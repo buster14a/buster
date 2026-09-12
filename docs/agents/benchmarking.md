@@ -423,3 +423,28 @@ require its output hash to match the ordinary compiler, and retain raw
 metrics. These calling-thread counters do not aggregate persistent lanes,
 time appends, or cover every operand decoder. They do not establish a
 Zen 5 speedup, live memory reduction, or whole-pipeline cost.
+
+## Object assembly-printer scaling
+
+`BUSTER_TEST_JOBS=1 BUSTER_OBJECT_ASSEMBLY_BENCH=1 build/Release/ide test --ci=1`
+adds generated-object printer replays to the registered object tests. Use the
+trusted Clang Release build. Ordinary tests cover the small cases without a
+timing gate; the opt-in run adds 1,024/2,048/4,096/8,192 definitions in ordered,
+reverse and permuted table order. A population N has N six-byte call/return
+functions, N function pointers, 2N+1 symbols and 2N relocations. Each case has
+one warmup and seven reported samples.
+
+`BENCH_OBJECT_ASSEMBLY` reports wall nanoseconds for `object_print_assembly`,
+including index construction, sorting, formatting and scratch rewind. Source
+construction, output hashing and optional file writes are outside that interval.
+`retained` is output-arena position growth; `peak` is its high-water growth,
+including temporary indexes and labels. These are arena bytes, not process RSS.
+`bytes` and the deterministic FNV-1a `hash` describe the complete output.
+Set `BUSTER_OBJECT_ASSEMBLY_OUTPUT` to an existing directory to save each first
+output as `assembly_N_ORDER.s` for exact baseline/candidate comparison. Run from
+the repository root, and use separate directories for the two binaries.
+
+Keep this isolated printer replay separate from the native throughput harness's
+`--artifact assembly` whole-process measurements. The #116 audit retains a
+supplement using the same collector for geometric call/function-pointer C
+inputs, object controls, alternating A/B pairs and separate PMU probes.

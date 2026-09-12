@@ -22,6 +22,7 @@
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   object_buffer_write .. object_writer_capacity  append-only write buffer
+//   object_assembly_build_index                    stable section/offset views
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
 //                                                  and relocation rendering)
@@ -46,6 +47,7 @@
 //   object_write_mach_o64, object_write            and their dispatcher
 
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/object/object_internal.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/integer.h>
@@ -373,6 +375,152 @@ ObjectFormat object_format_for_target(Target target)
     return result;
 }
 
+typedef struct ObjectAssemblySectionIndex ObjectAssemblySectionIndex;
+struct ObjectAssemblySectionIndex
+{
+    u32 symbol_begin;
+    u32 symbol_end;
+    u32 relocation_begin;
+    u32 relocation_end;
+};
+
+typedef struct ObjectAssemblyIndex ObjectAssemblyIndex;
+struct ObjectAssemblyIndex
+{
+    ObjectAssemblySectionIndex* sections;
+    u32* symbols;
+    u32* original_symbols;
+    u32* relocations;
+    u32 symbol_cursor;
+    u32 relocation_cursor;
+    u64 offset;
+};
+
+BUSTER_GLOBAL_LOCAL u64 object_assembly_index_offset(ObjectFile* object, u32 index, bool symbols)
+{
+    return symbols ? object->symbols[index].value : object->relocations[index].offset;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_assembly_index_before(ObjectFile* object, u32 left, u32 right, bool symbols)
+{
+    u64 left_offset = object_assembly_index_offset(object, left, symbols);
+    u64 right_offset = object_assembly_index_offset(object, right, symbols);
+    return left_offset < right_offset || (left_offset == right_offset && left < right);
+}
+
+// Stable section grouping retains .size order independently of offset order.
+// The sorted views contain original indices: relocation symbol IDs never move.
+BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena, ObjectFile* object)
+{
+    ObjectAssemblyIndex result = {0};
+    result.sections = arena_allocate_zeroed(arena, ObjectAssemblySectionIndex, object->section_count);
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        u32 section = object->symbols[index].section;
+        if (section < object->section_count) result.sections[section].symbol_end += 1;
+    }
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        u32 section = object->relocations[index].section;
+        if (section < object->section_count) result.sections[section].relocation_end += 1;
+    }
+    u32 symbol_count = 0;
+    u32 relocation_count = 0;
+    u32 maximum_count = 0;
+    for (u32 section = 0; section < object->section_count; section += 1)
+    {
+        ObjectAssemblySectionIndex* range = result.sections + section;
+        maximum_count = BUSTER_MAX(maximum_count, BUSTER_MAX(range->symbol_end, range->relocation_end));
+        u32 next_symbol = symbol_count + range->symbol_end;
+        u32 next_relocation = relocation_count + range->relocation_end;
+        range->symbol_begin = range->symbol_end = symbol_count;
+        range->relocation_begin = range->relocation_end = relocation_count;
+        symbol_count = next_symbol;
+        relocation_count = next_relocation;
+    }
+    result.symbols = symbol_count ? arena_allocate(arena, u32, symbol_count) : 0;
+    result.original_symbols = symbol_count ? arena_allocate(arena, u32, symbol_count) : 0;
+    result.relocations = relocation_count ? arena_allocate(arena, u32, relocation_count) : 0;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        u32 section = object->symbols[index].section;
+        if (section < object->section_count)
+        {
+            u32 slot = result.sections[section].symbol_end++;
+            result.symbols[slot] = result.original_symbols[slot] = index;
+        }
+    }
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        u32 section = object->relocations[index].section;
+        if (section < object->section_count) result.relocations[result.sections[section].relocation_end++] = index;
+    }
+    u64 sort_position = arena->position;
+    u32* temporary = 0;
+    for (u32 section = 0; section < object->section_count; section += 1)
+    {
+        ObjectAssemblySectionIndex range = result.sections[section];
+        for (u32 kind = 0; kind < 2; kind += 1)
+        {
+            bool symbols = kind == 0;
+            u32 begin = symbols ? range.symbol_begin : range.relocation_begin;
+            u32 end = symbols ? range.symbol_end : range.relocation_end;
+            u32 count = end - begin;
+            if (count < 2) continue;
+            u32* indices = (symbols ? result.symbols : result.relocations) + begin;
+            bool ordered = true;
+            for (u32 index = 1; index < count && ordered; index += 1)
+            {
+                ordered = !object_assembly_index_before(object, indices[index], indices[index - 1], symbols);
+            }
+            if (ordered) continue;
+            if (count <= 16)
+            {
+                for (u32 index = 1; index < count; index += 1)
+                {
+                    u32 value = indices[index];
+                    u32 slot = index;
+                    while (slot && object_assembly_index_before(object, value, indices[slot - 1], symbols))
+                    {
+                        indices[slot] = indices[slot - 1];
+                        slot -= 1;
+                    }
+                    indices[slot] = value;
+                }
+            }
+            else
+            {
+                if (!temporary) temporary = arena_allocate(arena, u32, maximum_count);
+                u32* source = indices;
+                u32* destination = temporary;
+                // Wide run arithmetic also covers counts close to UINT32_MAX.
+                for (u64 width = 1; width < count; width *= 2)
+                {
+                    for (u64 start = 0; start < count; start += width * 2)
+                    {
+                        u64 middle = BUSTER_MIN(start + width, count);
+                        u64 finish = BUSTER_MIN(start + width * 2, count);
+                        u64 left = start;
+                        u64 right = middle;
+                        for (u64 slot = start; slot < finish; slot += 1)
+                        {
+                            bool take_left = left < middle && (right == finish ||
+                                object_assembly_index_before(object, source[left], source[right], symbols));
+                            destination[slot] = take_left ? source[left++] : source[right++];
+                        }
+                    }
+                    u32* swap = source;
+                    source = destination;
+                    destination = swap;
+                }
+                if (source != indices) memcpy(indices, source, (u64)count * sizeof(*indices));
+            }
+        }
+    }
+    arena_set_position(arena, sort_position);
+    return result;
+}
+
 typedef struct ObjectAssemblyBuffer ObjectAssemblyBuffer;
 struct ObjectAssemblyBuffer
 {
@@ -380,6 +528,7 @@ struct ObjectAssemblyBuffer
     u64 count;
     u64 capacity;
     Arena* arena;
+    ObjectAssemblyIndex index;
     u8* internal_labels;
     u64 internal_label_count;
     u32 internal_label_section;
@@ -760,62 +909,94 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_is_gnu_type_target(Target target)
            target.os == OPERATING_SYSTEM_UEFI;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectRelocation* object_assembly_relocation_at(ObjectFile* object, u32 section, u64 offset)
+// The emission cursor only advances. Decoder lookahead and AArch64 literal
+// targets can query out of order; binary search handles those without moving
+// that cursor or repeatedly walking unrelated relocations.
+BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_lower_bound(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 offset)
 {
-    for (u32 index = 0; index < object->relocation_count; index += 1)
+    ObjectAssemblySectionIndex range = buffer->index.sections[section];
+    u32 begin = offset >= buffer->index.offset ? buffer->index.relocation_cursor : range.relocation_begin;
+    u32 end = range.relocation_end;
+    // The first outstanding relocation usually answers instruction-local queries.
+    if (begin < end && object->relocations[buffer->index.relocations[begin]].offset < offset)
     {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->section == section && relocation->offset == offset)
+        begin += 1;
+        while (begin < end)
         {
-            return relocation;
+            u32 middle = begin + (end - begin) / 2;
+            if (object->relocations[buffer->index.relocations[middle]].offset < offset) begin = middle + 1;
+            else end = middle;
         }
     }
-    return 0;
+    return begin;
 }
 
-BUSTER_GLOBAL_LOCAL u64 object_assembly_next_relocation(ObjectFile* object, u32 section, u64 offset, u64 end)
+BUSTER_GLOBAL_LOCAL ObjectRelocation* object_assembly_relocation_at(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 offset)
 {
-    u64 result = end;
-    for (u32 index = 0; index < object->relocation_count; index += 1)
+    u32 index = object_assembly_relocation_lower_bound(buffer, object, section, offset);
+    ObjectRelocation* result = 0;
+    if (index < buffer->index.sections[section].relocation_end)
     {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->section == section && relocation->offset >= offset && relocation->offset < result)
-        {
-            result = relocation->offset;
-        }
+        ObjectRelocation* relocation = object->relocations + buffer->index.relocations[index];
+        if (relocation->offset == offset) result = relocation;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 object_assembly_next_relocation(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 offset, u64 end)
+{
+    u32 index = object_assembly_relocation_lower_bound(buffer, object, section, offset);
+    u64 result = end;
+    if (index < buffer->index.sections[section].relocation_end)
+    {
+        result = BUSTER_MIN(end, object->relocations[buffer->index.relocations[index]].offset);
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectRelocation* object_assembly_first_relocation(ObjectFile* object, u32 section, u64 offset, u64 end)
+BUSTER_GLOBAL_LOCAL ObjectRelocation* object_assembly_first_relocation(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 offset, u64 end)
 {
-    u64 relocation_offset = object_assembly_next_relocation(object, section, offset, end);
-    return relocation_offset < end ? object_assembly_relocation_at(object, section, relocation_offset) : 0;
-}
-
-BUSTER_GLOBAL_LOCAL u64 object_assembly_next_symbol(ObjectFile* object, u32 section, u64 offset, u64 end)
-{
-    u64 result = end;
-    for (u32 index = 0; index < object->symbol_count; index += 1)
+    u32 index = object_assembly_relocation_lower_bound(buffer, object, section, offset);
+    ObjectRelocation* result = 0;
+    if (index < buffer->index.sections[section].relocation_end)
     {
-        ObjectSymbol* symbol = object->symbols + index;
-        if (symbol->section == section && symbol->value > offset && symbol->value < result)
-        {
-            result = symbol->value;
-        }
+        ObjectRelocation* relocation = object->relocations + buffer->index.relocations[index];
+        if (relocation->offset < end) result = relocation;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 object_assembly_next_symbol(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 offset, u64 end)
+{
+    u32 index = buffer->index.symbol_cursor;
+    u32 limit = buffer->index.sections[section].symbol_end;
+    while (index < limit && object->symbols[buffer->index.symbols[index]].value <= offset) index += 1;
+    return index < limit ? BUSTER_MIN(end, object->symbols[buffer->index.symbols[index]].value) : end;
+}
+
+BUSTER_GLOBAL_LOCAL void object_assembly_advance_index(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 offset)
+{
+    ObjectAssemblySectionIndex range = buffer->index.sections[section];
+    buffer->index.offset = offset;
+    while (buffer->index.symbol_cursor < range.symbol_end &&
+           object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value < offset)
+    {
+        buffer->index.symbol_cursor += 1;
+    }
+    while (buffer->index.relocation_cursor < range.relocation_end &&
+           object->relocations[buffer->index.relocations[buffer->index.relocation_cursor]].offset < offset)
+    {
+        buffer->index.relocation_cursor += 1;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section, u64 offset)
 {
-    for (u32 index = 0; index < object->symbol_count; index += 1)
+    u32 end = buffer->index.sections[section].symbol_end;
+    for (u32 index = buffer->index.symbol_cursor; index < end; index += 1)
     {
-        ObjectSymbol* symbol = object->symbols + index;
-        if (symbol->section != section || symbol->value != offset)
-        {
-            continue;
-        }
+        ObjectSymbol* symbol = object->symbols + buffer->index.symbols[index];
+        if (symbol->value != offset) break;
         if (symbol->global)
         {
             object_assembly_append_string(buffer, S8("\t.globl "));
@@ -839,13 +1020,10 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_sizes(ObjectAssemblyBuffer* buffer
     {
         return;
     }
-    for (u32 index = 0; index < object->symbol_count; index += 1)
+    ObjectAssemblySectionIndex range = buffer->index.sections[section];
+    for (u32 index = range.symbol_begin; index < range.symbol_end; index += 1)
     {
-        ObjectSymbol* symbol = object->symbols + index;
-        if (symbol->section != section)
-        {
-            continue;
-        }
+        ObjectSymbol* symbol = object->symbols + buffer->index.original_symbols[index];
         object_assembly_append_string(buffer, S8("\t.size "));
         object_assembly_append_assembly_symbol(buffer, target, symbol->name);
         object_assembly_append_string(buffer, S8(", "));
@@ -1581,22 +1759,82 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_x86_parse_modrm(ByteSlice data, u64 off
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectRelocation* object_assembly_relocation_in_range(ObjectFile* object, u32 section, u64 start, u64 end)
+BUSTER_GLOBAL_LOCAL ObjectRelocation* object_assembly_relocation_in_range(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, u64 start, u64 end)
 {
-    for (u32 index = 0; index < object->relocation_count; index += 1)
+    u32 first = object_assembly_relocation_lower_bound(buffer, object, section, start);
+    u32 limit = buffer->index.sections[section].relocation_end;
+    u32 selected = UINT32_MAX;
+    for (u32 index = first; index < limit; index += 1)
     {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->section == section && relocation->offset >= start && relocation->offset < end)
-        {
-            return relocation;
-        }
+        u32 original = buffer->index.relocations[index];
+        if (object->relocations[original].offset >= end) break;
+        // The old range query chose table order, not the lowest offset.
+        selected = BUSTER_MIN(selected, original);
     }
-    return 0;
+    return selected != UINT32_MAX ? object->relocations + selected : 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool object_assembly_x86_modrm_has_stable_displacement(ObjectFile* object, u32 section, ObjectAssemblyX86Modrm modrm)
+#if BUSTER_INCLUDE_TESTS
+// Test-only differential oracle for the retired scan semantics, including
+// arbitrary literal lookups after the streaming cursor has advanced.
+bool object_assembly_test_index_queries(Arena* arena, ObjectFile* object)
 {
-    return modrm.disp_size != 4 || object_assembly_relocation_at(object, section, modrm.disp_offset);
+    TemporalArena temporary = arena_begin_temporal(arena);
+    ObjectAssemblyBuffer buffer = {.arena = arena, .index = object_assembly_build_index(arena, object)};
+    bool result = true;
+    for (u32 section = 0; section < object->section_count; section += 1)
+    {
+        ObjectAssemblySectionIndex range = buffer.index.sections[section];
+        buffer.index.symbol_cursor = range.symbol_begin;
+        buffer.index.relocation_cursor = range.relocation_begin;
+        buffer.index.offset = 0;
+        for (u64 offset = 0; offset < 80; offset += 1)
+        {
+            object_assembly_advance_index(&buffer, object, section, offset);
+            for (u32 direction = 0; direction < 2; direction += 1)
+            {
+                u64 start = direction ? 79 - offset : offset;
+                u64 end = start + 16;
+                ObjectRelocation* at = 0;
+                ObjectRelocation* in_range = 0;
+                ObjectRelocation* first = 0;
+                u64 next = end;
+                for (u32 index = 0; index < object->relocation_count; index += 1)
+                {
+                    ObjectRelocation* relocation = object->relocations + index;
+                    if (relocation->section == section)
+                    {
+                        if (!at && relocation->offset == start) at = relocation;
+                        if (!in_range && relocation->offset >= start && relocation->offset < end) in_range = relocation;
+                        if (relocation->offset >= start && relocation->offset < next)
+                        {
+                            next = relocation->offset;
+                            first = relocation;
+                        }
+                    }
+                }
+                result = result && object_assembly_relocation_at(&buffer, object, section, start) == at;
+                result = result && object_assembly_relocation_in_range(&buffer, object, section, start, end) == in_range;
+                result = result && object_assembly_next_relocation(&buffer, object, section, start, end) == next;
+                result = result && object_assembly_first_relocation(&buffer, object, section, start, end) == first;
+            }
+            u64 next_symbol = UINT64_MAX;
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                ObjectSymbol* symbol = object->symbols + index;
+                if (symbol->section == section && symbol->value > offset) next_symbol = BUSTER_MIN(next_symbol, symbol->value);
+            }
+            result = result && object_assembly_next_symbol(&buffer, object, section, offset, UINT64_MAX) == next_symbol;
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool object_assembly_x86_modrm_has_stable_displacement(ObjectAssemblyBuffer* buffer, ObjectFile* object, u32 section, ObjectAssemblyX86Modrm modrm)
+{
+    return modrm.disp_size != 4 || object_assembly_relocation_at(buffer, object, section, modrm.disp_offset);
 }
 
 BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target,
@@ -1965,7 +2203,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 {
                     return 0;
                 }
-                ObjectRelocation* relocation = object_assembly_relocation_at(object, section, offset + prefix.length + 1);
+                ObjectRelocation* relocation = object_assembly_relocation_at(buffer, object, section, offset + prefix.length + 1);
                 bool has_symbol = object_assembly_x86_is_pc_relocation(relocation) && displacement_size == 4;
                 s64 displacement = displacement_size == 1 ? (s8)data.pointer[offset + prefix.length + 1] : 0;
                 if (!has_symbol)
@@ -2149,7 +2387,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     {
                         return 0;
                     }
-                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    if (!object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                     {
                         return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                     }
@@ -2158,7 +2396,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     object_assembly_append_string(buffer, object_assembly_x86_condition(extended));
                     object_assembly_append_string(buffer, S8(" "));
                     object_assembly_append_x86_rm(buffer, modrm, prefix, 8, true, object, target,
-                                                  object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                                  object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                     object_assembly_append_string(buffer, S8("\n"));
                     return instruction_length;
                 }
@@ -2175,7 +2413,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     {
                         return 0;
                     }
-                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    if (!object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                     {
                         return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                     }
@@ -2189,12 +2427,12 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                         object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
                         object_assembly_append_string(buffer, S8(", "));
                         object_assembly_append_x86_rm(buffer, modrm, prefix, source_width, true, object, target,
-                                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                                      object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                     }
                     else
                     {
                         object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
-                                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                                      object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                         object_assembly_append_string(buffer, S8(", "));
                         object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
                     }
@@ -2213,13 +2451,13 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     {
                         return 0;
                     }
-                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    if (!object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                     {
                         return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                     }
                     object_assembly_append_string(buffer, S8("\tnop "));
                     object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
-                                                  object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                                  object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                     object_assembly_append_string(buffer, S8("\n"));
                     return instruction_length;
                 }
@@ -2271,11 +2509,11 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     {
                         return 0;
                     }
-                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    if (!object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                     {
                         return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                     }
-                    ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
+                    ObjectRelocation* relocation = object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length);
                     object_assembly_append_string(buffer, S8("\t"));
                     object_assembly_append_string(buffer, name);
                     object_assembly_append_string(buffer, S8(" "));
@@ -2325,12 +2563,12 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 }
                 u32 operand_width = opcode == 0x80 ? 8 : width;
                 u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-                if (opcode == 0x81 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
+                if (opcode == 0x81 || !object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm) ||
                     (modrm.mod != 3 && (prefix.rex & 8)))
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                 }
-                ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
+                ObjectRelocation* relocation = object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length);
                 object_assembly_x86_emit_prefix(buffer, prefix);
                 object_assembly_append_string(buffer, name);
                 object_assembly_append_string(buffer, S8(" "));
@@ -2364,14 +2602,14 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 }
                 u32 operand_width = opcode == 0xc6 ? 1 : width;
                 u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-                if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
+                if (!object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm) ||
                     (modrm.mod != 3 && (prefix.rex & 8)))
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                 }
                 object_assembly_append_string(buffer, S8("\tmov "));
                 object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target,
-                                              object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                              object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                 object_assembly_append_string(buffer, S8(", "));
                 object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, opcode == 0xc7 && operand_width == 64);
                 object_assembly_append_string(buffer, S8("\n"));
@@ -2400,7 +2638,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     return 0;
                 }
                 u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-                if (opcode == 0x69 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                if (opcode == 0x69 || !object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                 }
@@ -2408,7 +2646,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
                 object_assembly_append_string(buffer, S8(", "));
                 object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
-                                              object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                              object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                 object_assembly_append_string(buffer, S8(", "));
                 object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
                 object_assembly_append_string(buffer, S8("\n"));
@@ -2429,11 +2667,11 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 {
                     return 0;
                 }
-                if ((opcode == 0x8d && modrm.mod == 3) || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                if ((opcode == 0x8d && modrm.mod == 3) || !object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                 }
-                ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
+                ObjectRelocation* relocation = object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length);
                 String8 name = opcode == 0x88 || opcode == 0x89 || opcode == 0x8a || opcode == 0x8b ? S8("mov")
                                : opcode == 0x8d                                    ? S8("lea")
                                : opcode == 0x87 || opcode == 0x86                 ? S8("xchg")
@@ -2519,7 +2757,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                 }
-                if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
+                if (!object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm) ||
                     (modrm.mod != 3 && (prefix.rex & 8)))
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
@@ -2528,7 +2766,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 object_assembly_append_string(buffer, name);
                 object_assembly_append_string(buffer, S8(" "));
                 object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object,
-                                              target, object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                              target, object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                 if (immediate_size)
                 {
                     object_assembly_append_string(buffer, S8(", "));
@@ -2557,7 +2795,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     return 0;
                 }
                 u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-                if (opcode == 0xc0 || opcode == 0xc1 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                if (opcode == 0xc0 || opcode == 0xc1 || !object_assembly_x86_modrm_has_stable_displacement(buffer, object, section, modrm))
                 {
                     return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                 }
@@ -2565,7 +2803,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 object_assembly_append_string(buffer, name);
                 object_assembly_append_string(buffer, S8(" "));
                 object_assembly_append_x86_rm(buffer, modrm, prefix, opcode == 0xc0 || opcode == 0xd0 || opcode == 0xd2 ? 8 : width, true, object, target,
-                                              object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                                              object_assembly_relocation_in_range(buffer, object, section, offset, offset + instruction_length));
                 if (opcode == 0xc0 || opcode == 0xc1)
                 {
                     object_assembly_append_string(buffer, S8(", "));
@@ -3120,7 +3358,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_prepare_internal_labels(ObjectAssemblyB
             {
                 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
                 s64 literal_target = (s64)offset + displacement;
-                if (literal_target >= 0 && object_assembly_relocation_at(object, section_index, (u64)literal_target))
+                if (literal_target >= 0 && object_assembly_relocation_at(buffer, object, section_index, (u64)literal_target))
                 {
                     object_assembly_mark_internal_label(buffer, section_index, (u64)literal_target);
                 }
@@ -3189,11 +3427,11 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
 {
     ObjectSection* section = object->sections + section_index;
     u64 data_length = object_section_kind_is_zero_fill(section->kind) ? section->virtual_size : section->data.length;
-    bool has_symbols = false;
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-    {
-        has_symbols |= object->symbols[symbol_index].section == section_index;
-    }
+    ObjectAssemblySectionIndex range = buffer->index.sections[section_index];
+    buffer->index.symbol_cursor = range.symbol_begin;
+    buffer->index.relocation_cursor = range.relocation_begin;
+    buffer->index.offset = 0;
+    bool has_symbols = range.symbol_begin != range.symbol_end;
     if (!data_length && !has_symbols)
     {
         return;
@@ -3225,13 +3463,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     u64 cursor = 0;
     while (cursor < data.length && !buffer->error)
     {
-        ObjectRelocation* next_relocation = object_assembly_first_relocation(object, section_index, cursor, data.length);
+        object_assembly_advance_index(buffer, object, section_index, cursor);
+        ObjectRelocation* next_relocation = object_assembly_first_relocation(buffer, object, section_index, cursor, data.length);
         u64 apple_x86_start = object_assembly_apple_x86_relocation_start(next_relocation, data, cursor);
         if (object_assembly_is_apple(target) && apple_x86_start != UINT64_MAX)
         {
             if (apple_x86_start > cursor)
             {
-                u64 boundary = BUSTER_MIN(apple_x86_start, object_assembly_next_symbol(object, section_index, cursor, data.length));
+                u64 boundary = BUSTER_MIN(apple_x86_start, object_assembly_next_symbol(buffer, object, section_index, cursor, data.length));
                 object_assembly_emit_labels(buffer, object, target, section_index, cursor);
                 object_assembly_emit_internal_label(buffer, section_index, cursor);
                 object_assembly_append_byte_range(buffer, data, cursor, boundary);
@@ -3246,7 +3485,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         }
         object_assembly_emit_labels(buffer, object, target, section_index, cursor);
         object_assembly_emit_internal_label(buffer, section_index, cursor);
-        ObjectRelocation* relocation = object_assembly_relocation_at(object, section_index, cursor);
+        ObjectRelocation* relocation = object_assembly_relocation_at(buffer, object, section_index, cursor);
         if (relocation)
         {
             if (!object_assembly_emit_relocation(buffer, object, target, relocation, data))
@@ -3259,7 +3498,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         }
         if (section->kind == OBJECT_SECTION_TEXT)
         {
-            u64 instruction_end = object_assembly_next_symbol(object, section_index, cursor, data.length);
+            u64 instruction_end = object_assembly_next_symbol(buffer, object, section_index, cursor, data.length);
             u64 instruction_length = target.cpu_arch == CPU_ARCH_X86_64
                                          ? object_assembly_emit_x86_instruction(buffer, object, target, section_index, data, cursor, instruction_end)
                                          : target.cpu_arch == CPU_ARCH_AARCH64
@@ -3281,8 +3520,8 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
                 continue;
             }
         }
-        u64 boundary = object_assembly_next_relocation(object, section_index, cursor + 1, data.length);
-        boundary = BUSTER_MIN(boundary, object_assembly_next_symbol(object, section_index, cursor, data.length));
+        u64 boundary = object_assembly_next_relocation(buffer, object, section_index, cursor + 1, data.length);
+        boundary = BUSTER_MIN(boundary, object_assembly_next_symbol(buffer, object, section_index, cursor, data.length));
         boundary = BUSTER_MIN(boundary, object_assembly_next_internal_label(buffer, section_index, cursor + 1, data.length));
         if (boundary <= cursor)
         {
@@ -3291,6 +3530,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_append_byte_range(buffer, data, cursor, boundary);
         cursor = boundary;
     }
+    object_assembly_advance_index(buffer, object, section_index, data.length);
     object_assembly_emit_labels(buffer, object, target, section_index, data.length);
     object_assembly_emit_internal_label(buffer, section_index, data.length);
     object_assembly_emit_sizes(buffer, object, target, section_index);
@@ -3298,68 +3538,69 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
 
 String8 object_print_assembly(Arena* arena, ObjectFile* object)
 {
-    if (!arena || !object || object->error != OBJECT_ERROR_NONE || !object->sections ||
-        (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
-        (object->target.cpu_arch != CPU_ARCH_X86_64 && object->target.cpu_arch != CPU_ARCH_AARCH64))
-    {
-        return (String8){0};
-    }
+    String8 result = {0};
+    bool valid = arena && object && object->error == OBJECT_ERROR_NONE && object->sections &&
+                 (!object->symbol_count || object->symbols) && (!object->relocation_count || object->relocations) &&
+                 (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64);
     u64 capacity = 1024;
-    for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+    if (valid)
     {
-        ObjectSection* section = object->sections + section_index;
-        if (section->data.length > (UINT64_MAX - capacity) / 16)
+        for (u32 section_index = 0; section_index < object->section_count && valid; section_index += 1)
         {
-            return (String8){0};
+            ObjectSection* section = object->sections + section_index;
+            valid = capacity <= UINT64_MAX - 256 && section->data.length <= (UINT64_MAX - capacity - 256) / 16;
+            if (valid)
+            {
+                capacity += section->data.length * 16 + 256;
+                valid = section->virtual_size <= (UINT64_MAX - capacity) / 2;
+                if (valid) capacity += section->virtual_size * 2;
+            }
         }
-        capacity += section->data.length * 16 + 256;
-        if (section->virtual_size > (UINT64_MAX - capacity) / 2)
+        for (u32 symbol_index = 0; symbol_index < object->symbol_count && valid; symbol_index += 1)
         {
-            return (String8){0};
+            u64 length = object->symbols[symbol_index].name.length;
+            valid = capacity <= UINT64_MAX - 128 && length <= (UINT64_MAX - capacity - 128) / 2;
+            if (valid) capacity += length * 2 + 128;
         }
-        capacity += section->virtual_size * 2;
+        valid = valid && object->relocation_count <= (UINT64_MAX - capacity) / 256;
+        if (valid) capacity += (u64)object->relocation_count * 256;
     }
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    if (valid)
     {
-        capacity += object->symbols[symbol_index].name.length * 2 + 128;
-    }
-    capacity += (u64)object->relocation_count * 256;
-    ObjectAssemblyBuffer buffer = {
-        .bytes = arena_allocate(arena, char8, capacity),
-        .capacity = capacity,
-        .arena = arena,
-    };
-    if (!buffer.bytes)
-    {
-        return (String8){0};
-    }
-    if (object->target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        object_assembly_append_string(&buffer, S8("\t.intel_syntax noprefix\n"));
-    }
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-    {
-        ObjectSymbol* symbol = object->symbols + symbol_index;
-        if (symbol->section != OBJECT_SECTION_UNDEFINED)
+        ObjectAssemblyBuffer buffer = {.bytes = arena_allocate(arena, char8, capacity), .capacity = capacity, .arena = arena};
+        if (buffer.bytes)
         {
-            continue;
+            // Reserve output first, then discard every index/label allocation
+            // on either success or failure without disturbing the returned bytes.
+            u64 output_position = arena->position;
+            buffer.index = object_assembly_build_index(arena, object);
+            if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                object_assembly_append_string(&buffer, S8("\t.intel_syntax noprefix\n"));
+            }
+            for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+            {
+                ObjectSymbol* symbol = object->symbols + symbol_index;
+                if (symbol->section == OBJECT_SECTION_UNDEFINED)
+                {
+                    object_assembly_append_string(&buffer, S8("\t.extern "));
+                    object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
+                    object_assembly_append_string(&buffer, S8("\n"));
+                }
+            }
+            for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)
+            {
+                u64 section_position = arena->position;
+                object_assembly_emit_section(&buffer, object, object->target, section_index);
+                buffer.internal_labels = 0;
+                buffer.internal_label_count = 0;
+                arena_set_position(arena, section_position);
+            }
+            if (!buffer.error) result = (String8){.pointer = buffer.bytes, .length = buffer.count};
+            arena_set_position(arena, output_position);
         }
-        object_assembly_append_string(&buffer, S8("\t.extern "));
-        object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
-        object_assembly_append_string(&buffer, S8("\n"));
     }
-    for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
-    {
-        object_assembly_emit_section(&buffer, object, object->target, section_index);
-    }
-    if (buffer.error)
-    {
-        return (String8){0};
-    }
-    return (String8){
-        .pointer = buffer.bytes,
-        .length = buffer.count,
-    };
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_read_u16(ByteSlice bytes, u64 offset, u16* value)

@@ -24,10 +24,15 @@
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
+//   uefi_boot_*                                 pinned firmware boot gate
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
+// TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
+// drivers can opt into the existing lane gang with test_differential --jobs.
+#if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)
 #define BUSTER_SINGLE_THREADED 1
+#endif
 #include <buster/lib/base.h>
 #include <buster/lib/os.h>
 #include <buster/lib/entry_point.h>
@@ -99,6 +104,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DIFFERENTIAL,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
+    BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -34065,6 +34071,7 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 #include "tools/differential.c"
 #include "tools/gpu_toolchains.c"
 #include "tools/native_retirement_census.c"
+#include "tools/uefi_boot.c"
 
 // Compiler construction stays in the existing generate/build commands. This
 // command builds the small native measurement tool, then forwards its argv
@@ -34246,6 +34253,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
+        [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -34337,6 +34345,11 @@ ProcessResult process_arguments(void)
     else if (command == BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS)
     {
         result = native_retirement_census_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_TEST_UEFI)
+    {
+        result = uefi_boot_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i}, arguments.pointer[0]);
         argument_i = arguments.length;
     }
 
@@ -35460,6 +35473,7 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
+        case BUILD_COMMAND_TEST_UEFI:
         {
             // Executed before the ordinary build-option parser.
         }
