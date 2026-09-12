@@ -4351,7 +4351,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     read_ok = false;
                 }
-                if (section_index != 0 && section_kinds[section_index] == UINT32_MAX)
+                if (read_ok && section_index != 0 && section_kinds[section_index] == UINT32_MAX)
                 {
                     continue;
                 }
@@ -4706,11 +4706,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                 read_ok = false;
                             }
-                            if (section_type == 9)
+                            if (read_ok)
                             {
-                                addend = decoded.operands[0].value;
+                                if (section_type == 9)
+                                {
+                                    addend = decoded.operands[0].value;
+                                }
+                                memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
                             }
-                            memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
                         }
                         else if (section_type == 9)
                         {
