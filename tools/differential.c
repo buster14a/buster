@@ -91,10 +91,23 @@ BUSTER_GLOBAL_LOCAL bool d_sanitizer(String8 text)
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL FILE* d_file_open(char const* path, bool write, bool update)
+{
+    // UCRT's N mode creates a non-inheritable descriptor atomically. A child
+    // retaining another lane's evidence writer would prevent its read-only
+    // hash/replay open on Windows even after the owning lane closed the file.
+#if BUSTER_WINDOWS
+    char const* mode = update ? "w+bN" : write ? "wbN" : "rbN";
+#else
+    char const* mode = update ? "w+b" : write ? "wb" : "rb";
+#endif
+    return fopen(path, mode);
+}
+
 BUSTER_GLOBAL_LOCAL void d_write(DSettings* settings, String8 path, String8 text)
 {
     String8 path_z = string_duplicate_arena(settings->arena, path, true);
-    FILE* file = fopen((char*)path_z.pointer, "wb");
+    FILE* file = d_file_open((char*)path_z.pointer, true, false);
     if (!file) { settings->io_failed = true; }
     else
     {
@@ -728,8 +741,8 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
         {
             String8 report_path = string_format_z(arena, S8("{S8}/processes.tsv"), directory);
             String8 log_path = string_format_z(arena, S8("{S8}/case.log"), directory);
-            settings.report = fopen((char*)report_path.pointer, "wb");
-            settings.log = fopen((char*)log_path.pointer, "wb");
+            settings.report = d_file_open((char*)report_path.pointer, true, false);
+            settings.log = d_file_open((char*)log_path.pointer, true, false);
             if (!settings.report || !settings.log) { settings.io_failed = true; }
             if (!settings.io_failed)
             {
@@ -772,7 +785,7 @@ BUSTER_GLOBAL_LOCAL bool d_case_stream(DSettings* settings, String8 path, u64 ex
     if (valid)
     {
         String8 path_z = string_duplicate_arena(settings->arena, path, true);
-        FILE* input = fopen((char*)path_z.pointer, "rb");
+        FILE* input = d_file_open((char*)path_z.pointer, false, false);
         valid = input != 0;
         if (input)
         {
@@ -860,8 +873,8 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
         errors += !d_create_output(arena, work.settings.out);
         String8 report = string_format_z(arena, S8("{S8}/processes.tsv"), work.settings.out);
         String8 log = string_format_z(arena, S8("{S8}/case.log"), work.settings.out);
-        work.settings.report = fopen((char*)report.pointer, "wb");
-        work.settings.log = fopen((char*)log.pointer, "w+b");
+        work.settings.report = d_file_open((char*)report.pointer, true, false);
+        work.settings.log = d_file_open((char*)log.pointer, true, true);
         work.settings.spawn_mutex = os_mutex_create();
         if (!work.settings.report || !work.settings.log || !work.settings.spawn_mutex) { errors += 1; }
         else
@@ -880,6 +893,14 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
             lane_run(worker_jobs, &d_case_lane, &work);
             u32 failures = d_cases_collect(&work);
             errors += pass == 2 ? failures < 5 : failures != 0;
+            if (pass != 2 && failures)
+            {
+                for (u32 index = 0; index < work.count; index += 1)
+                {
+                    string_print(S8("DIFFERENTIAL_SELF_TEST_RECORD pass={u32} case={S8} rows={u32} failures={u32} io_failed={u32} report_bytes={u64} log_bytes={u64}\n"),
+                        pass, tests[index].name, records[index].rows, records[index].failures, (u32)records[index].io_failed, records[index].report_size, records[index].log_size);
+                }
+            }
             for (u32 index = 0; index < work.count; index += 1) { errors += records[index].completed != 1; }
             if (pass != 2)
             {
@@ -1159,7 +1180,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             {
                 settings.out = os_path_absolute(arena, settings.out, true);
                 String8 report = string_format_z(arena, S8("{S8}/processes.tsv"), settings.out);
-                settings.report = fopen((char*)report.pointer, "wb");
+                settings.report = d_file_open((char*)report.pointer, true, false);
                 if (!settings.report) { failures = 1; }
                 else
                 {
