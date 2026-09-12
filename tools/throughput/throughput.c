@@ -108,20 +108,21 @@ static void tp_error(char const* format, ...)
 
 static int tp_path(char out[TP_PATH_CAP], char const* root, char const* leaf)
 {
-    int length = snprintf(out, TP_PATH_CAP, "%s/%s", root, leaf);
-    return length >= 0 && length < TP_PATH_CAP;
+    TemporalArena temp = scratch_begin(0, 0);
+    String8 parts[] = {string_from_pointer(root), S8("/"), string_from_pointer(leaf)};
+    String8 joined = string_join_arena(temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+    int ok = joined.length < TP_PATH_CAP;
+    if (ok) memcpy(out, joined.pointer, (size_t)joined.length + 1);
+    scratch_end(temp);
+    return ok;
 }
 
 static int tp_number(char const* text, unsigned* value)
 {
-    char* end;
-    errno = 0;
-    unsigned long n = strtoul(text, &end, 10);
-    int ok = text[0] >= '0' && text[0] <= '9' && !*end && errno == 0 && n <= UINT_MAX;
-    if (ok)
-    {
-        *value = (unsigned)n;
-    }
+    String8 string = string_from_pointer(text);
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(string);
+    int ok = parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == string.length && parsed.value <= UINT_MAX;
+    if (ok) *value = (unsigned)parsed.value;
     return ok;
 }
 
@@ -483,10 +484,11 @@ static int tp_read_metrics(char const* path, TpRow* row)
                            !strcmp(line, "allocation.arena_bytes") ? 8u : 0u;
             if (key)
             {
-                char* end;
-                errno = 0;
-                unsigned long long value = strtoull(equal + 1, &end, 10);
-                ok = !(seen & key) && equal[1] >= '0' && equal[1] <= '9' && !errno &&
+                String8 number = string_from_pointer(equal + 1);
+                IntegerParsingU64 parsed = string8_parse_u64_decimal(number);
+                char const* end = equal + 1 + parsed.length;
+                u64 value = parsed.value;
+                ok = !(seen & key) && parsed.status == INTEGER_PARSING_SUCCESS &&
                      (*end == '\n' || (*end == '\r' && end[1] == '\n'));
                 seen |= key;
                 if (key == 1) row->source_bytes = value;
@@ -709,22 +711,7 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
 #ifdef __linux__
 static int tp_copy_file(char const* source, char const* target)
 {
-    FILE* input = fopen(source, "rb");
-    FILE* output = input ? fopen(target, "wb") : NULL;
-    int ok = input && output;
-    if (ok)
-    {
-        unsigned char buffer[32768];
-        size_t count;
-        while ((count = fread(buffer, 1, sizeof(buffer), input)) != 0 && ok)
-        {
-            ok = fwrite(buffer, 1, count, output) == count;
-        }
-        ok = ok && !ferror(input);
-    }
-    if (input && fclose(input) != 0) ok = 0;
-    if (output && fclose(output) != 0) ok = 0;
-    return ok;
+    return file_copy((CopyFileArguments){string_from_pointer(source), string_from_pointer(target)});
 }
 
 #endif
@@ -931,10 +918,10 @@ static int tp_parse_double(char const* text, double* value, int optional)
 
 static int tp_parse_u64(char const* text, uint64_t* value)
 {
-    char* end;
-    errno = 0;
-    *value = (uint64_t)strtoull(text, &end, 10);
-    return text[0] >= '0' && text[0] <= '9' && !*end && !errno;
+    String8 string = string_from_pointer(text);
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(string);
+    *value = parsed.value;
+    return parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == string.length;
 }
 
 static int tp_load_samples(char const* root, char const* name, unsigned jobs, unsigned pairs, int require_complete, TpRow* rows)
@@ -948,7 +935,8 @@ static int tp_load_samples(char const* root, char const* name, unsigned jobs, un
         char line[4096];
         ok = fgets(line, sizeof(line), file) && !strcmp(line, TP_RAW_HEADER);
         size_t records = 0;
-        unsigned* orders = (unsigned*)calloc((size_t)jobs * TP_ROUNDS * pairs, sizeof(unsigned));
+        Arena* order_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+        unsigned* orders = arena_allocate_zeroed(order_arena, unsigned, (u64)jobs * TP_ROUNDS * pairs);
         ok = ok && orders != NULL;
         while (ok && fgets(line, sizeof(line), file))
         {
@@ -1023,7 +1011,7 @@ static int tp_load_samples(char const* root, char const* name, unsigned jobs, un
                 ok = present == 2 * pairs || (!require_complete && present == 0);
             }
         }
-        free(orders);
+        arena_destroy(order_arena, 1);
         if (fclose(file) != 0) ok = 0;
     }
     if (!ok) tp_error("malformed, duplicated, missing, or invalid samples; comparison refused");
@@ -1077,6 +1065,7 @@ static int tp_remove_summaries(char const* root)
 
 static int tp_compare(char const* root)
 {
+    Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
     char path[TP_PATH_CAP];
     unsigned jobs = 0, pairs = 0, guard = 0, schema = 0, rounds = 0;
     /* A rejected replay must not leave an earlier verdict publishable.
@@ -1095,10 +1084,10 @@ static int tp_compare(char const* root)
         fclose(config);
     }
     if (ok) ok = tp_completion(root, jobs, pairs, (int)guard, 0);
-    TpRow* rows = ok ? (TpRow*)calloc((size_t)jobs * TP_ROUNDS * 2 * pairs, sizeof(TpRow)) : NULL;
+    TpRow* rows = ok ? arena_allocate_zeroed(arena, TpRow, (u64)jobs * TP_ROUNDS * 2 * pairs) : NULL;
     ok = ok && rows != NULL;
     if (ok) ok = tp_load_samples(root, "samples.csv", jobs, pairs, 1, rows);
-    TpRow* probes = ok ? (TpRow*)calloc((size_t)jobs * TP_ROUNDS * 2 * 3, sizeof(TpRow)) : NULL;
+    TpRow* probes = ok ? arena_allocate_zeroed(arena, TpRow, (u64)jobs * TP_ROUNDS * 2 * 3) : NULL;
     ok = ok && probes != NULL;
     if (ok) ok = tp_load_samples(root, "telemetry.csv", jobs, 3, 0, probes);
     char names[TP_MAX_JOBS][128];
@@ -1271,8 +1260,7 @@ static int tp_compare(char const* root)
     }
     if (json && fclose(json) != 0) ok = 0;
     if (markdown && fclose(markdown) != 0) ok = 0;
-    free(rows);
-    free(probes);
+    arena_destroy(arena, 1);
     /* Work/output and stream errors can be discovered after reports open.
      * Close both streams before discarding their incomplete verdicts. */
     if (!ok) (void)tp_remove_summaries(root);
@@ -1322,17 +1310,18 @@ static int tp_self_host_hash(TpConfig const* config, char digest[65])
     int ok = tp_path(src, config->self_host_root, "src") && tp_hash_tree(src, source_hash) && tp_hash_tree(config->self_host_generated, generated_hash);
     if (ok)
     {
-        TpHash hash;
-        tp_hash_init(&hash);
-        tp_hash_add(&hash, source_hash, 65);
-        tp_hash_add(&hash, generated_hash, 65);
-        tp_hash_finish(&hash, digest);
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, source_hash, 65);
+        sha256_add(&hash, generated_hash, 65);
+        sha256_finish_hex(&hash, digest);
     }
     return ok;
 }
 
 static int tp_run(TpConfig config)
 {
+    Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
     char root[TP_PATH_CAP], directory[TP_PATH_CAP], baseline[TP_PATH_CAP], candidate[TP_PATH_CAP];
     char input_dir[TP_PATH_CAP], output_dir[TP_PATH_CAP], path[TP_PATH_CAP];
     char self_root[TP_PATH_CAP], self_generated[TP_PATH_CAP];
@@ -1360,8 +1349,8 @@ static int tp_run(TpConfig config)
     ok = ok && tp_job_count(&config, TP_MAX_JOBS, &job_count);
     /* Own the selected job records on the heap: their embedded paths must not
      * grow the Windows main-thread stack as workload coverage expands. */
-    TpJob* jobs = ok ? (TpJob*)calloc(job_count, sizeof(TpJob)) : NULL;
-    TpRow (*first)[2] = ok ? (TpRow (*)[2])calloc(job_count, sizeof(*first)) : NULL;
+    TpJob* jobs = ok ? arena_allocate_zeroed(arena, TpJob, job_count) : NULL;
+    TpRow (*first)[2] = ok ? (TpRow (*)[2])arena_allocate_zeroed(arena, TpRow, job_count * 2) : NULL;
     ok = ok && jobs && first && tp_mkdirs(input_dir) && tp_mkdirs(output_dir);
     TpWorkload workloads[TP_CASES];
     if (ok) ok = tp_generate(&config, input_dir, workloads);
@@ -1596,8 +1585,7 @@ static int tp_run(TpConfig config)
     if (capabilities && fclose(capabilities) != 0) ok = 0;
     if (telemetry && fclose(telemetry) != 0) ok = 0;
     if (ok) ok = tp_completion(root, job_count, config.pairs, config.guard, 1);
-    free(first);
-    free(jobs);
+    arena_destroy(arena, 1);
     int result = ok ? tp_compare(root) : 2;
     if (!ok) tp_error("run incomplete; partial logs retained; no performance verdict");
     return result;
@@ -1607,19 +1595,19 @@ static int tp_self_test(void)
 {
     unsigned assertions = 0, failures = 0;
 #define TP_TEST(condition) do { ++assertions; if (!(condition)) { ++failures; fprintf(stderr, "SELF_TEST failure line %d: %s\n", __LINE__, #condition); } } while (0)
-    TpHash hash;
+    Sha256 hash;
     char digest[65];
-    tp_hash_init(&hash);
-    tp_hash_finish(&hash, digest);
+    sha256_init(&hash);
+    sha256_finish_hex(&hash, digest);
     TP_TEST(!strcmp(digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
-    tp_hash_init(&hash);
-    tp_hash_add(&hash, "a", 1);
-    tp_hash_add(&hash, "bc", 2);
-    tp_hash_finish(&hash, digest);
+    sha256_init(&hash);
+    sha256_add(&hash, "a", 1);
+    sha256_add(&hash, "bc", 2);
+    sha256_finish_hex(&hash, digest);
     TP_TEST(!strcmp(digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
-    tp_hash_init(&hash);
-    for (unsigned i = 0; i < 1000000; ++i) tp_hash_add(&hash, "a", 1);
-    tp_hash_finish(&hash, digest);
+    sha256_init(&hash);
+    for (unsigned i = 0; i < 1000000; ++i) sha256_add(&hash, "a", 1);
+    sha256_finish_hex(&hash, digest);
     TP_TEST(!strcmp(digest, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"));
     TP_TEST(fabs(tp_sign_tail(20, 20) - 1.0 / 1048576.0) < 1e-15);
     TP_TEST(fabs(tp_sign_tail(20, 18) - 211.0 / 1048576.0) < 1e-15);
@@ -1696,6 +1684,8 @@ static void tp_help(void)
 
 int main(int argc, char** argv)
 {
+    ThreadContext* owned_context = thread_context_selected() ? NULL : thread_context_allocate();
+    if (owned_context) thread_context_select(owned_context);
     TpConfig config;
     TpHostLock lock = {-1};
     TpHost host;
@@ -1754,5 +1744,10 @@ int main(int argc, char** argv)
         }
     }
     tp_host_lock_release(&lock);
+    if (owned_context)
+    {
+        thread_context_release(owned_context);
+        arena_pool_release_thread();
+    }
     return result;
 }

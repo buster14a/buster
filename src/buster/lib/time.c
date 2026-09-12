@@ -37,6 +37,13 @@ u64 timestamp_ns_between(TimeDataType start, TimeDataType end)
     // counter would overflow after ~30 minutes); see os_now_microseconds.
     u64 ticks = end - start;
     u64 frequency = os_state.frequency;
+    if (!frequency)
+    {
+        LARGE_INTEGER native_frequency;
+        BOOL success = QueryPerformanceFrequency(&native_frequency);
+        BUSTER_VALIDATE(success && native_frequency.QuadPart > 0);
+        frequency = (u64)native_frequency.QuadPart;
+    }
     u64 whole_seconds = ticks / frequency;
     u64 remainder_ticks = ticks % frequency;
     u64 ns = whole_seconds * (u64)(1000 * 1000 * 1000) + (remainder_ticks * (u64)(1000 * 1000 * 1000)) / frequency;

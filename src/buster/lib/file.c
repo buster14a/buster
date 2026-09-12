@@ -306,19 +306,12 @@ bool file_copy(CopyFileArguments arguments)
                 os_file_open(arguments.new_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
             if (destination)
             {
-                result = true;
-                u64 remaining = os_file_get_size(source);
                 u8 buffer[BUSTER_KB(64)];
-                while (remaining && result)
+                u64 count = 0;
+                while ((result = os_file_read_attempt(source, (ByteSlice){buffer, sizeof(buffer)}, &count)) && count)
                 {
-                    u64 requested = BUSTER_MIN(remaining, sizeof(buffer));
-                    u64 read_count = os_file_read(source, (ByteSlice){buffer, sizeof(buffer)}, requested);
-                    result = read_count == requested;
-                    if (result)
-                    {
-                        os_file_write(destination, (ByteSlice){buffer, read_count});
-                        remaining -= read_count;
-                    }
+                    result = os_file_write_attempt(destination, (ByteSlice){buffer, count});
+                    if (!result) break;
                 }
                 result = os_file_close(destination) && result;
             }

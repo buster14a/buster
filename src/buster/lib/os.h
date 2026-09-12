@@ -164,6 +164,10 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSp
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
 BUSTER_F_DECL void os_make_directory(String8 path);
+// Creates one owner-only directory. An existing path counts as success, like
+// mkdir/EEXIST; callers opening a result tree still validate its contents.
+// Unlike os_make_directory, reports failure and accepts bounded path slices.
+BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 BUSTER_F_DECL bool os_file_delete(String8 path);
 // Deletes `path` and everything under it. Symbolic links are removed as links
 // rather than followed, so the walk cannot escape the tree it was given.
@@ -174,9 +178,19 @@ BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
 BUSTER_F_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
 BUSTER_F_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
+// Recoverable transfers: retry interrupted/partial IO without asserting or
+// printing. Read fills the buffer or reaches EOF; true with *read_count == 0
+// is EOF (or an empty request), false is an error, retaining any prefix count.
+// Empty transfers succeed without touching the descriptor.
+BUSTER_F_DECL bool os_file_read_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64* read_count);
+BUSTER_F_DECL bool os_file_write_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer);
 BUSTER_F_DECL bool os_file_close(OsFileDescriptor* file_descriptor);
 
 BUSTER_F_DECL String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate);
+// Allows missing output paths. POSIX prefixes the current directory without
+// resolving symlinks or dot components; Windows uses GetFullPathNameW.
+// Accepts bounded slices and returns an empty slice on OS/invalid-input failure.
+BUSTER_F_DECL String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate);
 BUSTER_F_DECL OsFileDescriptor* os_get_stdout(void);
 BUSTER_F_DECL OsFileDescriptor* os_get_standard_stream(StandardStream stream);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);

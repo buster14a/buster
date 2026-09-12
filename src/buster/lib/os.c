@@ -899,6 +899,59 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
     return result;
 }
 
+String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate)
+{
+    String8 result = {0};
+    bool valid = path.pointer || !path.length;
+    for (u64 i = 0; i < path.length && valid; i += 1)
+    {
+        valid = path.pointer[i] != 0;
+    }
+    if (valid)
+    {
+#if defined(_WIN32)
+        result = os_path_absolute(arena, path, null_terminate);
+#else
+        if (path.length && path.pointer[0] == '/')
+        {
+            result = string_duplicate_arena(arena, path, null_terminate);
+        }
+        else
+        {
+            char current[PATH_MAX];
+            if (getcwd(current, sizeof(current)))
+            {
+                String8 parts[] = {string_from_pointer(current), S8("/"), path};
+                result = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), null_terminate);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
+bool os_make_directory_attempt(String8 path)
+{
+    bool result = path.pointer != 0 && path.length != 0;
+    for (u64 i = 0; i < path.length && result; i += 1)
+    {
+        result = path.pointer[i] != 0;
+    }
+    if (result)
+    {
+        TemporalArena temp = scratch_begin(0, 0);
+#if defined(_WIN32)
+        String16 wide = string16_from_string8(temp.arena, path, true);
+        result = CreateDirectoryW(wide.pointer, 0) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+        String8 terminated = string_duplicate_arena(temp.arena, path, true);
+        result = mkdir(terminated.pointer, 0700) == 0 || errno == EEXIST;
+#endif
+        scratch_end(temp);
+    }
+    return result;
+}
+
 void os_make_directory(String8 path)
 {
 #if defined(__linux__) || defined(__APPLE__)
@@ -1274,7 +1327,7 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
 
 // Neither platform's transfer primitive takes a u64 count: WriteFile/ReadFile
 // take a DWORD, and write(2)/read(2) are only defined up to SSIZE_MAX. The
-// partial helpers below clamp to that limit and let their callers' loops
+// recoverable helpers below clamp to that limit and let their transfer loops
 // resume, because narrowing the count instead silently corrupted every request
 // of 4 GiB or more — an exactly 4 GiB one became a zero-byte request, which
 // os_file_write then retried forever without making progress.
@@ -1284,91 +1337,76 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
 #define OS_FILE_TRANSFER_MAX ((u64)(SIZE_MAX >> 1))
 #endif
 
-BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(OsFileDescriptor* file_descriptor, void* pointer, u64 length)
+bool os_file_write_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
-    u64 request_byte_count = BUSTER_CLAMP_TOP(length, OS_FILE_TRANSFER_MAX);
-#if defined(__linux__) || defined(__APPLE__)
-    int fd = generic_fd_to_posix(file_descriptor);
-    ssize_t result;
-    do
+    u64 written = 0;
+    bool success = !buffer.length || (file_descriptor && buffer.pointer);
+    while (written < buffer.length && success)
     {
-        result = write(fd, pointer, (size_t)request_byte_count);
-    } while (result < 0 && errno == EINTR);
-    BUSTER_VALIDATE(result > 0);
-    return (u64)result;
+        u64 request = BUSTER_MIN(buffer.length - written, OS_FILE_TRANSFER_MAX);
+#if defined(__linux__) || defined(__APPLE__)
+        ssize_t count;
+        do
+        {
+            count = write(generic_fd_to_posix(file_descriptor), buffer.pointer + written, (size_t)request);
+        } while (count < 0 && errno == EINTR);
+        success = count > 0;
+        if (success) written += (u64)count;
 #elif defined(_WIN32)
-    HANDLE fd = generic_fd_to_windows(file_descriptor);
-    DWORD written_byte_count = 0;
-    BOOL result = WriteFile(fd, pointer, (DWORD)request_byte_count, &written_byte_count, 0);
-    BUSTER_VALIDATE(result);
-    // Matches the POSIX branch: a success that moved nothing is a failure to
-    // the caller's loop, not a step it can be asked to repeat.
-    BUSTER_VALIDATE(written_byte_count > 0);
-    return written_byte_count;
+        DWORD count = 0;
+        success = WriteFile(generic_fd_to_windows(file_descriptor), buffer.pointer + written, (DWORD)request, &count, 0) != 0 && count != 0;
+        if (success) written += count;
 #endif
+    }
+    return success;
 }
 
 void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
-    u64 total_written_byte_count = 0;
-
-    while (total_written_byte_count < buffer.length)
-    {
-        u64 written_byte_count = os_file_write_partially(file_descriptor, buffer.pointer + total_written_byte_count, buffer.length - total_written_byte_count);
-        total_written_byte_count += written_byte_count;
-    }
+    bool success = os_file_write_attempt(file_descriptor, buffer);
+    BUSTER_VALIDATE(success);
 }
 
-BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(OsFileDescriptor* file_descriptor, void* buffer, u64 byte_count)
+bool os_file_read_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64* read_count)
 {
-    u64 result = 0;
-    bool success = true;
-    u64 request_byte_count = BUSTER_CLAMP_TOP(byte_count, OS_FILE_TRANSFER_MAX);
+    u64 total = 0;
+    bool success = !buffer.length || (file_descriptor && buffer.pointer);
+    bool ended = false;
+    while (total < buffer.length && success && !ended)
+    {
+        u64 request = BUSTER_MIN(buffer.length - total, OS_FILE_TRANSFER_MAX);
 #if defined(__linux__) || defined(__APPLE__)
-    int fd = generic_fd_to_posix(file_descriptor);
-    ssize_t read_byte_count;
-    do
-    {
-        read_byte_count = read(fd, buffer, (size_t)request_byte_count);
-    } while (read_byte_count < 0 && errno == EINTR);
-    success = read_byte_count >= 0;
-    if (success)
-    {
-        result = (u64)read_byte_count;
-    }
+        ssize_t count;
+        do
+        {
+            count = read(generic_fd_to_posix(file_descriptor), buffer.pointer + total, (size_t)request);
+        } while (count < 0 && errno == EINTR);
+        success = count >= 0;
 #elif defined(_WIN32)
-    HANDLE fd = generic_fd_to_windows(file_descriptor);
-    DWORD read_byte_count = 0;
-    success = ReadFile(fd, buffer, (DWORD)request_byte_count, &read_byte_count, 0) != 0;
-    if (success)
-    {
-        result = read_byte_count;
-    }
+        DWORD count = 0;
+        success = ReadFile(generic_fd_to_windows(file_descriptor), buffer.pointer + total, (DWORD)request, &count, 0) != 0;
+        // A closed anonymous pipe is EOF, matching POSIX read(2).
+        if (!success && GetLastError() == ERROR_BROKEN_PIPE) success = true;
 #endif
-    if (!success)
-    {
-        string_print(S8("Error reading file: {EOs}\n"), os_get_last_error());
+        if (success)
+        {
+            total += (u64)count;
+            ended = count == 0;
+        }
     }
-
-    return result;
+    *read_count = total;
+    return success;
 }
 
 u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count)
 {
-    u64 read_byte_count = 0;
-    u8* pointer = buffer.pointer;
     BUSTER_VALIDATE(buffer.length >= byte_count);
-    while (byte_count - read_byte_count)
+    u64 read_count = 0;
+    if (!os_file_read_attempt(file_descriptor, (ByteSlice){buffer.pointer, byte_count}, &read_count))
     {
-        u64 iteration_read_byte_count = os_file_read_partially(file_descriptor, pointer + read_byte_count, byte_count - read_byte_count);
-        if (iteration_read_byte_count == 0)
-        {
-            break;
-        }
-        read_byte_count += iteration_read_byte_count;
+        string_print(S8("Error reading file: {EOs}\n"), os_get_last_error());
     }
-
-    return read_byte_count;
+    return read_count;
 }
 
 FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options)

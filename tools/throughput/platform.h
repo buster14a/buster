@@ -11,6 +11,11 @@
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
+#include <buster/lib/arena.h>
+#include <buster/lib/string.h>
+#include <buster/lib/file.h>
+#include <buster/lib/time.h>
+#include <buster/lib/system_headers.h>
 #include <errno.h>
 #include <math.h>
 #include <stdint.h>
@@ -44,88 +49,25 @@ typedef struct TpProcess
     int exit_code, signal_number, timed_out, launch_error;
 } TpProcess;
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <psapi.h>
-#include <direct.h>
-
-static double tp_clock(void)
-{
-    LARGE_INTEGER ticks, frequency;
-    QueryPerformanceCounter(&ticks);
-    QueryPerformanceFrequency(&frequency);
-    return (double)ticks.QuadPart / (double)frequency.QuadPart;
-}
-
 static int tp_mkdir(char const* path)
 {
-    return _mkdir(path) == 0 || errno == EEXIST;
+    return os_make_directory_attempt(string_from_pointer(path));
 }
 
 static int tp_absolute(char const* path, char out[TP_PATH_CAP])
 {
-    return _fullpath(out, path, TP_PATH_CAP) != NULL;
-}
-
-/* Windows CRT quoting: double backslashes before quotes and at argument end.
- * Even an empty argument is quoted. There is no cmd.exe interpretation.
- */
-static int tp_windows_command(char* const* args, char* command, size_t capacity)
-{
-    size_t used = 0;
-    int ok = 1;
-    for (unsigned a = 0; args[a] && ok; ++a)
-    {
-        if (used + 3 >= capacity)
-        {
-            ok = 0;
-            break;
-        }
-        if (a)
-        {
-            command[used++] = ' ';
-        }
-        command[used++] = '"';
-        char const* p = args[a];
-        while (*p && ok)
-        {
-            size_t slashes = 0;
-            while (*p == '\\')
-            {
-                ++slashes;
-                ++p;
-            }
-            size_t copies = (*p == '"' || !*p) ? slashes * 2 : slashes;
-            if (*p == '"')
-            {
-                ++copies;
-            }
-            if (used + copies + 3 >= capacity)
-            {
-                ok = 0;
-                break;
-            }
-            for (size_t i = 0; i < copies; ++i)
-            {
-                command[used++] = '\\';
-            }
-            if (*p)
-            {
-                command[used++] = *p++;
-            }
-        }
-        if (ok)
-        {
-            command[used++] = '"';
-        }
-    }
-    if (ok)
-    {
-        command[used] = 0;
-    }
+    TemporalArena temp = scratch_begin(0, 0);
+    String8 absolute = os_path_absolute_lexical(temp.arena, string_from_pointer(path), true);
+    int ok = absolute.length && absolute.length < TP_PATH_CAP;
+    if (ok) memcpy(out, absolute.pointer, (size_t)absolute.length + 1);
+    scratch_end(temp);
     return ok;
 }
+
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#include <direct.h>
 
 static int tp_first_allowed_cpu(void)
 {
@@ -157,21 +99,24 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     HANDLE job = CreateJobObjectA(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    char command[32768];
+    TemporalArena temp = scratch_begin(0, 0);
+    SliceString8 arguments = slice_string_from_posix_string_list(temp.arena, (char**)args);
+    WindowsStringList command = windows_string_list_from_slice_string(temp.arena, arguments);
+    String16 working_directory = directory ? string16_from_string8(temp.arena, string_from_pointer(directory), true) : (String16){0};
     int ok = log != INVALID_HANDLE_VALUE && job != NULL &&
              SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) &&
-             tp_windows_command(args, command, sizeof(command));
-    STARTUPINFOA startup = {0};
+             string16_length(command) < 32768;
+    STARTUPINFOW startup = {0};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES;
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     startup.hStdOutput = log;
     startup.hStdError = log;
     PROCESS_INFORMATION process = {0};
-    double start = tp_clock();
+    TimeDataType start = timestamp_take();
     if (ok)
     {
-        ok = CreateProcessA(NULL, command, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, directory, &startup, &process) != 0;
+        ok = CreateProcessW(NULL, command, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, working_directory.pointer, &startup, &process) != 0;
     }
     if (ok)
     {
@@ -187,7 +132,7 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         if (ok)
         {
             DWORD wait = WaitForSingleObject(process.hProcess, timeout_seconds * 1000);
-            result.wall_seconds = tp_clock() - start;
+            result.wall_seconds = (double)timestamp_ns_between(start, timestamp_take()) * 1e-9;
             result.timed_out = wait == WAIT_TIMEOUT;
             if (wait != WAIT_OBJECT_0)
             {
@@ -246,6 +191,7 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     {
         CloseHandle(log);
     }
+    scratch_end(temp);
     return result;
 }
 #else
@@ -260,37 +206,6 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
 #include <sched.h>
 #include <sys/syscall.h>
 #endif
-
-static double tp_clock(void)
-{
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
-}
-
-static int tp_mkdir(char const* path)
-{
-    return mkdir(path, 0700) == 0 || errno == EEXIST;
-}
-
-static int tp_absolute(char const* path, char out[TP_PATH_CAP])
-{
-    int ok = 1;
-    if (path[0] == '/')
-    {
-        ok = snprintf(out, TP_PATH_CAP, "%s", path) < TP_PATH_CAP;
-    }
-    else
-    {
-        char current[TP_PATH_CAP];
-        ok = getcwd(current, sizeof(current)) != NULL;
-        if (ok)
-        {
-            ok = snprintf(out, TP_PATH_CAP, "%s/%s", current, path) < TP_PATH_CAP;
-        }
-    }
-    return ok;
-}
 
 /* Only the orchestration tool installs this handler, never the compiler.
  * kill(2) is async-signal-safe. It bounds the entire compiler process group.
@@ -367,7 +282,7 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     int handler_set = sigaction(SIGALRM, &handler, &previous) == 0;
     ok = ok && handler_set && pipe_handler_set && int_set && term_set;
     pid_t pid = -1;
-    double start = tp_clock();
+    TimeDataType start = timestamp_take();
     if (ok)
     {
         pid = fork();
@@ -471,7 +386,7 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         {
             waited = wait4(pid, &status, 0, &usage);
         } while (waited < 0 && errno == EINTR);
-        result.wall_seconds = tp_clock() - start;
+        result.wall_seconds = (double)timestamp_ns_between(start, timestamp_take()) * 1e-9;
         alarm(0);
         tp_active_pid = 0;
         result.timed_out = tp_timeout_fired != 0;

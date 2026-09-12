@@ -10,36 +10,36 @@
 
 typedef struct TpTreeEntry { char* name; int directory; } TpTreeEntry;
 
-static int tp_tree_add(TpTreeEntry** entries, unsigned* count, unsigned* capacity, char const* name, int directory)
+static int tp_tree_add(Arena* arena, TpTreeEntry** entries, unsigned* count, unsigned* capacity, char const* name, int directory)
 {
     int ok = *count < 32768;
     if (ok && *count == *capacity)
     {
         unsigned next = *capacity ? *capacity * 2 : 128;
-        TpTreeEntry* grown = (TpTreeEntry*)realloc(*entries, (size_t)next * sizeof(TpTreeEntry));
+        TpTreeEntry* grown = arena_allocate(arena, TpTreeEntry, next);
         ok = grown != NULL;
-        if (ok) { *entries = grown; *capacity = next; }
+        if (ok)
+        {
+            if (*count) memcpy(grown, *entries, (size_t)*count * sizeof(TpTreeEntry));
+            *entries = grown;
+            *capacity = next;
+        }
     }
     if (ok)
     {
-        size_t size = strlen(name) + 1;
-        char* copy = (char*)malloc(size);
-        ok = copy != NULL;
-        if (ok)
-        {
-            memcpy(copy, name, size);
-            (*entries)[*count] = (TpTreeEntry){copy, directory};
-            ++*count;
-        }
+        String8 copy = string_duplicate_arena(arena, string_from_pointer(name), true);
+        (*entries)[*count] = (TpTreeEntry){copy.pointer, directory};
+        ++*count;
     }
     return ok;
 }
 
 static int tp_hash_tree(char const* root, char digest[65])
 {
+    Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
     TpTreeEntry* entries = NULL;
     unsigned count = 0, capacity = 0;
-    int ok = tp_tree_add(&entries, &count, &capacity, "", 1);
+    int ok = tp_tree_add(arena, &entries, &count, &capacity, "", 1);
     for (unsigned directory = 0; directory < count && ok; ++directory)
     {
         if (!entries[directory].directory) continue;
@@ -60,7 +60,7 @@ static int tp_hash_tree(char const* root, char digest[65])
                 int length = snprintf(relative, sizeof(relative), "%s%s%s", entries[directory].name,
                                       entries[directory].name[0] ? "/" : "", item.cFileName);
                 ok = length >= 0 && length < TP_PATH_CAP && !(item.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
-                if (ok) ok = tp_tree_add(&entries, &count, &capacity, relative, !!(item.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
+                if (ok) ok = tp_tree_add(arena, &entries, &count, &capacity, relative, !!(item.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
             }
             next = FindNextFileA(search, &item) != 0;
         }
@@ -86,7 +86,7 @@ static int tp_hash_tree(char const* root, char digest[65])
                     struct stat status;
                     ok = length >= 0 && length < TP_PATH_CAP && tp_path(full, root, relative) && lstat(full, &status) == 0 &&
                          (S_ISDIR(status.st_mode) || S_ISREG(status.st_mode));
-                    if (ok) ok = tp_tree_add(&entries, &count, &capacity, relative, S_ISDIR(status.st_mode));
+                    if (ok) ok = tp_tree_add(arena, &entries, &count, &capacity, relative, S_ISDIR(status.st_mode));
                 }
                 errno = 0;
             }
@@ -96,7 +96,7 @@ static int tp_hash_tree(char const* root, char digest[65])
 #endif
     }
     /* Bottom-up merge sort of the compact pointer array. */
-    TpTreeEntry* scratch = ok ? (TpTreeEntry*)malloc((size_t)count * sizeof(TpTreeEntry)) : NULL;
+    TpTreeEntry* scratch = ok ? arena_allocate(arena, TpTreeEntry, count) : NULL;
     ok = ok && scratch != NULL;
     for (unsigned width = 1; width < count && ok; width *= 2)
     {
@@ -115,8 +115,8 @@ static int tp_hash_tree(char const* root, char digest[65])
     }
     if (ok)
     {
-        TpHash hash;
-        tp_hash_init(&hash);
+        Sha256 hash;
+        sha256_init(&hash);
         for (unsigned i = 0; i < count && ok; ++i)
         {
             if (!entries[i].directory)
@@ -126,16 +126,14 @@ static int tp_hash_tree(char const* root, char digest[65])
                 ok = tp_path(path, root, entries[i].name) && tp_hash_file(path, file_hash, &bytes, &lines);
                 if (ok)
                 {
-                    tp_hash_add(&hash, entries[i].name, strlen(entries[i].name) + 1);
-                    tp_hash_add(&hash, file_hash, 65);
+                    sha256_add(&hash, entries[i].name, strlen(entries[i].name) + 1);
+                    sha256_add(&hash, file_hash, 65);
                 }
             }
         }
-        tp_hash_finish(&hash, digest);
+        sha256_finish_hex(&hash, digest);
     }
-    free(scratch);
-    for (unsigned i = 0; i < count; ++i) free(entries[i].name);
-    free(entries);
+    arena_destroy(arena, 1);
     return ok;
 }
 #endif

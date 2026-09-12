@@ -22382,6 +22382,8 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
     generic_tool_run_add_end(r);
 }
 
+BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments);
+
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     // These synthetic diagnostics deliberately build large in-memory fixtures.
@@ -22453,6 +22455,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     {
         return superbuild_parallelism_test_result;
     }
+
+    // Exercise the shared-library runner on every native desktop matrix host.
+    String8 throughput_self_test[] = {S8("self-test")};
+    bench_throughput_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(throughput_self_test));
 
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
@@ -34075,15 +34081,16 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 
 // Compiler construction stays in the existing generate/build commands. This
 // command builds the small native measurement tool, then forwards its argv
-// without shell parsing. No new dependency or compiler-library module is added.
+// without shell parsing. Only the shared foundation modules are linked.
 BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments)
 {
     make_directory_recursive(arena, S8("build/throughput-tools"));
-    bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test"));
+    bool sanitize = arguments.length == 2 && string_equal(arguments.pointer[0], S8("self-test")) && string_equal(arguments.pointer[1], S8("--sanitize"));
+    bool self_test = sanitize || (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")));
 #if BUSTER_WINDOWS
-    String8 executable = self_test ? S8("build/throughput-tools/throughput-tests.exe") : S8("build/throughput-tools/throughput.exe");
+    String8 executable = sanitize ? S8("build/throughput-tools/throughput-tests-sanitized.exe") : self_test ? S8("build/throughput-tools/throughput-tests.exe") : S8("build/throughput-tools/throughput.exe");
 #else
-    String8 executable = self_test ? S8("build/throughput-tools/throughput-tests") : S8("build/throughput-tools/throughput");
+    String8 executable = sanitize ? S8("build/throughput-tools/throughput-tests-sanitized") : self_test ? S8("build/throughput-tools/throughput-tests") : S8("build/throughput-tools/throughput");
 #endif
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
@@ -34099,7 +34106,21 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
     os_argument_builder_append(&builder, S8("-fwrapv"));
     os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
     os_argument_builder_append(&builder, S8("-funsigned-char"));
+    os_argument_builder_append(&builder, S8("-Isrc"));
+    os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
     os_argument_builder_append(&builder, self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"));
+    os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
+    if (sanitize)
+    {
+        os_argument_builder_append(&builder, S8("-g"));
+        os_argument_builder_append(&builder, S8("-DBUSTER_SANITIZE=1"));
+        os_argument_builder_append(&builder, S8("-fsanitize=address,undefined"));
+        os_argument_builder_append(&builder, S8("-fno-sanitize-recover=all"));
+    }
+#if BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-Wno-microsoft-enum-forward-reference"));
+    os_argument_builder_append(&builder, S8("-lws2_32"));
+#endif
 #if !BUSTER_WINDOWS
     os_argument_builder_append(&builder, S8("-lm"));
 #endif
@@ -34112,7 +34133,7 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
     os_argument_builder_append(&builder, executable);
     if (self_test)
     {
-        os_argument_builder_append(&builder, S8("build/throughput-tool-tests"));
+        os_argument_builder_append(&builder, sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests"));
     }
     else
     {

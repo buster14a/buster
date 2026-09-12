@@ -1,6 +1,6 @@
 /* Native regression tests for the harness itself. Synthetic timings below are
  * fixtures, never compiler measurements. Child modes exercise the OS boundary.
- * Build: clang -std=c11 -O2 -Wall -Wextra -Werror tests.c -lm -o throughput-tests
+ * Build through ./build.sh bench_throughput self-test; shared.c owns linkage.
  */
 #define main throughput_cli_main
 #include "throughput.c"
@@ -99,6 +99,24 @@ static int test_child(int argc, char** argv)
     }
 #endif
     else if (!strcmp(argv[2], "sleep")) test_delay(5000);
+    else if (argc == 4 && !strcmp(argv[2], "descendant-marker"))
+    {
+        test_delay(2000);
+        result = file_write(string_from_pointer(argv[3]), (ByteSlice){(u8*)"escaped", 7}) ? 0 : 3;
+    }
+    else if (argc == 4 && !strcmp(argv[2], "descendant"))
+    {
+        String8 child_args[] = {string_from_pointer(argv[0]), S8("child"), S8("descendant-marker"), string_from_pointer(argv[3])};
+        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_args), (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){0});
+        result = child.handle ? 0 : 3;
+        if (child.handle)
+        {
+            test_delay(5000);
+            TemporalArena temp = scratch_begin(0, 0);
+            os_process_wait_deadline(temp.arena, child, 1000000);
+            scratch_end(temp);
+        }
+    }
     else if (!strcmp(argv[2], "memory"))
     {
         size_t bytes = (size_t)96 * 1024 * 1024;
@@ -147,6 +165,15 @@ static void test_processes(char const* executable, char const* root)
     char* sleep[] = {(char*)executable, "child", "sleep", NULL};
     TpProcess timeout = tp_process(sleep, NULL, log, 1, -1, 0);
     CHECK(timeout.timed_out && timeout.wall_seconds < 4.0);
+    char marker[TP_PATH_CAP];
+    CHECK(tp_path(marker, root, "descendant-marker"));
+    CHECK(os_file_delete(string_from_pointer(marker)));
+    char* descendant[] = {(char*)executable, "child", "descendant", marker, NULL};
+    TpProcess tree = tp_process(descendant, NULL, log, 1, -1, 0);
+    CHECK(tree.timed_out && tree.wall_seconds < 4.0);
+    test_delay(1500);
+    struct stat marker_status;
+    CHECK(stat(marker, &marker_status) != 0 && errno == ENOENT);
     char* memory[] = {(char*)executable, "child", "memory", NULL};
 #ifdef __linux__
     struct rusage before = {0}, after = {0};
@@ -433,8 +460,9 @@ static void test_workload_selection(void)
 static void test_job_capacity(void)
 {
     TpConfig config = {0};
-    TpWorkload* workloads = (TpWorkload*)calloc(TP_CASES, sizeof(TpWorkload));
-    TpJob* jobs = (TpJob*)calloc(TP_MAX_JOBS + 1, sizeof(TpJob));
+    Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    TpWorkload* workloads = arena_allocate_zeroed(arena, TpWorkload, TP_CASES);
+    TpJob* jobs = arena_allocate_zeroed(arena, TpJob, TP_MAX_JOBS + 1);
     CHECK(workloads && jobs);
     if (workloads && jobs)
     {
@@ -500,8 +528,7 @@ static void test_job_capacity(void)
         config.mode_mask = TP_ALL_MODE_MASK + 1;
         CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count) && !count);
     }
-    free(jobs);
-    free(workloads);
+    arena_destroy(arena, 1);
 }
 
 static void test_optional_inputs(char const* root)
@@ -642,7 +669,8 @@ static void test_maximum_jobs(char const* root)
     char directory[TP_PATH_CAP], path[TP_PATH_CAP];
     int ok = tp_path(directory, root, "maximum-jobs") && test_bundle(directory, 0);
     CHECK(ok);
-    TpRow* rows = (TpRow*)calloc(TP_ROUNDS * 2 * 20, sizeof(TpRow));
+    Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    TpRow* rows = arena_allocate_zeroed(arena, TpRow, TP_ROUNDS * 2 * 20);
     CHECK(rows != NULL);
     ok = ok && rows && tp_load_samples(directory, "samples.csv", 1, 20, 0, rows);
     CHECK(ok);
@@ -670,7 +698,7 @@ static void test_maximum_jobs(char const* root)
         CHECK(tp_completion(directory, TP_MAX_JOBS, 20, 0, 1));
         CHECK(tp_compare(directory) == 0);
     }
-    free(rows);
+    arena_destroy(arena, 1);
 }
 
 static void test_summaries(char const* root, int expected)
@@ -734,6 +762,8 @@ static void test_summary_write_failure(char const* executable, char const* root)
 
 int main(int argc, char** argv)
 {
+    ThreadContext* context = thread_context_allocate();
+    thread_context_select(context);
     int result = 2;
     if (argc >= 2 && !strcmp(argv[1], "child")) result = test_child(argc, argv);
     else if (argc == 2)
@@ -791,5 +821,7 @@ int main(int argc, char** argv)
         result = test_failures ? 1 : 0;
     }
     else fprintf(stderr, "usage: throughput-tests OUTPUT_DIRECTORY\n");
+    thread_context_release(context);
+    arena_pool_release_thread();
     return result;
 }

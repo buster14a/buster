@@ -75,6 +75,15 @@
   root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
 
+## Throughput runner integration
+
+The desktop combination matrix builds and runs `bench_throughput self-test`
+before compiler/configuration trees. The tool links shared foundations through
+`tools/throughput/shared.c`; its native process tests retain per-child RSS,
+timeout/descendant cleanup, argv, diagnostics and dedicated-host locking.
+SHA-256 and recoverable file/path contracts also run in the registered hash and
+OS module tests. See `tools/throughput/README.md` for the diagnostic build.
+
 ## Configured external compiler fixtures
 
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied
