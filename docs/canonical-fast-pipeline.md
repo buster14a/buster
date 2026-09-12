@@ -16,8 +16,8 @@ The [separate production-profile experiment](performance-audits/2026-09-11T21103
 validates tests-OFF outputs against the tested compiler and retains its full
 on/off comparison. Its mixed, inconclusive results did not establish acceptance;
 it includes a correction to the earlier optimization-level label. The final
-dedicated-host A/A, on/off, and leave-one-pass-out acceptance is retained in the
-current integration audit.
+dedicated-host A/A, on/off, and leave-one-pass-out acceptance is retained in
+[the final integration audit](performance-audits/2026-09-12T001148Z.md).
 
 ## Order and ownership
 
