@@ -1,0 +1,46 @@
+--- a/src/buster/apps/ide/ide.c
++++ b/src/buster/apps/ide/ide.c
+@@ -1022,38 +1022,8 @@
+ 
+ ProcessResult entry_point(void)
+ {
+-    switch (compiler_state.command)
+-    {
+-        case COMPILER_COMMAND_HELP:
+-            compiler_print_usage();
+-            return PROCESS_RESULT_SUCCESS;
+-        case COMPILER_COMMAND_TEST:
+-            return compiler_run_tests();
+-        case COMPILER_COMMAND_METAMORPHIC:
+-#if BUSTER_INCLUDE_TESTS
+-            return metamorphic_campaign(program_state->arena);
+-#else
+-            string_print(S8("metamorphic: rebuild with BUSTER_INCLUDE_TESTS=1\n"));
+-            return PROCESS_RESULT_FAILED;
+-#endif
+-        case COMPILER_COMMAND_BENCH:
+-            return compiler_run_benchmarks();
+-        case COMPILER_COMMAND_BENCH_SELECT:
+-            return compiler_run_selection_benchmark(compiler_state.selection_benchmark_path);
+-        case COMPILER_COMMAND_CC:
+-            return run_c_compiler();
+-        case COMPILER_COMMAND_FUZZ:
+-#if BUSTER_FUZZ_AVAILABLE
+-            return buster_fuzz_run(compiler_state.fuzz_arguments);
+-#else
+-            return PROCESS_RESULT_FAILED;
+-#endif
+-        case COMPILER_COMMAND_X86_64_COMPLETION_CENSUS:
+-#if BUSTER_CPU_ARCH_X86_64
+-            return run_completion_census();
+-#else
+-            return PROCESS_RESULT_FAILED;
+-#endif
+-    }
+-    return PROCESS_RESULT_FAILED;
+-}
++ UnitTestArguments args = {.arena=program_state->arena, .show=default_show};
++ UnitTestResult result=compiler_driver_archive_tests(&args);
++ string_print(S8("ARCHIVE_TEST passed={u64} total={u64}\n"),result.succeeded_test_count,result.test_count);
++ return result.succeeded_test_count == result.test_count ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
++}

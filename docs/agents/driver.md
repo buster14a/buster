@@ -220,6 +220,40 @@ input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
+Static archive extraction uses `compiler_driver_archive_extract` in the
+private `driver/archive.c` implementation. Its invocation-owned name table
+records selected definitions and strong/weak undefined references once per
+newly selected object. Each archive occurrence builds symbol-to-member provider
+lists and a heap ordered by `(scan pass, member index)`. A dependency discovered
+behind the cursor belongs to the next pass, preserving the former forward
+fixed-point selection sequence and first-definition behavior. Earlier archives
+are revisited only when explicitly present again; `-l` archives retain their
+existing driver placement after ordinary inputs. Definition binding strength
+does not alter eligibility once a selected definition exists.
+
+Provider state changes are monotonic: an edge is revisited at most three times.
+Selection work is expected O(S + A + D log(M + 1)), with S visited selected
+symbols, A archive symbols, D archive definition edges and M archive members;
+hashing includes symbol-name bytes. Provider lists and heap storage are scratch allocations for one archive.
+The name table is created only at the first nonempty archive with selected
+inputs, survives subsequent archives, and is destroyed before object linking
+or on an earlier driver error. No index storage remains in the returned result.
+Before allocating state, archives with at most eight selected objects, eight
+members and 32 total symbols use a bounded scan with a stack selection mask.
+An archive without undefined global symbols takes one indexed forward pass;
+it cannot introduce new extraction requests and does not retain irrelevant
+member names. The synthetic runtime-object checks retain their single-member
+path.
+
+`compiler_driver_archive_tests` compares exact member sequences, linker errors
+and successful ELF/COFF/Mach-O object bytes against an independent scan oracle.
+The fixed duplicate-definition fixture also verifies which member supplies the
+winning byte. Set `BUSTER_ARCHIVE_BENCH=1` for paired reverse-chain, forward-chain
+and irrelevant-member timing rows (with both one and many root references) within the driver tests; setup and destruction
+are included and timing never gates correctness. `state_bytes` is the name
+arena's used prefix (including superseded growth tables) before destruction,
+not physical RSS or the per-archive scratch peak.
+
 An undefined weak ELF reference does not select a static archive member.
 It may bind to a member selected for a separate strong dependency, to a
 direct object input, or to an already included shared library. Keep archive
