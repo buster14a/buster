@@ -2774,7 +2774,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     assembly->first_relocation <= function->inline_assembly_relocation_count &&
                     assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
                     (assembly->effects & ~(MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY | MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS |
-                                           MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR)) == 0 &&
+                                           MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR | MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP)) == 0 &&
                     (!assembly->bytes.length || assembly->bytes.pointer) && (!assembly->source.length || assembly->source.pointer);
             if (valid && function->target)
             {
