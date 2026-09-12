@@ -55,8 +55,10 @@ shared-object import, and the driver has no `-shared`) plus
 deliberately links getpath_noop.o. Both trees carry the same file, so their
 suites skip the same tests. `Python/perf_jit_trampoline.o` is compiled with
 `clang -fno-pic -gdwarf-4` in both trees (conditional directives inside a
-macro argument, issue 838; the DWARF 5 reader gap, issue 840; GOTPCRELX
-conversion, issue 841). `test_gdb`'s two tests are the expected buster-only
+macro argument, issue 838; the historical DWARF 5 reader gap, issue 840;
+GOTPCRELX conversion, issue 841). The ELF reader now accepts the ordinary
+DWARF 5 section family (GitHub #77); this harness retains its existing
+`-gdwarf-4` pin until the full CPython workflow is revalidated without it. `test_gdb`'s two tests are the expected buster-only
 suite divergence: gdb inspects a running python and Buster-linked
 executables carry no `.symtab` (issue 843). Refleak hunting, the
 resource-gated suite surface (`-u all`), and performance are out of scope.

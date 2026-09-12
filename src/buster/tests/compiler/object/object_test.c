@@ -652,9 +652,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_scaling(UnitTestArgument
     return result;
 }
 
+// Independent section names force the reader to recognize each DWARF 5
+// family. The object layer preserves bytes and relocations without decoding DIEs.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_dwarf5_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ObjectSectionKind kinds[] = {
+        OBJECT_SECTION_DEBUG_ADDR, OBJECT_SECTION_DEBUG_STR_OFFSETS, OBJECT_SECTION_DEBUG_LINE_STR,
+        OBJECT_SECTION_DEBUG_RNGLISTS, OBJECT_SECTION_DEBUG_LOCLISTS,
+    };
+    String8 names[] = {S8(".debug_addr"), S8(".debug_str_offsets"), S8(".debug_line_str"), S8(".debug_rnglists"), S8(".debug_loclists")};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+        ObjectSymbol symbols[BUSTER_ARRAY_LENGTH(kinds)] = {0};
+        ObjectRelocation relocations[BUSTER_ARRAY_LENGTH(kinds)] = {0};
+        u8 payload[16] = {12, 0, 0, 0, 5, 0, 8, 0};
+        u8 references[8 * BUSTER_ARRAY_LENGTH(kinds)] = {0};
+        for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+        {
+            sections[kind] = (ObjectSection){.name = object_section_name_for_kind((ObjectSectionKind)kind), .kind = (ObjectSectionKind)kind, .alignment = 1};
+        }
+        sections[OBJECT_SECTION_DEBUG_INFO].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(references);
+        sections[OBJECT_SECTION_DEBUG_INFO].virtual_size = sizeof(references);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+        {
+            ObjectSectionKind kind = kinds[index];
+            BUSTER_TEST(arguments, object_section_kind_is_debug(kind));
+            BUSTER_STRING_TEST(arguments, object_section_name_for_kind(kind), names[index]);
+            BUSTER_TEST(arguments, object_section_default_alignment(kind) == 1);
+            sections[kind].name = names[index];
+            sections[kind].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(payload);
+            sections[kind].virtual_size = sizeof(payload);
+            symbols[index] = (ObjectSymbol){.name = names[index], .section = (u32)kind, .value = 8};
+            relocations[index] = (ObjectRelocation){.section = OBJECT_SECTION_DEBUG_INFO, .symbol = index, .offset = (u64)index * 8,
+                                                   .kind = index & 1 ? OBJECT_RELOCATION_ABSOLUTE32 : OBJECT_RELOCATION_ABSOLUTE64, .addend = 1};
+        }
+        ObjectFile object = {.target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX},
+                             .sections = sections, .section_count = OBJECT_SECTION_COUNT,
+                             .symbols = symbols, .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+                             .relocations = relocations, .relocation_count = BUSTER_ARRAY_LENGTH(relocations)};
+        ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
+        ObjectFile restored = object_read(temporary.arena, artifact.bytes, object.target);
+        BUSTER_TEST(arguments, restored.error == OBJECT_ERROR_NONE);
+        if (restored.error == OBJECT_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, restored.relocation_count == BUSTER_ARRAY_LENGTH(relocations));
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                ByteSlice data = restored.sections[kinds[index]].data;
+                BUSTER_TEST(arguments, data.length == sizeof(payload) && memcmp(data.pointer, payload, sizeof(payload)) == 0);
+            }
+            for (u32 index = 0; index < restored.relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = restored.relocations[index];
+                BUSTER_TEST(arguments, relocation.symbol < restored.symbol_count && index < BUSTER_ARRAY_LENGTH(relocations));
+                if (relocation.symbol < restored.symbol_count && index < BUSTER_ARRAY_LENGTH(relocations))
+                {
+                    BUSTER_TEST(arguments, relocation.section == OBJECT_SECTION_DEBUG_INFO && relocation.offset == (u64)index * 8 &&
+                                           relocation.kind == relocations[index].kind && relocation.addend == 1);
+                    BUSTER_TEST(arguments, restored.symbols[relocation.symbol].section == (u32)kinds[index] && restored.symbols[relocation.symbol].value == 8);
+                }
+            }
+        }
+        // A valid ELF section outside the supported vocabulary must be named
+        // when a retained debug contribution references it.
+        sections[OBJECT_SECTION_DEBUG_ADDR].name = S8(".debug_future");
+        ObjectArtifact future = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, future.error == OBJECT_ERROR_NONE);
+        ObjectFile unsupported = object_read(temporary.arena, future.bytes, object.target);
+        BUSTER_TEST(arguments, unsupported.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        BUSTER_STRING_TEST(arguments, unsupported.diagnostic, S8("ELF relocation references unsupported section .debug_future"));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult dwarf5 = object_test_dwarf5_sections(arguments);
+    result.test_count += dwarf5.test_count;
+    result.succeeded_test_count += dwarf5.succeeded_test_count;
     UnitTestResult scaling = object_test_assembly_scaling(arguments);
     result.test_count += scaling.test_count;
     result.succeeded_test_count += scaling.succeeded_test_count;

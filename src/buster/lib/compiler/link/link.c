@@ -85,6 +85,11 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_debug_kinds[] = {
     OBJECT_SECTION_DEBUG_STR,
     OBJECT_SECTION_DEBUG_LOC,
     OBJECT_SECTION_DEBUG_RANGES,
+    OBJECT_SECTION_DEBUG_ADDR,
+    OBJECT_SECTION_DEBUG_STR_OFFSETS,
+    OBJECT_SECTION_DEBUG_LINE_STR,
+    OBJECT_SECTION_DEBUG_RNGLISTS,
+    OBJECT_SECTION_DEBUG_LOCLISTS,
 };
 
 BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
@@ -2653,8 +2658,9 @@ struct LinkElfSectionDescriptor
 // Appends merged DWARF data and an ELF section table to a finished image.
 // Loaded bytes retain their program-header layout, while zero-fill and debug
 // sections preserve their virtual and non-loaded representations. Debug
-// relocations are resolved statically here: 64-bit slots receive link-time
-// addresses and 32-bit slots receive offsets into the target debug section.
+// relocations are resolved statically here: references into debug sections
+// receive section offsets (including DWARF64); other 64-bit slots receive
+// link-time addresses, with the legacy range-list exception below.
 // Whether `bytes` ends exactly where the arena will hand out its next byte, so
 // the block can be grown without being moved.
 BUSTER_GLOBAL_LOCAL bool link_arena_block_on_top(Arena* arena, u8* bytes, u64 length)
@@ -2828,6 +2834,12 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         {
             ObjectSection* section = &object->sections[link_elf_debug_kinds[index]];
             debug_offsets[index] = cursor;
+            // Preserve the existing empty DWARF 4 section table. The external
+            // DWARF 5 family adds output only when an input contributes bytes.
+            if (!section->data.length && link_elf_debug_kinds[index] >= OBJECT_SECTION_DEBUG_ADDR)
+            {
+                continue;
+            }
             if (section->data.length > UINT64_MAX - cursor)
             {
                 result->error = LINK_ERROR_INVALID_INPUT;
@@ -2937,7 +2949,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 bool relative_text_range = (relocation->section == OBJECT_SECTION_DEBUG_LOC || relocation->section == OBJECT_SECTION_DEBUG_RANGES) &&
                                            symbol->section == OBJECT_SECTION_TEXT;
                 u64 value = 0;
-                if (relative_text_range)
+                if (relative_text_range || object_section_kind_is_debug((ObjectSectionKind)symbol->section))
                 {
                     if (!link_address_addend(symbol->value, relocation->addend, &value))
                     {

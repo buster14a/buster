@@ -1,6 +1,7 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
 // artifact, link, runtime, and cross-mode checks. compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
+// compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -3432,6 +3433,156 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(U
 }
 #endif
 
+// Build two independent optimized CUs with the configured host compiler.
+// Validate the retained contributions and their relocated cross-section offsets
+// through the public driver, then execute the mixed-compiler program.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID && defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
+    String8 versions[] = {S8("-gdwarf-4"), S8("-gdwarf-5"), S8("-gdwarf-5"), S8("-gdwarf-5")};
+    for (u32 version = 0; version < BUSTER_ARRAY_LENGTH(versions); version += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 object_paths[2];
+        ObjectFile objects[2] = {0};
+        u64 bases[2][OBJECT_SECTION_COUNT] = {0};
+        u64 sizes[OBJECT_SECTION_COUNT] = {0};
+        bool ready = true;
+        for (u32 unit = 0; unit < BUSTER_ARRAY_LENGTH(objects) && ready; unit += 1)
+        {
+            object_paths[unit] = buster_test_temporary_path(temporary.arena, S8("buster-host-dwarf"), unit ? S8("-second.o") : S8("-first.o"));
+            String8 command[16];
+            u32 count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+            command[count++] = S8("-c");
+            command[count++] = S8("-O2");
+            command[count++] = S8("-g");
+            command[count++] = versions[version];
+            if (version == 2) { command[count++] = S8("-gdwarf64"); }
+            if (version == 3) { command[count++] = S8("-gz=zlib"); }
+            command[count++] = S8("-ffunction-sections");
+            command[count++] = S8("-fno-pic");
+            command[count++] = S8("-fno-pie");
+            command[count++] = unit ? S8("-DDWARF_FUNCTION=dwarf_second") : S8("-DDWARF_FUNCTION=dwarf_first");
+            command[count++] = S8("tests/host_dwarf5.c");
+            command[count++] = S8("-o");
+            command[count++] = object_paths[unit];
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count},
+                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            ready = spawn.handle && os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, ready);
+            if (ready)
+            {
+                ByteSlice bytes = file_read(temporary.arena, object_paths[unit], (FileReadOptions){0});
+                objects[unit] = object_read(temporary.arena, bytes, (Target){.cpu_arch = BUSTER_CPU_ARCH_X86_64 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+                if (version == 3)
+                {
+                    BUSTER_TEST(arguments, objects[unit].error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    BUSTER_TEST(arguments, string_starts_with_sequence(objects[unit].diagnostic, S8("unsupported compressed ELF debug section .debug_")));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-compressed-dwarf"), S8(""));
+                    String8 link_command[] = {S8("-o"), output, object_paths[unit], S8("tests/basic_c_dwarf5_link.c")};
+                    CompilerDriverResult refused = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                    BUSTER_TEST(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE);
+                    BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, objects[unit].diagnostic) < refused.diagnostic.length);
+                    ready = false;
+                }
+                else
+                {
+                    ready = objects[unit].error == OBJECT_ERROR_NONE;
+                    BUSTER_TEST(arguments, ready);
+                }
+            }
+            if (ready)
+            {
+                for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+                {
+                    ObjectSection section = objects[unit].sections[kind];
+                    bases[unit][kind] = align_forward(sizes[kind], section.alignment);
+                    sizes[kind] = bases[unit][kind] + section.data.length;
+                }
+                ByteSlice info = objects[unit].sections[OBJECT_SECTION_DEBUG_INFO].data;
+                u32 version_offset = version == 2 ? 12 : 4;
+                u16 actual_version = 0;
+                if (info.length >= version_offset + sizeof(actual_version)) { memcpy(&actual_version, info.pointer + version_offset, sizeof(actual_version)); }
+                BUSTER_TEST(arguments, actual_version == (version ? 5 : 4));
+                if (version)
+                {
+                    BUSTER_TEST(arguments, objects[unit].sections[OBJECT_SECTION_DEBUG_LINE_STR].data.length != 0);
+                    BUSTER_TEST(arguments, objects[unit].sections[OBJECT_SECTION_DEBUG_RNGLISTS].data.length != 0);
+                    BUSTER_TEST(arguments, objects[unit].sections[OBJECT_SECTION_DEBUG_LOCLISTS].data.length != 0);
+                }
+            }
+        }
+        if (ready)
+        {
+            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-dwarf-link"), S8(""));
+            String8 command[] = {S8("-g0"), S8("-o"), executable, object_paths[0], object_paths[1], S8("tests/basic_c_dwarf5_link.c")};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            if (linked.error != COMPILER_DRIVER_ERROR_NONE) { arguments->show(arguments, S8("DWARF object link: {S8}\n"), linked.diagnostic); }
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                ByteSlice image = file_read(temporary.arena, executable, (FileReadOptions){0});
+                for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+                {
+                    if (object_section_kind_is_debug((ObjectSectionKind)kind) && sizes[kind])
+                    {
+                        ByteSlice data = compiler_driver_test_elf_section(image, object_section_name_for_kind((ObjectSectionKind)kind));
+                        BUSTER_TEST(arguments, data.length == sizes[kind]);
+                    }
+                }
+                u32 checked_offsets = 0;
+                u32 checked_addresses = 0;
+                u64 text_address = compiler_driver_test_elf_section_address(image, S8(".text"));
+                ByteSlice text = compiler_driver_test_elf_section(image, S8(".text"));
+                for (u32 unit = 0; unit < BUSTER_ARRAY_LENGTH(objects); unit += 1)
+                {
+                    for (u32 index = 0; index < objects[unit].relocation_count; index += 1)
+                    {
+                        ObjectRelocation relocation = objects[unit].relocations[index];
+                        if (!object_section_kind_is_debug((ObjectSectionKind)relocation.section)) { continue; }
+                        ObjectSymbol symbol = objects[unit].symbols[relocation.symbol];
+                        ByteSlice data = compiler_driver_test_elf_section(image, object_section_name_for_kind((ObjectSectionKind)relocation.section));
+                        u64 offset = bases[unit][relocation.section] + relocation.offset;
+                        u64 width = relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                        bool fits = offset <= data.length && width <= data.length - offset;
+                        BUSTER_TEST(arguments, fits);
+                        if (fits)
+                        {
+                            u64 value = 0;
+                            memcpy(&value, data.pointer + offset, width);
+                            if (object_section_kind_is_debug((ObjectSectionKind)symbol.section))
+                            {
+                                BUSTER_TEST(arguments, value == bases[unit][symbol.section] + symbol.value + (u64)relocation.addend);
+                                checked_offsets += 1;
+                            }
+                            else if (version && symbol.section == OBJECT_SECTION_TEXT && width == 8)
+                            {
+                                BUSTER_TEST(arguments, value >= text_address && value <= text_address + text.length);
+                                checked_addresses += 1;
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, checked_offsets != 0);
+                BUSTER_TEST(arguments, !version || checked_addresses != 0);
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = &executable, .length = 1},
+                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle && os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
@@ -3519,6 +3670,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult windows_arm64_unwind = compiler_driver_test_windows_arm64_unwind(arguments);
     result.test_count += windows_arm64_unwind.test_count;
     result.succeeded_test_count += windows_arm64_unwind.succeeded_test_count;
+    UnitTestResult dwarf5 = compiler_driver_test_dwarf5_objects(arguments);
+    result.test_count += dwarf5.test_count;
+    result.succeeded_test_count += dwarf5.succeeded_test_count;
     UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
     result.test_count += codeview_limit.test_count;
     result.succeeded_test_count += codeview_limit.succeeded_test_count;
