@@ -582,6 +582,23 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         .bit_width = 32,
         .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true},
     });
+    IrTypeId abi_u8 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_INTEGER,
+        .bit_width = 8,
+        .layout = {.size = 1, .alignment = 1, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true},
+    });
+    u32 abi_short_vector_sizes[] = {1, 2, 4};
+    IrTypeId abi_short_vectors[BUSTER_ARRAY_LENGTH(abi_short_vector_sizes)];
+    for (u32 vector_index = 0; vector_index < BUSTER_ARRAY_LENGTH(abi_short_vectors); vector_index += 1)
+    {
+        u32 size = abi_short_vector_sizes[vector_index];
+        abi_short_vectors[vector_index] = ir_program_add_type(&abi_program, (IrType){
+            .kind = IR_TYPE_VECTOR,
+            .element_type = abi_u8,
+            .element_count = size,
+            .layout = {.size = size, .alignment = size, .abi_class = IR_ABI_CLASS_VECTOR, .resolved = true},
+        });
+    }
     IrTypeId abi_enum = ir_program_add_type(&abi_program, (IrType){
         .kind = IR_TYPE_ENUM,
         .bit_width = 32,
@@ -748,6 +765,26 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, abi_f80_result.part_count == 2 && !abi_f80_result.memory && !abi_f80_result.indirect);
     BUSTER_TEST(arguments, abi_f80_result.parts[0].abi_class == IR_ABI_CLASS_X87 && abi_f80_result.parts[0].value_offset == 0 && abi_f80_result.parts[0].size == 8);
     BUSTER_TEST(arguments, abi_f80_result.parts[1].abi_class == IR_ABI_CLASS_X87_UP && abi_f80_result.parts[1].value_offset == 8 && abi_f80_result.parts[1].size == 8);
+
+    IrAbiConvention aarch64_conventions[] = {IR_ABI_CONVENTION_AAPCS64, IR_ABI_CONVENTION_DARWIN_AARCH64,
+                                             IR_ABI_CONVENTION_WINDOWS_AARCH64};
+    for (u32 convention = 0; convention < BUSTER_ARRAY_LENGTH(aarch64_conventions); convention += 1)
+    {
+        for (u32 vector_index = 0; vector_index < BUSTER_ARRAY_LENGTH(abi_short_vectors); vector_index += 1)
+        {
+            u32 size = abi_short_vector_sizes[vector_index];
+            IrTypeId vector = abi_short_vectors[vector_index];
+            IrAbiValue argument = ir_type_abi_value(&abi_program, vector, aarch64_conventions[convention], IR_ABI_USE_ARGUMENT);
+            IrAbiValue variadic = ir_type_abi_value(&abi_program, vector, aarch64_conventions[convention], IR_ABI_USE_VARIADIC_ARGUMENT);
+            IrAbiValue result_value = ir_type_abi_value(&abi_program, vector, aarch64_conventions[convention], IR_ABI_USE_RESULT);
+            BUSTER_TEST(arguments, argument.part_count == 1 && argument.parts[0].abi_class == IR_ABI_CLASS_INTEGER &&
+                                      argument.parts[0].size == size && !argument.indirect && !argument.memory);
+            BUSTER_TEST(arguments, variadic.part_count == 1 && variadic.parts[0].abi_class == IR_ABI_CLASS_INTEGER &&
+                                      variadic.parts[0].size == size && !variadic.indirect && !variadic.memory);
+            BUSTER_TEST(arguments, result_value.part_count == 1 && result_value.parts[0].abi_class == IR_ABI_CLASS_VECTOR &&
+                                      result_value.parts[0].size == size && !result_value.indirect && !result_value.memory);
+        }
+    }
 
     IrAbiValue abi_struct_f80_argument = ir_type_abi_value(&abi_program, abi_struct_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
     IrAbiValue abi_struct_f80_variadic = ir_type_abi_value(&abi_program, abi_struct_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);

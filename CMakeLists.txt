@@ -880,6 +880,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/os_test.c
     src/buster/tests/file_test.c
     src/buster/tests/target_test.c
+    src/buster/tests/truetype_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
@@ -930,6 +931,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/os_test.h
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
+    src/buster/tests/truetype_test.h
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
@@ -1773,6 +1775,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     integer
     string
     float
+    truetype
     compiler_c_frontend
     compiler_aarch64_encoding
     compiler_aarch64_exact_bridge

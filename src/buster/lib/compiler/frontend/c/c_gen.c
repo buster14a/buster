@@ -3755,6 +3755,8 @@ BUSTER_C_INTERNAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* bui
                 }
                 dynamic_cursor = base;
             }
+            // Label metadata helpers do not remove the function value storage.
+            BUSTER_CHECK(builder->function->values);
             IrType* selected_type = ir_type_from_id(&builder->program->types, builder->function->values[place.value].canonical_type);
             bool aggregate_element = selected_type &&
                                      (selected_type->kind == IR_TYPE_ARRAY || selected_type->kind == IR_TYPE_STRUCT || selected_type->kind == IR_TYPE_UNION);
@@ -4405,6 +4407,8 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* 
 BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_name(CIntegerIrBuilder* builder, CToken token)
 {
     CIntegerIrLocal* result = 0;
+    // Local rows and symbol rows are allocated together by c_lower_to_ir.
+    BUSTER_CHECK(!builder->local_count || (builder->locals && builder->local_symbols));
     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
     for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
     {

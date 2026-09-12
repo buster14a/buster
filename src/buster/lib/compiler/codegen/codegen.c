@@ -839,6 +839,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
                                                                    AssemblySyntax syntax, String8* source_out, String8* reason_out)
 {
     String8 template_source = extra.literal;
+    // Validated assembly has one constraint and value for every operand.
+    BUSTER_CHECK(!instruction->operand_count || (instruction->immediates && instruction->operands));
     // The registers this asm has already committed to, which is what licenses a
     // template to name one of them literally. Only the pinned operand classes
     // and the clobbers are here: a generically allocated `r` operand is a
@@ -977,7 +979,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         {
             output[output_index++] = '%';
         }
-        memcpy(output + output_index, register_name.pointer, register_name.length);
+        if (register_name.length) memcpy(output + output_index, register_name.pointer, register_name.length);
         output_index += register_name.length;
         if (memory_operand)
         {
@@ -8046,7 +8048,7 @@ BUSTER_GLOBAL_LOCAL u32 c_canonical_edge_thunk(CCanonicalEmitter* emitter, IrPro
     u32 start = (u32)buffer->count;
     IrPublishedCfg const* cfg = function->published_cfg;
     IrCfgEdge const* edge = ir_function_cfg_edge(function, patch.predecessor, patch.target);
-    if (!edge)
+    if (!edge || !cfg || patch.target.value >= cfg->block_count)
     {
         buffer->error = CODEGEN_ERROR_INVALID_IR;
     }
@@ -8229,6 +8231,48 @@ BUSTER_GLOBAL_LOCAL void c_a64_store(CCanonicalEmitter* emitter, u32 register_nu
 BUSTER_GLOBAL_LOCAL void c_a64_store_high(CCanonicalEmitter* emitter, u32 register_number, u32 result_offset)
 {
     (void)codegen_canonical_a64_frame_memory_operation(emitter->buffer, register_number, result_offset + 8, 8, true, false);
+}
+
+// The AAPCS64 result image widens two compact integer-vector elements into
+// 32-bit lanes and four elements into 16-bit lanes in D0. The canonical frame
+// image remains compact. This predicate deliberately excludes single-lane
+// short vectors, which retain their sized V-register transfer.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_widened_vector_result(IrProgram* program, IrType* type, u32* lane_count, u32* element_bits)
+{
+    IrType* element = type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
+    bool result = type && type->layout.resolved && type->layout.size < 8 && element && element->kind == IR_TYPE_INTEGER &&
+                  (type->element_count == 2 || type->element_count == 4) && (element->bit_width == 8 || element->bit_width == 16) &&
+                  type->layout.size == type->element_count * (element->bit_width / 8);
+    if (result)
+    {
+        *lane_count = (u32)type->element_count;
+        *element_bits = element->bit_width;
+    }
+    return result;
+}
+
+// Convert X9 between the compact frame image and the widened D0 ABI image.
+// X10 is the accumulating result and X11 is one extracted lane.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_pack_vector_result(CodegenBuffer* buffer, u32 lane_count, u32 element_bits, bool compact)
+{
+    u32 abi_lane_bits = 64u / lane_count;
+    u32 source_lane_bits = compact ? abi_lane_bits : element_bits;
+    u32 result_lane_bits = compact ? element_bits : abi_lane_bits;
+    codegen_emit_u32(buffer, UINT32_C(0xaa1f03ea)); // mov x10, xzr
+    for (u32 lane = 0; lane < lane_count; lane += 1)
+    {
+        u32 source_offset = lane * source_lane_bits;
+        codegen_emit_u32(buffer, UINT32_C(0xd3400000) | (source_offset << 16) | ((source_offset + element_bits - 1u) << 10) |
+                                     (9u << 5) | 11u); // ubfx x11, x9, #source_offset, #element_bits
+        u32 result_offset = lane * result_lane_bits;
+        if (result_offset)
+        {
+            codegen_emit_u32(buffer, UINT32_C(0xd3400000) | ((64u - result_offset) << 16) | ((63u - result_offset) << 10) |
+                                         (11u << 5) | 11u); // lsl x11, x11, #result_offset
+        }
+        codegen_emit_u32(buffer, UINT32_C(0xaa0b014a)); // orr x10, x10, x11
+    }
+    codegen_emit_u32(buffer, UINT32_C(0xaa0a03e9)); // mov x9, x10
 }
 
 // Patches one local AArch64 branch after its target has been emitted. The
@@ -19289,6 +19333,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
                         {
                             IrType* return_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            u32 widened_lane_count = 0;
+                            u32 widened_element_bits = 0;
+                            if (codegen_canonical_a64_widened_vector_result(program, return_type, &widened_lane_count, &widened_element_bits))
+                            {
+                                codegen_emit_u32(&buffer, UINT32_C(0x9e660009)); // fmov x9, d0
+                                codegen_canonical_a64_pack_vector_result(&buffer, widened_lane_count, widened_element_bits, true);
+                                c_a64_store(&emitter, 9, result_offset);
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                                continue;
+                            }
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
                                 if (return_type->bit_width != 32 && return_type->bit_width != 64)
@@ -20296,6 +20350,34 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             for (u32 part = 0; part < aggregate_return_abi.part_count; part += 1)
                             {
                                 return_hfa &= codegen_canonical_abi_part_is_float(aggregate_return_abi.parts[part].abi_class);
+                            }
+                            u32 widened_lane_count = 0;
+                            u32 widened_element_bits = 0;
+                            if (codegen_canonical_a64_widened_vector_result(program, return_type, &widened_lane_count, &widened_element_bits))
+                            {
+                                c_a64_load(&emitter, 9, return_value);
+                                codegen_canonical_a64_pack_vector_result(&buffer, widened_lane_count, widened_element_bits, false);
+                                codegen_emit_u32(&buffer, UINT32_C(0x9e670120)); // fmov d0, x9
+                                if (!codegen_epilog_offset_append(descriptor, function->instruction_count,
+                                                                  (u32)buffer.count - descriptor->code_offset))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                                codegen_emit_u32(&buffer, 0x9100039f);
+                                if (!codegen_canonical_a64_memory_operation(&buffer, 28, aarch64_frame_base_save_offset, 8, false, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                                if (frame_size)
+                                {
+                                    codegen_canonical_a64_adjust_stack_described(&buffer, frame_size, false, 0, 0, windows_aarch64);
+                                }
+                                codegen_emit_u32(&buffer, 0xa8c17bfd);
+                                codegen_emit_u32(&buffer, 0xd65f03c0);
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                                continue;
                             }
                             if (return_hfa)
                             {

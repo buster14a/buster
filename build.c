@@ -10,11 +10,13 @@
 // Regions, in file order; each anchor is a definition to search for:
 //   instruction_counter_open                     STEP_INSTRUCTIONS hardware
 //                                                counters (Linux only)
+//   build_gcc_*, build_compiler_discovery_*      GCC selection and identity checks
 //   build_artifact_fanout_*, self_host_*         self-host stages, stage
 //                                                comparison, and the
 //                                                provenance-checked artifact
 //                                                fan-out worker
-//   clang_analyze_*, cmake_profile_summary_*,    diagnostics: analyzer runs
+//   tools/clang_analyze.c                       analyzer shards and aggregation
+//   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
 //   test_timing_summary_*                        summaries
 //   matrix_superbuild_*                          the test_all_combinations
@@ -80,6 +82,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY,
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
+    BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_SYSREG,
@@ -119,7 +122,6 @@ typedef enum ProcessRunFlag
     PROCESS_RUN_FLAG_PRINT_COMMAND_ON_FAILURE_OR_WARNING = (1u << 1),
     PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR = (1u << 2),
     PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE = (1u << 3),
-    PROCESS_RUN_FLAG_CLANG_ANALYZE = (1u << 4),
 } ProcessRunFlag;
 
 // --- instruction counter -------------------------------------------------
@@ -253,7 +255,6 @@ typedef enum BuildArgument
     BUILD_ARGUMENT_UPDATE_BASELINE,
     BUILD_ARGUMENT_NO_UPDATE_BASELINE,
     BUILD_ARGUMENT_CC,
-    BUILD_ARGUMENT_CLANG,
     BUILD_ARGUMENT_CI,
     BUILD_ARGUMENT_CMAKE_PROFILE,
     BUILD_ARGUMENT_CMAKE_PROFILE_SUMMARY,
@@ -300,7 +301,6 @@ BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_UPDATE_BASELINE] = S8_INITIALIZER("--update-baseline"),
     [BUILD_ARGUMENT_NO_UPDATE_BASELINE] = S8_INITIALIZER("--no-update-baseline"),
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
-    [BUILD_ARGUMENT_CLANG] = S8_INITIALIZER("--clang"),
     [BUILD_ARGUMENT_CI] = S8_INITIALIZER("--ci"),
     [BUILD_ARGUMENT_CMAKE_PROFILE] = S8_INITIALIZER("--cmake-profile"),
     [BUILD_ARGUMENT_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("--cmake-profile-summary"),
@@ -880,6 +880,123 @@ BUSTER_GLOBAL_LOCAL void generic_tool_run_add_end(GenericRun r)
     };
 }
 
+// The macOS portability row deliberately uses Homebrew GCC 15, not Apple's
+// unversioned gcc shim. Keep the supported major explicit instead of silently
+// changing compiler coverage when a runner image installs another major.
+BUSTER_GLOBAL_LOCAL String8 build_gcc_default_name(bool macos)
+{
+    String8 result = macos ? S8("gcc-15") : S8("gcc");
+    return result;
+}
+
+typedef struct BuildCompilerIdentity BuildCompilerIdentity;
+struct BuildCompilerIdentity
+{
+    String8 executable;
+    String8 identity;
+    String8 target;
+    String8 version;
+};
+
+BUSTER_GLOBAL_LOCAL String8 build_compiler_output_trim(String8 output)
+{
+    u64 start = 0;
+    while (start < output.length && (u8)output.pointer[start] <= ' ')
+    {
+        start += 1;
+    }
+    while (output.length > start && (u8)output.pointer[output.length - 1] <= ' ')
+    {
+        output.length -= 1;
+    }
+    String8 result = string_slice(output, start, output.length);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_identity_is_gcc(String8 identity)
+{
+    bool result = string_equal(build_compiler_output_trim(identity), S8("BUSTER_BUILD_COMPILER_GNU"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 arguments, String8* output)
+{
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    bool result = spawn.handle != 0;
+    if (result)
+    {
+        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30 * 1000000);
+        result = wait.result == PROCESS_RESULT_SUCCESS;
+        if (result)
+        {
+            *output = build_compiler_output_trim(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
+            result = output->length != 0;
+        }
+        else if (wait.streams[STANDARD_STREAM_ERROR].length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), wait.streams[STANDARD_STREAM_ERROR]);
+        }
+    }
+    if (!result)
+    {
+        string_print(S8("error: compiler discovery query failed: {[]S8}\n"), arguments);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_inspect(Arena* arena, String8 executable, BuildCompilerIdentity* info)
+{
+    *info = (BuildCompilerIdentity){.executable = executable};
+    String8 identity_arguments[] = {executable, S8("-E"), S8("-P"), S8("-x"), S8("c"), S8("tests/build_compiler_identity.h")};
+    String8 target_arguments[] = {executable, S8("-dumpmachine")};
+    String8 version_arguments[] = {executable, S8("--version")};
+    bool result = executable.length &&
+                  build_compiler_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(identity_arguments), &info->identity) &&
+                  build_compiler_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_arguments), &info->target) &&
+                  build_compiler_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments), &info->version);
+    if (result)
+    {
+        string_print(S8("BUSTER_COMPILER_EXECUTABLE: {S8}\nBUSTER_COMPILER_IDENTITY: {S8}\nBUSTER_COMPILER_TARGET: {S8}\nBUSTER_COMPILER_VERSION: {S8}\n"),
+                     info->executable, info->identity, info->target, info->version);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 build_gcc_requested_name(bool macos, String8 override)
+{
+    String8 result = override.length ? override : build_gcc_default_name(macos);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_gcc_prepare(Arena* arena)
+{
+    String8 requested = build_gcc_requested_name(BUSTER_MACOS != 0, os_get_environment_variable(S8("BUSTER_GCC")));
+    bool explicit_path = string_first_code_unit(requested, '/') != BUSTER_STRING_NO_MATCH ||
+                         string_first_code_unit(requested, '\\') != BUSTER_STRING_NO_MATCH;
+    String8 resolved = explicit_path ? os_path_absolute_lexical(arena, requested, true) : executable_resolve_in_path(arena, requested);
+    BuildCompilerIdentity info;
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (!resolved.length)
+    {
+        string_print(S8("error: requested GCC executable '{S8}' was not found; install it or set BUSTER_GCC to a real GCC executable\n"), requested);
+    }
+    else if (build_compiler_inspect(arena, resolved, &info))
+    {
+        if (build_compiler_identity_is_gcc(info.identity))
+        {
+            gcc_path = resolved;
+            result = PROCESS_RESULT_SUCCESS;
+        }
+        else
+        {
+            string_print(S8("error: requested GCC row resolved to {S8} at {S8}; Clang (including Apple's gcc shim) cannot satisfy GCC coverage\n"),
+                         info.identity, resolved);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 cmake_cc(Arena* arena, BuildCompiler compiler)
 {
     switch (compiler)
@@ -892,7 +1009,7 @@ BUSTER_GLOBAL_LOCAL String8 cmake_cc(Arena* arena, BuildCompiler compiler)
         return get_resolved_path(arena, &clang_path, S8("clang"));
         break;
     case BUILD_COMPILER_GCC:
-        return get_resolved_path(arena, &gcc_path, S8("gcc"));
+        return get_resolved_path(arena, &gcc_path, build_gcc_default_name(BUSTER_MACOS != 0));
         break;
     case BUILD_COMPILER_ZIG:
     {
@@ -1104,10 +1221,89 @@ BUSTER_GLOBAL_LOCAL void remove_path_recursive(Arena* arena, String8 path)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, String8 compiler, bool cmake_override, String8 expected_error)
+{
+    String8 directory = string_format(arena, S8("build/compiler discovery test-{u64}"), os_now_microseconds());
+    make_directory_recursive(arena, directory);
+    String8 sentinel = path_join(arena, directory, S8("preserve.txt"));
+    bool success = file_write(sentinel, BUSTER_SLICE_TO_BYTE_SLICE(S8("preserve existing configuration")));
+    u64 capacity = program_state->input.environment_keys.length + 1;
+    String8* keys = arena_allocate(arena, String8, capacity);
+    String8* values = arena_allocate(arena, String8, capacity);
+    u64 count = 0;
+    for (u64 i = 0; i < program_state->input.environment_keys.length; i += 1)
+    {
+        String8 key = program_state->input.environment_keys.pointer[i];
+        if (!string_equal_ascii_case_insensitive(key, S8("BUSTER_GCC")))
+        {
+            keys[count] = key;
+            values[count++] = program_state->input.environment_values.pointer[i];
+        }
+    }
+    keys[count] = S8("BUSTER_GCC");
+    values[count++] = compiler;
+    String8 arguments[] = {program_state->input.arguments.pointer[0], S8("generate"), S8("--cc"), S8("gcc"),
+                           S8("--build-directory"), directory, S8("-DCMAKE_C_COMPILER=clang")};
+    SliceString8 command = {.pointer = arguments, .length = BUSTER_ARRAY_LENGTH(arguments) - !cmake_override};
+    if (success)
+    {
+        ProcessSpawnResult spawn = os_process_spawn(command,
+            (SliceString8){.pointer = keys, .length = count}, (SliceString8){.pointer = values, .length = count},
+            (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
+        success = spawn.handle != 0;
+        if (success)
+        {
+            ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 60 * 1000000);
+            String8 output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+            success = wait.result != PROCESS_RESULT_SUCCESS && !wait.timed_out &&
+                      string_first_sequence(output, expected_error) != BUSTER_STRING_NO_MATCH && path_exists(arena, sentinel);
+            if (!success)
+            {
+                string_print(S8("error: GCC rejection regression failed for {S8}: {S8}\n"), compiler, output);
+            }
+        }
+    }
+    remove_path_recursive(arena, directory);
+    return success;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_compiler_discovery_self_test(Arena* arena)
+{
+    bool success = build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU\n")) &&
+                   build_compiler_identity_is_gcc(S8(" \r\nBUSTER_BUILD_COMPILER_GNU\r\n")) &&
+                   !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_CLANG\n")) &&
+                   !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_UNKNOWN\n")) &&
+                   !build_compiler_identity_is_gcc(S8("")) &&
+                   !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU extra")) &&
+                   string_equal(build_gcc_requested_name(true, (String8){0}), S8("gcc-15")) &&
+                   string_equal(build_gcc_requested_name(false, (String8){0}), S8("gcc")) &&
+                   string_equal(build_gcc_requested_name(true, S8("/tools with spaces/gcc")), S8("/tools with spaces/gcc"));
+    // Clang also defines __GNUC__. Exercise the real preprocessor probe so
+    // checking that macro before __clang__ cannot turn this regression green.
+    BuildCompilerIdentity clang;
+    success = build_compiler_inspect(arena, get_resolved_path(arena, &clang_path, S8("clang")), &clang) &&
+              string_equal(clang.identity, S8("BUSTER_BUILD_COMPILER_CLANG")) && !build_compiler_identity_is_gcc(clang.identity) && success;
+#if BUSTER_MACOS
+    // Record the runner's unversioned gcc discovery independently of the GCC
+    // row. This remains valid if a future image stops shipping Apple's shim.
+    BuildCompilerIdentity unversioned;
+    success = build_compiler_inspect(arena, executable_resolve_in_path(arena, S8("gcc")), &unversioned) && success;
+#endif
+    success = build_compiler_discovery_rejection_test(arena, clang.executable, false, S8("Clang (including Apple's gcc shim) cannot satisfy GCC coverage")) && success;
+    success = build_compiler_discovery_rejection_test(arena, S8("buster-missing-gcc-discovery-fixture"), false, S8("was not found")) && success;
+    success = build_compiler_discovery_rejection_test(arena, clang.executable, true, S8("--cc gcc cannot be combined with a CMAKE_C_COMPILER override")) && success;
+    string_print(S8("COMPILER_DISCOVERY_SELF_TEST: {S8}\n"), success ? S8("pass") : S8("fail"));
+    ProcessResult result = success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 generate_cc(Arena* arena, Generate generate)
 {
-    BUSTER_UNUSED(arena);
     String8 result = generate.cc_set ? generate.cc : build_compilers[generate.compiler];
+    if (string_equal(result, S8("gcc")))
+    {
+        result = cmake_cc(arena, BUILD_COMPILER_GCC);
+    }
     if (string_equal(result, S8("zig cc")) || string_equal(result, S8("zig;cc")))
     {
         result = S8("zig");
@@ -1117,8 +1313,9 @@ BUSTER_GLOBAL_LOCAL String8 generate_cc(Arena* arena, Generate generate)
 
 BUSTER_GLOBAL_LOCAL bool generate_cc_contains(Generate generate, String8 cc, String8 needle)
 {
-    BUSTER_UNUSED(generate);
-    bool result = string_first_sequence(cc, needle) != BUSTER_STRING_NO_MATCH;
+    // A verified GCC override can live in a directory containing "clang" or
+    // "zig"; its path spelling must not change the selected compiler policy.
+    bool result = generate.compiler != BUILD_COMPILER_GCC && string_first_sequence(cc, needle) != BUSTER_STRING_NO_MATCH;
     return result;
 }
 
@@ -3687,26 +3884,6 @@ struct CompileCommandEntry
     SliceString8 arguments;
 };
 
-typedef struct ClangAnalyzeOptions ClangAnalyzeOptions;
-struct ClangAnalyzeOptions
-{
-    String8 compile_commands;
-    String8 config;
-    String8 clang;
-    u32 quiet : 1;
-    u32 compile_commands_set : 1;
-};
-
-typedef struct ClangAnalyzeSummary ClangAnalyzeSummary;
-struct ClangAnalyzeSummary
-{
-    u64 analyzed;
-    u64 warnings;
-    u64 failures;
-};
-
-BUSTER_GLOBAL_LOCAL ClangAnalyzeSummary clang_analyze_summary = {0};
-
 typedef struct CmakeProfileSummaryOptions CmakeProfileSummaryOptions;
 struct CmakeProfileSummaryOptions
 {
@@ -4977,9 +5154,32 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
         while (index < command.length)
         {
             char8 c = command.pointer[index++];
-            if (c == '"')
+            if (c == '\\')
             {
-                in_quotes = !in_quotes;
+                u64 backslashes = 1;
+                while (index < command.length && command.pointer[index] == '\\')
+                {
+                    backslashes += 1;
+                    index += 1;
+                }
+                bool quote = index < command.length && command.pointer[index] == '"';
+                u64 literal = quote ? backslashes / 2 : backslashes;
+                for (u64 i = 0; i < literal; i += 1) arena_append_char8(arena, '\\');
+                if (quote)
+                {
+                    index += 1;
+                    if (backslashes & 1) arena_append_char8(arena, '"');
+                    else in_quotes = !in_quotes;
+                }
+            }
+            else if (c == '"')
+            {
+                if (in_quotes && index < command.length && command.pointer[index] == '"')
+                {
+                    arena_append_char8(arena, '"');
+                    index += 1;
+                }
+                else in_quotes = !in_quotes;
             }
             else if (!in_quotes && character_is_space(c))
             {
@@ -4990,6 +5190,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
                 arena_append_char8(arena, c);
             }
         }
+        *valid = !in_quotes;
 
         String8 argument = {.pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start};
         arena_append_char8(arena, 0);
@@ -5097,14 +5298,6 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 a
     String8 joined_options[] = {
         S8("-MF"), S8("-MJ"), S8("-MQ"), S8("-MT"), S8("-o"), S8("--output="), S8("-dependency-file="),
     };
-    String8 build_host_definitions[] = {
-        S8("-DBUSTER_HOST_C_COMPILER="),
-        S8("-DBUSTER_HOST_C_COMPILER_ID="),
-        S8("-DBUSTER_HOST_C_COMPILER_ARG1="),
-        S8("-DBUSTER_HOST_C_RESOURCE_INCLUDE="),
-        S8("-DBUSTER_HOST_C_COMPILER_MSVC="),
-    };
-
     bool result = false;
     *skip_count = 0;
 
@@ -5134,29 +5327,6 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 a
         if (argument.length > prefix.length && string_starts_with_sequence(argument, prefix))
         {
             *skip_count = 1;
-            result = true;
-            break;
-        }
-    }
-
-    for (u64 i = 0; !result && i < BUSTER_ARRAY_LENGTH(build_host_definitions); i += 1)
-    {
-        String8 prefix = build_host_definitions[i];
-        if (argument.length >= prefix.length && string_starts_with_sequence(argument, prefix))
-        {
-            *skip_count = 1;
-            // CMake can emit an escaped string definition containing spaces as
-            // multiple command arguments on Windows. These build-host values
-            // are adjacent to compiler options and are irrelevant to analysis.
-            while (argument_index + *skip_count < arguments.length)
-            {
-                String8 continuation = arguments.pointer[argument_index + *skip_count];
-                if (continuation.length && continuation.pointer[0] == '-')
-                {
-                    break;
-                }
-                *skip_count += 1;
-            }
             result = true;
             break;
         }
@@ -5305,122 +5475,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_add(Arena* arena, ClangAnalyzeOptions options)
-{
-    ProcessResult result = PROCESS_RESULT_SUCCESS;
-    String8 path = clang_analyze_compile_commands_path(arena, options.compile_commands);
-    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.end_padding = 1});
-
-    if (!bytes.pointer)
-    {
-        string_print(S8("error: compile commands not found: {S8}\n"), path);
-        return PROCESS_RESULT_FAILED;
-    }
-
-    JsonParser parser = {.text = {.pointer = (char8*)bytes.pointer, .length = bytes.length}};
-    bool valid = true;
-    if (!json_consume(&parser, '['))
-    {
-        string_print(S8("error: failed to read {S8}: expected JSON array\n"), path);
-        return PROCESS_RESULT_FAILED;
-    }
-
-    BuildStep* step = 0;
-    u64 scheduled = 0;
-    u64 setup_failures = 0;
-    clang_analyze_summary = (ClangAnalyzeSummary){0};
-
-    for (;;)
-    {
-        json_skip_whitespace(&parser);
-        if (json_consume(&parser, ']'))
-        {
-            break;
-        }
-
-        CompileCommandEntry entry = json_parse_compile_command_entry(arena, &parser, &valid);
-        if (!valid)
-        {
-            string_print(S8("error: failed to read {S8}: invalid compile command entry\n"), path);
-            return PROCESS_RESULT_FAILED;
-        }
-
-        if (entry.file.pointer && clang_analyze_is_c_source(entry.file))
-        {
-            SliceString8 compile_arguments = entry.arguments;
-            bool split_valid = true;
-            if (!compile_arguments.length && entry.command.pointer)
-            {
-                compile_arguments = shell_split(arena, entry.command, &split_valid);
-            }
-
-            if (!split_valid || !compile_arguments.length)
-            {
-                string_print(S8("error: {S8}: compile command entry has no usable command\n"), entry.file);
-                setup_failures += 1;
-            }
-            else if (clang_analyze_entry_matches_config(arena, entry, compile_arguments, options.config))
-            {
-                SliceString8 command = clang_analyzer_command(arena, compile_arguments, options.clang);
-                if (!step)
-                {
-                    step = step_add(arena);
-                }
-
-                ProcessRun* run = run_add(arena, step);
-                u32 flags = PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE | PROCESS_RUN_FLAG_CLANG_ANALYZE;
-                if (options.quiet)
-                {
-                    flags |= PROCESS_RUN_FLAG_PRINT_COMMAND_ON_FAILURE_OR_WARNING;
-                }
-                else
-                {
-                    flags |= PROCESS_RUN_FLAG_PRINT_COMMAND;
-                }
-
-                *run = (ProcessRun){
-                    .arguments = command,
-                    .working_directory = entry.directory,
-                    .flags = flags,
-                    .spawn_options =
-                        (ProcessSpawnOptions){
-                            .capture = ((u64)1 << STANDARD_STREAM_ERROR),
-                            .use_process_environment = 1,
-                        },
-                };
-                scheduled += 1;
-            }
-        }
-
-        if (json_consume(&parser, ','))
-        {
-            continue;
-        }
-        if (json_consume(&parser, ']'))
-        {
-            break;
-        }
-
-        string_print(S8("error: failed to read {S8}: expected ',' or ']'\n"), path);
-        return PROCESS_RESULT_FAILED;
-    }
-
-    clang_analyze_summary.failures += setup_failures;
-    if (scheduled == 0)
-    {
-        if (options.config.pointer && options.config.length)
-        {
-            string_print(S8("error: no C compile commands found for configuration {S8} in {S8}\n"), options.config, path);
-        }
-        else
-        {
-            string_print(S8("error: no C compile commands found in {S8}\n"), path);
-        }
-        result = PROCESS_RESULT_FAILED;
-    }
-
-    return result;
-}
+#include "tools/clang_analyze.c"
 
 BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
 {
@@ -7296,8 +7351,8 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_artifacts(Arena* arena, String8 prefix)
 
 BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left, String8 right, bool allow_empty)
 {
-    // Open explicitly so two absent diagnostics are not mistaken for two
-    // legitimately empty diagnostics. file_read alone cannot distinguish them.
+    // Query both sizes before comparing mappings, including legitimately
+    // empty diagnostics. Missing files and failed stat queries fail the audit.
     OsFileDescriptor* left_fd = os_file_open(left, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
     OsFileDescriptor* right_fd = os_file_open(right, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
     bool valid = left_fd && right_fd;
@@ -7311,7 +7366,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left
     {
         valid = os_file_close(right_fd) && valid;
     }
-    valid = valid && (allow_empty || (left_size && right_size));
+    valid = valid && left_size != UINT64_MAX && right_size != UINT64_MAX && (allow_empty || (left_size && right_size));
     u64 offset = 0;
     if (valid && left_size && right_size)
     {
@@ -22436,6 +22491,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         string_print(S8("error: artifact fan-out was requested on an unsupported self-host consumer platform\n"));
         return PROCESS_RESULT_FAILED;
     }
+    if (!clang_analyze_self_test(arena))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
     ProcessResult focused_test_result = musl_directory_self_test(arena);
     if (focused_test_result == PROCESS_RESULT_SUCCESS)
     {
@@ -34250,6 +34309,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
+        [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_SYSREG] = S8_INITIALIZER("import_arm_a64_sysregs"),
@@ -34327,7 +34387,6 @@ ProcessResult process_arguments(void)
         .cmake_profile_summary_limit = 25,
     };
     CmakeBuildOptions options = {0};
-    ClangAnalyzeOptions clang_analyze_options = {.compile_commands = build_directory};
     CmakeProfileSummaryOptions cmake_profile_summary_options = {.limit = 25};
     NinjaLogSummaryOptions ninja_log_summary_options = {.limit = 25};
     TimeTraceSummaryOptions time_trace_summary_options = {.limit = 25};
@@ -34358,7 +34417,12 @@ ProcessResult process_arguments(void)
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
 
-    if (command == BUILD_COMMAND_TEST_DIFFERENTIAL)
+    if (command == BUILD_COMMAND_CLANG_ANALYZE)
+    {
+        result = clang_analyze_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_TEST_DIFFERENTIAL)
     {
         result = differential_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
         argument_i = arguments.length;
@@ -34448,12 +34512,6 @@ ProcessResult process_arguments(void)
             if (command == BUILD_COMMAND_BUILD && !string_starts_with_sequence(argument, S8("--")))
             {
                 string8_list_push(arena, &build_targets, argument);
-                argument_i += 1;
-            }
-            else if (command == BUILD_COMMAND_CLANG_ANALYZE && !clang_analyze_options.compile_commands_set && !string_starts_with_sequence(argument, S8("--")))
-            {
-                clang_analyze_options.compile_commands = argument;
-                clang_analyze_options.compile_commands_set = 1;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY && !cmake_profile_summary_options.profile_set &&
@@ -34724,10 +34782,6 @@ ProcessResult process_arguments(void)
             {
                 build_directory = value;
                 generate.build_directory = build_directory;
-                if (!clang_analyze_options.compile_commands_set)
-                {
-                    clang_analyze_options.compile_commands = build_directory;
-                }
             }
             else
             {
@@ -34786,20 +34840,6 @@ ProcessResult process_arguments(void)
             }
         }
         break;
-        case BUILD_ARGUMENT_CLANG:
-        {
-            String8 value = {0};
-            if (command == BUILD_COMMAND_CLANG_ANALYZE &&
-                build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
-            {
-                clang_analyze_options.clang = value;
-            }
-            else
-            {
-                result = PROCESS_RESULT_FAILED;
-            }
-        }
-        break;
         case BUILD_ARGUMENT_CONFIG:
         case BUILD_ARGUMENT_CONFIGURATION:
         {
@@ -34820,10 +34860,6 @@ ProcessResult process_arguments(void)
                 {
                     generate.config = config;
                     generate.config_set = true;
-                }
-                else if (command == BUILD_COMMAND_CLANG_ANALYZE)
-                {
-                    clang_analyze_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_TEST_CJSON)
                 {
@@ -35215,7 +35251,6 @@ ProcessResult process_arguments(void)
         case BUILD_ARGUMENT_QUIET:
         {
             options.quiet = 1;
-            clang_analyze_options.quiet = 1;
             argument_i += 1;
         }
         }
@@ -35289,6 +35324,36 @@ ProcessResult process_arguments(void)
         }
     }
 
+    bool combination_matrix = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS || command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
+    if (result == PROCESS_RESULT_SUCCESS && combination_matrix)
+    {
+        result = build_compiler_discovery_self_test(arena);
+    }
+    bool requested_gcc = command == BUILD_COMMAND_GENERATE && string_equal(generate.cc, S8("gcc"));
+    if (result == PROCESS_RESULT_SUCCESS && (requested_gcc || (combination_matrix && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64))))
+    {
+        // Reject conflicting CMake overrides before any generate command can
+        // remove its tree. BUSTER_GCC selects an explicit GCC path for this row.
+        for (String8Node* node = generate_cmake_arguments.first; node && result == PROCESS_RESULT_SUCCESS; node = node->next)
+        {
+            String8 argument = node->string;
+            if (string_equal(argument, S8("-D")) && node->next)
+            {
+                argument = string_format(arena, S8("-D{S8}"), node->next->string);
+            }
+            String8 override = {0};
+            if (build_cmake_definition_value(argument, S8("CMAKE_C_COMPILER"), &override))
+            {
+                string_print(S8("error: --cc gcc cannot be combined with a CMAKE_C_COMPILER override; use BUSTER_GCC to select the GCC executable\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        if (result == PROCESS_RESULT_SUCCESS)
+        {
+            result = build_gcc_prepare(arena);
+        }
+    }
+
     if (result == PROCESS_RESULT_SUCCESS)
     {
         switch (command)
@@ -35325,7 +35390,7 @@ ProcessResult process_arguments(void)
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
         {
-            result = clang_analyze_add(arena, clang_analyze_options);
+            // Already executed by the analyzer-specific argument parser.
         }
         break;
         case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
@@ -35358,6 +35423,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST:
         {
             result = test_timing_summary_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST:
+        {
+            result = build_compiler_discovery_self_test(arena);
         }
         break;
         case BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST:
@@ -35577,18 +35647,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
         command_print(run->arguments);
     }
 
-    if (run->flags & (PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE | PROCESS_RUN_FLAG_CLANG_ANALYZE))
+    if (run->flags & (PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE))
     {
         String8 error_output = {.pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer,
                                 .length = wait_result.streams[STANDARD_STREAM_ERROR].length};
         has_warning = clang_analyze_output_has_warning(error_output);
-
-        if (run->flags & PROCESS_RUN_FLAG_CLANG_ANALYZE)
-        {
-            clang_analyze_summary.analyzed += 1;
-            clang_analyze_summary.failures += wait_result.result != PROCESS_RESULT_SUCCESS;
-            clang_analyze_summary.warnings += has_warning;
-        }
 
         if ((run->flags & PROCESS_RUN_FLAG_PRINT_COMMAND_ON_FAILURE_OR_WARNING) && (wait_result.result != PROCESS_RESULT_SUCCESS || has_warning))
         {
@@ -35734,16 +35797,6 @@ ProcessResult entry_point(void)
         if (result != PROCESS_RESULT_SUCCESS)
         {
             break;
-        }
-    }
-
-    if (clang_analyze_summary.analyzed || clang_analyze_summary.failures || clang_analyze_summary.warnings)
-    {
-        string_print(S8("clang --analyze checked {u64} translation unit(s), {u64} with analyzer warning(s), {u64} failed.\n"), clang_analyze_summary.analyzed,
-                     clang_analyze_summary.warnings, clang_analyze_summary.failures);
-        if (result == PROCESS_RESULT_SUCCESS && (clang_analyze_summary.failures || clang_analyze_summary.warnings))
-        {
-            result = PROCESS_RESULT_FAILED;
         }
     }
 
