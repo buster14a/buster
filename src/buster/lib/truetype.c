@@ -639,7 +639,7 @@ BUSTER_GLOBAL_LOCAL TTF_RasterPoint ttf_raster_midpoint(TTF_RasterPoint a, TTF_R
 BUSTER_GLOBAL_LOCAL void ttf_append_quadratic(TTF_RasterPath* path, TTF_Point from, TTF_Point control, TTF_Point to, f32 scale_x, f32 scale_y, s32 x0,
                                               s32 y0, TTF_QuadraticStatistics* statistics)
 {
-    TTF_QuadraticWork work[TTF_CURVE_STACK_CAPACITY] = {{0}};
+    TTF_QuadraticWork work[TTF_CURVE_STACK_CAPACITY];
     u32 work_count = 1;
     work[0] = (TTF_QuadraticWork){
         .from = ttf_pixel_point(from, scale_x, scale_y, x0, y0),
