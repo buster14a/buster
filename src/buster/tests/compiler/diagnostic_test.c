@@ -71,10 +71,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-input"), S8(".c"));
+    String8 object = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-object"), S8(".o"));
+    String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-output"), S8(".bin"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 make_object[] = {S8("-c"), S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), object};
+    CompilerDriverResult control = compiler_driver_execute_invocation(arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_object)));
+    BUSTER_TEST(arguments, control.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 paths[] = {input, object};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+    {
+        // Exercise the real production fallback after mapping is unavailable.
+        // The transfer/size/close failure then passes through the same driver
+        // input path used on non-mappable files and restricted platforms.
+        OsFileTestStep script[] = {{OS_FILE_TEST_MAP, OS_FILE_TEST_ERROR, 1},
+                                  {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7},
+                                  {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}};
+#if BUSTER_ANDROID || BUSTER_IOS
+        u32 first = 1;
+#else
+        u32 first = 0;
+#endif
+        String8 command[] = {index ? S8("-O0") : S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux"), paths[index], S8("-o"), output};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        os_file_test_begin(paths[index], script + first, 3 - first);
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
+        BUSTER_TEST(arguments, os_file_test_end() == 3 - first);
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_FILE_READ);
+        BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
+        if (compiled.diagnostic_count == 1) BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, S8("driver.file-read"));
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, paths[index]) < compiled.diagnostic.length);
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(object));
+    return result;
+}
+
 UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_read_failures);
     CompilerDiagnostic copy;
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);

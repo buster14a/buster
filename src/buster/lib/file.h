@@ -20,6 +20,19 @@ struct FileMapRead
     void* mapped_handle;
 };
 
+typedef struct FileReadResult FileReadResult;
+struct FileReadResult
+{
+    ByteSlice bytes;
+    OsFileReadStatus status;
+    OsError error;
+};
+
+// Nonzero initial sizes use a bounded read-exact snapshot: later appended bytes
+// are excluded; premature EOF is failure. Zero-sized descriptors stream to EOF.
+// Success (including an empty file) has a nonnull pointer. Failure exposes no
+// prefix and restores the read allocation. Mappings require stable input files.
+BUSTER_F_DECL FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions options);
 BUSTER_F_DECL ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options);
 BUSTER_F_DECL FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options);
 BUSTER_F_DECL void file_map_unmap(FileMapRead map);

@@ -1256,6 +1256,12 @@ BUSTER_GLOBAL_LOCAL const OsFileTestStep* os_file_test_take(OsFileTestOperation 
     }
     return result;
 }
+
+bool os_file_test_map_unavailable(String8 path)
+{
+    bool selected = os_file_test_state.path.length && string_equal(path, os_file_test_state.path);
+    return selected && os_file_test_take(OS_FILE_TEST_MAP) != 0;
+}
 #endif
 
 OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions)
@@ -1468,79 +1474,121 @@ void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer)
     BUSTER_VALIDATE(success);
 }
 
-bool os_file_read_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64* read_count)
+OsFileReadResult os_file_read_some(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
-    u64 total = 0;
-    bool success = !buffer.length || (file_descriptor && buffer.pointer);
-    bool ended = false;
-    while (total < buffer.length && success && !ended)
+    OsFileReadResult result = {0};
+    if (buffer.length && (!file_descriptor || !buffer.pointer))
     {
-        u64 request = BUSTER_MIN(buffer.length - total, OS_FILE_TRANSFER_MAX);
-#if defined(__linux__) || defined(__APPLE__)
-        ssize_t count;
-        do
-        {
-            count = read(generic_fd_to_posix(file_descriptor), buffer.pointer + total, (size_t)request);
-        } while (count < 0 && errno == EINTR);
-        success = count >= 0;
-#elif defined(_WIN32)
-        DWORD count = 0;
-        success = ReadFile(generic_fd_to_windows(file_descriptor), buffer.pointer + total, (DWORD)request, &count, 0) != 0;
-        // A closed anonymous pipe is EOF, matching POSIX read(2).
-        if (!success && GetLastError() == ERROR_BROKEN_PIPE) success = true;
-#endif
-        if (success)
-        {
-            total += (u64)count;
-            ended = count == 0;
-        }
+        result.status = OS_FILE_READ_ERROR;
+        result.error = os_file_invalid_error();
     }
-    *read_count = total;
-    return success;
+    bool retry = buffer.length && result.status == OS_FILE_READ_OK;
+    while (retry)
+    {
+        retry = false;
+        u64 request = BUSTER_MIN(buffer.length, OS_FILE_TRANSFER_MAX);
+#if BUSTER_INCLUDE_TESTS
+        const OsFileTestStep* step = file_descriptor == os_file_test_state.file ? os_file_test_take(OS_FILE_TEST_READ) : 0;
+        if (step && step->action == OS_FILE_TEST_LIMIT) request = BUSTER_MIN(request, step->value);
+        if (step && step->action == OS_FILE_TEST_ERROR) result.error.v = (u32)step->value;
+        else if (step && step->action == OS_FILE_TEST_INTERRUPT) retry = true;
+        else if (!step || step->action != OS_FILE_TEST_ZERO)
+#endif
+        {
+#if defined(__linux__) || defined(__APPLE__)
+            ssize_t count = read(generic_fd_to_posix(file_descriptor), buffer.pointer, (size_t)request);
+            if (count < 0)
+            {
+                OsError error = os_get_last_error();
+                retry = error.v == (u32)EINTR;
+                if (!retry) result.error = error;
+            }
+            else result.transferred = (u64)count;
+#elif defined(_WIN32)
+            DWORD count = 0;
+            if (!ReadFile(generic_fd_to_windows(file_descriptor), buffer.pointer, (DWORD)request, &count, 0))
+            {
+                OsError error = os_get_last_error();
+                // Message pipes can return a prefix with ERROR_MORE_DATA;
+                // closed pipes and file EOF terminate without an OS error.
+                if (error.v == ERROR_MORE_DATA && count) result.transferred = count;
+                else if (error.v != ERROR_BROKEN_PIPE && error.v != ERROR_HANDLE_EOF) result.error = error;
+            }
+            else result.transferred = count;
+#endif
+        }
+        if (result.error.v) result.status = OS_FILE_READ_ERROR;
+        else if (!retry && !result.transferred) result.status = OS_FILE_READ_EOF;
+    }
+    return result;
 }
 
-u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count)
+OsFileReadResult os_file_read_exact(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
-    BUSTER_VALIDATE(buffer.length >= byte_count);
-    u64 read_count = 0;
-    if (!os_file_read_attempt(file_descriptor, (ByteSlice){buffer.pointer, byte_count}, &read_count))
+    OsFileReadResult result = {0};
+    // Validate before pointer arithmetic, including a null nonempty buffer.
+    if (buffer.length && (!file_descriptor || !buffer.pointer))
     {
-        string_print(S8("Error reading file: {EOs}\n"), os_get_last_error());
+        result.status = OS_FILE_READ_ERROR;
+        result.error = os_file_invalid_error();
     }
-    return read_count;
+    while (result.transferred < buffer.length && result.status == OS_FILE_READ_OK)
+    {
+        OsFileReadResult part = os_file_read_some(file_descriptor, (ByteSlice){buffer.pointer + result.transferred, buffer.length - result.transferred});
+        result.transferred += part.transferred;
+        result.status = part.status;
+        result.error = part.error;
+    }
+    return result;
+}
+
+bool os_file_read_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64* read_count)
+{
+    OsFileReadResult result = os_file_read_exact(file_descriptor, buffer);
+    *read_count = result.transferred;
+    return result.status != OS_FILE_READ_ERROR;
 }
 
 FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options)
 {
     FileStats result = {0};
-
-    if (((u64)file_descriptor != 0) & (options.raw != 0))
+    if (!file_descriptor) result.error = os_file_invalid_error();
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = file_descriptor && file_descriptor == os_file_test_state.file ? os_file_test_take(OS_FILE_TEST_STATS) : 0;
+    if (step && step->action == OS_FILE_TEST_ERROR) result.error.v = (u32)step->value;
+#endif
+    if (!result.error.v)
     {
 #if defined(__linux__) || defined(__APPLE__)
-        int fd = generic_fd_to_posix(file_descriptor);
-        struct stat sb;
-        int fstat_result = fstat(fd, &sb);
-        if (fstat_result == 0)
+        struct stat stats;
+        int status;
+        do
         {
-            if (options.size)
-            {
-                result.size = (u64)sb.st_size;
-            }
-
-            if (options.modified_time)
-            {
-                result.modified_time_s = (u64)sb.st_mtime;
-            }
+            status = fstat(generic_fd_to_posix(file_descriptor), &stats);
+        } while (status < 0 && errno == EINTR);
+        if (status < 0) result.error = os_get_last_error();
+        else if (stats.st_size < 0) result.error = os_file_invalid_error();
+        else
+        {
+            if (options.size) result.size = (u64)stats.st_size;
+            if (options.modified_time) result.modified_time_s = (u64)stats.st_mtime;
+            result.valid = true;
         }
 #elif defined(_WIN32)
-        HANDLE fd = generic_fd_to_windows(file_descriptor);
-        BY_HANDLE_FILE_INFORMATION file_information = {0};
-        BOOL file_result = GetFileInformationByHandle(fd, &file_information);
-        BUSTER_VALIDATE(file_result != 0);
-        w32_file_stats_from_file_information(&result, options, file_information);
+        BY_HANDLE_FILE_INFORMATION information = {0};
+        if (!GetFileInformationByHandle(generic_fd_to_windows(file_descriptor), &information)) result.error = os_get_last_error();
+        else
+        {
+            w32_file_stats_from_file_information(&result, options, information);
+            result.valid = true;
+        }
 #endif
     }
-
+#if BUSTER_INCLUDE_TESTS
+    // A stale size deterministically models resize between stat and read,
+    // without racing a second thread or changing process-global OS state.
+    if (result.valid && step && step->action == OS_FILE_TEST_SIZE) result.size = step->value;
+#endif
     return result;
 }
 
@@ -2294,20 +2342,8 @@ String8 os_get_environment_variable(String8 variable)
 
 u64 os_file_get_size(OsFileDescriptor* file_descriptor)
 {
-#if defined(__linux__) || defined(__APPLE__)
-    int fd = generic_fd_to_posix(file_descriptor);
-    struct stat sb;
-    int fstat_result = fstat(fd, &sb);
-    BUSTER_VALIDATE(fstat_result == 0);
-
-    return (u64)sb.st_size;
-#elif defined(_WIN32)
-    HANDLE fd = generic_fd_to_windows(file_descriptor);
-    BY_HANDLE_FILE_INFORMATION file_information = {0};
-    BOOL result = GetFileInformationByHandle(fd, &file_information);
-    BUSTER_VALIDATE(result);
-    return w32_file_size_from_file_information(file_information);
-#endif
+    FileStats stats = os_file_get_stats(file_descriptor, (FileStatsOptions){.size = 1});
+    return stats.valid ? stats.size : UINT64_MAX;
 }
 
 bool os_is_tty(OsFileDescriptor* file)
