@@ -93,7 +93,7 @@ shell, CMake, and utility subprocesses.
 `native_retirement_census`,
 `x86_64_completion_census`,
 `test_all_combinations`,
-`test_all_combinations_ci`; `self_host_from_existing` is an internal
+`test_all_combinations_ci`, `test_uefi`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
 
 `native_retirement_census` freezes the tracked C regression inputs and the full
@@ -282,3 +282,12 @@ it on Linux and macOS. This is build-graph evidence, not Android compilation,
 signing or device execution; those remain the regular Android mobile CI gates.
 Do not run two configurations' packaging concurrently in one build directory:
 the existing APK and staging paths are shared.
+
+## UEFI firmware execution
+
+`build/build test_uefi <built-ide> <fresh-output-directory>` boots both UEFI
+targets in all four allocators against pinned QEMU/EDK2, with bounded children
+and retained evidence. Run `build/build test_uefi --self-test <fresh-directory>`
+first. Missing firmware or mismatched pins fail explicitly. See
+[the reference lane](../uefi-target.md#reference-firmware-execution-gate) for
+prerequisites, negative controls, pins and the runtime success contract.

@@ -407,7 +407,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("./android/test_ci.sh --all", text)
         self.assertIn("./ios/test_ci.sh --all", text)
         self.assertNotRegex(text, r"(?m)^\s*continue-on-error:")
-        self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text)
+        self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text.split("\n  uefi:", 1)[0])
 
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
@@ -434,7 +434,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
         self.assertNotIn("needs:", mobile)
-        self.assertIn("needs: [lint, test, native, mobile]", text)
+        self.assertIn("needs: [lint, test, native, mobile, uefi]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_native_suites_are_independent_and_keep_all_four_unix_runners(self):
@@ -550,11 +550,11 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile, uefi]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
-        # predicate. Subshells contain its exit statements; all 625 outcomes
-        # include empty/missing dependency results as well as terminal states.
+        # predicate. Exercise all 625 existing shard outcomes with UEFI green,
+        # then independently reject each unavailable/unsuccessful UEFI result.
         body = aggregate.split("        run: |\n", 1)[1]
         body = textwrap.dedent(body)
         with tempfile.TemporaryDirectory() as temporary:
@@ -565,6 +565,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             script = r"""
 set -eu
 checked=0
+UEFI_RESULT=success
+export UEFI_RESULT
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
     for NATIVE_RESULT in success failure cancelled skipped ''; do
@@ -582,6 +584,15 @@ for LINT_RESULT in success failure cancelled skipped ''; do
     done
   done
 done
+LINT_RESULT=success DESKTOP_RESULT=success NATIVE_RESULT=success MOBILE_RESULT=success
+export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT MOBILE_RESULT
+for UEFI_RESULT in failure cancelled skipped ''; do
+  export UEFI_RESULT
+  actual=0
+  ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+  [[ "$actual" -ne 0 ]] || exit 1
+  checked=$((checked + 1))
+done
 printf '%s\n' "$checked"
 """
             # Windows CreateProcess can choose System32/bash.exe (WSL)
@@ -598,7 +609,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "625")
+            self.assertEqual(result.stdout.strip(), "629")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):
