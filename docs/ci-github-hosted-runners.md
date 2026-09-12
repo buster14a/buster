@@ -86,7 +86,7 @@ without adding a boundary. The RAM-only workspace is the part of the
    permissions `Actions: write`, `Secrets: write`, and `Metadata: read`.
    Store it only as the Forgejo Actions secret `GH_BRIDGE_TOKEN`.
 
-The default runner labels are `ubuntu-24.04`, `macos-15`, and
+The default runner labels are `ubuntu-26.04`, `macos-15`, and
 `windows-2022`; change the template deliberately if the GitHub account
 requires different hosted labels.
 

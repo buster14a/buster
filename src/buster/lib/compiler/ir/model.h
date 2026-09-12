@@ -236,6 +236,9 @@ typedef enum IrAbiClass
     // distinguish a valid long-double result from an incompatible merge.
     IR_ABI_CLASS_X87,
     IR_ABI_CLASS_X87_UP,
+    // Temporary SysV eightbyte class. Classification joins SSE/SSEUP into
+    // one VECTOR part before publishing an IrAbiValue to backend consumers.
+    IR_ABI_CLASS_FLOAT_UP,
     IR_ABI_CLASS_COUNT,
 } IrAbiClass;
 

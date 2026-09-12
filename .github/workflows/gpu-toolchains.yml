@@ -1,0 +1,106 @@
+name: GPU toolchain acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-tools-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+
+jobs:
+  linux:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: GPU Linux consumers
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install external validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clang-18 llvm-18 lld-18 spirv-tools
+          mkdir -p "$RUNNER_TEMP/dxc"
+          curl --fail --location --silent --show-error --retry 3 https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/linux_dxc_2025_07_14.x86_64.tar.gz -o "$RUNNER_TEMP/dxc.tar.gz"
+          echo "f2213da1fc99dc8778c8823078e16ba97c7f80f86a1d4520ab1adf4b462bc48c  $RUNNER_TEMP/dxc.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/dxc.tar.gz" -C "$RUNNER_TEMP/dxc"
+          chmod u+x "$RUNNER_TEMP/dxc/bin/dxv"
+          python3 -m pip install --no-deps --require-hashes --target "$RUNNER_TEMP/cuda" -r tests/gpu/ptxas-requirements.txt
+      - name: Bootstrap and test the native harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang-18 -Isrc build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" test_gpu_toolchains --self-test
+      - name: Build the compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --ci --linker DEFAULT --fuzz OFF --include-tests OFF
+          "$RUNNER_TEMP/buster-build" build --config Debug -t ide
+      - name: Validate all four Linux profiles
+        shell: bash
+        env:
+          BUSTER_DXC: ${{ runner.temp }}/dxc/bin/dxc
+          BUSTER_GPU_TEST_DXV: ${{ runner.temp }}/dxc/bin/dxv
+          BUSTER_GPU_TEST_PTXAS: ${{ runner.temp }}/cuda/nvidia/cuda_nvcc/bin/ptxas
+          BUSTER_GPU_TEST_LLD: /usr/lib/llvm-18/bin/ld.lld
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile spirv-dxc-2025.07 --profile ptx-llvm18-cuda12.4 --profile amdgcn-llvm18 --profile dxil-dxc-2025.07
+      - name: Retain commands, diagnostics, versions and hashes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gpu-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gpu-evidence
+            build/gpu-toolchains-self-test-*
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Public hosted Macs do not guarantee Metal device access. An administrator
+  # can opt in an eligible ephemeral runner; every configured error is fatal.
+  metal:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && vars.GPU_METAL_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: GPU Metal consumer
+    runs-on: ${{ vars.GPU_METAL_RUNNER }}
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build and validate the Metal profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --ci --linker DEFAULT --fuzz OFF --include-tests OFF
+          "$RUNNER_TEMP/buster-build" build --config Debug -t ide
+          "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile metal-xcode16.4
+      - name: Retain Metal evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gpu-metal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gpu-evidence
+            build/gpu-toolchains-self-test-*
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,86 @@
+[
+  {
+    "compiler": "../baseline-ide",
+    "name": "missing",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/missing.c:1:77: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "build/Debug/ide",
+    "name": "missing",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/missing.c:1:77: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "../baseline-ide",
+    "name": "bad_member",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_member.c:1:98: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "build/Debug/ide",
+    "name": "bad_member",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_member.c:1:98: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "../baseline-ide",
+    "name": "bad_subscript",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_subscript.c:1:75: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "build/Debug/ide",
+    "name": "bad_subscript",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_subscript.c:1:75: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "../baseline-ide",
+    "name": "bad_deref",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_deref.c:1:73: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "build/Debug/ide",
+    "name": "bad_deref",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_deref.c:1:73: use of undeclared identifier 'inferred'\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "../baseline-ide",
+    "name": "bad_group",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_group.c:1:42: unmatched closing delimiter\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "build/Debug/ide",
+    "name": "bad_group",
+    "returncode": 1,
+    "stdout": "cc: error: ../typeof-inputs/bad_group.c:1:42: unmatched closing delimiter\n",
+    "stderr": ""
+  },
+  {
+    "compiler": "../baseline-ide",
+    "name": "bad_comma",
+    "returncode": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "compiler": "build/Debug/ide",
+    "name": "bad_comma",
+    "returncode": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+]

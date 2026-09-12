@@ -206,6 +206,22 @@
   with scalar masks and exact zero/2^63 f80 corrections, without new opcodes
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.
+- System V x86-64 sixteen-byte vector wrappers retain SSE/SSEUP as one
+  sixteen-byte VECTOR ABI part. Union merging can split that pair into two
+  independent parts; an orphan SSEUP becomes SSE. Canonical classification
+  publishes no FLOAT_UP parts. MIR keeps these aggregates in frame slots,
+  with explicit XMM definition/use operands for whole-register argument
+  transfers and the existing XMM0 result bridges. Variadic prologues save
+  all sixteen XMM bytes, and each VECTOR read consumes one FP cursor slot.
+  The shared direct oracle also copies both register-save/overflow halves
+  and aligns the overflow cursor after an eight-byte stack argument.
+  `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
+  allocators, both frontend forms and PIC settings; matching native hosts
+  link `host_sysv_sseup.c` independently in both call directions. Nested
+  wrappers, union class merging, register exhaustion, copied lists, indirect
+  calls and every payload bit are covered. The native differential runner
+  includes the same pair. This does not change narrow-vector arithmetic or
+  the model-dependent splitting of larger vectors.
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete

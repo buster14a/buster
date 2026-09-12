@@ -2946,9 +2946,9 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_class_is_x87(IrAbiClass abi_class)
 
 // Merge one field's class into an eightbyte using the System V AMD64
 // merger algorithm's precedence, which is ordered: equal classes, NO_CLASS,
-// MEMORY, INTEGER, x87, and SSE last.  The existing IR model has one SSE-like
-// FLOAT class (rather than separate SSE/SSEUP classes); preserve that
-// behavior while making x87 classes explicit.
+// MEMORY, INTEGER, x87, and SSE last. FLOAT_UP is the upper eightbyte of
+// a vector, not another SSE register. It survives only an equal/NO_CLASS
+// merge and is joined to its SSE head before the ABI value is published.
 //
 // INTEGER beating x87 is the order the psABI writes and the order clang
 // compiles, and it is what makes musl's `union ldshape` -- an 80-bit
@@ -2983,9 +2983,7 @@ BUSTER_GLOBAL_LOCAL IrAbiClass ir_system_v_abi_class_merge(IrAbiClass left, IrAb
     {
         return IR_ABI_CLASS_MEMORY;
     }
-    // Preserve the previous INTEGER-over-FLOAT merge for all existing
-    // scalar/vector aggregates.  There are no SSEUP classes in this model.
-    return IR_ABI_CLASS_INTEGER;
+    return IR_ABI_CLASS_FLOAT;
 }
 
 // System V x86-64's COMPLEX_X87 class.  A `long double _Complex` result comes
@@ -3208,7 +3206,9 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                     valid = false;
                     break;
                 }
-                classes[part] = ir_system_v_abi_class_merge(classes[part], abi_class);
+                IrAbiClass part_class = type->kind == IR_TYPE_VECTOR && type->layout.size == 16 && part != first
+                                            ? IR_ABI_CLASS_FLOAT_UP : abi_class;
+                classes[part] = ir_system_v_abi_class_merge(classes[part], part_class);
             }
         }
         // Only value records are copied into the caller's classes. Neither
@@ -3804,13 +3804,21 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 };
                 return value;
             }
-            value.part_count = (u32)((size + 7) / 8);
+            // A union can replace the SSE head with INTEGER while leaving
+            // its upper eightbyte SSEUP. The psABI promotes that orphan to
+            // SSE. A surviving SSE/SSEUP pair occupies one complete XMM.
+            if (classes[1] == IR_ABI_CLASS_FLOAT_UP && classes[0] != IR_ABI_CLASS_FLOAT)
+            {
+                classes[1] = IR_ABI_CLASS_FLOAT;
+            }
+            bool whole_vector = classes[0] == IR_ABI_CLASS_FLOAT && classes[1] == IR_ABI_CLASS_FLOAT_UP;
+            value.part_count = whole_vector ? 1u : (u32)((size + 7) / 8);
             for (u32 part = 0; part < value.part_count; part += 1)
             {
                 value.parts[part] = (IrAbiPart){
-                    .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
+                    .abi_class = whole_vector ? IR_ABI_CLASS_VECTOR : classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
                     .value_offset = part * 8,
-                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    .size = whole_vector ? 16u : (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
                 };
             }
         }

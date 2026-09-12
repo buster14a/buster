@@ -9441,6 +9441,143 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     return result;
 }
 
+// Geometric depths exercise the whole typeof task machine and the direct
+// base/postfix continuation independently. A separate scratch arena exposes
+// released storage too, so a correct type cannot hide suffix-sized retention.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 open;
+        String8 close;
+        bool direct;
+        String8 leaf;
+        String8 suffix;
+    } shapes[] = {
+        {S8("(0,"), S8(")"), true, S8("object"), S8("")},
+        {S8("("), S8(")"), true, S8("object"), S8("")},
+        {S8("*& "), S8(""), true, S8("object"), S8("")},
+        {S8("*(0,&("), S8("))"), true, S8("object"), S8("")},
+        {S8("*&+ "), S8(""), false, S8("object"), S8("")},
+        {S8("(0,"), S8(")"), true, S8("&node"), S8("->value")},
+    };
+    bool report_storage = os_get_environment_variable(S8("BUSTER_TYPEOF_STORAGE")).length != 0;
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shapes); shape += 1)
+    {
+        for (u32 depth = 64; depth <= 16384; depth *= 4)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            u64 capacity = (shapes[shape].open.length + shapes[shape].close.length) * depth + 128;
+            char8* source = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(source, capacity, &length, S8("struct Node { long value; } node; long object; typedef __typeof__("));
+            for (u32 index = 0; index < depth; index += 1)
+            {
+                c_test_append_source(source, capacity, &length, shapes[shape].open);
+            }
+            c_test_append_source(source, capacity, &length, shapes[shape].leaf);
+            for (u32 index = 0; index < depth; index += 1)
+            {
+                c_test_append_source(source, capacity, &length, shapes[shape].close);
+            }
+            c_test_append_source(source, capacity, &length, shapes[shape].suffix);
+            c_test_append_source(source, capacity, &length, S8(") inferred;\n"));
+            CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){source, length},
+                                                   (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+            u64 parse_mark = temporary.arena->position;
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            u64 parse_bytes = temporary.arena->position - parse_mark;
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            // Includes all published types/entities/indexes, not only the
+            // expression helper. The fixed allowance covers builtin tables;
+            // the token term bounds growth without timing a shared CI host.
+            BUSTER_TEST(arguments, parse_bytes < BUSTER_MB(1) + (u64)tokens.token_count * 512);
+            CTypeId inferred = C_TYPE_ID_INVALID;
+            for (u32 entity = 0; entity < parse.entity_count; entity += 1)
+            {
+                if (string_equal(parse.entities[entity].name, S8("inferred")))
+                {
+                    inferred = parse.entities[entity].type;
+                }
+            }
+            BUSTER_TEST(arguments, inferred.value < parse.type_count);
+            if (inferred.value < parse.type_count)
+            {
+                BUSTER_TEST(arguments, parse.types[inferred.value].kind == C_TYPE_LONG);
+            }
+            u32 start = 0;
+            u32 end = 0;
+            for (u32 token = 0; token < tokens.token_count; token += 1)
+            {
+                if (string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[token]), S8("__typeof__")))
+                {
+                    start = token + 2;
+                    end = parse.position_index->matching_delimiters[token + 1];
+                }
+            }
+            Arena* probe = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(16)});
+            u64 scratch_mark = probe->position;
+            CTypeId direct = C_TYPE_ID_INVALID;
+            BUSTER_TEST(arguments, c_test_parse_direct_expression_type(probe, tokens, &parse, start, end, &direct) == shapes[shape].direct);
+            BUSTER_TEST(arguments, (direct.value < parse.type_count) == shapes[shape].direct);
+            if (direct.value < parse.type_count)
+            {
+                BUSTER_TEST(arguments, parse.types[direct.value].kind == C_TYPE_LONG);
+            }
+            BUSTER_TEST(arguments, probe->position == scratch_mark);
+            BUSTER_TEST(arguments, arena_dirty_position(probe) - scratch_mark <= (u64)(end - start) * 32 + 64);
+            if (report_storage)
+            {
+                arguments->show(arguments, S8("TYPEOF_STORAGE shape={u32} depth={u32} tokens={u32} parse_bytes={u64} direct_peak={u64}\n"),
+                                shape, depth, tokens.token_count, parse_bytes, arena_dirty_position(probe) - scratch_mark);
+            }
+            // An empty query must leave the output and scratch intact.
+            CTypeId invalid = {.value = 123456};
+            BUSTER_TEST(arguments, !c_test_parse_direct_expression_type(probe, tokens, &parse, end, end, &invalid));
+            BUSTER_TEST(arguments, invalid.value == 123456);
+            BUSTER_TEST(arguments, probe->position == scratch_mark);
+            BUSTER_TEST(arguments, arena_destroy(probe, 1));
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+        u32 column;
+    } invalid_cases[] = {
+        {S8("long object; typedef __typeof__((0,(0,missing))) inferred; int main(void) { inferred x=0; return x; }\n"),
+         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 77},
+        {S8("struct N { long x; } object; typedef __typeof__((0,&object)->missing) inferred; int main(void) { inferred x=0; return x; }\n"),
+         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 98},
+        {S8("long object; typedef __typeof__((0,object)[0]) inferred; int main(void) { inferred x=0; return x; }\n"),
+         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 75},
+        {S8("long object; typedef __typeof__(*(0,object)) inferred; int main(void) { inferred x=0; return x; }\n"),
+         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 73},
+        {S8("long object; typedef __typeof__((0,object]) inferred; int main(void) { return 0; }\n"),
+         C_DIAGNOSTIC_UNMATCHED_DELIMITER, 42},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_cases[index].source,
+                                               (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count > 0);
+        if (parse.diagnostic_count > 0)
+        {
+            BUSTER_TEST(arguments, parse.diagnostics[0].kind == invalid_cases[index].kind);
+            BUSTER_TEST(arguments, parse.diagnostics[0].location.line == 1);
+            BUSTER_TEST(arguments, parse.diagnostics[0].location.column == invalid_cases[index].column);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A conditional with void branches is common in Lua's GC-barrier macros:
 // `iscollectable(v) ? luaC_objbarrier(...) : ((void)(0))`.  It has side
 // effects but no result place; lowering must not cast/store a synthetic value
@@ -15608,6 +15745,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
     c_test_result_add(&result, c_test_typeof_conditional_type(arguments));
+    c_test_result_add(&result, c_test_typeof_expression_frames(arguments));
     c_test_result_add(&result, c_test_conditional_void_expression(arguments));
     c_test_result_add(&result, c_test_conditional_comma_assignment(arguments));
     c_test_result_add(&result, c_test_pointer_width_integer_conversion(arguments));

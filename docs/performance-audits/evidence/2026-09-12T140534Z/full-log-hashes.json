@@ -1,0 +1,14 @@
+{
+  "patch-release-test.log": {
+    "sha256": "52015f2687477d220c452a0561394feabb5456a46ac56801a8d3e2ecf5ef370c",
+    "bytes": 346752
+  },
+  "sanitize-test.log": {
+    "sha256": "e030ed80fad1e4120749c8cd91eee52c36182b94dd4bb287bdfe818fc1728bab",
+    "bytes": 181091
+  },
+  "storage-release-test.log": {
+    "sha256": "633b53dff16a4e29d726c7ac314a0f878305beda64b3d724cc008a76df2cc1e0",
+    "bytes": 19242
+  }
+}

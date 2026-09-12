@@ -630,7 +630,9 @@ struct CParseExpressionTypeTask
     CTypeId left_type;
     CParseExpressionTypeOperation operation;
     u8 state;
-    u8 reserved[3];
+    // A unary child reuses the top-level operator scan until a group opens.
+    bool operators_checked;
+    u8 reserved[2];
 };
 
 struct CTypeParseFrame
