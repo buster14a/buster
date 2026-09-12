@@ -6277,6 +6277,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     MachineInlineAssembly inline_descriptor = {
         .source = S8("nop"),
         .bytes = {.pointer = inline_bytes, .length = sizeof(inline_bytes)},
+        .clobber_mask = 1ull << MACHINE_X64_RAX,
         .operand_count = 1,
     };
     MachineInstruction inline_instructions[] = {
@@ -6298,6 +6299,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         .inline_assembly_operand_count = 1,
     };
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_NONE);
+    inline_descriptor.clobber_mask = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
     inline_descriptor.clobber_mask = 1ull << MACHINE_X64_RAX;
     MachineOpcodeRow inline_row = machine_instruction_opcode_row(&inline_function, inline_instructions);
     BUSTER_TEST(arguments, inline_row.clobber_mask == inline_descriptor.clobber_mask &&
@@ -6309,7 +6312,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (inline_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0 &&
                                inline_row.schedule_flags == (MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY));
     inline_descriptor.effects = 0;
-    inline_descriptor.clobber_mask = 0;
     inline_descriptor.first_operand = 1;
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
     inline_descriptor.first_operand = 0;
@@ -6335,12 +6337,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
     inline_descriptor.preserved_vector_mask = 1u << 6;
     inline_descriptor.preserved_vector_slot = 0;
+    inline_descriptor.clobber_mask = 1ull << MACHINE_X64_ZMM6;
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_NONE);
     inline_descriptor.preserved_vector_mask |= 1u << 5;
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
     inline_descriptor.preserved_vector_mask = 0;
     inline_function.target = machine_target_x86_64();
     inline_operand.physical_register = MACHINE_X64_RAX;
+    inline_descriptor.clobber_mask = 1ull << MACHINE_X64_RAX;
     inline_operand.constraint_class = IR_INLINE_ASSEMBLY_CONSTRAINT_T;
     inline_operand.flags = MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP;
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_NONE);

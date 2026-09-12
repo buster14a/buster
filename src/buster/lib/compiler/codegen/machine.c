@@ -2818,6 +2818,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             u8 expected_preserved_vector_mask = 0;
             u8 x87_top_flags = 0;
             u8 x87_below_flags = 0;
+            u64 operand_register_mask = 0;
             for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
             {
                 MachineInlineAssemblyOperand* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
@@ -2845,6 +2846,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     bool physical_vector = (function->target->vector_register_mask & (UINT64_C(1) << operand->physical_register)) != 0;
                     valid = physical_vector == vector && ((!x87_top && !x87_below) || function->target == machine_target_x86_64());
                 }
+                operand_register_mask |= valid ? UINT64_C(1) << operand->physical_register : 0;
                 x87_top_count += x87_top;
                 x87_below_count += x87_below;
                 x87_top_flags |= x87_top ? operand->flags : 0;
@@ -2871,7 +2873,8 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                 }
             }
             u32 preserved_vector_count = ((assembly->preserved_vector_mask >> 6) & 1u) + ((assembly->preserved_vector_mask >> 7) & 1u);
-            valid = valid && x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
+            valid = valid && (assembly->clobber_mask & operand_register_mask) == operand_register_mask &&
+                    x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
                     (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) ||
                      (x87_top_count == 1 && x87_below_count == 0 &&
                       (x87_top_flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
