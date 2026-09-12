@@ -888,7 +888,9 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
     {
         String8 contents = clang_analyze_test_database(arena, root, fixture, modes[mode]);
         bool written = clang_analyze_write(arena, database, contents);
-        ClangAnalyzeOptions options = {.database = database, .config = S8("Release"), .shards = 4, .jobs = 2, .timeout = 1, .quiet = true,
+        // Only the sleeping oracle needs the short deadline. Draining both
+        // pipes can take several seconds on hosted Windows AArch64 runners.
+        ClangAnalyzeOptions options = {.database = database, .config = S8("Release"), .shards = 4, .jobs = 2, .timeout = mode == 5 ? 1 : 30, .quiet = true,
             .results = path_join(arena, root, string_format(arena, S8("case-{u64}"), mode))};
         bool passed = written && clang_analyze_run(arena, options);
         clang_analyze_test_check(passed == (mode == 0 || mode == 6), modes[mode], &failures);

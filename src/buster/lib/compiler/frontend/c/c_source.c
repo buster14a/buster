@@ -2420,6 +2420,8 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
 
         if (bound)
         {
+            // Each emission bound is a window position or its length (64 max).
+            BUSTER_CHECK(bound <= 64);
             // Starts and ends compress through the token-boundary masks, one
             // byte subtract yields every length in the window, and the kind
             // and punctuator vectors ride the same starts mask.
