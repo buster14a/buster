@@ -709,6 +709,21 @@ class TimingTests(unittest.TestCase):
             run["jobs"].append(job)
         return run
 
+    def current_sample(self):
+        run = self.suite_sample()
+        required = {
+            "UEFI firmware boot": ("Build compiler and boot both architectures in all allocators",),
+            "Clang analyzer shards": ("Exercise analyzer failure and coverage controls",
+                                      "Compare reference analysis and aggregate all module shards"),
+        }
+        for name, steps in required.items():
+            job = copy.deepcopy(run["jobs"][0])
+            job["name"] = name
+            job["labels"] = ["ubuntu-26.04"]
+            job["steps"] = [{"name": step, "conclusion": "success"} for step in steps]
+            run["jobs"].append(job)
+        return run
+
     def test_suite_matrix_counts_all_fifteen_jobs(self):
         sample, reason = github_ci_time.measure(self.suite_sample())
         self.assertIsNone(reason)
@@ -717,8 +732,13 @@ class TimingTests(unittest.TestCase):
             dict(self.suite_sample(), id=2)]})
         self.assertEqual(len(report["cohorts"]), 2)
 
+    def test_current_matrix_counts_uefi_and_analyzer_cost(self):
+        sample, reason = github_ci_time.measure(self.current_sample())
+        self.assertIsNone(reason)
+        self.assertEqual(sample["runner_seconds"], 1020)
+
     def test_suite_matrix_rejects_missing_duplicate_failed_and_skipped_coverage(self):
-        for index in range(len(github_ci_time.SUITE_JOBS)):
+        for index in range(len(github_ci_time.PARTITIONED_JOBS)):
             run = self.suite_sample()
             run["jobs"].pop(index)
             self.assertIsNone(github_ci_time.measure(run)[0])
@@ -729,13 +749,32 @@ class TimingTests(unittest.TestCase):
                 run = self.suite_sample()
                 run["jobs"][index]["conclusion"] = conclusion
                 self.assertIsNone(github_ci_time.measure(run)[0])
-        for index in range(len(github_ci_time.SHARDED_JOBS), len(github_ci_time.SUITE_JOBS)):
+        for index in range(len(github_ci_time.SHARDED_JOBS), len(github_ci_time.PARTITIONED_JOBS)):
             for step in range(2):
                 for conclusion in ("failure", "cancelled", "skipped", None):
                     run = self.suite_sample()
                     run["jobs"][index]["steps"][step]["conclusion"] = conclusion
                     self.assertIsNone(github_ci_time.measure(run)[0])
                 run = self.suite_sample()
+                run["jobs"][index]["steps"].pop(step)
+                self.assertIsNone(github_ci_time.measure(run)[0])
+
+    def test_current_matrix_rejects_missing_duplicate_or_failed_new_gates(self):
+        first = len(github_ci_time.PARTITIONED_JOBS)
+        for index in range(first, len(github_ci_time.SUITE_JOBS)):
+            run = self.current_sample()
+            run["jobs"].pop(index)
+            self.assertIsNone(github_ci_time.measure(run)[0])
+            run = self.current_sample()
+            run["jobs"].append(copy.deepcopy(run["jobs"][index]))
+            self.assertIsNone(github_ci_time.measure(run)[0])
+            for conclusion in ("failure", "cancelled", "skipped", None):
+                run = self.current_sample()
+                run["jobs"][index]["conclusion"] = conclusion
+                self.assertIsNone(github_ci_time.measure(run)[0])
+            steps = len(self.current_sample()["jobs"][index]["steps"])
+            for step in range(steps):
+                run = self.current_sample()
                 run["jobs"][index]["steps"].pop(step)
                 self.assertIsNone(github_ci_time.measure(run)[0])
 
