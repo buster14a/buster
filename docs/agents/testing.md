@@ -142,3 +142,62 @@ failure bundles. Cross-target compilation is not a behavioral pass.
 consumer errors. See [GPU toolchain acceptance](../gpu-toolchain-validation.md).
 Its native `--self-test` checks the evidence machinery without vendor tools;
 registered GPU planner tests remain fast and deterministic.
+
+## Fixture arena ownership and memory reports
+
+`ide test --verbose=1 --ci=1` emits `TEST_ARENA_V1` records; either verbose
+or CI mode enables them. Ordinary quiet tests retain the same fixture lifetimes.
+Records have stable module names, static fixture names, and invocation indices.
+`arena_slot=0` is the supplied fixture arena; slots 1 and 2 are the selected
+thread context's scratch arenas. Parallel modules buffer complete records and
+failure text separately, then replay in descriptor order after the lane barrier.
+
+| Field | Meaning (bytes, relative to the arena mapping) |
+|---|---|
+| `start`, `end` | Cursor at scope entry and before scope cleanup |
+| `retained_bytes` | `end - start`, including alignment padding |
+| `high_water` | Maximum cursor reached inside this scope, including internal rewinds |
+| `peak_bytes` | `high_water - start`; an arena high water, not process RSS |
+| `after`, `live_bytes` | Cursor after cleanup and `after - start` |
+| `rewind` | Whether this scope reclaims the supplied fixture arena |
+
+`TEST_ARENA_TOP_V1` names each module's largest retaining fixture and largest
+fixture peak in its supplied arena. The full records retain scratch peaks
+separately. A module's `body` record covers the complete module, including any
+assertions not split into named fixtures. Scope peaks overlap and must not be
+summed as a process peak. Separate arenas created by a fixture, pooled mappings,
+metadata caches, executable mappings, worker contexts, and subprocesses are not
+represented by the three observed cursors; measure process RSS independently.
+The [#91 audit](../performance-audits/2026-09-12T162525Z.md) records the
+representative configuration: Linux x86-64, Clang Release, split translation
+units, all table audits enabled, and `BUSTER_TEST_JOBS=2`. Its replay script checks
+**640 MiB** maximum RSS for the complete invocation and primary-arena module
+peaks of **64 MiB driver / 40 MiB frontend / 80 MiB machine**. These are explicit
+reference-profile budgets, not thresholds for sanitized, foreign-platform, or
+larger parallel configurations. Keep compiler/configuration, corpus, and host
+fixed when comparing. The RSS field is wait4's process-tree high water and is
+separate from both live arena bytes and reserved address space.
+
+Use `BUSTER_TEST_FIXTURE(arguments, function)` for a direct fixture function that
+returns only `UnitTestResult` counts. It preserves call order, consumes counts,
+and rewinds the primary arena after the last assertion and diagnostic consumer.
+For inline fixture groups, pair `buster_test_arena_begin` and
+`buster_test_arena_end` around the complete set of consumers. Names must be
+static, whitespace-free tokens; the ordinal distinguishes repeated invocations.
+Scratch cursors are observed only: their existing temporal owners still rewind
+them. Do not close a scope before nested scratch lifetimes have closed.
+
+Ownership intentionally spans assertions in the driver's undefined-reference
+source/invocation pair and its native-versus-CPU-model vector comparison group.
+Static target lists and scalar comparison results may outlive a group; arena
+paths, IR, objects, and diagnostic strings may not. The machine module's shared
+program/verifier body remains live through its dependent checks. The runner's
+work-indexed parallel records lie below module marks, and parallel output has
+its own arena. The temporary-root pathname lives in a separate run-owned arena;
+compiler-global metadata and persistent lane contexts keep their existing owners.
+
+`test_arena_self_test` runs as a fail-closed harness check without changing
+registered assertion/module counts. It covers nested and empty scopes, retained
+scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
+failure diagnostics surviving a rewind and overwrite. Observation uses separate
+arena header storage in test-enabled builds and adds no allocation-path work.

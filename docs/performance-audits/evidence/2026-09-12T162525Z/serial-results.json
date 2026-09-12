@@ -1,0 +1,382 @@
+{
+  "base_and_candidate_identical": true,
+  "modules": [
+    {
+      "index": "0",
+      "module": "arena_tests",
+      "passed": "56",
+      "failed": "0",
+      "assertions": "56",
+      "status": "pass"
+    },
+    {
+      "index": "1",
+      "module": "hash_tests",
+      "passed": "705",
+      "failed": "0",
+      "assertions": "705",
+      "status": "pass"
+    },
+    {
+      "index": "2",
+      "module": "simd_tests",
+      "passed": "141",
+      "failed": "0",
+      "assertions": "141",
+      "status": "pass"
+    },
+    {
+      "index": "3",
+      "module": "string_tests",
+      "passed": "158069",
+      "failed": "0",
+      "assertions": "158069",
+      "status": "pass"
+    },
+    {
+      "index": "4",
+      "module": "os_tests",
+      "passed": "174",
+      "failed": "0",
+      "assertions": "174",
+      "status": "pass"
+    },
+    {
+      "index": "5",
+      "module": "file_tests",
+      "passed": "45",
+      "failed": "0",
+      "assertions": "45",
+      "status": "pass"
+    },
+    {
+      "index": "6",
+      "module": "target_tests",
+      "passed": "6469",
+      "failed": "0",
+      "assertions": "6469",
+      "status": "pass"
+    },
+    {
+      "index": "7",
+      "module": "c_frontend_tests",
+      "passed": "261345",
+      "failed": "0",
+      "assertions": "261345",
+      "status": "pass"
+    },
+    {
+      "index": "8",
+      "module": "metamorphic_tests",
+      "passed": "115",
+      "failed": "0",
+      "assertions": "115",
+      "status": "pass"
+    },
+    {
+      "index": "9",
+      "module": "aarch64_encoding_tests",
+      "passed": "236716",
+      "failed": "0",
+      "assertions": "236716",
+      "status": "pass"
+    },
+    {
+      "index": "10",
+      "module": "aarch64_exact_bridge_tests",
+      "passed": "102",
+      "failed": "0",
+      "assertions": "102",
+      "status": "pass"
+    },
+    {
+      "index": "11",
+      "module": "aarch64_control_semantics_tests",
+      "passed": "3377",
+      "failed": "0",
+      "assertions": "3377",
+      "status": "pass"
+    },
+    {
+      "index": "12",
+      "module": "aarch64_system_registers_tests",
+      "passed": "108",
+      "failed": "0",
+      "assertions": "108",
+      "status": "pass"
+    },
+    {
+      "index": "13",
+      "module": "aarch64_semantics_tests",
+      "passed": "215",
+      "failed": "0",
+      "assertions": "215",
+      "status": "pass"
+    },
+    {
+      "index": "14",
+      "module": "aarch64_system_semantics_tests",
+      "passed": "694",
+      "failed": "0",
+      "assertions": "694",
+      "status": "pass"
+    },
+    {
+      "index": "15",
+      "module": "aarch64_syntax_tests",
+      "passed": "112",
+      "failed": "0",
+      "assertions": "112",
+      "status": "pass"
+    },
+    {
+      "index": "16",
+      "module": "aarch64_semantic_vm_tests",
+      "passed": "90",
+      "failed": "0",
+      "assertions": "90",
+      "status": "pass"
+    },
+    {
+      "index": "17",
+      "module": "aarch64_direct_simd_tests",
+      "passed": "152",
+      "failed": "0",
+      "assertions": "152",
+      "status": "pass"
+    },
+    {
+      "index": "18",
+      "module": "aarch64_complex_simd_tests",
+      "passed": "32",
+      "failed": "0",
+      "assertions": "32",
+      "status": "pass"
+    },
+    {
+      "index": "19",
+      "module": "aarch64_memory_semantics_tests",
+      "passed": "18",
+      "failed": "0",
+      "assertions": "18",
+      "status": "pass"
+    },
+    {
+      "index": "20",
+      "module": "aarch64_alias_projection_tests",
+      "passed": "28",
+      "failed": "0",
+      "assertions": "28",
+      "status": "pass"
+    },
+    {
+      "index": "21",
+      "module": "assembly_tests",
+      "passed": "6148",
+      "failed": "0",
+      "assertions": "6148",
+      "status": "pass"
+    },
+    {
+      "index": "22",
+      "module": "x86_64_forwarding_tests",
+      "passed": "13113",
+      "failed": "0",
+      "assertions": "13113",
+      "status": "pass"
+    },
+    {
+      "index": "23",
+      "module": "x86_64_metadata_tests",
+      "passed": "1617",
+      "failed": "0",
+      "assertions": "1617",
+      "status": "pass"
+    },
+    {
+      "index": "24",
+      "module": "x86_64_tls_tests",
+      "passed": "294552",
+      "failed": "0",
+      "assertions": "294552",
+      "status": "pass"
+    },
+    {
+      "index": "25",
+      "module": "executable_padding_tests",
+      "passed": "32908",
+      "failed": "0",
+      "assertions": "32908",
+      "status": "pass"
+    },
+    {
+      "index": "26",
+      "module": "x86_64_got_tests",
+      "passed": "133541",
+      "failed": "0",
+      "assertions": "133541",
+      "status": "pass"
+    },
+    {
+      "index": "27",
+      "module": "x86_64_completion_census_tests",
+      "passed": "34046",
+      "failed": "0",
+      "assertions": "34046",
+      "status": "pass"
+    },
+    {
+      "index": "28",
+      "module": "ir_tests",
+      "passed": "348274",
+      "failed": "0",
+      "assertions": "348274",
+      "status": "pass"
+    },
+    {
+      "index": "29",
+      "module": "vector_contract_tests",
+      "passed": "3056",
+      "failed": "0",
+      "assertions": "3056",
+      "status": "pass"
+    },
+    {
+      "index": "30",
+      "module": "llvm_bitcode_tests",
+      "passed": "331",
+      "failed": "0",
+      "assertions": "331",
+      "status": "pass"
+    },
+    {
+      "index": "31",
+      "module": "machine_selection_tests",
+      "passed": "581",
+      "failed": "0",
+      "assertions": "581",
+      "status": "pass"
+    },
+    {
+      "index": "32",
+      "module": "machine_tests",
+      "passed": "491645",
+      "failed": "0",
+      "assertions": "491645",
+      "status": "pass"
+    },
+    {
+      "index": "33",
+      "module": "codegen_tests",
+      "passed": "4936",
+      "failed": "0",
+      "assertions": "4936",
+      "status": "pass"
+    },
+    {
+      "index": "34",
+      "module": "aarch64_stride_tests",
+      "passed": "98",
+      "failed": "0",
+      "assertions": "98",
+      "status": "pass"
+    },
+    {
+      "index": "35",
+      "module": "debug_model_tests",
+      "passed": "668",
+      "failed": "0",
+      "assertions": "668",
+      "status": "pass"
+    },
+    {
+      "index": "36",
+      "module": "dwarf_tests",
+      "passed": "104",
+      "failed": "0",
+      "assertions": "104",
+      "status": "pass"
+    },
+    {
+      "index": "37",
+      "module": "codeview_tests",
+      "passed": "46596",
+      "failed": "0",
+      "assertions": "46596",
+      "status": "pass"
+    },
+    {
+      "index": "38",
+      "module": "pdb_tests",
+      "passed": "24848",
+      "failed": "0",
+      "assertions": "24848",
+      "status": "pass"
+    },
+    {
+      "index": "39",
+      "module": "object_tests",
+      "passed": "92175",
+      "failed": "0",
+      "assertions": "92175",
+      "status": "pass"
+    },
+    {
+      "index": "40",
+      "module": "jit_tests",
+      "passed": "149",
+      "failed": "0",
+      "assertions": "149",
+      "status": "pass"
+    },
+    {
+      "index": "41",
+      "module": "link_tests",
+      "passed": "67751",
+      "failed": "0",
+      "assertions": "67751",
+      "status": "pass"
+    },
+    {
+      "index": "42",
+      "module": "gpu_pipeline_tests",
+      "passed": "135",
+      "failed": "0",
+      "assertions": "135",
+      "status": "pass"
+    },
+    {
+      "index": "43",
+      "module": "compiler_diagnostic_tests",
+      "passed": "64",
+      "failed": "0",
+      "assertions": "64",
+      "status": "pass"
+    },
+    {
+      "index": "44",
+      "module": "compiler_driver_tests",
+      "passed": "24998",
+      "failed": "0",
+      "assertions": "24998",
+      "status": "pass"
+    },
+    {
+      "index": "45",
+      "module": "compiler_driver_object_path_tests",
+      "passed": "22",
+      "failed": "0",
+      "assertions": "22",
+      "status": "pass"
+    },
+    {
+      "index": "46",
+      "module": "x86_64_tests",
+      "passed": "18",
+      "failed": "0",
+      "assertions": "18",
+      "status": "pass"
+    }
+  ],
+  "assertions": 2291137
+}

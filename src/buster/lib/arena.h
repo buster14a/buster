@@ -32,7 +32,15 @@ struct Arena
     // a store on every allocation, and pooled reuse carries the saved mark
     // across header reinitialization.
     u64 dirty_position;
+#if BUSTER_INCLUDE_TESTS
+    // Test scopes sample the live cursor at exit; rewinds preserve intervening
+    // peaks here. Separate from dirty_position: observation must never change
+    // which reused bytes arena_allocate_zeroed clears. No allocation-path work.
+    u64 test_high_water;
+    u8 reserved[8];
+#else
     u8 reserved[16];
+#endif
 };
 
 // The arenas need to be aligned in order for SIMD data (AVX buffers, vertex data) to work as expected

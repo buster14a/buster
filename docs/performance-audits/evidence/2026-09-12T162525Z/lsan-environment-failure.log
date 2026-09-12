@@ -1,0 +1,24 @@
+phase=1 launched=1 result=1 platform_status=256 timed_out=0
+argv[0]=/dev/shm/buster-issue91/sanitize/Debug/ide
+argv[1]=cc
+argv[2]=-std=c11
+argv[3]=-O0
+argv[4]=-nostdinc
+argv[5]=-fwrapv
+argv[6]=-fno-strict-aliasing
+argv[7]=-funsigned-char
+argv[8]=-ffrontend-ssa
+argv[9]=-fregister-allocator=none
+argv[10]=-target
+argv[11]=x86_64-unknown-linux-gnu
+argv[12]=/dev/shm/buster-issue91/test-tmp/buster-tests-5-1-92069219290638/metamorphic-5/work-0/base.c
+argv[13]=-o
+argv[14]=/dev/shm/buster-issue91/test-tmp/buster-tests-5-1-92069219290638/metamorphic-5/work-0/base.exe
+
+stdout:
+
+stderr:
+==74==Can't open /proc/73/task for reading.
+==73==LeakSanitizer has encountered a fatal error.
+==73==HINT: For debugging, try setting environment variable LSAN_OPTIONS=verbosity=1:log_threads=1
+==73==HINT: LeakSanitizer does not work under ptrace (strace, gdb, etc)

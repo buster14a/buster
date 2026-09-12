@@ -1,0 +1,58 @@
+[
+  {
+    "label": "baseline",
+    "binary": "/dev/shm/buster-issue91/ide-base",
+    "jobs": 2,
+    "exit_code": 0,
+    "peak_rss_kib": 620152,
+    "wall_seconds": 44.49288565799361,
+    "user_seconds": 30.789644,
+    "system_seconds": 12.171145,
+    "phase": "discovery"
+  },
+  {
+    "label": "observer",
+    "binary": "/dev/shm/buster-issue91/ide-observer",
+    "jobs": 2,
+    "exit_code": 0,
+    "peak_rss_kib": 620084,
+    "wall_seconds": 29.006318932995782,
+    "user_seconds": 22.06657,
+    "system_seconds": 6.534208,
+    "phase": "discovery"
+  },
+  {
+    "label": "inline-observer",
+    "binary": "/dev/shm/buster-issue91/ide-inline-observer",
+    "jobs": 2,
+    "exit_code": 0,
+    "peak_rss_kib": 620192,
+    "wall_seconds": 41.50053960099467,
+    "user_seconds": 32.573101,
+    "system_seconds": 8.781791,
+    "phase": "discovery"
+  },
+  {
+    "label": "narrow",
+    "binary": "/dev/shm/buster-issue91/ide-narrow",
+    "jobs": 2,
+    "exit_code": 0,
+    "peak_rss_kib": 602000,
+    "wall_seconds": 43.83932131298934,
+    "user_seconds": 32.12213,
+    "system_seconds": 9.181475,
+    "phase": "discovery"
+  },
+  {
+    "label": "scratch-observer",
+    "binary": "/dev/shm/buster-issue91/ide-scratch-observer",
+    "jobs": 2,
+    "exit_code": 0,
+    "peak_rss_kib": 602120,
+    "sampled_parent_hwm_kib": 300,
+    "wall_seconds": 31.820883648004383,
+    "user_seconds": 24.73007,
+    "system_seconds": 6.986908,
+    "phase": "discovery"
+  }
+]

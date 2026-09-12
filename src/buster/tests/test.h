@@ -52,6 +52,16 @@ struct UnitTestArguments
 {
     Arena* arena;
     ShowCallback* show;
+#if BUSTER_INCLUDE_TESTS
+    String8 memory_module;
+    u64 memory_fixture_index;
+    String8 memory_top_retained_fixture;
+    String8 memory_top_peak_fixture;
+    u64 memory_top_retained_bytes;
+    u64 memory_top_peak_bytes;
+    bool memory_report;
+    u8 reserved[7];
+#endif
 };
 
 typedef struct UnitTestResult UnitTestResult;
@@ -60,6 +70,44 @@ struct UnitTestResult
     u64 succeeded_test_count;
     u64 test_count;
 };
+
+#if BUSTER_INCLUDE_TESTS
+// Names are static tokens. Results contain counts only; show must consume or
+// copy diagnostics synchronously before a fixture's arena can be rewound.
+typedef struct TestArenaMark TestArenaMark;
+struct TestArenaMark
+{
+    Arena* arena;
+    u64 start;
+    u64 previous_high_water;
+};
+
+typedef struct TestArenaScope TestArenaScope;
+struct TestArenaScope
+{
+    // Slot zero is the supplied fixture arena; remaining slots are the
+    // selected context's scratch arenas. Their cursors are observed, not rewound.
+    TestArenaMark marks[1 + SCRATCH_ARENA_COUNT];
+    String8 name;
+    u64 index;
+    bool module;
+    u8 reserved[7];
+};
+
+BUSTER_F_DECL TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module);
+BUSTER_F_DECL void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, bool rewind);
+
+// Direct calls preserve normal test control flow and avoid callback dispatch.
+#define BUSTER_TEST_FIXTURE(arguments, function) \
+    do \
+    { \
+        TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
+        UnitTestResult fixture_result_ = function(arguments); \
+        result.test_count += fixture_result_.test_count; \
+        result.succeeded_test_count += fixture_result_.succeeded_test_count; \
+        buster_test_arena_end((arguments), fixture_scope_, true); \
+    } while (0)
+#endif
 
 typedef UnitTestResult TestFunction(UnitTestArguments*);
 
