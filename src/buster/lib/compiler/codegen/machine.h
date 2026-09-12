@@ -695,6 +695,11 @@ typedef enum MachineOpcode
     // bit 9 = release.
     MACHINE_A64_ATOMIC_LOAD_PAIR,
     MACHINE_A64_ATOMIC_STORE_PAIR,
+    // Address X10, result frame, input frame(s). Values are full integer
+    // representations, including the frontend's promoted aggregate padding.
+    // RMW adds IrAtomicOperation at MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT.
+    MACHINE_A64_ATOMIC_RMW_PAIR,
+    MACHINE_A64_ATOMIC_CAS_PAIR,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1110,6 +1115,7 @@ typedef struct MachineFunction MachineFunction;
 #define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)
 #define MACHINE_A64_ATOMIC_PAIR_ACQUIRE 0x100u
 #define MACHINE_A64_ATOMIC_PAIR_RELEASE 0x200u
+#define MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT 16u
 typedef struct MachineVaArgPart MachineVaArgPart;
 struct MachineVaArgPart
 {

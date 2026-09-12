@@ -161,8 +161,13 @@ integer-pair and sixteen-byte atomic load/store tests, unsupported signature
 controls, Windows/UEFI large-frame tests, and native Windows ARM64
 unwind-boundary execution remain registered. The atomic lane is strict across
 all AArch64 desktop targets, allocators and frontend forms; its broader
-aggregate census retains exactly one compare-exchange fallback, while the
-i128 census advances to its one remaining read-modify-write fallback.
+aggregate and i128 censuses both require zero fallback, including exchange,
+arithmetic/bitwise updates and compare-exchange. The separate nine-function
+atomic-update fixture covers all three AArch64 desktop targets, four allocator
+modes and both frontend forms; MIR legs reject fallback, and only the matching
+native desktop executes the result. This adds 24 object-compilation cases
+outside the eleven-fixture floor above. The direct backend remains its
+semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
