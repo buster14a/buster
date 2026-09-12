@@ -47,6 +47,7 @@
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
 
+#include <buster/tests/byte_writer_test.h>
 #include <buster/tests/arena_test.h>
 #include <buster/tests/hash_test.h>
 #include <buster/tests/simd_test.h>
@@ -99,6 +100,7 @@
 #endif
 
 #if BUSTER_UNITY_BUILD
+#include <buster/tests/byte_writer_test.c>
 #include <buster/tests/arena_test.c>
 #include <buster/tests/hash_test.c>
 #include <buster/tests/simd_test.c>
@@ -262,6 +264,7 @@ BUSTER_GLOBAL_LOCAL void test_timing_report(UnitTestArguments* arguments, TestTi
 
 typedef enum TestId
 {
+    TEST_ID_BYTE_WRITER,
     TEST_ID_ARENA,
     TEST_ID_HASH,
     TEST_ID_SIMD,
@@ -317,6 +320,7 @@ typedef enum TestId
 } TestId;
 
 BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
+    [TEST_ID_BYTE_WRITER] = {S8_INITIALIZER("byte_writer_tests"), &byte_writer_tests},
     [TEST_ID_ARENA] = {S8_INITIALIZER("arena_tests"), &arena_tests},
     [TEST_ID_HASH] = {S8_INITIALIZER("hash_tests"), &hash_tests},
     [TEST_ID_SIMD] = {S8_INITIALIZER("simd_tests"), &simd_tests},

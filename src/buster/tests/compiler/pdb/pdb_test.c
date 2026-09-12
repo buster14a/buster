@@ -631,7 +631,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_msf_boundaries(UnitTestArguments* ar
         {
             pdb_test_store_u32(payload, (u64)block * 4096, block);
         }
-        PdbBuffer stream = {.bytes = payload, .count = size, .capacity = size};
+        ByteWriter stream = {.bytes = payload, .count = size, .capacity = size};
         PdbResult built = pdb_msf_build(arena, &stream, 1);
         BUSTER_TEST(arguments, built.valid);
         if (built.valid)
@@ -646,13 +646,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_msf_boundaries(UnitTestArguments* ar
     // Unsupported sizes must fail before attempting to read these deliberately
     // tiny backing buffers or allocate a multi-gigabyte image.
     u8 byte = 0;
-    PdbBuffer invalid = {.bytes = &byte, .count = UINT64_MAX};
+    ByteWriter invalid = {.bytes = &byte, .count = UINT64_MAX};
     BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, 1).valid);
     invalid.count = UINT32_MAX;
     BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, 1).valid);
     invalid.count = (UINT64_C(1048575) - 100) * 4096;
     BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, 1).valid);
-    PdbBuffer directory_overflow[] = {
+    ByteWriter directory_overflow[] = {
         {.bytes = &byte, .count = UINT64_C(1048573) * 4096}, {.bytes = &byte, .count = 4096},
     };
     BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, directory_overflow, 2).valid);

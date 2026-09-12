@@ -6,6 +6,7 @@
 // pdb_rewrite_field_list remaps every member and LF_INDEX continuation.
 // pdb_msf_build owns the checked periodic-FPM block layout;
 // pdb_emit_contribution writes both DBI descriptions from module-owned ranges.
+// ByteWriter supplies bounded writes; PDB owns stream allocation and MSF layout.
 
 #include <buster/lib/compiler/pdb/pdb_internal.h>
 #include <buster/lib/string.h>
@@ -105,62 +106,6 @@ enum
     PDB_LF_ALIAS = 0x150a,
     PDB_LF_MEMBER = 0x150d,
 };
-
-// The remaining-space form of `count + size > capacity`: `count` never passes
-// `capacity`, so the subtraction cannot underflow, and unlike the sum it
-// cannot wrap past a `size` large enough to make the test pass.
-BUSTER_GLOBAL_LOCAL void pdb_emit_bytes(PdbBuffer* buffer, void const* source, u64 size)
-{
-    if (size > buffer->capacity - buffer->count)
-    {
-        buffer->overflow = true;
-        return;
-    }
-    if (size)
-    {
-        memcpy(buffer->bytes + buffer->count, source, size);
-    }
-    buffer->count += size;
-}
-
-BUSTER_GLOBAL_LOCAL void pdb_emit_zero(PdbBuffer* buffer, u64 size)
-{
-    if (size > buffer->capacity - buffer->count)
-    {
-        buffer->overflow = true;
-        return;
-    }
-    memset(buffer->bytes + buffer->count, 0, size);
-    buffer->count += size;
-}
-
-BUSTER_GLOBAL_LOCAL void pdb_emit_u16(PdbBuffer* buffer, u16 value)
-{
-    pdb_emit_bytes(buffer, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void pdb_emit_u32(PdbBuffer* buffer, u32 value)
-{
-    pdb_emit_bytes(buffer, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void pdb_emit_align4(PdbBuffer* buffer)
-{
-    while (buffer->count & 3)
-    {
-        pdb_emit_zero(buffer, 1);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void pdb_write_u32_at(PdbBuffer* buffer, u64 offset, u32 value)
-{
-    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
-    {
-        buffer->overflow = true;
-        return;
-    }
-    memcpy(buffer->bytes + offset, &value, sizeof(value));
-}
 
 u32 pdb_read_u32(ByteSlice bytes, u64 offset)
 {
@@ -783,7 +728,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_msf_allocate_blocks(u32* next, u32 count, u32* bloc
     return valid;
 }
 
-PdbResult pdb_msf_build(Arena* arena, PdbBuffer const* streams, u32 stream_count)
+PdbResult pdb_msf_build(Arena* arena, ByteWriter const* streams, u32 stream_count)
 {
     PdbResult result = {0};
     u64 data_block_count = 0;
@@ -792,7 +737,7 @@ PdbResult pdb_msf_build(Arena* arena, PdbBuffer const* streams, u32 stream_count
     bool valid = arena && streams && 4 + (u64)stream_count * 4 <= PDB_MAX_DIRECTORY_SIZE;
     for (u32 index = 0; index < stream_count && valid; index += 1)
     {
-        PdbBuffer const* stream = streams + index;
+        ByteWriter const* stream = streams + index;
         valid = !stream->overflow && stream->count < UINT32_MAX && (!stream->count || stream->bytes);
         if (valid)
         {
@@ -841,11 +786,11 @@ PdbResult pdb_msf_build(Arena* arena, PdbBuffer const* streams, u32 stream_count
                     }
                 }
             }
-            PdbBuffer directory = {.bytes = arena_allocate(arena, u8, directory_size), .capacity = directory_size};
-            pdb_emit_u32(&directory, stream_count);
+            ByteWriter directory = byte_writer_make(arena_allocate(arena, u8, directory_size), directory_size);
+            byte_writer_emit_u32_le(&directory, stream_count);
             for (u32 index = 0; index < stream_count; index += 1)
             {
-                pdb_emit_u32(&directory, (u32)streams[index].count);
+                byte_writer_emit_u32_le(&directory, (u32)streams[index].count);
             }
             u32 data_cursor = 0;
             for (u32 index = 0; index < stream_count; index += 1)
@@ -855,7 +800,7 @@ PdbResult pdb_msf_build(Arena* arena, PdbBuffer const* streams, u32 stream_count
                     u32 block = data_blocks[data_cursor++];
                     u64 size = BUSTER_MIN((u64)PDB_BLOCK_SIZE, streams[index].count - offset);
                     memcpy(bytes + (u64)block * PDB_BLOCK_SIZE, streams[index].bytes + offset, size);
-                    pdb_emit_u32(&directory, block);
+                    byte_writer_emit_u32_le(&directory, block);
                 }
             }
             for (u32 index = 0; index < directory_block_count; index += 1)
@@ -877,23 +822,23 @@ PdbResult pdb_msf_build(Arena* arena, PdbBuffer const* streams, u32 stream_count
 
 // DBI embeds the first contribution in each module descriptor. Empty modules
 // keep the format's all-zero descriptor and have no address range in the list.
-BUSTER_GLOBAL_LOCAL void pdb_emit_contribution(PdbBuffer* buffer, PdbSection const* sections, PdbContribution const* contribution, u16 module)
+BUSTER_GLOBAL_LOCAL void pdb_emit_contribution(ByteWriter* buffer, PdbSection const* sections, PdbContribution const* contribution, u16 module)
 {
     if (contribution)
     {
-        pdb_emit_u16(buffer, (u16)contribution->section);
-        pdb_emit_u16(buffer, 0);
-        pdb_emit_u32(buffer, contribution->offset);
-        pdb_emit_u32(buffer, contribution->size);
-        pdb_emit_u32(buffer, sections[contribution->section - 1].characteristics);
-        pdb_emit_u16(buffer, module);
-        pdb_emit_u16(buffer, 0);
-        pdb_emit_u32(buffer, 0);
-        pdb_emit_u32(buffer, 0);
+        byte_writer_emit_u16_le(buffer, (u16)contribution->section);
+        byte_writer_emit_u16_le(buffer, 0);
+        byte_writer_emit_u32_le(buffer, contribution->offset);
+        byte_writer_emit_u32_le(buffer, contribution->size);
+        byte_writer_emit_u32_le(buffer, sections[contribution->section - 1].characteristics);
+        byte_writer_emit_u16_le(buffer, module);
+        byte_writer_emit_u16_le(buffer, 0);
+        byte_writer_emit_u32_le(buffer, 0);
+        byte_writer_emit_u32_le(buffer, 0);
     }
     else
     {
-        pdb_emit_zero(buffer, PDB_SECTION_CONTRIBUTION_SIZE);
+        byte_writer_emit_zero(buffer, PDB_SECTION_CONTRIBUTION_SIZE);
     }
 }
 
@@ -1212,36 +1157,35 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     }
     u64 names_key_capacity = 16;
     u32 stream_count = PDB_STREAM_COUNT + (module_count > 1 ? module_count - 1 : 0);
-    PdbBuffer* streams = arena_allocate(arena, PdbBuffer, stream_count);
+    ByteWriter* streams = arena_allocate(arena, ByteWriter, stream_count);
     memset(streams, 0, (u64)stream_count * sizeof(*streams));
 #define PDB_STREAM_BEGIN(index, size)                                                                                                                          \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
-        streams[(index)].bytes = arena_allocate(arena, u8, (size));                                                                                            \
-        streams[(index)].capacity = (size);                                                                                                                    \
+        streams[(index)] = byte_writer_make(arena_allocate(arena, u8, (size)), (size));                                                                                            \
     } while (0)
 
     // Stream 1: PDB info, carrying the identity the image's RSDS entry repeats.
     PDB_STREAM_BEGIN(PDB_STREAM_INFO, 128 + names_key_capacity);
-    PdbBuffer* info = streams + PDB_STREAM_INFO;
-    pdb_emit_u32(info, PDB_INFO_VERSION_VC70);
-    pdb_emit_u32(info, 0);
-    pdb_emit_u32(info, input.age ? input.age : 1);
-    pdb_emit_bytes(info, input.guid, sizeof(input.guid));
+    ByteWriter* info = streams + PDB_STREAM_INFO;
+    byte_writer_emit_u32_le(info, PDB_INFO_VERSION_VC70);
+    byte_writer_emit_u32_le(info, 0);
+    byte_writer_emit_u32_le(info, input.age ? input.age : 1);
+    byte_writer_emit_bytes(info, input.guid, sizeof(input.guid));
     // Named stream map holding a single "/names" entry, placed in the bucket a
     // reader will probe for it.
     String8 names_key = S8("/names");
-    pdb_emit_u32(info, (u32)(names_key.length + 1));
-    pdb_emit_bytes(info, names_key.pointer, names_key.length);
-    pdb_emit_zero(info, 1);
-    pdb_emit_u32(info, 1);
-    pdb_emit_u32(info, PDB_NAMED_STREAM_CAPACITY);
-    pdb_emit_u32(info, 1);
-    pdb_emit_u32(info, 1u << (pdb_hash_string_v1(names_key) % PDB_NAMED_STREAM_CAPACITY));
-    pdb_emit_u32(info, 0);
-    pdb_emit_u32(info, 0);
-    pdb_emit_u32(info, PDB_STREAM_NAMES);
-    pdb_emit_u32(info, PDB_FEATURE_VC140);
+    byte_writer_emit_u32_le(info, (u32)(names_key.length + 1));
+    byte_writer_emit_bytes(info, names_key.pointer, names_key.length);
+    byte_writer_emit_zero(info, 1);
+    byte_writer_emit_u32_le(info, 1);
+    byte_writer_emit_u32_le(info, PDB_NAMED_STREAM_CAPACITY);
+    byte_writer_emit_u32_le(info, 1);
+    byte_writer_emit_u32_le(info, 1u << (pdb_hash_string_v1(names_key) % PDB_NAMED_STREAM_CAPACITY));
+    byte_writer_emit_u32_le(info, 0);
+    byte_writer_emit_u32_le(info, 0);
+    byte_writer_emit_u32_le(info, PDB_STREAM_NAMES);
+    byte_writer_emit_u32_le(info, PDB_FEATURE_VC140);
 
     // Streams 2 and 4: structurally valid type and id records.  The TPI
     // records have already been deduplicated and rewritten above; IPI remains
@@ -1261,22 +1205,22 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         u32 stream_index = pass ? PDB_STREAM_IPI : PDB_STREAM_TPI;
         u64 capacity = PDB_TPI_HEADER_SIZE + (pass ? 0 : type_record_bytes);
         PDB_STREAM_BEGIN(stream_index, capacity);
-        PdbBuffer* type_stream = streams + stream_index;
-        pdb_emit_u32(type_stream, PDB_TPI_VERSION_V80);
-        pdb_emit_u32(type_stream, PDB_TPI_HEADER_SIZE);
-        pdb_emit_u32(type_stream, 0x1000);
-        pdb_emit_u32(type_stream, 0x1000 + (pass ? 0 : live_count));
-        pdb_emit_u32(type_stream, (u32)(pass ? 0 : type_record_bytes));
-        pdb_emit_u16(type_stream, 0xffff);
-        pdb_emit_u16(type_stream, 0xffff);
-        pdb_emit_u32(type_stream, 4);
-        pdb_emit_u32(type_stream, 0x3ffff);
-        pdb_emit_u32(type_stream, 0);
-        pdb_emit_u32(type_stream, 0);
-        pdb_emit_u32(type_stream, 0);
-        pdb_emit_u32(type_stream, 0);
-        pdb_emit_u32(type_stream, 0);
-        pdb_emit_u32(type_stream, 0);
+        ByteWriter* type_stream = streams + stream_index;
+        byte_writer_emit_u32_le(type_stream, PDB_TPI_VERSION_V80);
+        byte_writer_emit_u32_le(type_stream, PDB_TPI_HEADER_SIZE);
+        byte_writer_emit_u32_le(type_stream, 0x1000);
+        byte_writer_emit_u32_le(type_stream, 0x1000 + (pass ? 0 : live_count));
+        byte_writer_emit_u32_le(type_stream, (u32)(pass ? 0 : type_record_bytes));
+        byte_writer_emit_u16_le(type_stream, 0xffff);
+        byte_writer_emit_u16_le(type_stream, 0xffff);
+        byte_writer_emit_u32_le(type_stream, 4);
+        byte_writer_emit_u32_le(type_stream, 0x3ffff);
+        byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, 0);
         if (!pass)
         {
             for (u32 live_position = 0; live_position < live_count; live_position += 1)
@@ -1284,7 +1228,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
                 ByteSlice type = normalized[live[live_position]];
                 if (type.length)
                 {
-                    pdb_emit_bytes(type_stream, type.pointer, type.length);
+                    byte_writer_emit_bytes(type_stream, type.pointer, type.length);
                 }
             }
         }
@@ -1292,22 +1236,22 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
 
     // Stream 8: the image section table, which maps addresses to sections.
     PDB_STREAM_BEGIN(PDB_STREAM_SECTION_HEADERS, (u64)input.section_count * 40);
-    PdbBuffer* section_headers = streams + PDB_STREAM_SECTION_HEADERS;
+    ByteWriter* section_headers = streams + PDB_STREAM_SECTION_HEADERS;
     for (u32 section_index = 0; section_index < input.section_count; section_index += 1)
     {
         PdbSection* section = input.sections + section_index;
         u64 header = section_headers->count;
-        pdb_emit_zero(section_headers, 40);
+        byte_writer_emit_zero(section_headers, 40);
         u64 name_length = BUSTER_MIN(section->name.length, 8);
         if (name_length)
         {
             memcpy(section_headers->bytes + header, section->name.pointer, name_length);
         }
-        pdb_write_u32_at(section_headers, header + 8, section->virtual_size);
-        pdb_write_u32_at(section_headers, header + 12, section->virtual_address);
-        pdb_write_u32_at(section_headers, header + 16, section->raw_size);
-        pdb_write_u32_at(section_headers, header + 20, section->raw_offset);
-        pdb_write_u32_at(section_headers, header + 36, section->characteristics);
+        byte_writer_patch_u32_le(section_headers, header + 8, section->virtual_size);
+        byte_writer_patch_u32_le(section_headers, header + 12, section->virtual_address);
+        byte_writer_patch_u32_le(section_headers, header + 16, section->raw_size);
+        byte_writer_patch_u32_le(section_headers, header + 20, section->raw_offset);
+        byte_writer_patch_u32_le(section_headers, header + 36, section->characteristics);
     }
 
     // Stream 9: the module's symbols followed by its C13 line tables.
@@ -1321,67 +1265,67 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         PdbCodeviewSplit* split = splits + module_index;
         u64 module_capacity = 8 + split->symbols.length + split->c13.length;
         PDB_STREAM_BEGIN(stream_index, module_capacity);
-        PdbBuffer* module = streams + stream_index;
-        pdb_emit_u32(module, 4);
-        pdb_emit_bytes(module, split->symbols.pointer, split->symbols.length);
+        ByteWriter* module = streams + stream_index;
+        byte_writer_emit_u32_le(module, 4);
+        byte_writer_emit_bytes(module, split->symbols.pointer, split->symbols.length);
         module_symbol_sizes[module_index] = (u32)(4 + split->symbols.length);
-        pdb_emit_bytes(module, split->c13.pointer, split->c13.length);
+        byte_writer_emit_bytes(module, split->c13.pointer, split->c13.length);
         module_c13_sizes[module_index] = (u32)split->c13.length;
-        pdb_emit_u32(module, 0);
+        byte_writer_emit_u32_le(module, 0);
     }
 
     // Stream 3: DBI, describing the modules and their exact section contributions.
     PDB_STREAM_BEGIN(PDB_STREAM_DBI, dbi_capacity);
-    PdbBuffer* dbi = streams + PDB_STREAM_DBI;
-    pdb_emit_u32(dbi, 0xffffffff);
-    pdb_emit_u32(dbi, PDB_DBI_VERSION_V70);
-    pdb_emit_u32(dbi, input.age ? input.age : 1);
-    pdb_emit_u16(dbi, PDB_STREAM_GLOBALS);
-    pdb_emit_u16(dbi, 0x8e1f);
-    pdb_emit_u16(dbi, PDB_STREAM_PUBLICS);
-    pdb_emit_u16(dbi, 0);
-    pdb_emit_u16(dbi, PDB_STREAM_SYMBOL_RECORDS);
-    pdb_emit_u16(dbi, 0);
-    pdb_emit_u32(dbi, (u32)module_info_size);
-    pdb_emit_u32(dbi, (u32)section_contribution_size);
-    pdb_emit_u32(dbi, (u32)section_map_size);
-    pdb_emit_u32(dbi, (u32)source_info_size);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_u32(dbi, (u32)dbg_header_size);
-    pdb_emit_u32(dbi, (u32)ec_substream_size);
-    pdb_emit_u16(dbi, 0);
-    pdb_emit_u16(dbi, input.machine);
-    pdb_emit_u32(dbi, 0);
+    ByteWriter* dbi = streams + PDB_STREAM_DBI;
+    byte_writer_emit_u32_le(dbi, 0xffffffff);
+    byte_writer_emit_u32_le(dbi, PDB_DBI_VERSION_V70);
+    byte_writer_emit_u32_le(dbi, input.age ? input.age : 1);
+    byte_writer_emit_u16_le(dbi, PDB_STREAM_GLOBALS);
+    byte_writer_emit_u16_le(dbi, 0x8e1f);
+    byte_writer_emit_u16_le(dbi, PDB_STREAM_PUBLICS);
+    byte_writer_emit_u16_le(dbi, 0);
+    byte_writer_emit_u16_le(dbi, PDB_STREAM_SYMBOL_RECORDS);
+    byte_writer_emit_u16_le(dbi, 0);
+    byte_writer_emit_u32_le(dbi, (u32)module_info_size);
+    byte_writer_emit_u32_le(dbi, (u32)section_contribution_size);
+    byte_writer_emit_u32_le(dbi, (u32)section_map_size);
+    byte_writer_emit_u32_le(dbi, (u32)source_info_size);
+    byte_writer_emit_u32_le(dbi, 0);
+    byte_writer_emit_u32_le(dbi, 0);
+    byte_writer_emit_u32_le(dbi, (u32)dbg_header_size);
+    byte_writer_emit_u32_le(dbi, (u32)ec_substream_size);
+    byte_writer_emit_u16_le(dbi, 0);
+    byte_writer_emit_u16_le(dbi, input.machine);
+    byte_writer_emit_u32_le(dbi, 0);
     u64 module_info_start = dbi->count;
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
         PdbModule* source_module = modules + module_index;
         String8 module_name = source_module->name.length ? source_module->name : S8("buster.obj");
-        pdb_emit_u32(dbi, 0);
+        byte_writer_emit_u32_le(dbi, 0);
         pdb_emit_contribution(dbi, input.sections, source_module->contribution_count ? source_module->contributions : 0, (u16)module_index);
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u16(dbi, (u16)module_stream_indices[module_index]);
-        pdb_emit_u32(dbi, module_symbol_sizes[module_index]);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_u32(dbi, module_c13_sizes[module_index]);
-        pdb_emit_u16(dbi, (u16)source_counts[module_index]);
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
-        pdb_emit_zero(dbi, 1);
-        pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
-        pdb_emit_zero(dbi, 1);
-        pdb_emit_align4(dbi);
+        byte_writer_emit_u16_le(dbi, 0);
+        byte_writer_emit_u16_le(dbi, (u16)module_stream_indices[module_index]);
+        byte_writer_emit_u32_le(dbi, module_symbol_sizes[module_index]);
+        byte_writer_emit_u32_le(dbi, 0);
+        byte_writer_emit_u32_le(dbi, module_c13_sizes[module_index]);
+        byte_writer_emit_u16_le(dbi, (u16)source_counts[module_index]);
+        byte_writer_emit_u16_le(dbi, 0);
+        byte_writer_emit_u32_le(dbi, 0);
+        byte_writer_emit_u32_le(dbi, 0);
+        byte_writer_emit_u32_le(dbi, 0);
+        byte_writer_emit_bytes(dbi, module_name.pointer, module_name.length);
+        byte_writer_emit_zero(dbi, 1);
+        byte_writer_emit_bytes(dbi, module_name.pointer, module_name.length);
+        byte_writer_emit_zero(dbi, 1);
+        byte_writer_align4(dbi);
 
     }
     if (dbi->count - module_info_start != module_info_size)
     {
         return result;
     }
-    pdb_emit_u32(dbi, PDB_SECTION_CONTRIBUTION_VERSION);
+    byte_writer_emit_u32_le(dbi, PDB_SECTION_CONTRIBUTION_VERSION);
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
         PdbModule* module = modules + module_index;
@@ -1390,100 +1334,100 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             pdb_emit_contribution(dbi, input.sections, module->contributions + range, (u16)module_index);
         }
     }
-    pdb_emit_u16(dbi, (u16)input.section_count);
-    pdb_emit_u16(dbi, (u16)input.section_count);
+    byte_writer_emit_u16_le(dbi, (u16)input.section_count);
+    byte_writer_emit_u16_le(dbi, (u16)input.section_count);
     for (u32 section_index = 0; section_index < input.section_count; section_index += 1)
     {
-        pdb_emit_u16(dbi, 0x109);
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u16(dbi, 0);
-        pdb_emit_u16(dbi, (u16)(section_index + 1));
-        pdb_emit_u16(dbi, 0xffff);
-        pdb_emit_u16(dbi, 0xffff);
-        pdb_emit_u32(dbi, 0);
-        pdb_emit_u32(dbi, input.sections[section_index].virtual_size);
+        byte_writer_emit_u16_le(dbi, 0x109);
+        byte_writer_emit_u16_le(dbi, 0);
+        byte_writer_emit_u16_le(dbi, 0);
+        byte_writer_emit_u16_le(dbi, (u16)(section_index + 1));
+        byte_writer_emit_u16_le(dbi, 0xffff);
+        byte_writer_emit_u16_le(dbi, 0xffff);
+        byte_writer_emit_u32_le(dbi, 0);
+        byte_writer_emit_u32_le(dbi, input.sections[section_index].virtual_size);
     }
     u64 source_info_start = dbi->count;
-    pdb_emit_u16(dbi, (u16)module_count);
-    pdb_emit_u16(dbi, (u16)source_file_count);
+    byte_writer_emit_u16_le(dbi, (u16)module_count);
+    byte_writer_emit_u16_le(dbi, (u16)source_file_count);
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        pdb_emit_u16(dbi, 0);
+        byte_writer_emit_u16_le(dbi, 0);
     }
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        pdb_emit_u16(dbi, (u16)source_counts[module_index]);
+        byte_writer_emit_u16_le(dbi, (u16)source_counts[module_index]);
     }
     u64 name_offset_start = dbi->count;
-    pdb_emit_zero(dbi, (u64)source_file_count * 4);
+    byte_writer_emit_zero(dbi, (u64)source_file_count * 4);
     u64 names_start = dbi->count;
     for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
     {
-        pdb_write_u32_at(dbi, name_offset_start + (u64)file_index * 4, (u32)(dbi->count - names_start));
-        pdb_emit_bytes(dbi, source_names[file_index].pointer, source_names[file_index].length);
-        pdb_emit_zero(dbi, 1);
+        byte_writer_patch_u32_le(dbi, name_offset_start + (u64)file_index * 4, (u32)(dbi->count - names_start));
+        byte_writer_emit_bytes(dbi, source_names[file_index].pointer, source_names[file_index].length);
+        byte_writer_emit_zero(dbi, 1);
     }
-    pdb_emit_align4(dbi);
+    byte_writer_align4(dbi);
     if (dbi->count - source_info_start != source_info_size)
     {
         return result;
     }
     u64 ec_start = dbi->count;
-    pdb_emit_u32(dbi, PDB_STRING_TABLE_SIGNATURE);
-    pdb_emit_u32(dbi, 1);
-    pdb_emit_u32(dbi, 1);
-    pdb_emit_zero(dbi, 1);
-    pdb_emit_u32(dbi, 1);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_u32(dbi, 0);
-    pdb_emit_align4(dbi);
+    byte_writer_emit_u32_le(dbi, PDB_STRING_TABLE_SIGNATURE);
+    byte_writer_emit_u32_le(dbi, 1);
+    byte_writer_emit_u32_le(dbi, 1);
+    byte_writer_emit_zero(dbi, 1);
+    byte_writer_emit_u32_le(dbi, 1);
+    byte_writer_emit_u32_le(dbi, 0);
+    byte_writer_emit_u32_le(dbi, 0);
+    byte_writer_align4(dbi);
     if (dbi->count - ec_start != ec_substream_size)
     {
         return result;
     }
     for (u32 index = 0; index < PDB_DBG_HEADER_COUNT; index += 1)
     {
-        pdb_emit_u16(dbi, index == PDB_DBG_HEADER_SECTION_HEADERS ? (u16)PDB_STREAM_SECTION_HEADERS : (u16)0xffff);
+        byte_writer_emit_u16_le(dbi, index == PDB_DBG_HEADER_SECTION_HEADERS ? (u16)PDB_STREAM_SECTION_HEADERS : (u16)0xffff);
     }
 
     // Streams 5 and 6 hold no records yet, but readers still expect their
     // hash headers to be present and well formed.
     PDB_STREAM_BEGIN(PDB_STREAM_GLOBALS, PDB_GSI_HASH_HEADER_SIZE);
-    PdbBuffer* globals = streams + PDB_STREAM_GLOBALS;
-    pdb_emit_u32(globals, 0xffffffff);
-    pdb_emit_u32(globals, PDB_GSI_HASH_VERSION);
-    pdb_emit_u32(globals, 0);
-    pdb_emit_u32(globals, 0);
+    ByteWriter* globals = streams + PDB_STREAM_GLOBALS;
+    byte_writer_emit_u32_le(globals, 0xffffffff);
+    byte_writer_emit_u32_le(globals, PDB_GSI_HASH_VERSION);
+    byte_writer_emit_u32_le(globals, 0);
+    byte_writer_emit_u32_le(globals, 0);
     PDB_STREAM_BEGIN(PDB_STREAM_PUBLICS, PDB_PUBLICS_HEADER_SIZE + PDB_GSI_HASH_HEADER_SIZE);
-    PdbBuffer* publics = streams + PDB_STREAM_PUBLICS;
-    pdb_emit_u32(publics, PDB_GSI_HASH_HEADER_SIZE);
-    pdb_emit_u32(publics, 0);
-    pdb_emit_u32(publics, 0);
-    pdb_emit_u32(publics, 0);
-    pdb_emit_u16(publics, 0);
-    pdb_emit_u16(publics, 0);
-    pdb_emit_u32(publics, 0);
-    pdb_emit_u32(publics, 0);
-    pdb_emit_u32(publics, 0xffffffff);
-    pdb_emit_u32(publics, PDB_GSI_HASH_VERSION);
-    pdb_emit_u32(publics, 0);
-    pdb_emit_u32(publics, 0);
+    ByteWriter* publics = streams + PDB_STREAM_PUBLICS;
+    byte_writer_emit_u32_le(publics, PDB_GSI_HASH_HEADER_SIZE);
+    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u16_le(publics, 0);
+    byte_writer_emit_u16_le(publics, 0);
+    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, 0xffffffff);
+    byte_writer_emit_u32_le(publics, PDB_GSI_HASH_VERSION);
+    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, 0);
     // Stream 10: the checked byte capacity also bounds the bucket count to u32.
     u32 names_bucket_count = (u32)names_bucket_capacity;
     PDB_STREAM_BEGIN(PDB_STREAM_NAMES, names_capacity);
-    PdbBuffer* names = streams + PDB_STREAM_NAMES;
-    pdb_emit_u32(names, PDB_STRING_TABLE_SIGNATURE);
-    pdb_emit_u32(names, 1);
-    pdb_emit_u32(names, (u32)names_buffer_size);
-    pdb_emit_zero(names, 1);
+    ByteWriter* names = streams + PDB_STREAM_NAMES;
+    byte_writer_emit_u32_le(names, PDB_STRING_TABLE_SIGNATURE);
+    byte_writer_emit_u32_le(names, 1);
+    byte_writer_emit_u32_le(names, (u32)names_buffer_size);
+    byte_writer_emit_zero(names, 1);
     for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
     {
-        pdb_emit_bytes(names, source_names[file_index].pointer, source_names[file_index].length);
-        pdb_emit_zero(names, 1);
+        byte_writer_emit_bytes(names, source_names[file_index].pointer, source_names[file_index].length);
+        byte_writer_emit_zero(names, 1);
     }
-    pdb_emit_u32(names, names_bucket_count);
+    byte_writer_emit_u32_le(names, names_bucket_count);
     u64 names_bucket_start = names->count;
-    pdb_emit_zero(names, (u64)names_bucket_count * 4);
+    byte_writer_emit_zero(names, (u64)names_bucket_count * 4);
     for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
     {
         u32 bucket = pdb_hash_string_v1(source_names[file_index]) % names_bucket_count;
@@ -1491,9 +1435,9 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         {
             bucket = (bucket + 1) % names_bucket_count;
         }
-        pdb_write_u32_at(names, names_bucket_start + (u64)bucket * 4, all_names_offsets[file_index]);
+        byte_writer_patch_u32_le(names, names_bucket_start + (u64)bucket * 4, all_names_offsets[file_index]);
     }
-    pdb_emit_u32(names, source_file_count);
+    byte_writer_emit_u32_le(names, source_file_count);
     // Stream 7 stays empty: no symbol records are published yet.
     for (u32 index = 0; index < stream_count; index += 1)
     {
