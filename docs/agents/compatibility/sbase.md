@@ -10,7 +10,7 @@ repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_sbase --config Release /path/to/sbase
+./build.sh test_sbase --config Release /path/to/sbase
 ```
 
 The checkout must be commit

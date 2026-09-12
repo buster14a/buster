@@ -70,9 +70,10 @@ disagree, inspect the code and update the affected guide in the same change.
 
 ## Build and validation
 
-`build.sh` / `build.ps1` bootstrap the native `build.c` driver with TCC; that
-driver owns build policy and orchestration. CMake generates the graph and Ninja
-executes it. Keep workflows out of shell, PowerShell, and CMake scripting.
+`build.sh` / `build.ps1` bootstrap and reuse an immutable native `build.c`
+driver with TCC; that driver owns build policy and orchestration. CMake
+generates the graph and Ninja executes it. Keep workflows out of shell,
+PowerShell, and CMake scripting.
 GitHub-hosted Clang bootstrapping is a documented CI exception, not a trusted
 local-bootstrap substitute; see [build guidance](docs/agents/build.md).
 

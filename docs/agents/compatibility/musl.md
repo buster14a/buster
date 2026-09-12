@@ -9,8 +9,8 @@ checkout; upstream sources are never copied into or patched in this repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_musl --config Release /path/to/musl-v1.2.6
-./build/build test_musl --config Release /path/to/musl-v1.2.6 /path/to/libc-test
+./build.sh test_musl --config Release /path/to/musl-v1.2.6
+./build.sh test_musl --config Release /path/to/musl-v1.2.6 /path/to/libc-test
 ```
 
 The checkout must be tag `v1.2.6` at commit

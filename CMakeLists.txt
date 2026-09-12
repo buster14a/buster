@@ -728,7 +728,10 @@ if (BUSTER_DEVELOPER_TARGETS)
     find_program(gdb_executable gdb)
     find_program(lldb_executable lldb)
 endif()
-set(BUSTER_CLANG_ANALYZE_DRIVER "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}")
+if (NOT DEFINED BUSTER_BUILD_DRIVER OR BUSTER_BUILD_DRIVER STREQUAL "")
+    set(BUSTER_BUILD_DRIVER "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}")
+endif()
+set(BUSTER_CLANG_ANALYZE_DRIVER "${BUSTER_BUILD_DRIVER}")
 
 if (BUSTER_DEVELOPER_TARGETS)
     message(STATUS "GDB: ${gdb_executable}")
@@ -1823,7 +1826,7 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
     (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS"))
     add_custom_target(test_self_host
         COMMAND
-            "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"
+            "${BUSTER_BUILD_DRIVER}"
             test_self_host
             --build-directory "${CMAKE_BINARY_DIR}"
             --config "$<CONFIG>"
@@ -1833,7 +1836,7 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
     )
     add_custom_target(test_mode_matrix
         COMMAND
-            "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"
+            "${BUSTER_BUILD_DRIVER}"
             test_mode_matrix
             --build-directory "${CMAKE_BINARY_DIR}"
             --config "$<CONFIG>"

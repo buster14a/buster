@@ -120,7 +120,7 @@
   the token count alone, since equal counts of differently spelled tokens are
   still different programs.
 - **`ninja_log_summary <build-dir> [--limit N]`** and **`time_trace_summary
-  <json-path>... [--limit N]`** (both new `build/build` commands, same
+  <json-path>... [--limit N]`** (both build-driver commands, same
   shape as `cmake_profile_summary` — see `build.c`) are diagnostics for
   *where compile time goes*: the former reads `<build-dir>/.ninja_log`
   directly (only useful for multi-TU/Debug builds — Release is a single

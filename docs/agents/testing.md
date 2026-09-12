@@ -7,6 +7,12 @@
 - All tests run inside the `ide` executable; there is no external unit-test
   framework. From the repository root, run `ide test --verbose=1 --ci=1` or
   build the `test_all` target.
+- The bootstrap wrappers have a controlled platform test at
+  `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
+  driver, and covers cold/warm reuse, dependency and compiler invalidation,
+  corrupt/incomplete entries, failure propagation, argument forwarding and
+  concurrent immutable publication. CI runs it on every desktop OS/architecture
+  lane before installing optional tools.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds

@@ -10,7 +10,7 @@ repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_cjson --config Release /path/to/cjson-v1.7.19
+./build.sh test_cjson --config Release /path/to/cjson-v1.7.19
 ```
 
 The checkout must be commit

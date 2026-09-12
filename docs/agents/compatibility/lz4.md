@@ -10,7 +10,7 @@ repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_lz4 --config Release /path/to/lz4-v1.10.0
+./build.sh test_lz4 --config Release /path/to/lz4-v1.10.0
 ```
 
 The checkout must be tag `v1.10.0` at commit
