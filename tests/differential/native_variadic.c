@@ -106,7 +106,7 @@ double native_va_hfa_overflow(double a, double b, double c, double d, double e, 
 // These lists cross an independently compiled translation-unit boundary.
 // A self-consistent private producer/consumer representation cannot pass.
 typedef int NativeVaListReader(void*, int);
-typedef int NativeVaListValueReader(va_list);
+typedef int NativeVaListValueReader(va_list, void*);
 struct NativeVaPublicLayout
 {
     void* stack;
@@ -232,13 +232,14 @@ int native_va_list_named(long long a, long long b, long long c, long long d,
     return bad;
 }
 
-// AAPCS64 va_list is a struct, not an array or pointer typedef. Passing it
-// by value must consume the callee's private copy, as for a vprintf call.
-int native_va_list_value(va_list ap)
+// AAPCS64 passes va_list as a struct with distinct callee storage. The
+// caller passes a separate copy and only ends that consumed list afterwards.
+int native_va_list_value(va_list ap, void* caller_list)
 {
     va_list copy;
     __builtin_va_copy(copy, ap);
-    int bad = __builtin_va_arg(ap, long long) != 1;
+    int bad = (void*)&ap == caller_list;
+    bad |= __builtin_va_arg(ap, long long) != 1;
     bad |= __builtin_va_arg(ap, double) != 2.5;
     bad |= __builtin_va_arg(ap, long long) != 3;
     bad |= __builtin_va_arg(copy, long long) != 1;
@@ -248,8 +249,11 @@ int native_va_list_value(va_list ap)
 int native_va_list_pass_value(NativeVaListValueReader* reader, int tag, ...)
 {
     va_list ap;
+    va_list passed;
     __builtin_va_start(ap, tag);
-    int bad = reader(ap);
+    __builtin_va_copy(passed, ap);
+    int bad = reader(passed, &passed);
+    __builtin_va_end(passed);
     bad |= __builtin_va_arg(ap, long long) != 1;
     __builtin_va_end(ap);
     return bad;
