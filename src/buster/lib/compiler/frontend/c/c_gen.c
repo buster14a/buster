@@ -14194,6 +14194,60 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* bui
     return result;
 }
 
+// Read the sign in the original format: a floating conversion can quiet a
+// signaling NaN or raise overflow/underflow, neither of which signbit permits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, CToken token, IrValueId value)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId value_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* type = ir_type_from_id(&builder->program->types, value_type);
+    if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64 || type->bit_width == 80 || type->bit_width == 128))
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        u32 width = type->bit_width;
+        CTypeKind bits_kind = width == 32 ? C_TYPE_UNSIGNED_INT : width == 80 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_LONG_LONG;
+        IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
+        IrValueId slot = c_ir_emit_temporary(builder, value_type, source);
+        if (bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+            c_ir_emit_store_place(builder, slot, value_type, value, source))
+        {
+            IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+            IrValueId address = c_ir_emit_address_of_place(builder, slot, value_type, source);
+            IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                         ? c_ir_emit_cast(builder, address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits_place = IR_VALUE_ID_INVALID;
+            if (bits_address.value != IR_ID_UNDERLYING_INVALID)
+            {
+                // The supported formats are little-endian. The wide sign field
+                // starts at byte eight: the x87 sign/exponent or binary128 high limb.
+                if (width > 64)
+                {
+                    IrValueId index = c_ir_emit_integer_value_typed(builder, width == 80 ? 4u : 1u, false, token, builder->s32_type);
+                    if (index.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        bits_place = c_ir_emit_index_place(builder, bits_address, index, source);
+                    }
+                }
+                else
+                {
+                    bits_place = c_ir_emit_dereference_place(builder, bits_address, source);
+                }
+            }
+            IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId shift = c_ir_emit_integer_value_typed(builder, width == 32 ? 31u : width == 80 ? 15u : 63u, false, token, bits_type);
+            if (bits.value != IR_ID_UNDERLYING_INVALID && shift.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrValueId sign = c_ir_emit_binary_value(builder, bits, shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+                if (sign.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    result = c_ir_emit_cast(builder, sign, builder->s32_type, source);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
 {
     // `__builtin_huge_val()` is a constant-valued compiler intrinsic.  Keep
@@ -14242,43 +14296,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
                                                                                        : UINT64_C(0x7ff8000000000000),
                                             source, S8("NAN"));
     }
-    // `signbit` is the one float predicate that cannot be written as a
-    // comparison: it has to answer -0.0 and it has to answer it differently
-    // from +0.0, which compare equal.  The value therefore goes through a
-    // stack slot and comes back as its bits, which is what the backend would
-    // do for a union read anyway.
     if (string_equal(link_name, S8("signbit")) || string_equal(link_name, S8("signbitf")) || string_equal(link_name, S8("signbitl")))
     {
-        if (argument_count != 1)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        IrTypeId bits_type = builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG];
-        // A narrower float widens to binary64 first: the conversion is exact
-        // for f32 and keeps the sign of every f80 value it rounds, including
-        // the zeroes and NaNs whose sign is the whole question here.
-        IrValueId value = c_ir_emit_cast(builder, arguments[0], builder->f64_type, source);
-        IrValueId slot = builder->f64_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_temporary(builder, builder->f64_type, source) : IR_VALUE_ID_INVALID;
-        if (bits_type.value == IR_ID_UNDERLYING_INVALID || value.value == IR_ID_UNDERLYING_INVALID || slot.value == IR_ID_UNDERLYING_INVALID ||
-            !c_ir_emit_store_place(builder, slot, builder->f64_type, value, source))
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
-        IrValueId address = c_ir_emit_address_of_place(builder, slot, builder->f64_type, source);
-        IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
-                                     ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
-                                     : IR_VALUE_ID_INVALID;
-        IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source) : IR_VALUE_ID_INVALID;
-        IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
-        IrValueId sign_shift = c_ir_emit_integer_value_typed(builder, 63, false, token, bits_type);
-        if (bits.value == IR_ID_UNDERLYING_INVALID || sign_shift.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrValueId sign = c_ir_emit_binary_value(builder, bits, sign_shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
-        return sign.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, sign, builder->s32_type, source);
+        return argument_count == 1 ? c_ir_emit_signbit_value(builder, token, arguments[0]) : IR_VALUE_ID_INVALID;
     }
     bool isnan_builtin = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isnan"));
     bool isinf_builtin = string_equal(link_name, S8("isinf")) || string_equal(link_name, S8("isinff"));
