@@ -158,13 +158,35 @@ static int test_compare_exchange(Limb seed)
     return failed;
 }
 
+static int test_aggregate(Limb seed)
+{
+    _Atomic(Pair) cell;
+    Pair first = {seed, ~seed};
+    Pair second = {~seed, seed};
+    Pair expected = {0, 0};
+    __c11_atomic_store(&cell, first, __ATOMIC_SEQ_CST);
+    Pair old = __c11_atomic_exchange(&cell, second, __ATOMIC_ACQ_REL);
+    int failed = old.low != first.low || old.high != first.high;
+    int changed = __c11_atomic_compare_exchange_strong(&cell, &expected, first, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    failed |= changed || expected.low != second.low || expected.high != second.high;
+    changed = __c11_atomic_compare_exchange_strong(&cell, &expected, first, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    failed |= !changed || expected.low != second.low || expected.high != second.high;
+    old = __c11_atomic_load(&cell, __ATOMIC_RELAXED);
+    failed |= old.low != first.low || old.high != first.high;
+    return failed;
+}
+
+// The promoted nine-byte representation and zero padding are Buster contracts,
+// not a portable external-compiler oracle. Keep their original test intact in
+// every Buster mode; external controls exercise the padding-free Pair above.
+#if defined(__BUSTER__)
 struct __attribute__((packed)) Nine
 {
     Limb low;
     unsigned char high;
 };
 
-static int test_aggregate(Limb seed)
+static int test_promoted_aggregate(Limb seed)
 {
     _Atomic(struct Nine) cell;
     struct Nine first = {seed, 0x81};
@@ -184,6 +206,8 @@ static int test_aggregate(Limb seed)
         failed |= bytes[byte] != 0;
     return failed;
 }
+
+#endif
 
 static int test_signed_and_large_frame(Limb seed)
 {
@@ -215,6 +239,9 @@ int main(void)
     int failed = test_updates(seed);
     failed |= test_compare_exchange(seed) << 1;
     failed |= test_aggregate(seed) << 2;
+#if defined(__BUSTER__)
+    failed |= test_promoted_aggregate(seed) << 4;
+#endif
     failed |= test_signed_and_large_frame(seed) << 3;
     return failed;
 }

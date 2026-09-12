@@ -1952,7 +1952,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                 String8 description = string_format(arguments->arena, S8("atomic update {S8} {S8} {S8}: {S8}"),
                     atomic_pair_targets[target], atomic_update_modes[mode], frontends[frontend], compiled.diagnostic);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
-                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 9 &&
+                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 10 &&
                     compiled.codegen_statistics.fallback_function_count == 0, description);
 #if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS
                 bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
@@ -2865,6 +2865,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    // Two all-host controls precede eight mixed-compiler executions. The host
+    // owns threads, independent atomic operations, ticket accounting and timeouts.
+    for (u32 variant = 0; variant < 2 + 2 * BUSTER_ARRAY_LENGTH(modes); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 object = buster_test_temporary_path(arena, S8("buster-atomic-contention"), S8(".o"));
+        String8 executable = buster_test_temporary_path(arena, S8("buster-atomic-contention"), S8(""));
+        bool input_ready = true;
+        if (variant >= 2)
+        {
+            u32 mode = (variant - 2) / 2;
+            String8 compile[] = {
+                S8("-c"), S8("-g0"), S8("-o"), object, S8("-fverify-codegen"),
+                (variant & 1) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"),
+                string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                S8("tests/basic_c_atomic_pair_contention.c"),
+            };
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            invocation.reject_machine_fallback = mode != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            input_ready = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+            BUSTER_TEST_RAW(arguments, input_ready, compiled.diagnostic);
+            BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 6 && compiled.codegen_statistics.fallback_function_count == 0);
+        }
+        if (input_ready)
+        {
+            String8 link[16];
+            u32 count = 0;
+            link[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            link[count++] = S8("-std=gnu11");
+            link[count++] = variant == 0 ? S8("-O0") : S8("-O2");
+            link[count++] = S8("-fwrapv");
+            link[count++] = S8("-fno-strict-aliasing");
+            link[count++] = S8("-funsigned-char");
+            link[count++] = S8("-pthread");
+            link[count++] = S8("tests/host_atomic_pair_contention.c");
+            link[count++] = variant < 2 ? S8("tests/basic_c_atomic_pair_contention.c") : object;
+#if BUSTER_LINUX
+            link[count++] = S8("-latomic");
+#endif
+            link[count++] = S8("-o");
+            link[count++] = executable;
+            ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                           .use_process_environment = true};
+            ProcessSpawnResult compiler = os_process_spawn((SliceString8){link, count}, (SliceString8){0}, (SliceString8){0}, capture);
+            ProcessWaitResult linked = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
+            bool linked_ok = compiler.handle && !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST_RAW(arguments, linked_ok, string_format(arena, S8("atomic contention host link variant={u32}: {S8}"), variant,
+                (String8){(char8*)linked.streams[STANDARD_STREAM_ERROR].pointer, linked.streams[STANDARD_STREAM_ERROR].length}));
+            if (linked_ok)
+            {
+                ProcessSpawnResult child = os_process_spawn((SliceString8){&executable, 1}, (SliceString8){0}, (SliceString8){0}, capture);
+                ProcessWaitResult ran = child.handle ? os_process_wait_deadline(arena, child, 35000000) : (ProcessWaitResult){0};
+                String8 output = {(char8*)ran.streams[STANDARD_STREAM_OUTPUT].pointer, ran.streams[STANDARD_STREAM_OUTPUT].length};
+                bool passed = child.handle && !ran.timed_out && ran.result == PROCESS_RESULT_SUCCESS &&
+                              string_first_sequence(output, S8("ATOMIC_PAIR_CONTENTION:PASS")) != BUSTER_STRING_NO_MATCH;
+                BUSTER_TEST_RAW(arguments, passed, string_format(arena, S8("atomic contention execution variant={u32}: {S8}"), variant, output));
+                arguments->show(arguments, S8("ATOMIC_PAIR_CONTENTION variant={u32} passed={u32}\n"), variant, (u32)passed);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
@@ -2917,6 +2990,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult complement = compiler_driver_test_x86_64_i128_complement(arguments);
     result.test_count += complement.test_count;
     result.succeeded_test_count += complement.succeeded_test_count;
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    UnitTestResult contention = compiler_driver_test_atomic_pair_contention(arguments);
+    result.test_count += contention.test_count;
+    result.succeeded_test_count += contention.succeeded_test_count;
+#endif
     UnitTestResult fallback = compiler_driver_test_machine_fallback(arguments);
     result.test_count += fallback.test_count;
     result.succeeded_test_count += fallback.succeeded_test_count;
