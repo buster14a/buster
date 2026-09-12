@@ -8,6 +8,9 @@
 // the defining instruction, never by aliasing mutable C storage. All storage
 // still counts toward the existing 512-byte frame limit; aggregate ABIs and
 // aggregate block parameters remain explicit unsupported cases.
+// ebpf_fe_last_uses and ebpf_fe_allocate recycle block-local scalar slots.
+// Arguments, cross-block values, rematerialization inputs, pointers and aggregate
+// snapshots retain dedicated storage; edge-copy scratch never aliases values.
 // ebpf_initialize_symbols seeds the dense key domain; ebpf_add_symbol_record
 // publishes stable record indices, and ebpf_symbol_by_key also serves ELF
 // relocation resolution. Symbol rows retain insertion order through emission.
@@ -176,6 +179,8 @@ struct EbpfFunctionEmitter
     s16 temporary_base;
     u32 temporary_count;
     u32 frame_size;
+    s16 cached_slot;
+    u8 cached_register;
 };
 
 enum
@@ -751,6 +756,9 @@ static bool ebpf_patch_jump(EbpfContext* context, EbpfSection* section, u32 inst
 
 static void ebpf_fe_insn(EbpfFunctionEmitter* emitter, u8 code, u8 destination, u8 source, s16 offset, s32 immediate)
 {
+    // Forward only until the next emitted instruction. This also invalidates
+    // across calls, branches, address rematerialization and register clobbers.
+    emitter->cached_slot = EBPF_SLOT_NONE;
     if (!ebpf_failed(emitter->context) && !ebpf_emit_insn(emitter->context, emitter->section, code, destination, source, offset, immediate))
     {
         ebpf_fail(emitter->context, EBPF_ERROR_ENCODING, ebpf_s8("failed to append eBPF instruction"), emitter->function, 0, 0,
@@ -822,7 +830,18 @@ static void ebpf_fe_store_memory(EbpfFunctionEmitter* emitter, u8 base, s16 offs
 
 static void ebpf_fe_load_stack(EbpfFunctionEmitter* emitter, u8 destination, s16 offset)
 {
-    ebpf_fe_load_memory(emitter, destination, EBPF_REG_FP, offset, 8);
+    if (emitter->cached_slot == offset)
+    {
+        emitter->cached_slot = EBPF_SLOT_NONE;
+        if (destination != emitter->cached_register)
+        {
+            ebpf_fe_mov_reg(emitter, destination, emitter->cached_register);
+        }
+    }
+    else
+    {
+        ebpf_fe_load_memory(emitter, destination, EBPF_REG_FP, offset, 8);
+    }
 }
 
 static void ebpf_fe_store_stack(EbpfFunctionEmitter* emitter, s16 offset, u8 source)
@@ -1140,6 +1159,8 @@ static void ebpf_fe_store_result(EbpfFunctionEmitter* emitter, IrInstruction* in
     if (slot != EBPF_SLOT_NONE)
     {
         ebpf_fe_store_stack(emitter, slot, source);
+        emitter->cached_slot = slot;
+        emitter->cached_register = source;
     }
 }
 
@@ -1163,160 +1184,205 @@ static bool ebpf_instruction_is_rematerialized(IrInstruction* instruction)
     }
 }
 
-static bool ebpf_fe_allocate(EbpfFunctionEmitter* emitter)
+enum
+{
+    EBPF_STACK_BYTES = 512,
+    EBPF_SLOT_BYTES = 8,
+    EBPF_SLOT_COUNT = EBPF_STACK_BYTES / EBPF_SLOT_BYTES,
+};
+
+BUSTER_GLOBAL_LOCAL u32* ebpf_fe_last_uses(EbpfFunctionEmitter* emitter, Arena* arena)
+{
+    IrFunction* function = emitter->function;
+    u32* last_uses = arena_allocate_zeroed(arena, u32, function->value_count ? function->value_count : 1);
+    u32* owners = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    for (u32 index = 0; index < function->instruction_count; index += 1) owners[index] = UINT32_MAX;
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (u32 index = block->first_instruction.value; index != IR_ID_UNDERLYING_INVALID && index <= block->last_instruction.value; index += 1)
+        {
+            owners[index] = block_index;
+        }
+    }
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* instruction = function->instructions + index;
+        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+        {
+            u32 value = instruction->operands[operand_index].value;
+            u32 definition = function->values[value].definition.value;
+            emitter->use_counts[value] += 1;
+            // Address recipes consume their inputs when rematerialized, not at
+            // the recipe's definition. Pin those inputs, including nested
+            // recipes, instead of walking the expression again at every use.
+            if (ebpf_instruction_is_rematerialized(instruction) || definition >= function->instruction_count ||
+                owners[definition] != owners[index] || owners[index] == UINT32_MAX)
+            {
+                last_uses[value] = UINT32_MAX;
+            }
+            else if (last_uses[value] != UINT32_MAX && last_uses[value] < index)
+            {
+                last_uses[value] = index;
+            }
+        }
+    }
+    IrPublishedCfg const* cfg = function->published_cfg;
+    for (u32 index = 0; index < cfg->argument_count; index += 1)
+    {
+        u32 value = cfg->arguments[index].value;
+        emitter->use_counts[value] += 1;
+        last_uses[value] = UINT32_MAX;
+    }
+    return last_uses;
+}
+
+BUSTER_GLOBAL_LOCAL bool ebpf_fe_allocate(EbpfFunctionEmitter* emitter)
 {
     EbpfContext* context = emitter->context;
     IrFunction* function = emitter->function;
     u32 value_count = function->value_count ? function->value_count : 1;
     emitter->value_slots = arena_allocate(context->arena, s16, value_count);
     emitter->local_offsets = arena_allocate(context->arena, s16, value_count);
-    emitter->use_counts = arena_allocate(context->arena, u32, value_count);
-    memset(emitter->use_counts, 0, sizeof(u32) * value_count);
+    emitter->use_counts = arena_allocate_zeroed(context->arena, u32, value_count);
     for (u32 index = 0; index < value_count; index += 1)
     {
         emitter->value_slots[index] = EBPF_SLOT_NONE;
         emitter->local_offsets[index] = EBPF_SLOT_NONE;
     }
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-        {
-            if (instruction->operands[operand_index].value < function->value_count)
-            {
-                emitter->use_counts[instruction->operands[operand_index].value] += 1;
-            }
-        }
-    }
-    u32 maximum_parameters = 0;
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        if (block->parameter_count > maximum_parameters)
-        {
-            maximum_parameters = block->parameter_count;
-        }
-    }
-    IrPublishedCfg const* cfg = function->published_cfg;
-    for (u32 index = 0; index < cfg->argument_count; index += 1)
-    {
-        emitter->use_counts[cfg->arguments[index].value] += 1;
-    }
-
+    TemporalArena temporary = scratch_begin(&context->arena, 1);
+    u32* last_uses = ebpf_fe_last_uses(emitter, temporary.arena);
     u64 cursor = 0;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    for (u32 index = 0; index < function->instruction_count && !ebpf_failed(context); index += 1)
     {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count)
-        {
-            continue;
-        }
+        IrInstruction* instruction = function->instructions + index;
+        if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count) continue;
         IrType* type = ebpf_type(context, instruction->canonical_type);
         u32 size = ebpf_type_size(type);
         u32 alignment = type && type->layout.alignment ? type->layout.alignment : 1;
-        if (!size || alignment > 8 || (alignment & (alignment - 1)))
+        if (!size || alignment > EBPF_SLOT_BYTES || (alignment & (alignment - 1)))
         {
             ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_TYPE, ebpf_s8("eBPF local requires a resolved layout with at most 8-byte alignment"),
                       function, 0, instruction, IR_SYMBOL_ID_INVALID);
-            return false;
         }
-        cursor = ebpf_align_up(cursor, alignment);
-        cursor += size;
-        if (cursor > 512)
+        else
         {
-            ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function, 0,
-                      instruction, IR_SYMBOL_ID_INVALID);
-            return false;
+            // The base is -cursor: align the end of this downward allocation.
+            cursor = ebpf_align_up(cursor + size, alignment);
+            if (cursor > EBPF_STACK_BYTES)
+            {
+                ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function, 0,
+                          instruction, IR_SYMBOL_ID_INVALID);
+            }
+            else emitter->local_offsets[instruction->result.value] = (s16)(-(s32)cursor);
         }
-        emitter->local_offsets[instruction->result.value] = (s16)(-(s32)cursor);
     }
-
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    u32 maximum_parameters = 0;
+    IrPublishedCfg const* cfg = function->published_cfg;
+    for (u32 block_index = 0; block_index < function->block_count && !ebpf_failed(context); block_index += 1)
     {
-        IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
-        for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
+        IrCfgBlock const* block = cfg->blocks + block_index;
+        if (block->parameter_count > maximum_parameters) maximum_parameters = block->parameter_count;
+        for (u32 index = 0; index < block->parameter_count && !ebpf_failed(context); index += 1)
         {
-            IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
+            IrCfgParameter const* parameter = cfg->parameters + block->parameter_offset + index;
             if (parameter->value.value >= function->value_count || !ebpf_type_is_scalar(ebpf_type(context, parameter->canonical_type)))
             {
                 ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("aggregate eBPF block parameters are unsupported"), function,
                           function->blocks + block_index, 0, IR_SYMBOL_ID_INVALID);
-                return false;
             }
-            cursor = ebpf_align_up(cursor, 8) + 8;
-            if (cursor > 512)
+            else
             {
-                ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function,
-                          function->blocks + block_index, 0, IR_SYMBOL_ID_INVALID);
-                return false;
+                cursor = ebpf_align_up(cursor, EBPF_SLOT_BYTES) + EBPF_SLOT_BYTES;
+                if (cursor > EBPF_STACK_BYTES)
+                {
+                    ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function,
+                              function->blocks + block_index, 0, IR_SYMBOL_ID_INVALID);
+                }
+                else emitter->value_slots[parameter->value.value] = (s16)(-(s32)cursor);
             }
-            emitter->value_slots[parameter->value.value] = (s16)(-(s32)cursor);
         }
     }
-
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    // Allocate fixed storage first. Pointer spills and aggregate snapshots never
+    // share slots with scalar temporaries or partially written local objects.
+    // ARGUMENT lifetimes begin in the prologue even for late IR definitions.
+    for (u32 index = 0; index < function->instruction_count && !ebpf_failed(context); index += 1)
     {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count ||
-            (!emitter->use_counts[instruction->result.value] && instruction->opcode != IR_OPCODE_ARGUMENT) ||
-            ebpf_instruction_is_rematerialized(instruction))
-        {
-            continue;
-        }
+        IrInstruction* instruction = function->instructions + index;
+        u32 value = instruction->result.value;
+        if (value >= function->value_count || (!emitter->use_counts[value] && instruction->opcode != IR_OPCODE_ARGUMENT) ||
+            ebpf_instruction_is_rematerialized(instruction)) continue;
         IrType* type = ebpf_type(context, instruction->canonical_type);
         bool aggregate = ebpf_type_is_local_aggregate(type);
         if (!ebpf_type_is_scalar(type) && !aggregate)
         {
-            if (instruction->opcode == IR_OPCODE_LOAD && !emitter->use_counts[instruction->result.value] && !instruction->volatile_access)
-            {
-                continue;
-            }
             ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("aggregate eBPF SSA values are unsupported"), function, 0,
                       instruction, IR_SYMBOL_ID_INVALID);
-            return false;
         }
-        u64 slot_size = aggregate ? type->layout.size : 8;
-        if (aggregate && (slot_size > 512 || !type->layout.alignment || type->layout.alignment > 8 ||
-                          (type->layout.alignment & (type->layout.alignment - 1))))
+        else if (aggregate && (type->layout.size > EBPF_STACK_BYTES || !type->layout.alignment || type->layout.alignment > EBPF_SLOT_BYTES ||
+                               (type->layout.alignment & (type->layout.alignment - 1))))
         {
             ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("invalid eBPF local aggregate snapshot layout"), function, 0,
                       instruction, IR_SYMBOL_ID_INVALID);
-            return false;
         }
-        cursor = ebpf_align_up(cursor, 8) + ebpf_align_up(slot_size, 8);
-        if (cursor > 512)
+        else if (aggregate || !ebpf_type_is_integer(type) || instruction->opcode == IR_OPCODE_ARGUMENT || last_uses[value] == UINT32_MAX)
         {
-            ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function, 0,
-                      instruction, IR_SYMBOL_ID_INVALID);
-            return false;
+            u64 size = aggregate ? type->layout.size : EBPF_SLOT_BYTES;
+            cursor = ebpf_align_up(cursor, EBPF_SLOT_BYTES) + ebpf_align_up(size, EBPF_SLOT_BYTES);
+            if (cursor > EBPF_STACK_BYTES)
+            {
+                ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function, 0,
+                          instruction, IR_SYMBOL_ID_INVALID);
+            }
+            else emitter->value_slots[value] = (s16)(-(s32)cursor);
         }
-        emitter->value_slots[instruction->result.value] = (s16)(-(s32)cursor);
     }
-
+    u64 reusable_base = ebpf_align_up(cursor, EBPF_SLOT_BYTES);
+    u32 reusable_count = 0;
+    for (u32 block_index = 0; block_index < function->block_count && !ebpf_failed(context); block_index += 1)
+    {
+        // The verifier bounds this scan to 64 slots; no sorting, interference
+        // graph or CFG fixed point is needed. No pool value escapes its block.
+        u32 ends[EBPF_SLOT_COUNT] = {0};
+        IrBlock* block = function->blocks + block_index;
+        for (u32 index = block->first_instruction.value; index != IR_ID_UNDERLYING_INVALID && index <= block->last_instruction.value &&
+             !ebpf_failed(context); index += 1)
+        {
+            IrInstruction* instruction = function->instructions + index;
+            u32 value = instruction->result.value;
+            if (value >= function->value_count || !emitter->use_counts[value] || emitter->value_slots[value] != EBPF_SLOT_NONE ||
+                ebpf_instruction_is_rematerialized(instruction)) continue;
+            u32 slot = 0;
+            // Closed intervals: a result cannot overwrite any operand while
+            // its instruction is still loading operands or constructing data.
+            while (slot < reusable_count && ends[slot] && ends[slot] >= index) slot += 1;
+            u64 end = reusable_base + ((u64)slot + 1) * EBPF_SLOT_BYTES;
+            if (end > EBPF_STACK_BYTES)
+            {
+                ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function,
+                          block, instruction, IR_SYMBOL_ID_INVALID);
+            }
+            else
+            {
+                if (slot == reusable_count) reusable_count += 1;
+                ends[slot] = last_uses[value];
+                emitter->value_slots[value] = (s16)(-(s32)end);
+            }
+        }
+    }
+    cursor = reusable_base + (u64)reusable_count * EBPF_SLOT_BYTES;
     emitter->temporary_count = maximum_parameters;
-    if (maximum_parameters)
+    emitter->temporary_base = maximum_parameters ? (s16)(-(s32)(cursor + EBPF_SLOT_BYTES)) : EBPF_SLOT_NONE;
+    cursor += (u64)maximum_parameters * EBPF_SLOT_BYTES;
+    if (!ebpf_failed(context) && cursor > EBPF_STACK_BYTES)
     {
-        cursor = ebpf_align_up(cursor, 8);
-        u64 base_cursor = cursor + 8;
-        cursor += (u64)maximum_parameters * 8;
-        if (cursor > 512)
-        {
-            ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF block-parameter copies exceed the 512-byte verifier stack limit"),
-                      function, 0, 0, IR_SYMBOL_ID_INVALID);
-            return false;
-        }
-        emitter->temporary_base = (s16)(-(s32)base_cursor);
+        ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF block-parameter copies exceed the 512-byte verifier stack limit"),
+                  function, 0, 0, IR_SYMBOL_ID_INVALID);
     }
-    else
-    {
-        emitter->temporary_base = EBPF_SLOT_NONE;
-    }
-    emitter->frame_size = (u32)ebpf_align_up(cursor, 8);
-    if (emitter->frame_size > context->stats.max_stack_bytes)
-    {
-        context->stats.max_stack_bytes = emitter->frame_size;
-    }
-    return true;
+    emitter->frame_size = (u32)cursor;
+    if (!ebpf_failed(context) && emitter->frame_size > context->stats.max_stack_bytes) context->stats.max_stack_bytes = emitter->frame_size;
+    scratch_end(temporary);
+    return !ebpf_failed(context);
 }
 
 static bool ebpf_fe_validate_abi(EbpfFunctionEmitter* emitter)
@@ -2019,6 +2085,7 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
     }
     record->offset = emitter.section->data.length;
     emitter.section_start = record->offset;
+    emitter.cached_slot = EBPF_SLOT_NONE;
     ebpf_fe_emit_prologue(&emitter);
     // Execution falls through the prologue into the declared entry, which
     // need not have block ID zero. Branch fixups still use the original IDs.
@@ -2033,6 +2100,7 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
                       IR_SYMBOL_ID_INVALID);
             break;
         }
+        emitter.cached_slot = EBPF_SLOT_NONE;
         emitter.block_starts[block->id.value] = ebpf_section_instruction_count(emitter.section);
         IrInstructionId instruction_id = block->first_instruction;
         while (instruction_id.value != IR_ID_UNDERLYING_INVALID && !ebpf_failed(context))

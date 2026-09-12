@@ -1,0 +1,88 @@
+{
+  "base": "719ba64e3022a0ae1db078ea97cb951a70ac02a0",
+  "local_implementation": "8b40e04efd844bfc5f952264b4b5bfa0f2f28789",
+  "published_implementation": "821562a1357f53db02ce8059663cfe05486b63dc",
+  "implementation_tree": "09be6c65a03134efce191d48877ace1b5387c1f4",
+  "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+  "probe_flags": [
+    "-O3",
+    "-DNDEBUG",
+    "-DBUSTER_OPTIMIZE=1",
+    "-g",
+    "-fno-omit-frame-pointer",
+    "-march=native",
+    "-fwrapv",
+    "-fno-strict-aliasing",
+    "-funsigned-char",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-fstack-usage",
+    "-Isrc",
+    "-Ibuild/generated",
+    "-Wno-unused-function",
+    "-Wno-undefined-internal",
+    "-Wl,--gc-sections",
+    "-lm"
+  ],
+  "machine": "Intel Xeon Platinum 8573C KVM guest, shared, unpinned",
+  "probe_binaries": {
+    "base": "d86716088a46fa9dd09781e13579d4b16faf5935ec9ac986f37fd895c7ff6f18",
+    "patch": "713e17a6b9ab0ab3411ab33f3b08f740b4376f5196d5a0a7cf46e5919f9d5201"
+  },
+  "logs": [
+    {
+      "file": "baseline-self-host-clang.log",
+      "sha256": "53a522fe379e4ddff3d93c7dc36bbe8ea092e12adb602b7612542fca277d121a",
+      "bytes": 18235,
+      "relevant_lines": [
+        "SELF_HOST fixed_point bytes=38167160 stage1=build-base/self-host/Release/ide-stage1 stage2=build-base/self-host/Release/ide-stage2"
+      ]
+    },
+    {
+      "file": "baseline-test-all.log",
+      "sha256": "1696874ee97185a96637573345d45105138c216fa3db8239e72dfc661c639068",
+      "bytes": 346239,
+      "relevant_lines": [
+        "TEST_MODULE_TIMING index=41 module=link_tests duration_ns=76052623 passed=1256 failed=0 assertions=1256 status=pass",
+        "[1943578/1943578] Unit tests",
+        "[47/47] Module tests"
+      ]
+    },
+    {
+      "file": "baseline-cjson.log",
+      "sha256": "362822476840fc1f92c9758f6291a76ebc856c2dd9ab82e74b0f8348c5f336a1",
+      "bytes": 61484,
+      "relevant_lines": [
+        "CJSON_IDE_LINK status=pass equal_reference=1",
+        "CJSON_RESULT commit=c859b25da02955fef659d658b8f324b5cde87be3 core_tests=18 utils_tests=3 allocators=4 status=pass"
+      ]
+    },
+    {
+      "file": "sanitize-test-all.log",
+      "sha256": "da8109aea1db50f9940696d8019d17c535389ca6568bf38ee37878a9d3d6cd30",
+      "bytes": 181663,
+      "relevant_lines": [
+        "TEST_MODULE_TIMING index=41 module=link_tests duration_ns=1831087919 passed=67708 failed=0 assertions=67708 status=pass",
+        "[1997194/1997194] Unit tests",
+        "[47/47] Module tests"
+      ]
+    },
+    {
+      "file": "initializer-test-base.log",
+      "sha256": "5a8b55eb7c1c38ec1205e2efc2456c84b6390416e444ecd777abdb05558f08ab",
+      "bytes": 38,
+      "relevant_lines": [
+        "initializer assertions: 66495 / 66495"
+      ]
+    },
+    {
+      "file": "initializer-test-patch.log",
+      "sha256": "5a8b55eb7c1c38ec1205e2efc2456c84b6390416e444ecd777abdb05558f08ab",
+      "bytes": 38,
+      "relevant_lines": [
+        "initializer assertions: 66495 / 66495"
+      ]
+    }
+  ],
+  "note": "The retained C probe moves test-mode-only cleanup to its common return after measurement; preprocessing without INITIALIZER_REGRESSION keeps the measured linking/measurement code unchanged."
+}
