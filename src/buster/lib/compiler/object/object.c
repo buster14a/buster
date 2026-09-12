@@ -9653,7 +9653,8 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
 
 BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
 {
-    if (module->function_count != module->entry_count || (module->function_count && (!module->functions || !module->entries)))
+    if (module->function_count != module->entry_count || module->assembly_function_count > module->function_count ||
+        (module->function_count && (!module->functions || !module->entries)))
     {
         return false;
     }
@@ -9838,8 +9839,9 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     ObjectWindowsUnwindResult windows_unwind = {0};
     if (target_uses_pe_unwind(target))
     {
+        u32 compiler_function_count = module->function_count - module->assembly_function_count;
         windows_unwind = target.cpu_arch == CPU_ARCH_X86_64 ? object_windows_x64_unwind_build(arena, module->functions, module->function_count)
-                                                             : object_windows_arm64_unwind_build(arena, module->functions, module->function_count);
+                                                             : object_windows_arm64_unwind_build(arena, module->functions, compiler_function_count);
         if (!windows_unwind.valid)
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
