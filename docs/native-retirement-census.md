@@ -34,17 +34,62 @@ revision produced an arbitrary executable.
 ## Frozen inventory and matrix
 
 `git ls-files -z -- tests` supplies the sorted input inventory. Every tracked
-`.c` file is a subject except seven explicitly named syntax/semantic/preprocessor
-rejection fixtures. Every input's role, byte count and `buster_hash_64` fingerprint
+`.c` file is a subject except twelve explicitly named diagnostic-rejection
+fixtures. Every input's role, byte count and `buster_hash_64` fingerprint
 is recorded, including excluded inputs. The decision uses exact paths:
 `basic_c_negative_constant_widening.c` remains a positive subject. Dormant `.bbb`
 files never become compilation rows. Headers and other support files are copied
 with the subjects, preserving their relative paths. Compilation reads these
 snapshots, including the snapshot's `tests` include directory.
 
-The initial inventory has 359 C subjects, 477 tracked input/support files and
-68,928 compilation rows. Counts are discovered afresh; newly tracked C fixtures
-automatically enter the next manifest. Nothing untracked silently enters a run.
+The exact excluded identities are:
+
+- `tests/basic_c_invalid_labels.c`
+- `tests/basic_c_invalid_asm_goto.c`
+- `tests/basic_c_invalid_bit_field_width.c`
+- `tests/basic_c_preprocessor_error.c`
+- `tests/self_host_bootstrap_invalid.c`
+- `tests/differential/reject_syntax.c`
+- `tests/differential/reject_type.c`
+- `tests/basic_c_bit_field_alignas.c`
+- `tests/basic_c_function_pointer_conflict.c`
+- `tests/basic_c_asm_literal_register.c`
+- `tests/basic_c_sizeof_missing_member.c`
+- `tests/basic_c_sizeof_parenthesized_type.c`
+
+The driver tests explicitly require the last five inputs to fail, including
+their diagnostic wording. The literal-register assembly case is an intentional
+codegen rejection; it is not a supported native subject. Excluded source bytes
+remain in `inputs.tsv` and the snapshot. Counts are discovered afresh; newly
+tracked C fixtures automatically enter the next manifest. Nothing untracked
+silently enters a run.
+
+Known language requirements use these exact-path recipes on both compiler legs:
+
+| Fixture | Added flags |
+| --- | --- |
+| `tests/basic_c_constexpr.c` | `-std=c23` |
+| `tests/basic_c_constexpr_leaf.c` | `-std=c23` |
+| `tests/basic_c_nullptr.c` | `-std=c23` |
+| `tests/basic_c_typeof.c` | `-std=c23` |
+| `tests/basic_c_dialect.c` | `-std=c23 -DEXPECTED_STDC_VERSION=202311L -DEXPECTED_GNU=0` |
+
+The first three settings match their registered driver tests. The `typeof`
+fixture uses `typeof_unqual`, whose C23 keyword gate is covered by the C frontend
+tests. The dialect recipe selects the registered strict C23 variant; the driver's
+other seven GNU/strict dialect variants remain separate coverage. Other inputs
+retain the pinned compiler's dialect default, including similarly named files.
+`inputs.tsv` freezes each recipe name and exact added flags; `rows.tsv` repeats
+the recipe name, and executed children retain every argument byte in `.argv`.
+
+The snapshot covers tracked `tests/` files and compiler executables. Host system
+headers, compiler resource headers such as `BUSTER_HOST_C_RESOURCE_INCLUDE`, and
+the inherited process environment remain external dependencies. The driver can
+read these outside the snapshot; their contents are neither copied nor hashed.
+`manifest.txt` records this limitation. A run using such dependencies is not a
+self-contained reproduction, and comparing it elsewhere requires the same
+host/resource-header setup. External fixtures needing additional setup remain
+unresolved subjects; the recipe list does not omit them or manufacture support.
 
 The full product is:
 
@@ -98,6 +143,10 @@ The command returns failure for any unresolved baseline, supported-native gap,
 protocol/infrastructure failure, or missing selected execution. It still attempts
 the remaining rows and retains their observations.
 
+An older baseline that omits `CODEGEN` counters for an empty translation unit
+also remains unresolved. The census does not invent a zero function count or
+relax verifier/telemetry requirements to turn that observation into support.
+
 Verbose codegen now retains its aggregate statistics after a codegen error,
 including strict fallback rejection. `fallback-counters.tsv` preserves every
 reported reason/opcode/stage total, keyed by row. Successful and failed children
@@ -140,7 +189,7 @@ fixed points, independent mixed-compiler/runtime correctness, native unwinding,
 representative external workloads and accepted throughput/memory/size/runtime
 budgets remain separate requirements of #36.
 
-`--self-test` checks exact exclusions, strict decimal/counter/attribution protocols,
+`--self-test` checks exact exclusions and language recipes, strict decimal/counter/attribution protocols,
 revision/path fields and complete, disjoint shard selection without needing a
 compiler. Real smoke runs must additionally exercise successful objects, known
 strict failures and refusal to reuse an evidence directory. The deadline and

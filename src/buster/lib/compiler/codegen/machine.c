@@ -488,6 +488,44 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .fixed_register_mask = 0xf,
         .fixed_registers = {MACHINE_X64_RCX, MACHINE_X64_RDX, MACHINE_X64_R8, MACHINE_X64_R9},
     },
+    [MACHINE_X64_F80_BINARY] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
+    [MACHINE_X64_F80_NEGATE] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
+    [MACHINE_X64_F80_COMPARE] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
+        .fixed_register_mask = 1,
+        .fixed_registers = {MACHINE_X64_RAX},
+        .clobber_mask = 1u << MACHINE_X64_RCX,
+    },
+    [MACHINE_X64_F80_CONVERT] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .clobber_mask = 1u << MACHINE_X64_RAX,
+    },
+    [MACHINE_X64_F80_RESULT_LOAD] = {
+        .operand_count = 1, .operand_info = {MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
+    },
+    [MACHINE_X64_F80_RESULT_STORE] = {
+        .operand_count = 1, .operand_info = {MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+    },
     [MACHINE_X64_VA_SAVE] = {
         .operand_count = 1,
         // The operand is a frame slot, so no register class is attached.
@@ -1260,6 +1298,12 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
 #define MACHINE_X64_RECIPE_ROW(opcode, category, index, status) [opcode] = MACHINE_EMIT_RECIPE_##category##_BASE + index,
     MACHINE_X86_64_EMIT_REGISTRY(MACHINE_X64_RECIPE_ROW)
 #undef MACHINE_X64_RECIPE_ROW
+    [MACHINE_X64_F80_BINARY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 77,
+    [MACHINE_X64_F80_NEGATE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 78,
+    [MACHINE_X64_F80_COMPARE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 79,
+    [MACHINE_X64_F80_CONVERT] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 80,
+    [MACHINE_X64_F80_RESULT_LOAD] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 81,
+    [MACHINE_X64_F80_RESULT_STORE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 82,
     [MACHINE_A64_MOV_RR] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 0,
     [MACHINE_A64_MOV32_RR] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 1,
     [MACHINE_A64_SXTB] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 2,
@@ -1489,6 +1533,14 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
             // Alignment, the page-probe loop, the final subtract/touch, and
             // the RSP result are substantially larger than a normal row.
             encode_budget = 64;
+            break;
+        case MACHINE_X64_F80_BINARY:
+        case MACHINE_X64_F80_NEGATE:
+        case MACHINE_X64_F80_COMPARE:
+        case MACHINE_X64_F80_CONVERT:
+        case MACHINE_X64_F80_RESULT_LOAD:
+        case MACHINE_X64_F80_RESULT_STORE:
+            encode_budget = 128;
             break;
         case MACHINE_X64_VA_SAVE:
             // Six GP stores plus eight XMM stores, each with a disp32 frame
@@ -2583,6 +2635,33 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
     bool valid = true;
     switch (instruction->opcode)
     {
+        case MACHINE_X64_F80_BINARY:
+        case MACHINE_X64_F80_NEGATE:
+        case MACHINE_X64_F80_COMPARE:
+        case MACHINE_X64_F80_CONVERT:
+        case MACHINE_X64_F80_RESULT_LOAD:
+        case MACHINE_X64_F80_RESULT_STORE:
+        {
+            bool binary = instruction->opcode == MACHINE_X64_F80_BINARY;
+            bool compare = instruction->opcode == MACHINE_X64_F80_COMPARE;
+            bool convert = instruction->opcode == MACHINE_X64_F80_CONVERT;
+            u32 count = binary || compare || convert ? 3u : instruction->opcode == MACHINE_X64_F80_NEGATE ? 2u : 1u;
+            bool bridge = instruction->opcode == MACHINE_X64_F80_RESULT_LOAD || instruction->opcode == MACHINE_X64_F80_RESULT_STORE;
+            valid = binary ? instruction->payload < 4u : compare || convert ? instruction->payload < 6u :
+                    bridge ? instruction->payload == 0 || instruction->payload == 16 : instruction->payload == 0;
+            for (u32 operand = compare ? 1u : 0u; operand < count && valid; operand += 1)
+            {
+                u32 bytes = 16 + (bridge ? instruction->payload : 0);
+                if (convert)
+                {
+                    bool to_f80 = instruction->payload == 0 || instruction->payload == 1 || instruction->payload == 4;
+                    bytes = operand == 2 || operand == (to_f80 ? 1u : 0u) ? 8u : 16u;
+                }
+                MachineRef ref = instruction->operands[operand];
+                u32 slot = machine_ref_payload(ref);
+                valid = machine_ref_kind(ref) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && function->stack_slot_sizes[slot] >= bytes;
+            }
+        } break;
         case MACHINE_X64_KMOV_FROM_GENERAL:
         case MACHINE_X64_KMOV_TO_GENERAL:
         case MACHINE_X64_KMOV:
@@ -2612,8 +2691,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     instruction->flags == 4 || instruction->flags == 8;
             break;
         case MACHINE_A64_LEA_INCOMING:
-            valid = (s32)instruction->payload >= -(s32)MACHINE_A64_VA_GP_SAVE_BYTES &&
-                    (s32)instruction->payload <= 4095;
+            valid = (s32)instruction->payload >= -(s32)MACHINE_A64_VA_GP_SAVE_BYTES;
             break;
         case MACHINE_A64_VA_HOME_WINDOWS:
             valid = function->windows_aarch64_frame && function->windows_aarch64_variadic && instruction->payload == 0;

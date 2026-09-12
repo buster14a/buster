@@ -98,6 +98,18 @@
   machine function, retaining separate selection-opcode and post-selection
   counters. The driver can require zero fallback with `-fno-machine-fallback`;
   see the [driver guide](driver.md) for the curated CI corpus and reason names.
+- Native signature and call storage is sized from canonical IR counts. Incoming
+  shapes, placements, argument values and normalization rows use arena arrays;
+  the existing value-fact walk sizes one reusable call workspace per function.
+  x86-64's per-type signature pool sums parameter counts in 64 bits. Stack
+  placements use 32-bit offsets and check the signed frame-displacement bound
+  before advancing cursors. There is no fixed source argument-count limit.
+  The many-argument fixture covers 25 integer, 33 floating, 65 narrow scalar,
+  33 mixed aggregate/HFA parameters and a 65-value variadic tail, with direct
+  and indirect calls and a hidden aggregate result pointer. A 522-parameter
+  variadic signature checks the general incoming-address expansion past 4095
+  bytes. Darwin callers extend narrow integer register arguments to 32 bits
+  before physical-register staging, as required by its public ABI.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
@@ -179,6 +191,21 @@
   discovery. Predicate pressure has its own seven-register scheduler budget.
   `basic_c_predicate_bank.c` and the machine module cover source selection,
   independent residency, spills, calls, widths, fixed operands and edge cycles.
+- SysV x86-64 f80 values use sixteen-byte frame homes. `machine_x64_emit_f80`
+  emits closed metadata-backed x87 transactions, with one explicit ST(i)
+  operand and architectural ST(0) left implicit in the exact token. Arithmetic,
+  negation, comparison and conversion rows carry memory/barrier membership;
+  no x87 register class is allocated. Comparisons repair unordered flags,
+  integer casts save/restore the caller's control word, and only call/return
+  bridges carry live ST results. Frame sizes and operation payloads are checked
+  by the MIR verifier. Scalar loads/stores copy ten payload bytes, while
+  constants and computed results clear private padding. Two-limb edge copies
+  carry f80 joins; ABI transport includes single-f80 wrappers and complex
+  results. See [wide float boundaries](frontend/wide-floats-assembly.md) for
+  unsupported i128 casts. Unsigned-64 conversion now composes signed casts
+  with scalar masks and exact zero/2^63 f80 corrections, without new opcodes
+  or CFG blocks. The extended-precision contract retains all 64 integer bits;
+  arbitrary rounding-control modes and the complete control word are preserved.
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete
@@ -228,7 +255,8 @@
   Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
   aggregates and 128-bit integers according to the canonical ABI classification.
   Indirect reads copy the complete value, including aggregates above sixteen
-  bytes; vector signatures remain excluded.
+  bytes. On AVX-512 targets, sixty-four-byte vectors use the same cursor and
+  indirect load, including named vector parameters and copied lists.
   Variadic callers duplicate scalar float bits into positional GPRs during the
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
@@ -262,6 +290,18 @@
   high limbs, private parameter writes, and forty-byte variadic aggregates.
   The direct backend still lacks wide variadic reads, so this fixture's
   complete module is a MIR gate rather than a NONE differential gate.
+- Windows/UEFI x86-64 sixty-four-byte vector signatures use the existing ZMM
+  vocabulary on AVX-512 targets. Arguments occupy one pointer slot with an
+  aligned private copy; callers stage register values through a frame slot,
+  and callees load whole vectors after all incoming pointer captures. Results
+  return in ZMM0. Vector literals construct their complete lanes into a
+  temporary frame before loading the resulting vector. Fixed and variadic
+  calls share the pointer placement, including named vector parameters.
+  `win64_vector.c` crosses Clang/MIR boundaries in both directions on capable
+  hosts, checks every result lane, caller preservation, raw variadic pointer
+  alignment, and live dynamic allocations. The fixed subset also executes
+  through NONE. Smaller vectors and model-dependent register splitting retain
+  the direct fallback; this change does not replace their representation.
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
   `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a

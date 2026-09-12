@@ -41,10 +41,6 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
-// Supported argument-list length: the register files plus the scalar
-// stack tail the subset stages, matching the x86-64 selector's cap.
-#define MACHINE_A64_MAX_ARGUMENTS 24
-
 // Larger frames address the compact callee-save area from X29 through X16.
 // The shared module accounts for the two extra address-setup words.
 #define MACHINE_A64_DIRECT_SAVE_MAX (A64_IMM12_MAX * 8u)
@@ -131,7 +127,7 @@ struct MachineA64ArgumentPlacement
 {
     u16 first_integer;
     u16 first_float;
-    u16 first_stack_offset;
+    u32 first_stack_offset;
     u8 on_stack;
     // Windows variadics may split an integer composite between X7 and SP.
     u8 split_register_parts;
@@ -190,12 +186,19 @@ struct MachineA64Selector
     u8* direct_call_uses;
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers.
-    u32 argument_values[MACHINE_A64_MAX_ARGUMENTS];
+    u32* argument_values;
+    u32 parameter_count;
     // Register shape and placement per parameter, plus the return shape,
     // computed once from the IR-owned AAPCS64 classification.
-    MachineA64ValueShape parameter_shapes[MACHINE_A64_MAX_ARGUMENTS];
-    MachineA64ArgumentPlacement parameter_placements[MACHINE_A64_MAX_ARGUMENTS];
+    MachineA64ValueShape* parameter_shapes;
+    MachineA64ArgumentPlacement* parameter_placements;
     MachineA64ValueShape return_shape;
+    // One reusable call workspace, sized by the existing canonical row walk.
+    u32 call_argument_capacity;
+    u32* call_argument_registers;
+    u32* call_argument_slots;
+    MachineA64ValueShape* call_argument_shapes;
+    MachineA64ArgumentPlacement* call_argument_placements;
     // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
     u32 hidden_return_slot;
     // Frame slot of the 64-byte X0-X7 variadic save area, or UINT32_MAX.
@@ -458,7 +461,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         // the integer file, takes the next sequential eight-byte stack
         // part — the pointer is an ordinary integer part to the placement.
         placement->on_stack = 1;
-        placement->first_stack_offset = (u16)(*stack_part_count * 8u);
+        placement->first_stack_offset = *stack_part_count * 8u;
         *stack_part_count += 1;
     }
     else if (float_parts == shape->part_count)
@@ -470,7 +473,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         *float_count = 8;
         if (shape->stack_aligned) { *stack_part_count = (*stack_part_count + 1u) & ~1u; }
         placement->on_stack = 1;
-        placement->first_stack_offset = (u16)(*stack_part_count * 8u);
+        placement->first_stack_offset = *stack_part_count * 8u;
         *stack_part_count += shape->byte_size / 8;
     }
     else if (integer_parts == shape->part_count)
@@ -482,11 +485,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         // both the pair and the trailing scalar on the stack.
         *integer_count = 8;
         placement->on_stack = 1;
-        placement->first_stack_offset = (u16)(*stack_part_count * 8u);
+        placement->first_stack_offset = *stack_part_count * 8u;
         if (shape->even_integer_pair)
         {
             *stack_part_count = (*stack_part_count + 1u) & ~1u;
-            placement->first_stack_offset = (u16)(*stack_part_count * 8u);
+            placement->first_stack_offset = *stack_part_count * 8u;
         }
         *stack_part_count += shape->byte_size / 8;
     }
@@ -505,13 +508,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_variadic_argument(MachineA64ValueShap
                                                              u32* integer_count, u32* float_count, u32* stack_part_count,
                                                              MachineA64ArgumentPlacement* placement)
 {
-    bool placed = true;
+    // LEA_INCOMING carries a signed frame displacement. Include alignment
+    // and the frame chain before advancing a count measured in eightbytes.
+    u64 bytes = shape->indirect ? 8u : shape->byte_size;
+    bool placed = (u64)*stack_part_count * 8u + bytes + 32u <= INT32_MAX;
     if (packed_stack_bytes && !anonymous_darwin)
     {
         // Apple does not require an even X register for named integer pairs.
         shape->even_integer_pair = false;
     }
-    if (windows)
+    if (placed && windows)
     {
         u32 first = *integer_count;
         if (shape->even_integer_pair)
@@ -522,23 +528,23 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_variadic_argument(MachineA64ValueShap
         u32 register_parts = first < 8 ? BUSTER_MIN(parts, 8u - first) : 0u;
         *placement = (MachineA64ArgumentPlacement){
             .first_integer = (u16)BUSTER_MIN(first, 8u),
-            .first_stack_offset = (u16)((first > 8 ? first - 8u : 0u) * 8u),
+            .first_stack_offset = (first > 8 ? first - 8u : 0u) * 8u,
             .on_stack = (u8)(register_parts < parts),
             .split_register_parts = (u8)(register_parts < parts ? register_parts : 0u),
         };
         *integer_count = first + parts;
         *stack_part_count = *integer_count > 8 ? *integer_count - 8u : 0u;
     }
-    else if (anonymous_darwin)
+    else if (placed && anonymous_darwin)
     {
         if (shape->even_integer_pair)
         {
             *stack_part_count = (*stack_part_count + 1u) & ~1u;
         }
-        *placement = (MachineA64ArgumentPlacement){.on_stack = 1, .first_stack_offset = (u16)(*stack_part_count * 8u)};
+        *placement = (MachineA64ArgumentPlacement){.on_stack = 1, .first_stack_offset = *stack_part_count * 8u};
         *stack_part_count += shape->indirect ? 1u : shape->byte_size / 8u;
     }
-    else
+    else if (placed)
     {
         placed = machine_a64_place_argument(shape, integer_count, float_count, stack_part_count, placement);
     }
@@ -552,7 +558,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_variadic_argument(MachineA64ValueShap
             size = (size + 7u) & ~7u;
         }
         *packed_stack_bytes = (*packed_stack_bytes + alignment - 1u) & ~(alignment - 1u);
-        placement->first_stack_offset = (u16)*packed_stack_bytes;
+        placement->first_stack_offset = *packed_stack_bytes;
         *packed_stack_bytes += size;
         *stack_part_count = (*packed_stack_bytes + 7u) / 8u;
     }
@@ -922,7 +928,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_argument(MachineA64Selector* selecto
     if (instruction->immediate_count && instruction->immediates)
     {
         u32 argument_index = (u32)instruction->immediates[0];
-        selected = argument_index < MACHINE_A64_MAX_ARGUMENTS &&
+        selected = argument_index < selector->parameter_count &&
                    (result_register != UINT32_MAX || selector->value_stack_slots[instruction->result.value] != UINT32_MAX) &&
                    selector->argument_values[argument_index] == instruction->result.value;
     }
@@ -2880,10 +2886,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_index(MachineA64Selector* selector, 
 typedef struct MachineA64CallPlan MachineA64CallPlan;
 struct MachineA64CallPlan
 {
-    MachineA64ValueShape argument_shapes[MACHINE_A64_MAX_ARGUMENTS];
-    MachineA64ArgumentPlacement argument_placements[MACHINE_A64_MAX_ARGUMENTS];
-    u32 argument_registers[MACHINE_A64_MAX_ARGUMENTS];
-    u32 argument_slots[MACHINE_A64_MAX_ARGUMENTS];
+    MachineA64ValueShape* argument_shapes;
+    MachineA64ArgumentPlacement* argument_placements;
+    u32* argument_registers;
+    u32* argument_slots;
     MachineA64ValueShape return_shape;
     u32 argument_count;
     u32 stack_part_count;
@@ -3211,6 +3217,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     IrFunction* function = selector->function;
 
     *plan = (MachineA64CallPlan){.callee_register = UINT32_MAX, .indirect_result_slot = UINT32_MAX};
+    plan->argument_registers = selector->call_argument_registers;
+    plan->argument_slots = selector->call_argument_slots;
+    plan->argument_shapes = selector->call_argument_shapes;
+    plan->argument_placements = selector->call_argument_placements;
     IrType* callee_type = 0;
     bool planned = instruction->operand_count != 0 && instruction->operands[0].value < function->value_count;
     if (planned)
@@ -3235,7 +3245,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
         bool variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
         planned = callee_type && callee_type->kind == IR_TYPE_FUNCTION &&
                   (variadic_call ? plan->argument_count >= callee_type->parameter_count : callee_type->parameter_count == plan->argument_count) &&
-                  plan->argument_count <= MACHINE_A64_MAX_ARGUMENTS;
+                  plan->argument_count <= selector->call_argument_capacity;
     }
     if (planned)
     {
@@ -3285,6 +3295,26 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
                               ? plan->argument_slots[argument_index] != UINT32_MAX
                               : machine_a64_operand_register(selector, instruction->operands[argument_index + 1],
                                                              plan->argument_registers + argument_index);
+                IrType* argument_type = ir_type_from_id(&program->types, argument_type_id);
+                if (planned && darwin && argument_type->kind == IR_TYPE_INTEGER && argument_type->layout.size < 4 &&
+                    !plan->argument_placements[argument_index].on_stack)
+                {
+                    // Apple requires the caller to extend narrow integer
+                    // register arguments to 32 bits. Normalize before any
+                    // fixed register is staged so temporaries cannot clobber it.
+                    u32 source = plan->argument_registers[argument_index];
+                    u32 extended = machine_a64_synthesize_register(selector);
+                    u16 opcode = argument_type->is_signed
+                                     ? (argument_type->layout.size == 1 ? MACHINE_A64_SXTB : MACHINE_A64_SXTH)
+                                     : (argument_type->layout.size == 1 ? MACHINE_A64_UXTB : MACHINE_A64_UXTH);
+                    u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, extended),
+                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source)},
+                        .opcode = opcode,
+                    });
+                    machine_a64_define(selector, extended, row);
+                    plan->argument_registers[argument_index] = extended;
+                }
             }
         }
     }
@@ -5158,8 +5188,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
-        if (!function_type || function_type->kind != IR_TYPE_FUNCTION ||
-            function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
+        if (!function_type || function_type->kind != IR_TYPE_FUNCTION)
         {
             return result;
         }
@@ -5175,8 +5204,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             return result;
         }
-        MachineA64ValueShape signature_parameter_shapes[MACHINE_A64_MAX_ARGUMENTS] = {0};
-        MachineA64ArgumentPlacement signature_parameter_placements[MACHINE_A64_MAX_ARGUMENTS] = {0};
+        MachineA64ValueShape* signature_parameter_shapes = arena_allocate(arena, MachineA64ValueShape, function_type->parameter_count);
+        MachineA64ArgumentPlacement* signature_parameter_placements = arena_allocate(arena, MachineA64ArgumentPlacement, function_type->parameter_count);
         u32 signature_integer_count = 0;
         u32 signature_float_count = 0;
         u32 signature_stack_part_count = 0;
@@ -5244,11 +5273,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             // snapshot itself.
             selector.va_register_save_slot = machine_a64_append_slot(&selector, MACHINE_A64_VA_SAVE_BYTES, 16);
         }
-        for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
-        {
-            selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
-            selector.parameter_placements[parameter_index] = signature_parameter_placements[parameter_index];
-        }
+        selector.parameter_shapes = signature_parameter_shapes;
+        selector.parameter_placements = signature_parameter_placements;
+        selector.parameter_count = function_type->parameter_count;
+        selector.argument_values = arena_allocate(arena, u32, function_type->parameter_count);
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
             selector.value_virtual_registers[value_index] = UINT32_MAX;
@@ -5294,7 +5322,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 value_facts.definition_blocks[parameter->value.value] = function->blocks[block_index].id.value;
             }
         }
-        for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
+        for (u32 argument_index = 0; argument_index < selector.parameter_count; argument_index += 1)
         {
             selector.argument_values[argument_index] = IR_ID_UNDERLYING_INVALID;
         }
@@ -5365,6 +5393,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 IrInstruction* instruction = function->instructions + id.value;
                 nonvolatile_memory &= !instruction->volatile_access;
+                if (instruction->opcode == IR_OPCODE_CALL && instruction->operand_count)
+                {
+                    selector.call_argument_capacity = BUSTER_MAX(selector.call_argument_capacity, instruction->operand_count - 1u);
+                }
                 if (machine_a64_instruction_is_i128_divide(program, instruction))
                 {
                     if (!selector.block_entries)
@@ -5462,6 +5494,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             block_candidate_counts[block_index] = block_candidate_count;
         }
+        selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
+        selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
+        selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
+        selector.call_argument_placements = arena_allocate(arena, MachineA64ArgumentPlacement, selector.call_argument_capacity);
         // Incoming block-parameter values are edge uses, not instruction
         // operands. Count them before aliasing/fusion so a value carried by
         // canonical promotion cannot be absorbed as an otherwise-dead branch
@@ -5586,7 +5622,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
                 IrValue* value = function->values + instruction->result.value;
                 if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
-                    instruction->immediates[0] < BUSTER_ARRAY_LENGTH(selector.argument_values))
+                    instruction->immediates[0] < selector.parameter_count)
                 {
                     selector.argument_values[instruction->immediates[0]] = instruction->result.value;
                 }
@@ -5983,9 +6019,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                           .opcode = MACHINE_A64_STORE_FRAME64,
                                                       });
                 }
-                u32 normalize_registers[MACHINE_A64_MAX_ARGUMENTS] = {0};
-                u32 normalize_values[MACHINE_A64_MAX_ARGUMENTS] = {0};
-                u16 normalize_opcodes[MACHINE_A64_MAX_ARGUMENTS] = {0};
+                u32* normalize_registers = arena_allocate(arena, u32, function_type->parameter_count);
+                u32* normalize_values = arena_allocate(arena, u32, function_type->parameter_count);
+                u16* normalize_opcodes = arena_allocate(arena, u16, function_type->parameter_count);
                 u32 normalize_count = 0;
                 for (u32 capture_pass = 0; capture_pass < 3 && selector.supported; capture_pass += 1)
                 {
@@ -6231,7 +6267,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         // after every capture pass: a row emitted between
                         // captures may take a scratch register the incoming
                         // arguments still occupy.
-                        if (!scalar_float && normalize_count < BUSTER_ARRAY_LENGTH(normalize_registers))
+                        if (!scalar_float && normalize_count < function_type->parameter_count)
                         {
                             IrType* parameter_type = ir_type_from_id(&program->types, function_type->parameter_types[argument_index]);
                             if (parameter_type && (parameter_type->kind == IR_TYPE_INTEGER || parameter_type->kind == IR_TYPE_BOOLEAN) &&
@@ -8227,12 +8263,20 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_LEA_INCOMING:
             {
                 s64 incoming_offset = (s64)(s32)instruction->payload + (windows_frame ? windows_save_area : 16u);
-                if (incoming_offset < 0 || incoming_offset > A64_IMM12_MAX)
+                if (incoming_offset < 0 || incoming_offset > UINT32_MAX)
                 {
                     return result;
                 }
-                u32 fields[] = {operand_registers[0], MACHINE_A64_X29, (u32)incoming_offset};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                if (incoming_offset <= A64_IMM12_MAX)
+                {
+                    u32 fields[] = {operand_registers[0], MACHINE_A64_X29, (u32)incoming_offset};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                }
+                else
+                {
+                    machine_a64_emit_immediate(&encoder, operand_registers[0], (u32)incoming_offset);
+                    machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_ADD64, operand_registers[0], MACHINE_A64_X29, operand_registers[0], 0);
+                }
             }
             break;
             case MACHINE_A64_VA_HOME_WINDOWS:

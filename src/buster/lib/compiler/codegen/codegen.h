@@ -532,10 +532,10 @@ struct CodegenModuleOptions
     bool assume_validated;
     // Test/audit mode: validate certified IR and selected/scheduled MIR too;
     // verifier/placement failures must not disappear into canonical fallback.
-    bool verify_invariants : 1;
-    // Share the existing verification byte so the options record stays six
-    // bytes. Both fields are diagnostic opt-ins, not production mode changes.
-    bool record_fallbacks : 1;
+    bool verify_invariants;
+    // Keep diagnostic flags independently addressable during self-hosting.
+    // Packed _Bool fields can lose their load type during local promotion.
+    bool record_fallbacks;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
     // thread-local block, and a symbol another object could interpose is
@@ -545,11 +545,10 @@ struct CodegenModuleOptions
     // other target's address materialization is a different one and this flag
     // does not reach it.
     bool position_independent;
-    // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
-    // record at its existing size.
+    // A CodegenRegisterAllocatorMode value; byte storage keeps the options
+    // record within one native argument eightbyte.
     u8 register_allocator;
-    // An AssemblySyntax value.  Keep this byte-sized so the public options
-    // record remains ABI-compatible with callers that embed it.
+    // An AssemblySyntax value, also stored as one byte.
     u8 assembly_syntax;
 };
 

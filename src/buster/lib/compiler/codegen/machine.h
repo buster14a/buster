@@ -715,6 +715,14 @@ typedef enum MachineOpcode
     MACHINE_A64_LEA_INCOMING,
     // Snapshot X0-X7 to the 64-byte image immediately below incoming SP.
     MACHINE_A64_VA_HOME_WINDOWS,
+    // Closed x87 transactions over frame values. No ST register survives a
+    // row except the explicit ABI result bridge immediately beside CALL/RET.
+    MACHINE_X64_F80_BINARY, // destination, left, right frames; payload = add/sub/mul/div
+    MACHINE_X64_F80_NEGATE, // destination, source frames
+    MACHINE_X64_F80_COMPARE, // general definition, left/right frames; payload = relation
+    MACHINE_X64_F80_CONVERT, // destination/source/scratch frames; payload = conversion
+    MACHINE_X64_F80_RESULT_LOAD, // frame source; publish ST(0) for RET
+    MACHINE_X64_F80_RESULT_STORE, // frame destination; consume ST(0) from CALL
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

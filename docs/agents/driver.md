@@ -87,6 +87,10 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
+The signature-reason negative control uses the currently direct-only narrow
+Win64 vector ABI. Argument count is covered by strict-success regressions and
+must not be constrained to keep a telemetry test failing.
+
 For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
 names the source tuple, not the destination register width. A broadcast
 qualifier names its scalar element. The metadata selector projects the

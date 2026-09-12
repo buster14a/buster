@@ -21,6 +21,8 @@ BUSTER_GLOBAL_LOCAL String8 const nrc_targets[] = {
 
 typedef struct NrcInput NrcInput;
 struct NrcInput { String8 path; String8 role; u64 hash; u64 bytes; };
+typedef struct NrcFixtureRecipe NrcFixtureRecipe;
+struct NrcFixtureRecipe { String8 name; String8 flags[3]; u32 count; };
 typedef struct NrcStatistics NrcStatistics;
 struct NrcStatistics { u32 functions; u32 fallbacks; bool valid; };
 typedef struct NrcSettings NrcSettings;
@@ -79,6 +81,9 @@ BUSTER_GLOBAL_LOCAL String8 nrc_role(String8 path)
         S8("tests/basic_c_invalid_bit_field_width.c"), S8("tests/basic_c_preprocessor_error.c"),
         S8("tests/self_host_bootstrap_invalid.c"), S8("tests/differential/reject_syntax.c"),
         S8("tests/differential/reject_type.c"),
+        S8("tests/basic_c_bit_field_alignas.c"), S8("tests/basic_c_function_pointer_conflict.c"),
+        S8("tests/basic_c_asm_literal_register.c"), S8("tests/basic_c_sizeof_missing_member.c"),
+        S8("tests/basic_c_sizeof_parenthesized_type.c"),
     };
     String8 result = string_ends_with_sequence(path, S8(".c")) ? S8("subject") : S8("support-file");
     if (string_ends_with_sequence(path, S8(".bbb"))) { result = S8("dormant-custom-language"); }
@@ -87,6 +92,28 @@ BUSTER_GLOBAL_LOCAL String8 nrc_role(String8 path)
         if (string_equal(path, rejected[index])) { result = S8("negative-diagnostic-fixture"); }
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL NrcFixtureRecipe nrc_fixture_recipe(String8 path)
+{
+    // Match known C23 inputs and the registered C23 dialect assertion variant.
+    // Similar names retain their own defaults; no source-text guessing occurs.
+    String8 c23[] = {S8("tests/basic_c_constexpr.c"), S8("tests/basic_c_constexpr_leaf.c"),
+                    S8("tests/basic_c_typeof.c"), S8("tests/basic_c_nullptr.c")};
+    NrcFixtureRecipe recipe = {.name = S8("compiler-default")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c23); index += 1)
+    {
+        if (string_equal(path, c23[index]))
+        {
+            recipe = (NrcFixtureRecipe){.name = S8("c23"), .flags = {S8("-std=c23")}, .count = 1};
+        }
+    }
+    if (string_equal(path, S8("tests/basic_c_dialect.c")))
+    {
+        recipe = (NrcFixtureRecipe){.name = S8("c23-dialect-assertions"),
+            .flags = {S8("-std=c23"), S8("-DEXPECTED_STDC_VERSION=202311L"), S8("-DEXPECTED_GNU=0")}, .count = 3};
+    }
+    return recipe;
 }
 
 BUSTER_GLOBAL_LOCAL FILE* nrc_open(NrcSettings* settings, String8 name)
@@ -147,7 +174,7 @@ BUSTER_GLOBAL_LOCAL NrcInput* nrc_inventory(NrcSettings* settings, u64* count_ou
     FILE* manifest = valid ? nrc_open(settings, S8("inputs.tsv")) : 0;
     if (manifest)
     {
-        fprintf(manifest, "path\trole\tbytes\tbuster_hash_64\n");
+        fprintf(manifest, "path\trole\tbytes\tbuster_hash_64\tfixture_recipe\tfixture_flags\n");
         for (u64 index = 0; valid && index < count; index += 1)
         {
             NrcInput* input = inputs + index;
@@ -170,8 +197,15 @@ BUSTER_GLOBAL_LOCAL NrcInput* nrc_inventory(NrcSettings* settings, u64* count_ou
                 if (valid) { d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes)); }
                 input->bytes = bytes.length;
                 input->hash = buster_hash_64(bytes.pointer, bytes.length);
-                fprintf(manifest, "%.*s\t%.*s\t%llu\t%llu\n", (int)input->path.length, input->path.pointer,
-                        (int)input->role.length, input->role.pointer, (unsigned long long)input->bytes, (unsigned long long)input->hash);
+                NrcFixtureRecipe recipe = nrc_fixture_recipe(input->path);
+                fprintf(manifest, "%.*s\t%.*s\t%llu\t%llu\t%.*s\t", (int)input->path.length, input->path.pointer,
+                        (int)input->role.length, input->role.pointer, (unsigned long long)input->bytes, (unsigned long long)input->hash,
+                        (int)recipe.name.length, recipe.name.pointer);
+                for (u32 flag = 0; flag < recipe.count; flag += 1)
+                {
+                    fprintf(manifest, "%s%.*s", flag ? " " : "", (int)recipe.flags[flag].length, recipe.flags[flag].pointer);
+                }
+                fprintf(manifest, "\n");
                 scratch_end(temporary);
             }
         }
@@ -358,12 +392,15 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         String8 allocator = string_format(temporary.arena, S8("-fregister-allocator={S8}"), nrc_allocators[mode]);
         String8 cpu = string_format(temporary.arena, S8("-mcpu={S8}"), settings->cpu);
         String8 include = string_format(temporary.arena, S8("-I{S8}/tests"), settings->snapshot);
+        NrcFixtureRecipe recipe = nrc_fixture_recipe(input.path);
         String8 command[] = {mode ? settings->child.ide : settings->baseline, S8("cc"), S8("-c"), S8("-g0"), S8("-v"),
             S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"), S8("-target"), nrc_targets[target], cpu,
             pic ? S8("-fPIC") : S8("-fno-pic"), frontend ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"),
             allocator, S8("-fverify-codegen"), mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
-            include, source, S8("-o"), object, S8("-fcodegen-fallback-census")};
-        SliceString8 argv = {.pointer = command, .length = BUSTER_ARRAY_LENGTH(command) - (mode == 0)};
+            include, source, S8("-o"), object, {0}, {0}, {0}, {0}};
+        SliceString8 argv = {.pointer = command, .length = BUSTER_ARRAY_LENGTH(command) - BUSTER_ARRAY_LENGTH(recipe.flags) - 1};
+        for (u32 flag = 0; flag < recipe.count; flag += 1) { command[argv.length++] = recipe.flags[flag]; }
+        if (mode) { command[argv.length++] = S8("-fcodegen-fallback-census"); }
         DObservation observed = d_observe(&child, argv, prefix);
         NrcStatistics statistics = nrc_statistics(observed.output, nrc_allocators[mode]);
         bool records_valid = !mode || nrc_function_records(settings, group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode,
@@ -422,12 +459,13 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
 BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u64 count, bool run)
 {
     FILE* manifest = run ? 0 : nrc_open(settings, S8("rows.tsv"));
-    if (manifest) { fprintf(manifest, "row\tgroup\tfixture\ttarget\tallocator\tfrontend_ssa\tPIC\tselected\n"); }
+    if (manifest) { fprintf(manifest, "row\tgroup\tfixture\ttarget\tallocator\tfrontend_ssa\tPIC\tselected\tfixture_recipe\n"); }
     u64 group = 0;
     for (u64 input = 0; input < count; input += 1)
     {
         if (string_equal(inputs[input].role, S8("subject")))
         {
+            NrcFixtureRecipe recipe = nrc_fixture_recipe(inputs[input].path);
             for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(nrc_targets); target += 1)
             {
                 for (u32 frontend = 0; frontend < 2; frontend += 1)
@@ -443,11 +481,11 @@ BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u6
                         {
                             for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(nrc_allocators); mode += 1)
                             {
-                                fprintf(manifest, "%llu\t%llu\t%.*s\t%.*s\t%.*s\t%u\t%u\t%u\n",
+                                fprintf(manifest, "%llu\t%llu\t%.*s\t%.*s\t%.*s\t%u\t%u\t%u\t%.*s\n",
                                     (unsigned long long)(group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode), (unsigned long long)group,
                                     (int)inputs[input].path.length, inputs[input].path.pointer, (int)nrc_targets[target].length,
                                     nrc_targets[target].pointer, (int)nrc_allocators[mode].length, nrc_allocators[mode].pointer,
-                                    frontend, pic, (unsigned)selected);
+                                    frontend, pic, (unsigned)selected, (int)recipe.name.length, recipe.name.pointer);
                             }
                         }
                         group += 1;
@@ -465,8 +503,28 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
     u32 failures = 0;
     failures += !string_equal(nrc_role(S8("tests/basic_c_negative_constant_widening.c")), S8("subject"));
     failures += !string_equal(nrc_role(S8("tests/basic_c_invalid_labels.c")), S8("negative-diagnostic-fixture"));
+    String8 rejection_contract[] = {S8("tests/basic_c_bit_field_alignas.c"), S8("tests/basic_c_function_pointer_conflict.c"),
+        S8("tests/basic_c_asm_literal_register.c"), S8("tests/basic_c_sizeof_missing_member.c"), S8("tests/basic_c_sizeof_parenthesized_type.c")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejection_contract); index += 1)
+    {
+        failures += !string_equal(nrc_role(rejection_contract[index]), S8("negative-diagnostic-fixture"));
+    }
+    failures += !string_equal(nrc_role(S8("tests/differential/basic_c_bit_field_alignas.c")), S8("subject"));
+    failures += !string_equal(nrc_role(S8("tests/basic_c_bit_field_aligned.c")), S8("subject"));
     failures += !string_equal(nrc_role(S8("tests/basic_if_else.bbb")), S8("dormant-custom-language"));
     failures += !string_equal(nrc_role(S8("tests/basic_c_guarded_include.h")), S8("support-file"));
+    String8 c23_contract[] = {S8("tests/basic_c_constexpr.c"), S8("tests/basic_c_constexpr_leaf.c"),
+                             S8("tests/basic_c_typeof.c"), S8("tests/basic_c_nullptr.c")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c23_contract); index += 1)
+    {
+        NrcFixtureRecipe recipe = nrc_fixture_recipe(c23_contract[index]);
+        failures += recipe.count != 1 || !string_equal(recipe.flags[0], S8("-std=c23"));
+    }
+    NrcFixtureRecipe dialect = nrc_fixture_recipe(S8("tests/basic_c_dialect.c"));
+    failures += dialect.count != 3 || !string_equal(dialect.flags[0], S8("-std=c23")) ||
+        !string_equal(dialect.flags[1], S8("-DEXPECTED_STDC_VERSION=202311L")) || !string_equal(dialect.flags[2], S8("-DEXPECTED_GNU=0"));
+    failures += nrc_fixture_recipe(S8("tests/basic_c_typeof_declaration.c")).count != 0;
+    failures += nrc_fixture_recipe(S8("tests/differential/basic_c_constexpr.c")).count != 0;
     failures += nrc_field_safe(S8("bad\tpath")) || nrc_revision_valid(S8("main"));
     failures += !nrc_revision_valid(S8("641cd88d33decfd56fa2da9a960c6ac075935a71"));
     NrcStatistics valid = nrc_statistics(S8("CODEGEN functions=4 allocator=fast fallback_functions=2\n"), S8("fast"));
@@ -607,7 +665,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             "compiler_revision_claim={S8}\nbaseline_revision_claim={S8}\ncompiler_hash={u64}\ncompiler_bytes={u64}\n"
             "baseline_hash={u64}\nbaseline_bytes={u64}\ncpu={S8}\ninputs={u64}\nrows={u64}\n"
             "fixture_filter={S8}\ntarget_filter={S8}\nshard_index={u32}\nshard_count={u32}\nmanifest_only={u32}\ntimeout_seconds={u32}\n"
-            "function_evidence=all-observed-fallbacks-plus-first-fatal-diagnostic\nflags=-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen\n"),
+            "function_evidence=all-observed-fallbacks-plus-first-fatal-diagnostic\n"
+            "fixture_flags=exact-path-recipes-in-inputs.tsv\nunfrozen_dependencies=host-and-compiler-resource-headers,process-environment\n"
+            "flags=-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen\n"),
             settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, baseline_hash, baseline_bytes, settings.cpu,
             input_count, groups * BUSTER_ARRAY_LENGTH(nrc_allocators), settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds);

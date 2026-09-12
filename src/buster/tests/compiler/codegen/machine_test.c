@@ -39,10 +39,9 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
-// Five bytes of flags plus the code-model byte -fPIC sets. The record is
-// passed by value on every module generation, so it stays a handful of bytes
-// and this check is what says so.
-BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 6);
+// Independently addressable diagnostic flags keep self-hosted IR loads typed.
+// The by-value module options still fit in one native argument eightbyte.
+BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 7);
 BUSTER_CT_CHECK(sizeof(MachineQualityInterval) == 24);
 
 // Independent integer goldens at the old 32-bit boundary. These call the same
@@ -122,7 +121,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
     BUSTER_TEST(arguments, machine_quality_region_next(zeros, BUSTER_ARRAY_LENGTH(zeros), UINT32_MAX) == UINT32_MAX);
     return result;
 }
-
 // Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
 // bounded producer comparison also checks every byte outside the instruction.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArguments* arguments)
@@ -354,7 +352,7 @@ BUSTER_GLOBAL_LOCAL bool machine_test_a64_atomic_update_loop(u8 const* bytes, u6
                 // Every retry must reload all frame-backed input halves.
                 // Address materialization can add register-only words.
                 u32 loaded_registers = 0;
-                for (s64 before = retry; valid && before < (s64)start; before += sizeof(u32))
+                for (s64 before = retry; valid && before < (s64)start; before += (s64)sizeof(u32))
                 {
                     memcpy(&word, bytes + before, sizeof(word));
                     if ((word & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000))
@@ -3938,6 +3936,187 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_aligned(UnitTestArguments*
     return result;
 }
 
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+#define MACHINE_TEST_WIN64_VECTOR_TARGET __attribute__((target("avx512f,avx512bw")))
+typedef unsigned long long MachineTestWin64Vector __attribute__((vector_size(64)));
+typedef MachineTestWin64Vector __attribute__((ms_abi)) MachineTestWin64VectorMix(MachineTestWin64Vector, double,
+    MachineTestWin64Vector, unsigned long long, MachineTestWin64Vector, unsigned long long);
+typedef MachineTestWin64Vector __attribute__((ms_abi)) MachineTestWin64VectorVariadic(MachineTestWin64Vector, int, ...);
+
+BUSTER_GLOBAL_LOCAL MACHINE_TEST_WIN64_VECTOR_TARGET MachineTestWin64Vector __attribute__((ms_abi)) machine_test_win64_host_vector_mix(
+    volatile MachineTestWin64Vector a, double b, volatile MachineTestWin64Vector c, unsigned long long d,
+    volatile MachineTestWin64Vector e, unsigned long long tail)
+{
+    volatile u64 a_address = (u64)&a;
+    volatile u64 c_address = (u64)&c;
+    volatile u64 e_address = (u64)&e;
+    MachineTestWin64Vector lane = {1, 2, 3, 4, 5, 6, 7, 8};
+    MachineTestWin64Vector sum = a + c + c + e + e + e + lane;
+    if (((a_address | c_address | e_address) & 63) != 0 || b != 9.0 || d != 13 || tail != 17)
+    {
+        sum ^= (MachineTestWin64Vector){1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63};
+    }
+    a = (MachineTestWin64Vector){0};
+    c = (MachineTestWin64Vector){0};
+    e = (MachineTestWin64Vector){0};
+    return sum;
+}
+
+BUSTER_GLOBAL_LOCAL MACHINE_TEST_WIN64_VECTOR_TARGET MachineTestWin64Vector __attribute__((ms_abi)) machine_test_win64_host_vector_variadic(MachineTestWin64Vector named, int marker, ...)
+{
+    __builtin_ms_va_list cursor;
+    __builtin_ms_va_start(cursor, marker);
+    u64 a_address;
+    memcpy(&a_address, cursor, sizeof(a_address));
+    MachineTestWin64Vector a = __builtin_va_arg(cursor, MachineTestWin64Vector);
+    double b = __builtin_va_arg(cursor, double);
+    u64 c_address;
+    memcpy(&c_address, cursor, sizeof(c_address));
+    MachineTestWin64Vector c = __builtin_va_arg(cursor, MachineTestWin64Vector);
+    unsigned long long d = __builtin_va_arg(cursor, unsigned long long);
+    u64 e_address;
+    memcpy(&e_address, cursor, sizeof(e_address));
+    MachineTestWin64Vector e = __builtin_va_arg(cursor, MachineTestWin64Vector);
+    __builtin_ms_va_end(cursor);
+    MachineTestWin64Vector lane = {1, 2, 3, 4, 5, 6, 7, 8};
+    MachineTestWin64Vector sum = a + a + c + c + e + e + e + named + lane;
+    if (((a_address | c_address | e_address) & 63) != 0 || marker != 7 || b != 9.0 || d != 13)
+    {
+        sum ^= (MachineTestWin64Vector){1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63, 1ull << 63};
+    }
+    *(volatile MachineTestWin64Vector*)a_address = (MachineTestWin64Vector){0};
+    *(volatile MachineTestWin64Vector*)c_address = (MachineTestWin64Vector){0};
+    *(volatile MachineTestWin64Vector*)e_address = (MachineTestWin64Vector){0};
+    return sum;
+}
+
+// Keep every host vector call in an explicitly AVX-512 function, so a baseline
+// host build still compiles these tests with the same full-ZMM return ABI.
+BUSTER_GLOBAL_LOCAL MACHINE_TEST_WIN64_VECTOR_TARGET UnitTestResult machine_test_win64_vector_execute(UnitTestArguments* arguments,
+    CodegenModule* generated, IrModule* module, u32 mode, bool variadic)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, generated->relocation_count == 0);
+    CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated->code});
+    BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+    if (executable.address)
+    {
+        String8 names[] = {S8("win64_vector_mix"), S8("win64_vector_dispatch"), S8("win64_vector_variadic"), S8("win64_vector_variadic_dispatch")};
+        for (u32 name = 0; name < (variadic ? 4u : 2u); name += 1)
+        {
+            u32 offset = machine_test_module_offset(generated, module, names[name]);
+            BUSTER_TEST(arguments, offset != UINT32_MAX);
+            if (offset != UINT32_MAX)
+            {
+                void* address = (u8*)executable.address + offset;
+                for (unsigned long long seed = 1; seed < 128; seed += 16)
+                {
+                    MachineTestWin64Vector value = {0};
+                    MachineTestWin64Vector lane = {1, 2, 3, 4, 5, 6, 7, 8};
+                    for (u32 index = 0; index < 8; index += 1)
+                    {
+                        value[index] = UINT64_C(0xfedcba9876543210) + seed * UINT64_C(0x0102030405060708) + index * 1234567ull;
+                    }
+                    MachineTestWin64Vector actual;
+                    u64 coefficient;
+                    u64 bias = 0;
+                    if (name == 0)
+                    {
+                        MachineTestWin64VectorMix* call;
+                        memcpy(&call, &address, sizeof(call));
+                        actual = call(value, 9.0, value + lane, 13, value + lane + lane, 17);
+                        coefficient = 6;
+                    }
+                    else if (name == 1)
+                    {
+                        typedef MachineTestWin64Vector __attribute__((ms_abi)) Dispatch(MachineTestWin64VectorMix*, MachineTestWin64Vector);
+                        Dispatch* call;
+                        memcpy(&call, &address, sizeof(call));
+                        actual = call(machine_test_win64_host_vector_mix, value);
+                        coefficient = 9;
+                    }
+                    else if (name == 2)
+                    {
+                        MachineTestWin64VectorVariadic* call;
+                        memcpy(&call, &address, sizeof(call));
+                        actual = call(value, 7, value, 9.0, value + lane, 13ull, value + lane + lane);
+                        coefficient = 8;
+                    }
+                    else
+                    {
+                        typedef MachineTestWin64Vector __attribute__((ms_abi)) Dispatch(MachineTestWin64VectorVariadic*, MachineTestWin64Vector, unsigned long long);
+                        Dispatch* call;
+                        memcpy(&call, &address, sizeof(call));
+                        actual = call(machine_test_win64_host_vector_variadic, value, seed);
+                        coefficient = 11;
+                        bias = 56;
+                    }
+                    for (u32 index = 0; index < 8; index += 1)
+                    {
+                        u64 expected = coefficient * value[index] + ((name & 1) ? 12u : 9u) * (index + 1) + bias;
+                        BUSTER_TEST_RAW(arguments, actual[index] == expected, string_format(arguments->arena,
+                            S8("{S8} mode={u32} seed={u64} lane={u32} actual={u64} expected={u64}"), names[name], mode, (u64)seed, index, (u64)actual[index], expected));
+                    }
+                }
+            }
+        }
+    }
+    codegen_release_executable(executable);
+    return result;
+}
+#undef MACHINE_TEST_WIN64_VECTOR_TARGET
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_vector(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/win64_vector.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    OperatingSystem systems[] = {OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_UEFI};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_AMD_ZEN_5, .os = systems[system]};
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            for (u32 variant = 0; variant < 2; variant += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 variant_source = variant ? source : string_format(temporary.arena, S8("#define WIN64_VECTOR_FIXED_ONLY 1\n{S8}"), source);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("win64-vector.c"), variant_source, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (program && program->module_count == 1)
+                {
+                    IrModule* module = program->modules;
+                    u32 mode_begin = variant ? CODEGEN_REGISTER_ALLOCATOR_MIR_STACK : CODEGEN_REGISTER_ALLOCATOR_NONE;
+                    u32 mode_end = variant ? CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT : CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;
+                    for (u32 mode = mode_begin; mode < mode_end; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                        BUSTER_TEST(arguments, generated.statistics.function_count == (variant ? 4u : 2u));
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+                        TargetCpuFeatures host = cpu_detect_features_x86_64();
+                        if (generated.error == CODEGEN_ERROR_NONE && target_cpu_features_contains(host, TARGET_CPU_FEATURE_X86_AVX512F) &&
+                            target_cpu_features_contains(host, TARGET_CPU_FEATURE_X86_AVX512BW))
+                        {
+                            UnitTestResult executed = machine_test_win64_vector_execute(arguments, &generated, module, mode, variant != 0);
+                            result.test_count += executed.test_count;
+                            result.succeeded_test_count += executed.succeeded_test_count;
+                        }
+#endif
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_aggregate(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4018,6 +4197,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_aggregate(UnitTestArgumen
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_f80(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 paths[] = {S8("tests/basic_c_f80_machine.c"), S8("tests/basic_c_va_arg_long_double.c"), S8("tests/basic_c_f80_u64.c")};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}};
+    for (u32 file = 0; file < BUSTER_ARRAY_LENGTH(paths); file += 1)
+    {
+        ByteSlice input = file_read(arguments->arena, paths[file], (FileReadOptions){0});
+        String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+        BUSTER_TEST(arguments, source.length != 0);
+        for (u32 target = 0; source.length && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 memory = 0; memory < 2; memory += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, paths[file], source, targets[target],
+                    (CIRLowerOptions){.disable_direct_ssa = memory != 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (program && program->module_count == 1)
+                {
+                    IrModule* module = program->modules;
+                    u32 operations = 0;
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, targets[target]);
+                        BUSTER_TEST(arguments, selected.supported);
+                        if (selected.supported)
+                        {
+                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                            for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                            {
+                                MachineInstruction* instruction = selected.function.instructions + row;
+                                if (instruction->opcode >= MACHINE_X64_F80_BINARY && instruction->opcode <= MACHINE_X64_F80_RESULT_STORE)
+                                {
+                                    operations |= 1u << (instruction->opcode - MACHINE_X64_F80_BINARY);
+                                    u32 payload = instruction->payload;
+                                    instruction->payload = UINT32_MAX;
+                                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
+                                    instruction->payload = payload;
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, file || operations == 0x3fu);
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, targets[target],
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                        if (generated.error == CODEGEN_ERROR_NONE)
+                        {
+                            // Resolve only bounded local PC32 calls/addresses before
+                            // copying into executable storage; external/data references
+                            // fail the test without executing an unpatched module.
+                            bool patched = true;
+                            for (u32 relocation_index = 0; patched && relocation_index < generated.relocation_count; relocation_index += 1)
+                            {
+                                CodegenModuleRelocation* relocation = generated.relocations + relocation_index;
+                                bool found = false;
+                                if (codegen_module_relocation_valid(relocation) && relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
+                                    relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 && !relocation->addend &&
+                                    relocation->offset <= generated.code.length && generated.code.length - relocation->offset >= 4)
+                                {
+                                    for (u32 entry = 0; !found && entry < generated.entry_count; entry += 1)
+                                    {
+                                        if (generated.entries[entry].symbol.value == relocation->symbol.value)
+                                        {
+                                            s64 displacement = (s64)generated.entries[entry].offset - ((s64)relocation->offset + 4);
+                                            found = displacement >= INT32_MIN && displacement <= INT32_MAX;
+                                            if (found)
+                                            {
+                                                s32 encoded = (s32)displacement;
+                                                memcpy(generated.code.pointer + relocation->offset, &encoded, sizeof(encoded));
+                                            }
+                                        }
+                                    }
+                                }
+                                patched = found;
+                            }
+                            BUSTER_TEST(arguments, patched);
+                            u32 offset = machine_test_module_offset(&generated, module, S8("main"));
+                            BUSTER_TEST(arguments, offset != UINT32_MAX);
+                            CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                            BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                            if (executable.address && offset != UINT32_MAX && patched)
+                            {
+                                void* address = (u8*)executable.address + offset;
+                                int (*call)(void) = 0;
+                                memcpy(&call, &address, sizeof(call));
+                                BUSTER_TEST(arguments, call() == 0);
+                            }
+                            codegen_release_executable(executable);
+                        }
+#endif
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArguments* arguments)
 {
@@ -4438,9 +4724,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult aligned_result = machine_test_win64_aligned(arguments);
     result.test_count += aligned_result.test_count;
     result.succeeded_test_count += aligned_result.succeeded_test_count;
+    UnitTestResult vector_result = machine_test_win64_vector(arguments);
+    result.test_count += vector_result.test_count;
+    result.succeeded_test_count += vector_result.succeeded_test_count;
     UnitTestResult aggregate_result = machine_test_native_aggregate(arguments);
     result.test_count += aggregate_result.test_count;
     result.succeeded_test_count += aggregate_result.succeeded_test_count;
+    UnitTestResult f80_result = machine_test_f80(arguments);
+    result.test_count += f80_result.test_count;
+    result.succeeded_test_count += f80_result.succeeded_test_count;
     UnitTestResult variadic_result = machine_test_native_variadic(arguments);
     result.test_count += variadic_result.test_count;
     result.succeeded_test_count += variadic_result.succeeded_test_count;
@@ -4834,8 +5126,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 279);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 285);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
+        [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_F80_COMPARE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_F80_CONVERT] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_F80_RESULT_LOAD] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_F80_RESULT_STORE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_VLOAD_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_VSTORE_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_VCOMPRESS_STORE_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -5221,7 +5519,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 106);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 112);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -5469,7 +5767,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += movabs_result.succeeded_test_count;
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 207);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 248);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate

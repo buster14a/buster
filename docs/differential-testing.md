@@ -153,6 +153,16 @@ isolate the callee's local copy, whose alignment fix already landed in
 [PR #282](https://github.com/buster14a/buster/pull/282). No alignment fix is
 part of this harness change.
 
+The native driver also cross-links `many_native_arguments.c` and its independent
+host companion in both directions. Weighted results observe every argument at
+25, 33 and 65 fixed parameters, including floating and narrow scalar values,
+stack aggregates, HFAs, hidden result pointers and a 65-value variadic tail.
+A 522-parameter variadic signature crosses the short incoming-address range.
+All six desktop targets compile with strict MIR in both frontend forms; the
+matching native host executes standalone and mixed-compiler programs. The host
+companion disables loop and SLP vectorization so this argument-transport check
+does not require additional vector constant-pool relocation support.
+
 The qualified-aggregate fixture cross-links top-level const/volatile parameter
 objects with an independent host caller and callees. It checks private-copy
 semantics, compatible function pointers selected across a loop join, expression
