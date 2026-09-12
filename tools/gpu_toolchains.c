@@ -231,9 +231,46 @@ BUSTER_GLOBAL_LOCAL u32 gpu_tools_self_test(Arena* arena)
     tp_hash_add(&hash, "abc", 3);
     tp_hash_finish(&hash, digest);
     failures += strcmp(digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0;
-    // The common evidence observer's self-test covers process errors, timeouts,
-    // arbitrary argv bytes and refusing an already-owned output directory.
-    failures += d_self_test(arena);
+    // Exercise the shared process/evidence primitives directly. The deliberate
+    // crash must not wait for a host's core-dump service before we reap it.
+#if BUSTER_LINUX || BUSTER_APPLE
+    struct rlimit previous_core_limit = {0};
+    bool have_core_limit = getrlimit(RLIMIT_CORE, &previous_core_limit) == 0;
+    struct rlimit disabled_core_limit = previous_core_limit;
+    disabled_core_limit.rlim_cur = 0;
+    bool core_disabled = have_core_limit && setrlimit(RLIMIT_CORE, &disabled_core_limit) == 0;
+    failures += !core_disabled;
+#endif
+    String8 directory = string_format_z(arena, S8("build/gpu-toolchains-self-test-{u64}"), os_now_microseconds());
+    GpuTools settings = {.evidence = {.arena = arena, .out = directory, .timeout_seconds = 2}, .directory = directory};
+    if (!d_create_output(arena, directory)) { failures += 1; }
+    else
+    {
+        String8 report = string_duplicate_arena(arena, path_join(arena, directory, S8("commands.tsv")), true);
+        settings.evidence.report = fopen((char*)report.pointer, "wb");
+        failures += settings.evidence.report == 0;
+        String8 modes[] = {S8("exit"), S8("sanitizer"), S8("timeout"), S8("crash")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
+        {
+            DObservation child = GPU_TOOLS_RUN(&settings, modes[index], program_state->input.arguments.pointer[0],
+                S8("test_differential"), S8("--self-test-child"), modes[index]);
+            bool ok;
+            if (index == 0) { ok = child.kind == D_EXIT && child.status == 7 && string_equal(child.output, S8("a\0b")) && string_equal(child.error, S8("child stderr\n")); }
+            else if (index == 1) { ok = child.kind == D_EXIT && child.status == 0 && child.sanitizer && !d_success(child); }
+            else if (index == 2) { ok = child.kind == D_TIMEOUT; }
+            else { ok = child.kind == D_SIGNAL; }
+            failures += !ok;
+            string_print(S8("GPU_SELF_TEST {S8} kind={u32} status={u32} ok={u32}\n"), modes[index], (u32)child.kind, child.status, (u32)ok);
+        }
+        DObservation missing = GPU_TOOLS_RUN(&settings, S8("missing"), path_join(arena, directory, S8("missing-tool")));
+        failures += missing.kind != D_SPAWN || gpu_tools_rejected(missing);
+        failures += d_create_output(arena, directory);
+        if (settings.evidence.report) { failures += fclose(settings.evidence.report) != 0; }
+        failures += settings.evidence.io_failed;
+    }
+#if BUSTER_LINUX || BUSTER_APPLE
+    if (core_disabled) { failures += setrlimit(RLIMIT_CORE, &previous_core_limit) != 0; }
+#endif
     string_print(S8("GPU_TOOLCHAINS_SELF_TEST failures={u32}\n"), failures);
     return failures;
 }

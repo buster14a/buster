@@ -59,8 +59,10 @@ DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer ./build.sh test_gp
 `--timeout SECONDS` bounds every child (default 60, allowed 1–3600). The runner
 claims the output directory atomically and refuses reuse, including an empty
 existing directory, so stale artifacts cannot turn a failed tool into a pass.
-The self-test exercises rejection classification and SHA-256, and reuses the
-observer's subprocess, timeout, argv, and output-ownership regressions. It never
+The self-test exercises rejection classification and SHA-256, and directly exercises the
+shared observer's subprocess, timeout, argv, and output-ownership behavior.
+Intentional crash probes disable core dumps and retain their observation rows
+in `build/gpu-toolchains-self-test-*`. It never
 reports a real GPU profile as passed.
 
 All tool overrides designate **one executable path**, not a shell command:

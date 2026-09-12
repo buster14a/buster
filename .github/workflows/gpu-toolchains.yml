@@ -66,7 +66,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gpu-linux-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gpu-evidence
+          path: |
+            ${{ runner.temp }}/gpu-evidence
+            build/gpu-toolchains-self-test-*
           if-no-files-found: warn
           retention-days: 7
 
@@ -97,6 +99,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gpu-metal-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gpu-evidence
+          path: |
+            ${{ runner.temp }}/gpu-evidence
+            build/gpu-toolchains-self-test-*
           if-no-files-found: warn
           retention-days: 7
