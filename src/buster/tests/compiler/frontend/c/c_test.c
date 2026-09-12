@@ -4818,6 +4818,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_preprocessed_token(arguments, &result, empty_preprocess, 3, C_TOKEN_PREPROCESSING_NUMBER, S8("0"));
     c_test_preprocessed_token(arguments, &result, empty_preprocess, 4, C_TOKEN_PUNCTUATOR, S8(";"));
 
+    CPreprocessorOperation command_operations[] = {
+        {S8("ORDERED=1"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("ORDERED"), C_PREPROCESSOR_OPERATION_UNDEFINE},
+        {S8("ORDERED=7"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("ORDERED"), C_PREPROCESSOR_OPERATION_UNDEFINE},
+        {S8("ORDERED=9"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("NEVER_DEFINED"), C_PREPROCESSOR_OPERATION_UNDEFINE},
+        {S8("REPEAT=1"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("REPEAT=2"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("IMPLICIT"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("EMPTY="), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("__clang__"), C_PREPROCESSOR_OPERATION_UNDEFINE},
+        {S8("__GNUC__=99"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("DOUBLE(x)=((x)+(x))"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("ZERO()=zero"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("MULTI(a,b)=a*b"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("IDENTITY(x)=x"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("NESTED(x)=IDENTITY(DOUBLE(x))"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("STRINGIFY(x)=#x"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("PASTE(a,b)=a##b"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("VARIADIC(first,...)=first+__VA_ARGS__"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("EQUALS(x)=x==1"), C_PREPROCESSOR_OPERATION_DEFINE},
+        {S8("EMPTY_FUNCTION(x)="), C_PREPROCESSOR_OPERATION_DEFINE},
+    };
+    CPreprocessResult ordered_commands = c_preprocess(
+        arguments->arena,
+        S8("ORDERED REPEAT IMPLICIT EMPTY keep\n"
+           "__GNUC__\n"
+           "#ifdef __clang__\nCLANG_PRESENT\n#else\nCLANG_ABSENT\n#endif\n"
+           "DOUBLE(21) ZERO() MULTI(2,3) NESTED(2)\n"
+           "STRINGIFY(two words) PASTE(join,ed) VARIADIC(1,2+3) EQUALS(1)\n"
+           "EMPTY_FUNCTION(ignored) tail\n"),
+        (CPreprocessOptions){
+            .macro_operations = command_operations,
+            .macro_operation_count = BUSTER_ARRAY_LENGTH(command_operations),
+        });
+    CLexResult ordered_expected = c_lex(arguments->arena,
+                                        S8("9 2 1 keep 99 CLANG_ABSENT ((21)+(21)) zero 2*3 ((2)+(2)) "
+                                           "\"two words\" joined 1+2+3 1==1 tail"));
+    BUSTER_TEST(arguments, ordered_commands.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ordered_commands.token_count == ordered_expected.token_count);
+    for (u64 token_index = 0; token_index + 1 < ordered_expected.token_count && token_index < ordered_commands.token_count; token_index += 1)
+    {
+        c_test_preprocessed_token(arguments, &result, ordered_commands, token_index, ordered_expected.tokens[token_index].kind,
+                                  c_token_spelling(ordered_expected.spelling_base, ordered_expected.tokens[token_index]));
+    }
+
+    // Existing embedding callers keep their historical array policy. The
+    // definition name may use the source parser's function-like syntax, and
+    // every legacy undefinition is still replayed after every definition.
+    CPreprocessorDefinition legacy_definitions[] = {
+        {S8("LEGACY(x)"), S8("x+x")},
+        {S8("REMOVED"), S8("present")},
+    };
+    String8 legacy_undefinitions[] = {S8("REMOVED")};
+    CPreprocessResult legacy_commands = c_preprocess(arguments->arena, S8("LEGACY(4)\n#ifdef REMOVED\npresent\n#else\nremoved\n#endif\n"),
+                                                      (CPreprocessOptions){
+                                                          .definitions = legacy_definitions,
+                                                          .undefinitions = legacy_undefinitions,
+                                                          .definition_count = BUSTER_ARRAY_LENGTH(legacy_definitions),
+                                                          .undefinition_count = BUSTER_ARRAY_LENGTH(legacy_undefinitions),
+                                                      });
+    CLexResult legacy_expected = c_lex(arguments->arena, S8("4+4 removed"));
+    BUSTER_TEST(arguments, legacy_commands.diagnostic_count == 0);
+    BUSTER_TEST(arguments, legacy_commands.token_count == legacy_expected.token_count);
+    for (u64 token_index = 0; token_index + 1 < legacy_expected.token_count && token_index < legacy_commands.token_count; token_index += 1)
+    {
+        c_test_preprocessed_token(arguments, &result, legacy_commands, token_index, legacy_expected.tokens[token_index].kind,
+                                  c_token_spelling(legacy_expected.spelling_base, legacy_expected.tokens[token_index]));
+    }
+
+    String8 invalid_command_definitions[] = {
+        S8("1BAD=1"), S8("BAD NAME=1"), S8("DUP(x,x)=x"), S8("TRAILING(x,)=x"), S8("VARIADIC(...,x)=x"), S8("OPEN(x=x"),
+    };
+    for (u32 definition_index = 0; definition_index < BUSTER_ARRAY_LENGTH(invalid_command_definitions); definition_index += 1)
+    {
+        CPreprocessorOperation invalid_operation = {
+            .operand = invalid_command_definitions[definition_index],
+            .kind = C_PREPROCESSOR_OPERATION_DEFINE,
+        };
+        CPreprocessResult invalid_command = c_preprocess(arguments->arena, S8("int valid_after_diagnostic;\n"),
+                                                         (CPreprocessOptions){
+                                                             .macro_operations = &invalid_operation,
+                                                             .macro_operation_count = 1,
+                                                         });
+        BUSTER_TEST(arguments, invalid_command.error_count != 0);
+        if (invalid_command.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, invalid_command.diagnostics[0].kind == C_DIAGNOSTIC_EXPECTED_MACRO_NAME ||
+                                       invalid_command.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_MACRO_DEFINITION);
+        }
+    }
+    CPreprocessorOperation invalid_undefinition = {
+        .operand = S8("BAD NAME"),
+        .kind = C_PREPROCESSOR_OPERATION_UNDEFINE,
+    };
+    CPreprocessResult invalid_undefine = c_preprocess(arguments->arena, S8("int valid_after_undefine_diagnostic;\n"),
+                                                      (CPreprocessOptions){
+                                                          .macro_operations = &invalid_undefinition,
+                                                          .macro_operation_count = 1,
+                                                      });
+    BUSTER_TEST(arguments, invalid_undefine.error_count == 1 && invalid_undefine.diagnostic_count == 1);
+    if (invalid_undefine.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, invalid_undefine.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_MACRO_DEFINITION);
+    }
+
     CPreprocessResult function_macro = c_preprocess(arguments->arena,
                                                     S8("#define ADD(x, y) x + y\n"
                                                        "ADD(1, 2)\n"),

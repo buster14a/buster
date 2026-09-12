@@ -54,7 +54,9 @@
 //   CIncludeGuardState, CIncludeGuardTable     the multiple-include
 //                                              optimization for #ifndef
 //                                              guard-shaped headers
-//   c_preprocess_define_directive              #define parsing
+//   c_preprocess_command_operations,           ordered command-line macro
+//   c_preprocess_define_directive              operations and shared #define
+//                                              parsing
 //   c_preprocess                               the stage driver
 //   c_prewarm                                  serial table prewarm
 
@@ -3754,6 +3756,9 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         .variadic = variadic,
         .defined = true,
     };
+    // A later ordinary or command-line definition replaces a dynamic builtin
+    // as a macro, not merely its replacement tokens.
+    macro->builtin = C_MACRO_BUILTIN_NONE;
     macro->definition.plain_count = replacement_count;
     // Allocated for every parameter list, empty replacement included: a
     // `#define F(x)` with no replacement tokens still reaches the capacity
@@ -7033,42 +7038,103 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
     return false;
 }
 
-BUSTER_C_INTERNAL void c_preprocess_command_definitions(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CPreprocessOptions options,
-                                                          CMacro** first_macro, CMacro** last_macro)
+BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro** first_macro, CMacro** last_macro,
+                                                       CPreprocessResult* result, CSourceLocation directive_location, u32 command_name_start,
+                                                       u32 command_name_end);
+BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro* first_macro,
+                                                         CPreprocessResult* result, CSourceLocation directive_location, u32 command_name_start,
+                                                         u32 command_name_end, bool allow_builtin);
+
+BUSTER_C_INTERNAL CPreprocessorDefinition c_preprocess_command_operand(String8 operand)
 {
-    for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
+    CPreprocessorDefinition result = {
+        .name = operand,
+        .value = S8("1"),
+    };
+    bool split = false;
+    for (u64 index = 0; index < operand.length && !split; index += 1)
     {
-        CPreprocessorDefinition definition = options.definitions[definition_index];
-        // The value is the replacement list verbatim, empty included: `-DNAME=`
-        // defines NAME as nothing, which is how a build switches a decoration
-        // off. Only a `-D` with no `=` at all means `1`, and the driver that
-        // reads the spelling resolves that default before it gets here.
-        CLexResult lex = c_lex_space(arena, space, definition.value);
-        c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
-        u32 replacement_count = 0;
-        for (u64 token_index = 0; token_index < lex.token_count; token_index += 1)
+        if (operand.pointer[index] == '=')
         {
-            CTokenKind kind = lex.tokens[token_index].kind;
-            replacement_count += kind != C_TOKEN_END_OF_FILE && kind != C_TOKEN_NEWLINE;
+            result.name = string_slice(operand, 0, index);
+            result.value = string_slice(operand, index + 1, operand.length);
+            split = true;
         }
-        CToken* replacement = arena_allocate(arena, CToken, replacement_count);
-        u32 replacement_index = 0;
-        for (u64 token_index = 0; token_index < lex.token_count; token_index += 1)
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_preprocess_command_definition(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols,
+                                                         CPreprocessorDefinition definition, CMacro** first_macro, CMacro** last_macro,
+                                                         CPreprocessResult* result)
+{
+    String8 prefix = S8("#define ");
+    String8 text = string_format(arena, S8("{S8}{S8} {S8}\n"), prefix, definition.name, definition.value);
+    CLexResult lex = c_lex_space(arena, space, text);
+    for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
+    {
+        c_preprocess_diagnostic_copy(arena, result, lex.diagnostics[diagnostic_index]);
+    }
+    c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
+    u64 token_index = 2;
+    u32 name_start = lex.translated_offset + (u32)prefix.length;
+    u32 name_end = name_start + (u32)definition.name.length;
+    c_preprocess_define_directive(arena, symbols, lex, &token_index, first_macro, last_macro, result,
+                                  (CSourceLocation){.line = 1, .column = 1}, name_start, name_end);
+}
+
+BUSTER_C_INTERNAL void c_preprocess_command_undefinition(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, String8 name,
+                                                           CMacro* first_macro, CPreprocessResult* result)
+{
+    String8 prefix = S8("#undef ");
+    String8 text = string_format(arena, S8("{S8}{S8}\n"), prefix, name);
+    CLexResult lex = c_lex_space(arena, space, text);
+    for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
+    {
+        c_preprocess_diagnostic_copy(arena, result, lex.diagnostics[diagnostic_index]);
+    }
+    c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
+    u64 token_index = 2;
+    u32 name_start = lex.translated_offset + (u32)prefix.length;
+    u32 name_end = name_start + (u32)name.length;
+    c_preprocess_undefine_directive(arena, symbols, lex, &token_index, first_macro, result,
+                                    (CSourceLocation){.line = 1, .column = 1}, name_start, name_end, true);
+}
+
+BUSTER_C_INTERNAL void c_preprocess_command_operations(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CPreprocessOptions options,
+                                                         CMacro** first_macro, CMacro** last_macro, CPreprocessResult* result)
+{
+    if (options.macro_operation_count)
+    {
+        for (u32 operation_index = 0; operation_index < options.macro_operation_count; operation_index += 1)
         {
-            CToken token = lex.tokens[token_index];
-            if (token.kind != C_TOKEN_END_OF_FILE && token.kind != C_TOKEN_NEWLINE)
+            CPreprocessorOperation operation = options.macro_operations[operation_index];
+            switch (operation.kind)
             {
-                replacement[replacement_index++] = token;
+            case C_PREPROCESSOR_OPERATION_DEFINE:
+                c_preprocess_command_definition(arena, space, symbols, c_preprocess_command_operand(operation.operand), first_macro, last_macro, result);
+                break;
+            case C_PREPROCESSOR_OPERATION_UNDEFINE:
+                c_preprocess_command_undefinition(arena, space, symbols, operation.operand, *first_macro, result);
+                break;
+            case C_PREPROCESSOR_OPERATION_COUNT:
+                c_preprocess_diagnostic_push(arena, result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_INVALID_MACRO_DEFINITION,
+                                             S8("invalid command-line macro operation"));
+                break;
             }
         }
-        c_macro_define(arena, lex.spelling_base, symbols, first_macro, last_macro, definition.name, replacement, replacement_count, 0, 0, false, false);
     }
-    for (u32 undefinition_index = 0; undefinition_index < options.undefinition_count; undefinition_index += 1)
+    else
     {
-        CMacro* macro = c_macro_find(*first_macro, c_symbol_intern(symbols, options.undefinitions[undefinition_index]));
-        if (macro)
+        // Compatibility for pre-ordered API callers is the historical order:
+        // all definitions first, followed by all undefinitions.
+        for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
         {
-            macro->definition.defined = false;
+            c_preprocess_command_definition(arena, space, symbols, options.definitions[definition_index], first_macro, last_macro, result);
+        }
+        for (u32 undefinition_index = 0; undefinition_index < options.undefinition_count; undefinition_index += 1)
+        {
+            c_preprocess_command_undefinition(arena, space, symbols, options.undefinitions[undefinition_index], *first_macro, result);
         }
     }
 }
@@ -7087,7 +7153,8 @@ BUSTER_C_INTERNAL void c_preprocess_builtins(Arena* arena, CSymbolTable* symbols
 }
 
 BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro** first_macro, CMacro** last_macro,
-                                                       CPreprocessResult* result, CSourceLocation directive_location)
+                                                       CPreprocessResult* result, CSourceLocation directive_location, u32 command_name_start,
+                                                       u32 command_name_end)
 {
     if (*token_index >= lex.token_count || lex.tokens[*token_index].kind != C_TOKEN_IDENTIFIER)
     {
@@ -7095,6 +7162,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
         return;
     }
     CToken name = lex.tokens[(*token_index)++];
+    u32 parsed_name_end = name.offset + name.length;
     // Adjacency in translated offsets: a '(' that starts a parameter list
     // must follow the name with nothing between (a line splice deletes its
     // bytes in translation, which matches the standard's post-splice view).
@@ -7104,6 +7172,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
     u32 parameter_count = 0;
     bool variadic = false;
     bool valid = true;
+    bool command_name_valid = true;
     if (function_like)
     {
         *token_index += 1;
@@ -7128,6 +7197,8 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
             CToken token = lex.tokens[*token_index];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                valid = valid && (!expect_parameter || parameter_count == 0);
+                parsed_name_end = token.offset + c_token_length(lex.spelling_base, token);
                 *token_index += 1;
                 break;
             }
@@ -7135,16 +7206,29 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
             {
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
                 {
-                    expect_parameter = true;
-                    *token_index += 1;
-                    continue;
+                    if (variadic)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    else
+                    {
+                        expect_parameter = true;
+                        *token_index += 1;
+                        continue;
+                    }
                 }
                 valid = false;
                 break;
             }
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS))
             {
-                parameters[parameter_count++] = S8("__VA_ARGS__");
+                String8 parameter = S8("__VA_ARGS__");
+                for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
+                {
+                    valid = valid && !string_equal(parameters[parameter_index], parameter);
+                }
+                parameters[parameter_count++] = parameter;
                 variadic = true;
                 expect_parameter = false;
                 *token_index += 1;
@@ -7155,7 +7239,12 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
                 valid = false;
                 break;
             }
-            parameters[parameter_count++] = c_token_spelling(lex.spelling_base, token);
+            String8 parameter = c_token_spelling(lex.spelling_base, token);
+            for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
+            {
+                valid = valid && !string_equal(parameters[parameter_index], parameter);
+            }
+            parameters[parameter_count++] = parameter;
             *token_index += 1;
             if (*token_index < lex.token_count && c_token_is_punctuator(&lex.tokens[*token_index], C_PUNCTUATOR_ELLIPSIS))
             {
@@ -7168,6 +7257,11 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
         {
             valid = false;
         }
+    }
+    if (command_name_start != UINT32_MAX)
+    {
+        command_name_valid = name.offset == command_name_start && parsed_name_end == command_name_end;
+        valid = valid && command_name_valid;
     }
     u64 replacement_start = *token_index;
     // A block comment is one space, so a newline inside one does not end the
@@ -7221,8 +7315,9 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
     }
     if (!valid)
     {
+        String8 message = command_name_valid ? S8("invalid function-like macro parameter list") : S8("invalid macro name after '#define'");
         c_preprocess_diagnostic_push(arena, result, c_lex_token_location(&lex, name), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION,
-                                     S8("invalid function-like macro parameter list"));
+                                     message);
         return;
     }
     u64 replacement_capacity = *token_index - replacement_start;
@@ -7239,6 +7334,38 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
     CMacro* macro = c_macro_define(arena, lex.spelling_base, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement,
                                    (u32)replacement_count, parameters, parameter_count, function_like, variadic);
     macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, replacement, (u32)replacement_count);
+}
+
+BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro* first_macro,
+                                                         CPreprocessResult* result, CSourceLocation directive_location, u32 command_name_start,
+                                                         u32 command_name_end, bool allow_builtin)
+{
+    bool valid = *token_index < lex.token_count && lex.tokens[*token_index].kind == C_TOKEN_IDENTIFIER;
+    if (!valid)
+    {
+        c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_EXPECTED_MACRO_NAME, S8("expected macro name after '#undef'"));
+    }
+    else
+    {
+        CToken name = lex.tokens[(*token_index)++];
+        if (command_name_start != UINT32_MAX)
+        {
+            valid = name.offset == command_name_start && name.offset + name.length == command_name_end;
+        }
+        if (!valid)
+        {
+            c_preprocess_diagnostic_push(arena, result, c_lex_token_location(&lex, name), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION,
+                                         S8("invalid macro name after '#undef'"));
+        }
+        else
+        {
+            CMacro* macro = c_macro_find_token(first_macro, symbols, lex.spelling_base, &name);
+            if (macro && (allow_builtin || !macro->builtin))
+            {
+                macro->definition.defined = false;
+            }
+        }
+    }
 }
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
@@ -7469,7 +7596,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     c_symbols_intern_tokens(symbol_table, root_lex.spelling_base, root_lex.tokens, root_lex.token_shapes, root_lex.token_count);
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
-    result.diagnostic_capacity = BUSTER_MIN(source.length + options.definition_count + 1, UINT64_C(64));
+    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
     {
@@ -7477,7 +7604,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     CMacro* first_macro = 0;
     CMacro* last_macro = 0;
-    c_preprocess_command_definitions(arena, space, symbol_table, options, &first_macro, &last_macro);
     CToken* standard_replacement = arena_allocate(arena, CToken, 2);
     standard_replacement[0] = (CToken){
         .offset = C_SPELLING_ONE,
@@ -7980,6 +8106,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
+    c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
     String8* once_paths = arena_allocate(arena, String8, source.length + 1);
     u32 once_path_count = 0;
     CIncludeGuardTable guard_table = {0};
@@ -8288,28 +8415,16 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
                 else if (active && c_token_spelling_equal(base, directive, S8("define")))
                 {
-                    c_preprocess_define_directive(arena, symbol_table, lex, &token_index, &first_macro, &last_macro, &result, directive_location);
+                    c_preprocess_define_directive(arena, symbol_table, lex, &token_index, &first_macro, &last_macro, &result, directive_location,
+                                                  UINT32_MAX, UINT32_MAX);
                     // Directives reached, not macros surviving: a header
                     // included twice defines its macros twice.
                     result.detail->preprocessed.definitions += 1;
                 }
                 else if (active && c_token_spelling_equal(base, directive, S8("undef")))
                 {
-                    if (token_index >= lex.token_count || lex.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
-                    {
-                        c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_EXPECTED_MACRO_NAME, S8("expected macro name after '#undef'"));
-                    }
-                    else
-                    {
-                        CMacro* macro = c_macro_find_token(first_macro, symbol_table, base, &lex.tokens[token_index]);
-                        // The per-line rebuild used to redefine __LINE__/__FILE__ right
-                        // after any #undef, so builtins stay effectively un-undefinable.
-                        if (macro && !macro->builtin)
-                        {
-                            macro->definition.defined = false;
-                        }
-                        token_index += 1;
-                    }
+                    c_preprocess_undefine_directive(arena, symbol_table, lex, &token_index, first_macro, &result, directive_location, UINT32_MAX,
+                                                    UINT32_MAX, false);
                 }
                 else if (active && (is_include || is_include_next || is_import))
                 {

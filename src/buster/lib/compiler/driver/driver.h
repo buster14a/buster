@@ -81,6 +81,10 @@ struct CompilerDriverInvocation
     String8* input_paths;
     String8* include_paths;
     String8* system_include_paths;
+    // Parsed command lines populate only this ordered stream. The separate
+    // arrays remain an execution compatibility path for API-built invocations
+    // and are used only when macro_operation_count is zero.
+    CPreprocessorOperation* macro_operations;
     String8* definitions;
     String8* undefinitions;
     String8* library_paths;
@@ -119,6 +123,7 @@ struct CompilerDriverInvocation
     u32 compile_jobs;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 macro_operation_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 library_path_count;
