@@ -190,8 +190,22 @@
   half, arms the monitor with LDXP or LDAXP, and retries STXP/STLXP until the
   replacement lands whole. The rows
   preserve the direct emitter's memory-order strengths on every desktop ABI.
-  Sixteen-byte exchange, arithmetic RMW and compare-exchange still fall back
-  to that direct oracle.
+  Sixteen-byte exchange, arithmetic/bitwise RMW and compare-exchange use
+  constrained update rows with full-width integer input/result frame slots.
+  RMW reloads its unchanged operand on each retry and propagates carry/borrow
+  across both limbs. CAS compares both halves, selects the observed pair on
+  mismatch, and still completes STXP/STLXP before returning: an unvalidated
+  LDXP may be a torn read. The direct oracle follows the same corrected rule.
+  Every frame load precedes LDXP on each retry; only register operations
+  occur before STXP, preserving the exclusive-loop progress guarantee.
+  Both rows declare X9/X11-X14 clobbers and flag definitions; CAS additionally
+  stages desired in X15/X17. X10 is the constrained address, and X16 remains
+  reserved frame scratch.
+  `basic_c_aarch64_atomic_update_pair.c` checks both-limb results, boundary
+  arithmetic, strong/weak CAS, promoted padding and a large native frame.
+  The machine tests independently check complete retry windows and invalid
+  payload/frame contracts; the mnemonic oracle is
+  `tests/aarch64_atomic_update_pair_oracle.s`.
 - Windows/UEFI x86-64 variadic definitions home RCX/RDX/R8/R9 before any
   argument capture can reuse those registers. The caller-owned homes adjoin
   the overflow arguments; both homing and `LEA_INCOMING` include placement's

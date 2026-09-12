@@ -16,6 +16,8 @@
 // copy, over-aligned locals as runtime-aligned pointers into padded raw
 // slots, and rvalue array/vector INDEX bases through their storage
 // snapshot. Wide division expands into scalar MIR blocks before placement.
+// Sixteen-byte atomics use constrained pair rows, including readback on a
+// failed compare-exchange so the returned old image is single-copy atomic.
 // Everything else is an explicit unsupported result, never a
 // silent misselection.
 //
@@ -4219,6 +4221,60 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* sel
     return selected;
 }
 
+// RMW and CAS consume complete integer representations. Aggregate C11
+// operations already convert through these bits in canonical IR; do not
+// reinterpret smaller record storage as a sixteen-byte input here.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_pair_update(MachineA64Selector* selector, IrInstruction* instruction, bool compare_exchange)
+{
+    IrFunction* function = selector->function;
+    IrType* value_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    u32 operand_count = compare_exchange ? 3u : 2u;
+    bool selected = value_type && value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128 &&
+                    value_type->layout.resolved && value_type->layout.size == 16 && instruction->operand_count == operand_count &&
+                    instruction->result.value < function->value_count && instruction->operands[0].value < function->value_count &&
+                    (compare_exchange || instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT);
+    MachineInstruction row = {
+        .opcode = compare_exchange ? MACHINE_A64_ATOMIC_CAS_PAIR : MACHINE_A64_ATOMIC_RMW_PAIR,
+    };
+    if (selected)
+    {
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        selected = result_slot != UINT32_MAX;
+        if (selected)
+        {
+            row.operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
+        }
+    }
+    for (u32 operand_index = 1; selected && operand_index < operand_count; operand_index += 1)
+    {
+        u32 value = instruction->operands[operand_index].value;
+        selected = value < function->value_count && selector->value_stack_slots[value] != UINT32_MAX;
+        if (selected)
+        {
+            row.operands[operand_index + 1] = machine_ref_make(MACHINE_REF_STACK_SLOT, selector->value_stack_slots[value]);
+        }
+    }
+    if (selected)
+    {
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            bool acquire = machine_a64_memory_order_acquires(instruction->memory_order) ||
+                           (compare_exchange && machine_a64_memory_order_acquires(instruction->failure_memory_order));
+            bool release = machine_a64_memory_order_releases(instruction->memory_order);
+            row.operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register);
+            row.payload = 16u | (acquire ? MACHINE_A64_ATOMIC_PAIR_ACQUIRE : 0) | (release ? MACHINE_A64_ATOMIC_PAIR_RELEASE : 0);
+            if (!compare_exchange)
+            {
+                row.payload |= (u32)instruction->atomic_operation << MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT;
+            }
+            machine_a64_select_row(selector, row);
+        }
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -4254,6 +4310,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64S
                                                        });
             machine_a64_define(selector, result_register, row);
         }
+    }
+    else if (result_register == UINT32_MAX)
+    {
+        selected = machine_a64_select_atomic_pair_update(selector, instruction, false);
     }
     return selected;
 }
@@ -4294,6 +4354,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_compare_exchange(MachineA64Se
                                                        });
             machine_a64_define(selector, result_register, row);
         }
+    }
+    else if (result_register == UINT32_MAX)
+    {
+        selected = machine_a64_select_atomic_pair_update(selector, instruction, true);
     }
     return selected;
 }
@@ -5335,7 +5399,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.value_virtual_registers[instruction->result.value] = register_index;
                 }
                 else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
-                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_CALL ||
                           instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                           instruction->opcode == IR_OPCODE_VA_ARG || instruction->opcode == IR_OPCODE_CAST ||
                           instruction->opcode == IR_OPCODE_CONSTANT_INTEGER ||
@@ -7365,6 +7430,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // AND, and the exclusive pair replacement loop.
             capacity64 += 32 + 2u * (large_save_offset ? 16u : 4u);
             break;
+        case MACHINE_A64_ATOMIC_RMW_PAIR:
+            // Two input loads, a pair loop with at most two arithmetic
+            // words, and two result stores. Every frame access may expand.
+            capacity64 += 20 + 4u * (large_save_offset ? 16u : 4u);
+            break;
+        case MACHINE_A64_ATOMIC_CAS_PAIR:
+            // Expected/desired loads, compare and conditional replacement,
+            // pair loop, and result stores; no mismatch escape from LDXP.
+            capacity64 += 28 + 6u * (large_save_offset ? 16u : 4u);
+            break;
         case MACHINE_A64_ATOMIC_RMW:
             // ld(a)xr, operation, st(l)xr, cbnz.
             capacity64 += 16;
@@ -7906,6 +7981,84 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? 0xc8208000u : 0xc8200000u) |
                                                (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) | MACHINE_A64_X11);
                 machine_a64_emit(&encoder, 0x35000000u | (0x7fffeu << 5) | MACHINE_A64_X13);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_RMW_PAIR:
+            case MACHINE_A64_ATOMIC_CAS_PAIR:
+            {
+                bool compare_exchange = instruction->opcode == MACHINE_A64_ATOMIC_CAS_PAIR;
+                u32 result_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
+                u32 input_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[2])];
+                u32 atomic_address = operand_registers[0];
+                u32 retry_offset = encoder.count;
+                // Reload operands before LDXP, not inside the exclusive
+                // window: ordinary memory accesses would forfeit the
+                // architecture's forward-progress guarantee. Retrying also
+                // restores X11/X12 after arithmetic or conditional selection.
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X11, machine_a64_frame_offset(frame_area, input_offset), 8, false);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X12, machine_a64_frame_offset(frame_area, input_offset - 8), 8, false);
+                if (compare_exchange)
+                {
+                    u32 desired_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[3])];
+                    machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X15, machine_a64_frame_offset(frame_area, desired_offset), 8, false);
+                    machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X17, machine_a64_frame_offset(frame_area, desired_offset - 8), 8, false);
+                }
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_ACQUIRE) ? UINT32_C(0xc87f8000)
+                                                                                                  : UINT32_C(0xc87f0000)) |
+                                               (MACHINE_A64_X14 << 10) | (atomic_address << 5) | MACHINE_A64_X9);
+                if (compare_exchange)
+                {
+                    machine_a64_emit(&encoder, UINT32_C(0xeb0b013f)); // cmp x9, x11
+                    machine_a64_emit(&encoder, UINT32_C(0xfa4c01c0)); // ccmp x14, x12, #0, eq
+                    // A mismatch still needs a successful STXP to validate
+                    // the pair read. Select the observed bits in that case.
+                    machine_a64_emit(&encoder, UINT32_C(0x9a8901eb)); // csel x11, x15, x9, eq
+                    machine_a64_emit(&encoder, UINT32_C(0x9a8e022c)); // csel x12, x17, x14, eq
+                }
+                else
+                {
+                    switch (instruction->payload >> MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT)
+                    {
+                        case IR_ATOMIC_ADD:
+                            machine_a64_emit(&encoder, UINT32_C(0xab0b012b)); // adds x11, x9, x11
+                            machine_a64_emit(&encoder, UINT32_C(0x9a0c01cc)); // adc x12, x14, x12
+                            break;
+                        case IR_ATOMIC_SUBTRACT:
+                            machine_a64_emit(&encoder, UINT32_C(0xeb0b012b)); // subs x11, x9, x11
+                            machine_a64_emit(&encoder, UINT32_C(0xda0c01cc)); // sbc x12, x14, x12
+                            break;
+                        case IR_ATOMIC_BITWISE_AND:
+                            machine_a64_emit(&encoder, UINT32_C(0x8a0b012b));
+                            machine_a64_emit(&encoder, UINT32_C(0x8a0c01cc));
+                            break;
+                        case IR_ATOMIC_BITWISE_OR:
+                            machine_a64_emit(&encoder, UINT32_C(0xaa0b012b));
+                            machine_a64_emit(&encoder, UINT32_C(0xaa0c01cc));
+                            break;
+                        case IR_ATOMIC_BITWISE_XOR:
+                            machine_a64_emit(&encoder, UINT32_C(0xca0b012b));
+                            machine_a64_emit(&encoder, UINT32_C(0xca0c01cc));
+                            break;
+                        case IR_ATOMIC_EXCHANGE:
+                            break;
+                        default:
+                            encoder.error = true;
+                            break;
+                    }
+                }
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? UINT32_C(0xc8208000)
+                                                                                                  : UINT32_C(0xc8200000)) |
+                                               (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) | MACHINE_A64_X11);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                    .operands = {{.value = MACHINE_A64_X13, .kind = A64_MC_OPERAND_REGISTER},
+                                 {.value = (s64)retry_offset - (s64)encoder.count, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+                    .opcode = A64_OPCODE_CBNZ_W,
+                    .operand_count = 2,
+                });
+                // No frame store occurs before the successful exclusive
+                // store, and the returned old value includes both limbs.
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, machine_a64_frame_offset(frame_area, result_offset), 8, true);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X14, machine_a64_frame_offset(frame_area, result_offset - 8), 8, true);
             }
             break;
             case MACHINE_A64_ATOMIC_LOAD:

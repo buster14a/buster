@@ -18403,9 +18403,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                 instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
                                                 instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
                             u32 pair_retry_offset = (u32)buffer.count;
-                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
                             c_a64_load(&emitter, 11, instruction->operands[1]);
                             c_a64_load_high(&emitter, 12, instruction->operands[1]);
+                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
                             switch (instruction->atomic_operation)
                             {
                             case IR_ATOMIC_ADD:
@@ -18514,11 +18514,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             value_type->layout.size == 16)
                         {
                             // The sixteen-byte compare-exchange: the expected
-                            // pair reloads inside the loop (the register pair
-                            // doubles as the desired pair on the match path),
-                            // both halves compare through CCMP, a mismatch
-                            // leaves through CLREX like the scalar form, and
-                            // the loop returns the old value pair like every
+                            // and desired pairs reload before each exclusive
+                            // window, which contains no ordinary memory access.
+                            // both halves compare through CCMP, and CSEL
+                            // chooses the observed pair on mismatch. LDXP is
+                            // not itself a single-copy atomic read: even a
+                            // mismatch must complete STXP before returning.
+                            // The loop returns the old value pair like every
                             // other atomic — the frontend owns the success
                             // comparison and the expected write-back.
                             if (indirect)
@@ -18539,21 +18541,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                 instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
                                                 instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
                             u32 pair_retry_offset = (u32)buffer.count;
-                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
+                            // Stage every frame read before the exclusive window.
+                            // X16 remains address scratch; X15/X17 retain desired.
                             c_a64_load(&emitter, 11, instruction->operands[1]);
                             c_a64_load_high(&emitter, 12, instruction->operands[1]);
-                            // CMP X9, X11; CCMP X14, X12, #0, EQ — NE when either
-                            // half differs; the B.NE displacement patches once the
-                            // desired reloads below fix the loop's length.
+                            c_a64_load(&emitter, 15, instruction->operands[2]);
+                            c_a64_load_high(&emitter, 17, instruction->operands[2]);
+                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
                             codegen_emit_u32(&buffer, UINT32_C(0xeb0b013f));
                             codegen_emit_u32(&buffer, UINT32_C(0xfa4c01c0));
-                            u32 pair_mismatch_offset = (u32)buffer.count;
-                            codegen_emit_u32(&buffer, UINT32_C(0x54000001));
-                            c_a64_load(&emitter, 11, instruction->operands[2]);
-                            c_a64_load_high(&emitter, 12, instruction->operands[2]);
+                            codegen_emit_u32(&buffer, UINT32_C(0x9a8901eb)); // csel x11, x15, x9, eq
+                            codegen_emit_u32(&buffer, UINT32_C(0x9a8e022c)); // csel x12, x17, x14, eq
                             a64_emit_atomic_exclusive_store_pair(&buffer, 13, 11, 12, 10, pair_release);
                             a64_emit_exclusive_retry(&buffer, pair_retry_offset);
-                            codegen_canonical_a64_patch_local_branch(&buffer, pair_mismatch_offset, (u32)buffer.count, true);
                             codegen_emit_u32(&buffer, UINT32_C(0xd5033f5f));
                             c_a64_store(&emitter, 9, result_offset);
                             c_a64_store_high(&emitter, 14, result_offset);

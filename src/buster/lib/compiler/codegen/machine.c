@@ -946,6 +946,24 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .fixed_register_mask = 0x1, .fixed_registers = {MACHINE_A64_X10},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
+    [MACHINE_A64_ATOMIC_RMW_PAIR] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11) | (1u << MACHINE_A64_X12) |
+                        (1u << MACHINE_A64_X13) | (1u << MACHINE_A64_X14),
+        .fixed_register_mask = 0x1, .fixed_registers = {MACHINE_A64_X10},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
+    [MACHINE_A64_ATOMIC_CAS_PAIR] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11) | (1u << MACHINE_A64_X12) |
+                        (1u << MACHINE_A64_X13) | (1u << MACHINE_A64_X14) | (1u << MACHINE_A64_X15) | (1u << MACHINE_A64_X17),
+        .fixed_register_mask = 0x1, .fixed_registers = {MACHINE_A64_X10},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
     // The exclusive loops run on the canonical emitter's fixed register
     // palette: X9 old value, X10 address, X11 operand/desired, X12
     // scratch/expected, X13 status — the same registers VA_ARG already
@@ -1288,6 +1306,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_ATOMIC_FENCE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 41,
     [MACHINE_A64_ATOMIC_LOAD_PAIR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 63,
     [MACHINE_A64_ATOMIC_STORE_PAIR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 64,
+    [MACHINE_A64_ATOMIC_RMW_PAIR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 65,
+    [MACHINE_A64_ATOMIC_CAS_PAIR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 66,
     [MACHINE_A64_LEA_TLS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 42,
     [MACHINE_A64_STACK_ALLOCATE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 43,
     [MACHINE_A64_SWITCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 44,
@@ -2531,6 +2551,23 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     function->stack_slot_sizes[slot] >= 16 && value_size > 8 && value_size <= 16 &&
                     !(instruction->payload & ~(0xffu | MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE)) &&
                     order_flags_valid;
+        } break;
+        case MACHINE_A64_ATOMIC_RMW_PAIR:
+        case MACHINE_A64_ATOMIC_CAS_PAIR:
+        {
+            bool compare_exchange = instruction->opcode == MACHINE_A64_ATOMIC_CAS_PAIR;
+            u32 operation_mask = compare_exchange ? 0 : 0xffu << MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT;
+            u32 allowed_mask = 0xffu | MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE | operation_mask;
+            valid = (instruction->payload & 0xffu) == 16 && !(instruction->payload & ~allowed_mask) &&
+                    (compare_exchange || (instruction->payload >> MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT) < IR_ATOMIC_OPERATION_COUNT);
+            u32 operand_count = compare_exchange ? 4u : 3u;
+            for (u32 operand_index = 1; valid && operand_index < operand_count; operand_index += 1)
+            {
+                MachineRef frame_ref = instruction->operands[operand_index];
+                u32 slot = machine_ref_payload(frame_ref);
+                valid = machine_ref_kind(frame_ref) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                        function->stack_slot_sizes[slot] >= 16;
+            }
         } break;
         case MACHINE_X64_CPUID:
         case MACHINE_X64_XGETBV:
