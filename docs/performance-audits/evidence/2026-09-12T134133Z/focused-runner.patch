@@ -1,9 +1,6 @@
 --- a/src/buster/apps/ide/ide.c
 +++ b/src/buster/apps/ide/ide.c
-@@ -1022,38 +1022,8 @@
- 
- ProcessResult entry_point(void)
- {
+@@ -1025,35 +1025,5 @@
 -    switch (compiler_state.command)
 -    {
 -        case COMPILER_COMMAND_HELP:

@@ -70,6 +70,18 @@ int stack_check_variadic_tail(int marker, ...)
 }
 #endif
 
+struct stack_result_pair stack_return_pair(struct stack_aligned64 value)
+{
+    struct stack_result_pair result = {value.values[0] + value.values[7], value.values[1] + value.values[6]};
+    return result;
+}
+
+double stack_return_float(struct stack_aligned32 value)
+{
+    return value.values[2] * 1.25;
+}
+
+#if !defined(OVERALIGNED_STACK_SCALAR_ONLY)
 // Exhaust the eight vector argument registers before each wide vector so
 // both host compiler feature sets must pass it in the stack argument area.
 int stack_check_vector32(double a, double b, double c, double d, double e, double f, double g, double h, stack_vector32 value)
@@ -91,3 +103,5 @@ int stack_check_vector64(double a, double b, double c, double d, double e, doubl
     }
     return failures;
 }
+
+#endif

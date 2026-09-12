@@ -9,6 +9,10 @@
   timing/RSS, separate PMU/allocation probes and a conservative CI guard.
   See [`tools/throughput/README.md`](../../tools/throughput/README.md) for the
   experiment contract, reproducible commands, statistical assumptions and limits.
+  Recovered macro-expansion and aggregate-ABI inputs are opt-in via repeatable
+  `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
+  and preserve the default CI corpus. Their counts/hashes and full job-capacity
+  cross product are covered by the native harness tests.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.

@@ -160,7 +160,20 @@ struct CompilerDriverInvocation
     // -fno-machine-fallback: fail native C compilation before writing its
     // object if any function needed the canonical differential oracle.
     bool reject_machine_fallback;
+    // -fcodegen-fallback-census: retain every observed native fallback's
+    // source identity. It does not enable or disable production fallback.
+    bool record_codegen_fallbacks;
     bool c_dialect_explicit;
+};
+
+typedef struct CompilerDriverFallbackRecord CompilerDriverFallbackRecord;
+struct CompilerDriverFallbackRecord
+{
+    String8 source;
+    String8 function;
+    CodegenFallbackRecord codegen;
+    u32 line;
+    u32 column;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
@@ -183,6 +196,8 @@ struct CompilerDriverResult
     EbpfArtifact ebpf;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
+    CompilerDriverFallbackRecord* fallback_records;
+    u32 fallback_record_count;
     // What the C frontend consumed, per inclusion and per distinct file, and
     // what preprocessing made of it. `lexed_files` attributes the difference
     // between the two aggregates: across several inputs it keeps only the

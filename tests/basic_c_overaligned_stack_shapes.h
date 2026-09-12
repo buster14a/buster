@@ -14,6 +14,10 @@ struct __attribute__((aligned(64))) stack_aligned64
 typedef unsigned char stack_vector32 __attribute__((vector_size(32)));
 typedef unsigned char stack_vector64 __attribute__((vector_size(64)));
 
+struct stack_result_pair { unsigned long long low; unsigned long long high; };
+extern struct stack_result_pair stack_return_pair(struct stack_aligned64 value);
+extern double stack_return_float(struct stack_aligned32 value);
+
 extern int stack_observe_alignment(void const* pointer, unsigned long long alignment);
 extern int stack_check32(struct stack_aligned32 value);
 extern int stack_check64(struct stack_aligned64 value);

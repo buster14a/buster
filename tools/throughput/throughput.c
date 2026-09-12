@@ -31,15 +31,22 @@
 #define TP_RAW_FIELDS (22 + TP_DIAGNOSTICS)
 #define TP_STANDARD_METRICS 15
 #define TP_METRICS (TP_STANDARD_METRICS + TP_DIAGNOSTICS)
-#define TP_CASES 6
-#define TP_MAX_JOBS 32
+#define TP_DEFAULT_CASES 6
+#define TP_CASES 8
+#define TP_MODES 4
+#define TP_SELF_HOST_STAGES 2
+#define TP_DEFAULT_WORKLOAD_MASK ((1u << TP_DEFAULT_CASES) - 1u)
+#define TP_ALL_WORKLOAD_MASK ((1u << TP_CASES) - 1u)
+#define TP_ALL_MODE_MASK ((1u << TP_MODES) - 1u)
+#define TP_MAX_JOBS (TP_CASES * TP_MODES + TP_SELF_HOST_STAGES)
 #define TP_ROUNDS 2
 #define TP_MAX_FLAGS 32
 #define TP_RAW_HEADER "round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,instructions,branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,output_bytes,source_bytes,source_lines,source_functions,output_sha256,minor_faults,major_faults,voluntary_context_switches,involuntary_context_switches\n"
 
 static char const* const tp_case_names[TP_CASES] = {
-    "tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"};
-static char const* const tp_modes[4] = {"none", "mir-stack", "fast", "quality"};
+    "tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure",
+    "macros", "aggregate-abi"};
+static char const* const tp_modes[TP_MODES] = {"none", "mir-stack", "fast", "quality"};
 
 typedef struct TpConfig
 {
@@ -59,7 +66,7 @@ typedef struct TpConfig
     char const* allocation_candidate;
     char const* flags[TP_MAX_FLAGS];
     unsigned flag_count;
-    unsigned mode_mask, pairs, warmups, timeout, seed, scale;
+    unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
     int assembly;
 } TpConfig;
@@ -171,7 +178,8 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->baseline_id = "unspecified";
     config->candidate_id = "unspecified";
     config->profile = "ci";
-    config->mode_mask = 15;
+    config->mode_mask = TP_ALL_MODE_MASK;
+    config->workload_mask = TP_DEFAULT_WORKLOAD_MASK;
     config->pairs = 20;
     config->warmups = 2;
     config->timeout = 120;
@@ -179,7 +187,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->scale = 1;
     config->cpu = -1;
     config->guard = 1;
-    int ok = 1;
+    int ok = 1, selected_workloads = 0;
     for (int i = 2; i < argc && ok; ++i)
     {
         char const* key = argv[i];
@@ -247,12 +255,24 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--mode"))
             {
                 config->mode_mask = 0;
-                for (unsigned m = 0; m < 4; ++m)
+                for (unsigned m = 0; m < TP_MODES; ++m)
                 {
                     if (!strcmp(value, tp_modes[m])) config->mode_mask |= 1u << m;
                 }
-                if (!strcmp(value, "all")) config->mode_mask = 15;
+                if (!strcmp(value, "all")) config->mode_mask = TP_ALL_MODE_MASK;
                 ok = config->mode_mask != 0;
+            }
+            else if (!strcmp(key, "--workload"))
+            {
+                unsigned mask = 0;
+                for (unsigned kind = 0; kind < TP_CASES; ++kind)
+                    if (!strcmp(value, tp_case_names[kind])) mask |= 1u << kind;
+                if (!strcmp(value, "default")) mask = TP_DEFAULT_WORKLOAD_MASK;
+                if (!strcmp(value, "all")) mask = TP_ALL_WORKLOAD_MASK;
+                ok = mask != 0;
+                if (!selected_workloads) config->workload_mask = 0;
+                config->workload_mask |= mask;
+                selected_workloads = 1;
             }
             else if (!strcmp(key, "--flag"))
             {
@@ -278,6 +298,11 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     if (config->guard && config->pairs < 20 && !strcmp(config->command, "run"))
     {
         tp_error("a guard requires at least 20 pairs in EACH of two rounds; use --no-guard for smoke measurements");
+        ok = 0;
+    }
+    if (config->guard && config->workload_mask != TP_DEFAULT_WORKLOAD_MASK && !strcmp(config->command, "run"))
+    {
+        tp_error("custom workload selection requires --no-guard; the predeclared CI corpus is unchanged");
         ok = 0;
     }
     if (!!config->allocation_baseline != !!config->allocation_candidate ||
@@ -309,6 +334,7 @@ static int tp_generate(TpConfig const* config, char const* root, TpWorkload work
     int ok = 1;
     for (unsigned kind = 0; kind < TP_CASES && ok; ++kind)
     {
+        if (!(config->workload_mask & (1u << kind))) continue;
         TpWorkload* workload = workloads + kind;
         memset(workload, 0, sizeof(*workload));
         snprintf(workload->name, sizeof(workload->name), "%s", tp_case_names[kind]);
@@ -382,7 +408,7 @@ static int tp_generate(TpConfig const* config, char const* root, TpWorkload work
                     fputs("    return x ^ y;\n}\n", file);
                 }
             }
-            else
+            else if (kind == 5)
             {
                 fputs("extern unsigned opaque(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned);\n", file);
                 workload->functions = 8 * multiplier;
@@ -408,6 +434,23 @@ static int tp_generate(TpConfig const* config, char const* root, TpWorkload work
                     for (unsigned v = 0; v < 32; ++v) fprintf(file, " ^ v%u", v);
                     fputs(";\n}\n", file);
                 }
+            }
+            else if (kind == 6)
+            {
+                /* Recovered allocation transport corpus; see README provenance.
+                 * Unsigned arithmetic keeps every argument free of signed overflow. */
+                fputs("#define CAT_(a,b) a##b\n#define CAT(a,b) CAT_(a,b)\n"
+                      "#define TWICE(x) ((x)+(x))\n#define STEP(x) (TWICE(TWICE(x))+TWICE(x))\n"
+                      "#define MAKE(n) unsigned CAT(fn_,n)(unsigned x) { return STEP(x)+n; }\n", file);
+                workload->functions = 256 * multiplier;
+                for (unsigned i = 0; i < workload->functions; ++i) fprintf(file, "MAKE(%u)\n", i);
+            }
+            else
+            {
+                workload->functions = 128 * multiplier;
+                for (unsigned i = 0; i < workload->functions; ++i)
+                    fprintf(file, "struct S%u { long x,y; }; struct S%u fn_%u(struct S%u v) "
+                            "{ v.x=(long)((unsigned long)v.x+%uUL);return v; }\n", i, i, i, i, i);
             }
             ok = !ferror(file);
             if (fclose(file) != 0) ok = 0;
@@ -483,6 +526,50 @@ static int tp_sample_csv(FILE* file, unsigned round, unsigned pair, unsigned ord
     }
     fputc('\n', file);
     return !ferror(file) && fflush(file) == 0;
+}
+
+/* Validate the complete cross product before allocating or writing any job.
+ * Masks are checked first, so the bounded sums/products cannot overflow. */
+static int tp_job_count(TpConfig const* config, unsigned capacity, unsigned* count)
+{
+    int ok = config->workload_mask && !(config->workload_mask & ~TP_ALL_WORKLOAD_MASK) &&
+             config->mode_mask && !(config->mode_mask & ~TP_ALL_MODE_MASK);
+    unsigned workloads = 0, modes = 0, required = 0;
+    if (ok)
+    {
+        for (unsigned kind = 0; kind < TP_CASES; ++kind) workloads += !!(config->workload_mask & (1u << kind));
+        for (unsigned mode = 0; mode < TP_MODES; ++mode) modes += !!(config->mode_mask & (1u << mode));
+        required = workloads * modes + (config->self_host_root ? TP_SELF_HOST_STAGES : 0);
+        ok = required <= capacity;
+    }
+    *count = ok ? required : 0;
+    return ok;
+}
+
+static int tp_prepare_jobs(TpConfig const* config, TpWorkload const workloads[TP_CASES],
+                           TpJob* jobs, unsigned capacity, unsigned* count)
+{
+    int ok = tp_job_count(config, capacity, count);
+    unsigned next = 0;
+    if (ok)
+    {
+        for (unsigned kind = 0; kind < TP_CASES; ++kind)
+        {
+            if (!(config->workload_mask & (1u << kind))) continue;
+            for (unsigned mode = 0; mode < TP_MODES; ++mode)
+                if (config->mode_mask & (1u << mode)) jobs[next++] = (TpJob){workloads[kind], mode, 0, config->assembly};
+        }
+        for (unsigned stage = 1; config->self_host_root && stage <= TP_SELF_HOST_STAGES && ok; ++stage)
+        {
+            TpJob* job = jobs + next++;
+            memset(job, 0, sizeof(*job));
+            job->mode = 2;
+            job->stage = stage;
+            snprintf(job->workload.name, sizeof(job->workload.name), "self_host_stage%u", stage);
+            ok = tp_path(job->workload.path, config->self_host_root, "src/buster/apps/ide/ide.c");
+        }
+    }
+    return ok;
 }
 
 typedef struct TpArguments
@@ -664,7 +751,15 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
         fputs("\"cpu_scope\":\"OS child user plus system CPU time\",\"rss_scope\":\"OS per-child peak; not concurrent tree sum\",", file);
         fputs("\"pmu_scope\":\"separate diagnostic replay; user-space inherited hardware events; >=90% running required\",", file);
         fputs("\"allocation_scope\":\"separate explicitly instrumented compiler replay; arena calls and requested bytes\",", file);
-        fprintf(file, "\"input_schema\":%d,", TP_INPUT_SCHEMA);
+        fprintf(file, "\"input_schema\":%d,\"workloads\":[", TP_INPUT_SCHEMA);
+        unsigned selected = 0;
+        for (unsigned kind = 0; kind < TP_CASES; ++kind)
+        {
+            if (!(config->workload_mask & (1u << kind))) continue;
+            if (selected++) fputc(',', file);
+            tp_json_string(file, tp_case_names[kind]);
+        }
+        fputs("],", file);
         fputs("\"process_diagnostics_scope\":\"Linux wait4 child usage; faults and context switches, not PMU events; copied after timing; other platforms unavailable; diagnostic only\",", file);
         if (config->host)
         {
@@ -1261,38 +1356,22 @@ static int tp_run(TpConfig config)
         ok = tp_path(path, root, "metadata.json") && stat(path, &exists) != 0 && errno == ENOENT;
         if (!ok) tp_error("result directory already contains a run; choose a new --output directory");
     }
-    ok = ok && tp_mkdirs(input_dir) && tp_mkdirs(output_dir);
+    unsigned job_count = 0;
+    ok = ok && tp_job_count(&config, TP_MAX_JOBS, &job_count);
+    /* Own the selected job records on the heap: their embedded paths must not
+     * grow the Windows main-thread stack as workload coverage expands. */
+    TpJob* jobs = ok ? (TpJob*)calloc(job_count, sizeof(TpJob)) : NULL;
+    TpRow (*first)[2] = ok ? (TpRow (*)[2])calloc(job_count, sizeof(*first)) : NULL;
+    ok = ok && jobs && first && tp_mkdirs(input_dir) && tp_mkdirs(output_dir);
     TpWorkload workloads[TP_CASES];
     if (ok) ok = tp_generate(&config, input_dir, workloads);
-    TpJob jobs[TP_MAX_JOBS];
-    unsigned job_count = 0;
-    if (ok)
-    {
-        for (unsigned i = 0; i < TP_CASES; ++i)
-        {
-            for (unsigned mode = 0; mode < 4; ++mode)
-            {
-                if (config.mode_mask & (1u << mode)) jobs[job_count++] = (TpJob){workloads[i], mode, 0, config.assembly};
-            }
-        }
-    }
+    if (ok) ok = tp_prepare_jobs(&config, workloads, jobs, job_count, &job_count);
     char frozen_hash[65] = {0};
     if (ok && config.self_host_root)
     {
         ok = tp_self_host_hash(&config, frozen_hash);
-        if (ok)
-        {
-            for (unsigned stage = 1; stage <= 2; ++stage)
-            {
-                TpJob* job = jobs + job_count++;
-                memset(job, 0, sizeof(*job));
-                job->mode = 2;
-                job->stage = stage;
-                snprintf(job->workload.name, sizeof(job->workload.name), "self_host_stage%u", stage);
-                ok = ok && tp_path(job->workload.path, self_root, "src/buster/apps/ide/ide.c");
-                memcpy(job->workload.hash, frozen_hash, sizeof(frozen_hash));
-            }
-        }
+        for (unsigned i = job_count - TP_SELF_HOST_STAGES; i < job_count && ok; ++i)
+            memcpy(jobs[i].workload.hash, frozen_hash, sizeof(frozen_hash));
         if (!ok) tp_error("cannot freeze self-host input trees (regular files/directories only)");
     }
     char compiler_hashes[4][65];
@@ -1322,8 +1401,6 @@ static int tp_run(TpConfig config)
     ok = ok && samples && commands && capabilities && telemetry;
     if (samples) fputs(TP_RAW_HEADER, samples);
     if (telemetry) fputs(TP_RAW_HEADER, telemetry);
-    TpRow first[TP_MAX_JOBS][2];
-    memset(first, 0, sizeof(first));
     char stage1[2][TP_PATH_CAP], stage2[2][TP_PATH_CAP];
     for (unsigned variant = 0; variant < 2; ++variant)
     {
@@ -1519,6 +1596,8 @@ static int tp_run(TpConfig config)
     if (capabilities && fclose(capabilities) != 0) ok = 0;
     if (telemetry && fclose(telemetry) != 0) ok = 0;
     if (ok) ok = tp_completion(root, job_count, config.pairs, config.guard, 1);
+    free(first);
+    free(jobs);
     int result = ok ? tp_compare(root) : 2;
     if (!ok) tp_error("run incomplete; partial logs retained; no performance verdict");
     return result;
@@ -1601,10 +1680,13 @@ static void tp_help(void)
           "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
+          "--workload NAME (repeatable; first replaces defaults; names below, or default|all),\n"
           "--artifact object|assembly (ordinary jobs only; default object; self-host stages stay executable),\n"
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
-          "--no-guard (explicit diagnostic/smoke mode; no performance pass claimed).\n"
+          "--no-guard (required for custom workload runs; no performance pass claimed).\n"
+          "Workloads: tiny_startup, large_function, many_functions, symbol_table, control_flow, backend_pressure,\n"
+          "macros, aggregate-abi. Default: the first six, in fixed corpus order regardless of selection order.\n"
           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
           "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
@@ -1646,7 +1728,8 @@ int main(int argc, char** argv)
             result = ok ? 0 : 2;
             if (ok)
             {
-                for (unsigned i = 0; i < TP_CASES; ++i) printf("%s bytes=%" PRIu64 " lines=%" PRIu64 " functions=%" PRIu64 " sha256=%s\n",
+                for (unsigned i = 0; i < TP_CASES; ++i)
+                    if (config.workload_mask & (1u << i)) printf("%s bytes=%" PRIu64 " lines=%" PRIu64 " functions=%" PRIu64 " sha256=%s\n",
                         workloads[i].name, workloads[i].bytes, workloads[i].lines, workloads[i].functions, workloads[i].hash);
             }
         }

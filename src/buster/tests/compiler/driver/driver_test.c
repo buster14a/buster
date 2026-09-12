@@ -1285,6 +1285,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
 
 // The curated MIR corpus is part of test_all/CI. Keep exclusions in separate
 // negative tests so an unsupported target cannot make a strict gate vacuous.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_aligned_calls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 sources[] = {S8("tests/basic_c_overaligned_stack_caller.c"), S8("tests/basic_c_overaligned_stack_callee.c")};
+    u32 functions[] = {8, 6};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-sysv-aligned-call"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-target"), targets[target], S8("-march=baseline"), modes[mode], frontends[frontend],
+                        S8("-DOVERALIGNED_STACK_SCALAR_ONLY=1"), S8("-fno-machine-fallback"), S8("-fverify-codegen"), sources[source], S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == functions[source] &&
+                                           compiled.codegen_statistics.fallback_function_count == 0);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_large_frame(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1569,11 +1602,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(Un
     return result;
 }
 
-// Both the new boundary/CFG oracle and the unchanged wide fixture must select.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_i128_divide(UnitTestArguments* arguments)
+// Shared limb references cover native divide, remainder, shifts, and negation.
+// Keep the original AArch64 wide fixture as an additional coverage gate.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_i128_divide(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
+                        S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows"),
+                        S8("x86_64-android"), S8("x86_64-ios"), S8("x86_64-uefi")};
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
@@ -1581,20 +1617,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_i128_divide(Unit
     {
         String8 path;
         u32 functions;
+        bool x86_64;
     } fixtures[] = {
-        {S8("tests/basic_c_aarch64_i128_divide.c"), 8},
-        {S8("tests/basic_c_aarch64_i128.c"), 38},
+        {S8("tests/basic_c_aarch64_i128_divide.c"), 8, true},
+        {S8("tests/basic_c_aarch64_i128.c"), 38, false},
+        {S8("tests/basic_c_i128_shift_edges.c"), 2, true},
+        {S8("tests/basic_c_i128_divide_oracle_edges.c"), 1, true},
+        {S8("tests/basic_c_asm_goto_division.c"), 2, true},
     };
     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
     {
-        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        for (u32 target = 0; target < (fixtures[fixture].x86_64 ? BUSTER_ARRAY_LENGTH(targets) : 3u); target += 1)
         {
             for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
             {
                 for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-i128_divide"), S8(".o"));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-native-i128_divide"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                                          S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture].path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
@@ -1605,11 +1645,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_i128_divide(Unit
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
                     BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == fixtures[fixture].functions &&
                         compiled.codegen_statistics.fallback_function_count == 0, description);
-#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS
-                    bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+#if (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && !BUSTER_ANDROID && !BUSTER_IOS
+                    bool native_target = (BUSTER_CPU_ARCH_AARCH64 && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) ||
+                                                                                  (target == 2 && BUSTER_WINDOWS))) ||
+                                         (BUSTER_CPU_ARCH_X86_64 && ((target == 3 && BUSTER_LINUX) || (target == 4 && BUSTER_MACOS) ||
+                                                                                   (target == 5 && BUSTER_WINDOWS)));
                     if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-i128_divide-run"), S8(".exe"));
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-native-i128_divide-run"), S8(".exe"));
                         String8 native_command[] = {modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable,
                                                     fixtures[fixture].path};
                         CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
@@ -1734,6 +1777,204 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_row_address(UnitTest
     return result;
 }
 
+// The argument count comes from IR; register exhaustion only changes placement.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
+                         S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-many-arguments-host"), S8(".o"));
+    String8 host_command[16];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    host_command[host_count++] = S8("-O2");
+    host_command[host_count++] = S8("-fno-tree-vectorize");
+    host_command[host_count++] = S8("-fno-tree-slp-vectorize");
+    host_command[host_count++] = S8("-ffreestanding");
+    host_command[host_count++] = S8("-fno-stack-protector");
+    host_command[host_count++] = S8("-fno-unwind-tables");
+    host_command[host_count++] = S8("-fno-asynchronous-unwind-tables");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = S8("tests/differential/many_native_arguments_host.c");
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+    bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 source = S8("tests/basic_c_many_native_arguments.c");
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments"), S8(".o"));
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                    S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(temporary.arena, S8("many arguments {S8} {S8} {S8}: {S8}"),
+                    targets[target], modes[mode], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 7 &&
+                    compiled.codegen_statistics.fallback_function_count == 0, description);
+#if (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && !BUSTER_ANDROID && !BUSTER_IOS
+                bool native_arch = (target < 3 && BUSTER_CPU_ARCH_AARCH64) || (target >= 3 && BUSTER_CPU_ARCH_X86_64);
+                bool native_target = native_arch && ((target % 3 == 0 && BUSTER_LINUX) ||
+                    (target % 3 == 1 && BUSTER_MACOS) || (target % 3 == 2 && BUSTER_WINDOWS));
+                if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-run"), S8(".exe"));
+                    String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                        S8("-o"), executable, source};
+                    CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+                    BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                    if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
+                    if (host_compiled)
+                    {
+                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-many-arguments-mixed"), S8(".exe"));
+                        String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                            S8("-o"), mixed, S8("tests/differential/many_native_arguments.c"), host_object};
+                        CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_command)));
+                        BUSTER_TEST_RAW(arguments, mixed_result.error == COMPILER_DRIVER_ERROR_NONE, mixed_result.diagnostic);
+                        if (mixed_result.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, mixed));
+                        }
+                    }
+#endif
+                }
+#endif
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-macos"), S8("aarch64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-platform-variadic-host"), S8(".o"));
+    String8 host_command[14];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    host_command[host_count++] = S8("-O2");
+    host_command[host_count++] = S8("-ffreestanding");
+    host_command[host_count++] = S8("-fno-stack-protector");
+    host_command[host_count++] = S8("-fno-unwind-tables");
+    host_command[host_count++] = S8("-fno-asynchronous-unwind-tables");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = S8("tests/differential/aarch64_platform_variadic_host.c");
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+    bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#if BUSTER_WINDOWS
+    String8 boundary_object = buster_test_temporary_path(arguments->arena, S8("buster-windows-variadic-abi"), S8(".o"));
+    host_command[host_count - 3] = S8("tests/differential/aarch64_windows_variadic_boundary.S");
+    host_command[host_count - 1] = boundary_object;
+    host_command[host_count++] = S8("-DBUSTER_PLATFORM_VA_ABI_PROBE=1");
+    ProcessSpawnResult boundary_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+    bool boundary_compiled = boundary_spawn.handle && os_process_wait_sync(arguments->arena, boundary_spawn).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, boundary_compiled);
+#endif
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 fixture = 0; fixture < (target ? 2u : 1u); fixture += 1)
+                {
+                    String8 source = fixture ? S8("tests/basic_c_aarch64_windows_variadic_boundary.c") : S8("tests/basic_c_aarch64_platform_variadic.c");
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                        S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("platform variadic {S8} {S8} {S8} {S8}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], source, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == (fixture ? 4u : 10u) &&
+                        compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_IOS
+                    bool native_target = target == (BUSTER_WINDOWS ? 1u : 0u);
+                    if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-run"), S8(".exe"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                            S8("-o"), executable, source};
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
+                        if (host_compiled && !fixture)
+                        {
+                            String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-variadic-mixed"), S8(".exe"));
+                            String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                S8("-o"), mixed, S8("tests/differential/aarch64_platform_variadic.c"), host_object};
+                            CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
+                                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_command)));
+                            BUSTER_TEST_RAW(arguments, mixed_result.error == COMPILER_DRIVER_ERROR_NONE, mixed_result.diagnostic);
+                            if (mixed_result.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, mixed));
+                            }
+                        }
+#if BUSTER_WINDOWS
+                        if (boundary_compiled && fixture)
+                        {
+                            String8 boundary = buster_test_temporary_path(temporary.arena, S8("buster-windows-variadic-boundary-run"), S8(".exe"));
+                            String8 boundary_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                S8("-DBUSTER_PLATFORM_VA_ABI_PROBE=1"), S8("-o"), boundary, source, boundary_object};
+                            CompilerDriverResult boundary_result = compiler_driver_execute_invocation(temporary.arena,
+                                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_command)));
+                            BUSTER_TEST_RAW(arguments, boundary_result.error == COMPILER_DRIVER_ERROR_NONE, boundary_result.diagnostic);
+                            if (boundary_result.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, boundary));
+                            }
+                        }
+#endif
+#endif
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1757,12 +1998,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         {.path = S8("tests/basic_c_large_frame.c")},
         {.path = S8("tests/basic_c_win64_large_frame.c")},
         {.path = S8("tests/basic_c_compiler_barrier.c")},
+        {.path = S8("tests/basic_c_inline_hints.c")},
+        {.path = S8("tests/basic_c_asm_identity.c")},
+        {.path = S8("tests/basic_c_asm_goto_identity.c")},
         {.path = S8("tests/basic_c_statement_expression_value.c"), .variadic_definitions = 1},
     };
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
-        bool variadic_gap = string_equal(targets[target], S8("aarch64-apple-macos")) ||
-                            string_equal(targets[target], S8("aarch64-unknown-windows"));
+        bool variadic_gap = false;
         bool dynamic_stack_gap = false;
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -1870,11 +2113,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             scratch_end(temporary);
         }
     }
-    // The direct emitter already owns the baseline LDXP/STXP/STLXP semantics for
-    // sixteen-byte atomics. Keep the load/store-only fixture strict across
-    // every desktop AArch64 target and frontend, and pin the broader
-    // aggregate corpus at its one remaining compare-exchange fallback. A
-    // regression in either pair selector must not hide behind that later row.
+    // Keep the unchanged load/store fixture strict, and promote both broader
+    // corpora from their last expected CAS/RMW refusal to zero fallback.
     String8 atomic_pair_targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(atomic_pair_targets); target += 1)
     {
@@ -1899,7 +2139,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
 
                 String8 census_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-aggregate-census"), S8(".o"));
                 String8 census_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
-                                            S8("-fverify-codegen"), S8("-o"), census_output, S8("tests/basic_c_atomic_aggregate.c")};
+                                            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), census_output, S8("tests/basic_c_atomic_aggregate.c")};
                 CompilerDriverResult census = compiler_driver_execute_invocation(
                     temporary.arena,
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command)));
@@ -1907,16 +2147,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                                                            atomic_pair_targets[target], modes[mode], frontends[frontend], census.diagnostic);
                 BUSTER_TEST_RAW(arguments, census.error == COMPILER_DRIVER_ERROR_NONE && census.has_object, census_description);
                 BUSTER_TEST_RAW(arguments, census.codegen_statistics.function_count != 0 &&
-                                               census.codegen_statistics.fallback_function_count == 1 &&
-                                               census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1 &&
-                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_COMPARE_EXCHANGE] == 1 &&
+                                               census.codegen_statistics.fallback_function_count == 0 &&
+                                               census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 0 &&
+                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_COMPARE_EXCHANGE] == 0 &&
                                                census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_LOAD] == 0 &&
                                                census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_STORE] == 0,
                                 census_description);
 
                 String8 int128_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-int128-census"), S8(".o"));
                 String8 int128_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
-                                            S8("-fverify-codegen"), S8("-o"), int128_output, S8("tests/basic_c_int128.c")};
+                                            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), int128_output, S8("tests/basic_c_int128.c")};
                 CompilerDriverResult int128_census = compiler_driver_execute_invocation(
                     temporary.arena,
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(int128_command)));
@@ -1924,12 +2164,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                                                            atomic_pair_targets[target], modes[mode], frontends[frontend], int128_census.diagnostic);
                 BUSTER_TEST_RAW(arguments, int128_census.error == COMPILER_DRIVER_ERROR_NONE && int128_census.has_object, int128_description);
                 BUSTER_TEST_RAW(arguments, int128_census.codegen_statistics.function_count != 0 &&
-                                               int128_census.codegen_statistics.fallback_function_count == 1 &&
-                                               int128_census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1 &&
-                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_READ_MODIFY_WRITE] == 1 &&
+                                               int128_census.codegen_statistics.fallback_function_count == 0 &&
+                                               int128_census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 0 &&
+                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_READ_MODIFY_WRITE] == 0 &&
                                                int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_LOAD] == 0 &&
                                                int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_STORE] == 0,
                                 int128_description);
+                scratch_end(temporary);
+            }
+        }
+    }
+    // New updates and the direct reference share one source. Strict object
+    // coverage is cross-target; only the matching native desktop executes it.
+    String8 atomic_update_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                     S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(atomic_pair_targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(atomic_update_modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-update"), S8(".o"));
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], atomic_update_modes[mode],
+                                     frontends[frontend], S8("-fverify-codegen"), S8("-o"), output,
+                                     S8("tests/basic_c_aarch64_atomic_update_pair.c")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(arguments->arena, S8("atomic update {S8} {S8} {S8}: {S8}"),
+                    atomic_pair_targets[target], atomic_update_modes[mode], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 10 &&
+                    compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS
+                bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+                if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-update-run"), S8(".exe"));
+                    String8 native_command[] = {atomic_update_modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable,
+                                                S8("tests/basic_c_aarch64_atomic_update_pair.c")};
+                    CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                    native_invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                    BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE &&
+                        native.codegen_statistics.fallback_function_count == 0, native.diagnostic);
+                    if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+                }
+#endif
                 scratch_end(temporary);
             }
         }
@@ -2008,7 +2294,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
 #endif
         scratch_end(temporary);
     }
-    String8 fallback_targets[] = {S8("x86_64-unknown-windows"), S8("aarch64-apple-macos"), S8("aarch64-unknown-windows")};
+    String8 fallback_targets[] = {S8("x86_64-unknown-windows")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -2022,6 +2308,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 1);
+            BUSTER_TEST(arguments, compiled.fallback_records == 0 && compiled.fallback_record_count == 0);
             BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_reason_counts[reason] == 1);
             BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_COUNT] == 1);
             u32 census = 0;
@@ -2035,9 +2322,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             ByteSlice sentinel = {.pointer = (u8*)"existing-output", .length = 15};
             BUSTER_TEST(arguments, file_write(output, sentinel));
             invocation.reject_machine_fallback = true;
+            invocation.record_codegen_fallbacks = true;
             CompilerDriverResult strict = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST(arguments, strict.error == COMPILER_DRIVER_ERROR_CODEGEN && !strict.has_object);
             BUSTER_TEST(arguments, strict.codegen_statistics.fallback_function_count == 1);
+            BUSTER_TEST(arguments, strict.fallback_record_count == strict.codegen_statistics.fallback_function_count);
+            if (strict.fallback_record_count == 1)
+            {
+                CompilerDriverFallbackRecord record = strict.fallback_records[0];
+                BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_signature")));
+                BUSTER_TEST(arguments, string_equal(record.source, S8("tests/basic_c_machine_fallback_signature.c")));
+                BUSTER_TEST(arguments, record.line != 0 && record.column != 0);
+                BUSTER_TEST(arguments, record.codegen.reason == reason && record.codegen.opcode == IR_OPCODE_COUNT);
+            }
             BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("opcode=not-applicable")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, strict.diagnostic_count == 1);
             if (strict.diagnostic_count == 1)
@@ -2079,11 +2376,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         }
         output = buster_test_temporary_path(temporary.arena, S8("buster-mir-census-multiple"), S8(".exe"));
         String8 command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode], S8("-o"), output,
-                             inputs[0], inputs[1], inputs[2]};
+                             inputs[0], inputs[1], inputs[2], S8("-fcodegen-fallback-census")};
         CompilerDriverResult multiple = compiler_driver_execute_invocation(temporary.arena,
             compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST_RAW(arguments, multiple.error == COMPILER_DRIVER_ERROR_NONE && multiple.has_object, multiple.diagnostic);
         BUSTER_TEST(arguments, multiple.codegen_statistics.fallback_function_count == 1);
+        BUSTER_TEST(arguments, multiple.fallback_record_count == multiple.codegen_statistics.fallback_function_count);
+        if (multiple.fallback_record_count == 1)
+        {
+            // The producer's unit arena has already been destroyed here.
+            CompilerDriverFallbackRecord record = multiple.fallback_records[0];
+            BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_signature")));
+            BUSTER_TEST(arguments, string_equal(record.source, inputs[0]) && record.line != 0);
+        }
 #define BUSTER_DRIVER_TEST_STATISTIC_SUM(field) \
         BUSTER_TEST(arguments, multiple.codegen_statistics.field == units[0].field + units[1].field + units[2].field)
         BUSTER_DRIVER_TEST_STATISTIC_SUM(instruction_count);
@@ -2823,6 +3128,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
 #include <buster/tests/compiler/driver/driver_fast_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    // Two all-host controls precede eight mixed-compiler executions. The host
+    // owns threads, independent atomic operations, ticket accounting and timeouts.
+    for (u32 variant = 0; variant < 2 + 2 * BUSTER_ARRAY_LENGTH(modes); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 object = buster_test_temporary_path(arena, S8("buster-atomic-contention"), S8(".o"));
+        String8 executable = buster_test_temporary_path(arena, S8("buster-atomic-contention"), S8(""));
+        bool input_ready = true;
+        if (variant >= 2)
+        {
+            u32 mode = (variant - 2) / 2;
+            String8 compile[] = {
+                S8("-c"), S8("-g0"), S8("-o"), object, S8("-fverify-codegen"),
+                (variant & 1) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"),
+                string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                S8("tests/basic_c_atomic_pair_contention.c"),
+            };
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            invocation.reject_machine_fallback = mode != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            input_ready = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+            BUSTER_TEST_RAW(arguments, input_ready, compiled.diagnostic);
+            BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 6 && compiled.codegen_statistics.fallback_function_count == 0);
+        }
+        if (input_ready)
+        {
+            String8 link[16];
+            u32 count = 0;
+            link[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            link[count++] = S8("-std=gnu11");
+            link[count++] = variant == 0 ? S8("-O0") : S8("-O2");
+            link[count++] = S8("-fwrapv");
+            link[count++] = S8("-fno-strict-aliasing");
+            link[count++] = S8("-funsigned-char");
+            link[count++] = S8("-pthread");
+            link[count++] = S8("tests/host_atomic_pair_contention.c");
+            link[count++] = variant < 2 ? S8("tests/basic_c_atomic_pair_contention.c") : object;
+#if BUSTER_LINUX
+            link[count++] = S8("-latomic");
+#endif
+            link[count++] = S8("-o");
+            link[count++] = executable;
+            ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                           .use_process_environment = true};
+            ProcessSpawnResult compiler = os_process_spawn((SliceString8){link, count}, (SliceString8){0}, (SliceString8){0}, capture);
+            ProcessWaitResult linked = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
+            bool linked_ok = compiler.handle && !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST_RAW(arguments, linked_ok, string_format(arena, S8("atomic contention host link variant={u32}: {S8}"), variant,
+                (String8){(char8*)linked.streams[STANDARD_STREAM_ERROR].pointer, linked.streams[STANDARD_STREAM_ERROR].length}));
+            if (linked_ok)
+            {
+                ProcessSpawnResult child = os_process_spawn((SliceString8){&executable, 1}, (SliceString8){0}, (SliceString8){0}, capture);
+                ProcessWaitResult ran = child.handle ? os_process_wait_deadline(arena, child, 35000000) : (ProcessWaitResult){0};
+                String8 output = {(char8*)ran.streams[STANDARD_STREAM_OUTPUT].pointer, ran.streams[STANDARD_STREAM_OUTPUT].length};
+                bool passed = child.handle && !ran.timed_out && ran.result == PROCESS_RESULT_SUCCESS &&
+                              string_first_sequence(output, S8("ATOMIC_PAIR_CONTENTION:PASS")) != BUSTER_STRING_NO_MATCH;
+                BUSTER_TEST_RAW(arguments, passed, string_format(arena, S8("atomic contention execution variant={u32}: {S8}"), variant, output));
+                arguments->show(arguments, S8("ATOMIC_PAIR_CONTENTION variant={u32} passed={u32}\n"), variant, (u32)passed);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
@@ -2857,7 +3235,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult dynamic_stack = compiler_driver_test_x64_dynamic_stack(arguments);
     result.test_count += dynamic_stack.test_count;
     result.succeeded_test_count += dynamic_stack.succeeded_test_count;
-    UnitTestResult i128_divide = compiler_driver_test_aarch64_i128_divide(arguments);
+    UnitTestResult i128_divide = compiler_driver_test_native_i128_divide(arguments);
     result.test_count += i128_divide.test_count;
     result.succeeded_test_count += i128_divide.succeeded_test_count;
     UnitTestResult i128_block_parameters = compiler_driver_test_i128_block_parameters(arguments);
@@ -2878,9 +3256,23 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult complement = compiler_driver_test_x86_64_i128_complement(arguments);
     result.test_count += complement.test_count;
     result.succeeded_test_count += complement.succeeded_test_count;
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    UnitTestResult contention = compiler_driver_test_atomic_pair_contention(arguments);
+    result.test_count += contention.test_count;
+    result.succeeded_test_count += contention.succeeded_test_count;
+#endif
     UnitTestResult fallback = compiler_driver_test_machine_fallback(arguments);
+    UnitTestResult many_arguments = compiler_driver_test_many_native_arguments(arguments);
+    result.test_count += many_arguments.test_count;
+    result.succeeded_test_count += many_arguments.succeeded_test_count;
+    UnitTestResult platform_variadic = compiler_driver_test_aarch64_platform_variadic(arguments);
+    result.test_count += platform_variadic.test_count;
+    result.succeeded_test_count += platform_variadic.succeeded_test_count;
     result.test_count += fallback.test_count;
     result.succeeded_test_count += fallback.succeeded_test_count;
+    UnitTestResult sysv_aligned_calls = compiler_driver_test_sysv_aligned_calls(arguments);
+    result.test_count += sysv_aligned_calls.test_count;
+    result.succeeded_test_count += sysv_aligned_calls.succeeded_test_count;
     UnitTestResult windows_large_frame = compiler_driver_test_windows_large_frame(arguments);
     result.test_count += windows_large_frame.test_count;
     result.succeeded_test_count += windows_large_frame.succeeded_test_count;
@@ -3415,6 +3807,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, register_allocator_default.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
     BUSTER_TEST(arguments, !register_allocator_default.register_allocator_explicit);
     BUSTER_TEST(arguments, !register_allocator_default.verify_codegen);
+    BUSTER_TEST(arguments, !register_allocator_default.record_codegen_fallbacks);
+    String8 census_command[] = {S8("-fcodegen-fallback-census"), S8("source.c")};
+    CompilerDriverInvocation census_enabled = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command));
+    BUSTER_TEST(arguments, census_enabled.error == COMPILER_DRIVER_ERROR_NONE && census_enabled.record_codegen_fallbacks);
+    String8 census_disabled_command[] = {S8("-fcodegen-fallback-census"), S8("-fno-codegen-fallback-census"), S8("source.c")};
+    CompilerDriverInvocation census_disabled = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_disabled_command));
+    BUSTER_TEST(arguments, census_disabled.error == COMPILER_DRIVER_ERROR_NONE && !census_disabled.record_codegen_fallbacks);
+    String8 census_llvm_command[] = {S8("-fcodegen-fallback-census"), S8("-emit-llvm"), S8("source.c")};
+    CompilerDriverInvocation census_llvm = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_llvm_command));
+    BUSTER_TEST(arguments, census_llvm.error == COMPILER_DRIVER_ERROR_ARGUMENT);
 
     String8 register_allocator_o0_command_line[] = {S8("-O0"), S8("source.c")};
     CompilerDriverInvocation register_allocator_o0 = compiler_driver_parse_arguments(
@@ -5840,6 +6242,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // `__typeof__` over an address-of member base (crossinterp's Py_CLEAR).
     String8 c_cpython_shape_fixtures[] = {
         S8("tests/basic_c_flexible_array_static_initializer.c"),
+        S8("tests/basic_c_inline_hints.c"),
+        S8("tests/basic_c_asm_identity.c"),
+        S8("tests/basic_c_asm_goto_identity.c"),
         S8("tests/basic_c_prefix_update_stepping_pointer.c"),
         S8("tests/basic_c_typeof_address_member.c"),
         S8("tests/basic_c_parenthesized_string_initializer.c"),
@@ -7393,18 +7798,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             S8("-o"),
             x64_i128_stack_path,
             S8("tests/basic_c_x86_64_i128_stack_abi.c"),
+            allocator_index ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-fverify-codegen"),
         };
         Arena* x64_i128_stack_arena = arena_create((ArenaCreation){0});
         CompilerDriverResult x64_i128_stack = compiler_driver_execute_invocation(
             x64_i128_stack_arena, compiler_driver_parse_arguments(x64_i128_stack_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x64_i128_stack_command_line)));
         BUSTER_TEST(arguments, x64_i128_stack.error == COMPILER_DRIVER_ERROR_NONE);
-        // NONE reports no fallbacks by definition; under the machine modes
-        // exactly one function is left, and the four boundary callees remain
-        // machine-selected. The count was two until the x86-64 selector picked
-        // up the rest of the i128 binary subset (#811) and the checker's shifts
-        // and comparisons started selecting; the one left refuses at a CALL,
-        // not at an i128 operation.
-        BUSTER_TEST(arguments, x64_i128_stack.codegen_statistics.fallback_function_count == (allocator_index == 0 ? 0u : 1u));
+        // The caller's aligned i128 stack pair leaves an eightbyte hole.
+        // Its complete argument area now stays on MIR with the callees.
+        BUSTER_TEST(arguments, x64_i128_stack.codegen_statistics.fallback_function_count == 0);
         CompilerDriverError x64_i128_stack_error = x64_i128_stack.error;
         BUSTER_TEST(arguments, arena_destroy(x64_i128_stack_arena, 1));
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
@@ -8687,6 +9089,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Cross both compiler directions so agreeing on an incorrect stack layout
     // cannot pass. The third translation unit observes parameter addresses
     // without letting the host fold checks from its ABI alignment assumptions.
+    // Keep the full vector corpus, then require zero MIR fallback for the
+    // scalar signature slice under both frontend representations.
+    for (u32 stack_variant = 0; stack_variant < 3; stack_variant += 1)
     {
         TemporalArena stack_pair_temporary = scratch_begin(&arguments->arena, 1);
         Arena* stack_pair_arena = stack_pair_temporary.arena;
@@ -8703,7 +9108,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 stack_pair_arena, S8("buster-c-overaligned-host"), string_format(stack_pair_arena, S8("-{u32}.o"), source_index));
             // Match the existing mixed-object pairs: no GOT references or
             // host debug sections outside the native object reader's model.
-            String8 host_stack_command[10];
+            String8 host_stack_command[11];
             u64 host_stack_command_count = 0;
             host_stack_command[host_stack_command_count++] = S8(BUSTER_HOST_C_COMPILER);
 #if defined(BUSTER_HOST_C_COMPILER_ARG1)
@@ -8713,7 +9118,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
 #endif
             String8 host_stack_options[] = {
-                S8("-DOVERALIGNED_STACK_OBSERVE=1"), S8("-O0"), S8("-fno-pic"), S8("-g0"), S8("-c"),
+                S8("-DOVERALIGNED_STACK_OBSERVE=1"),
+                stack_variant ? S8("-DOVERALIGNED_STACK_SCALAR_ONLY=1") : S8("-UOVERALIGNED_STACK_SCALAR_ONLY"),
+                S8("-O0"), S8("-fno-pic"), S8("-g0"), S8("-c"),
                 S8("-o"), host_stack_objects[source_index], stack_sources[source_index],
             };
             for (u64 option = 0; option < BUSTER_ARRAY_LENGTH(host_stack_options); option += 1)
@@ -8740,10 +9147,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     stack_pair_arena, S8("buster-c-overaligned-object"), string_format(stack_pair_arena, S8("-{u32}-{u32}.o"), (u32)allocator_index, source_index));
                 String8 buster_stack_command[] = {
                     c_lz4_regression_allocators[allocator_index], S8("-c"), S8("-o"), buster_stack_objects[source_index], stack_sources[source_index],
+                    stack_variant ? S8("-DOVERALIGNED_STACK_SCALAR_ONLY=1") : S8("-UOVERALIGNED_STACK_SCALAR_ONLY"),
+                    stack_variant && allocator_index != 1 ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                    stack_variant == 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"),
                 };
                 CompilerDriverResult buster_stack = compiler_driver_execute_invocation(
                     stack_pair_arena, compiler_driver_parse_arguments(stack_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_stack_command)));
-                BUSTER_TEST(arguments, buster_stack.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST_RAW(arguments, buster_stack.error == COMPILER_DRIVER_ERROR_NONE, buster_stack.diagnostic);
+                if (stack_variant)
+                {
+                    BUSTER_TEST(arguments, buster_stack.codegen_statistics.function_count > 0 &&
+                                           buster_stack.codegen_statistics.fallback_function_count == 0);
+                }
                 buster_stack_compiled &= buster_stack.error == COMPILER_DRIVER_ERROR_NONE;
             }
             for (u32 direction = 0; buster_stack_compiled && direction < 2; direction += 1)
@@ -9372,9 +9787,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // the four operators, and the variadic `%.2Lf` call LZ4IO_toHuman needs.
     // Every check inside the fixture is one a 53-bit significand would fail,
     // so a lowering that quietly computed in double does not pass it.  Run it
-    // under every allocator even though only the canonical emitter has the
-    // x87 vocabulary: what the other three are being checked for is that a
-    // function carrying an f80 falls back to it rather than being selected.
+    // under every allocator. Unsigned-eightbyte conversions still
+    // exercise the canonical fallback, while the common scalar transactions
+    // select into MIR.
     // The fixture compiles to an empty program wherever `long double` is not
     // the x87 format, so it stays registered on every host.
     String8 c_long_double_allocators[] = {
@@ -9408,6 +9823,36 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(long_double_temporary);
     }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS
+    // The bounded MIR vocabulary must remain selected, including calls
+    // through function pointers whose relocations the standalone link owns.
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(c_long_double_allocators); mode += 1)
+    {
+        for (u32 memory = 0; memory < 2; memory += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 path = buster_test_temporary_path(temporary.arena, S8("buster-c-f80-machine"), S8(""));
+            String8 command[] = {c_long_double_allocators[mode], mode == 1 ? S8("-fmachine-fallback") : S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
+                memory ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), path, S8("tests/basic_c_f80_machine.c")};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 f80_arguments[] = {path};
+                ProcessSpawnResult process = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(f80_arguments), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, process.handle != 0);
+                if (process.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(temporary.arena, process).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
     // Static 80-bit x87 initialization: a folded constant expression and an
     // aggregate of them, which is the pair musl's src/math needs and the
     // shapes a bare-literal path refused.  The fixture compares each object
@@ -12394,8 +12839,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
+    // This audit checks the canonical emitter's exact frame/register sequence;
+    // the strict asm-identity corpus separately checks allocated MIR transport.
     String8 c_asm_aarch64_command_line[] = {
-        S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
+        S8("-fregister-allocator=none"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
     };
     CompilerDriverResult c_asm_aarch64 = compiler_driver_execute_invocation(
         c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_aarch64_command_line)));
