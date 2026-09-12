@@ -61,8 +61,10 @@ claims the output directory atomically and refuses reuse, including an empty
 existing directory, so stale artifacts cannot turn a failed tool into a pass.
 The self-test exercises rejection classification and SHA-256, and directly exercises the
 shared observer's subprocess, timeout, argv, and output-ownership behavior.
-Intentional crash probes disable core dumps and retain their observation rows
-in `build/gpu-toolchains-self-test-*`. It never
+The POSIX signal probe uses a non-core-dumping termination signal and retains
+its observation rows in `build/gpu-toolchains-self-test-*`; it cannot stall on
+a host core-dump service. Signal and timeout observations must still fail
+artifact acceptance. It never
 reports a real GPU profile as passed.
 
 All tool overrides designate **one executable path**, not a shell command:
