@@ -4934,6 +4934,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_source(MachineA64Selector* 
             }
         }
     }
+    if (valid && write && bytes[write - 1] != '\n')
+    {
+        bytes[write++] = '\n';
+    }
     AssemblyEncodeResult encoded = {0};
     if (valid)
     {
