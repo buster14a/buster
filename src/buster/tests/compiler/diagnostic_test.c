@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_diagnostic_test_compile(Arena* arena, String8 path, bool suppress)
 {
@@ -14,9 +15,107 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_diagnostic_test_compile(Arena*
     return compiler_driver_execute_invocation(arena, invocation);
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-output"), S8(".bin"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-O0")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    OsFileTestStep failures[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}};
+    for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 command[] = {actions[action], modes[mode], S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), output};
+            for (u32 failure = 0; failure < BUSTER_ARRAY_LENGTH(failures); failure += 1)
+            {
+                TemporalArena scratch = scratch_begin(&arguments->arena, 1);
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(scratch.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                os_file_test_begin(output, &failures[failure], 1);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(scratch.arena, invocation);
+                BUSTER_TEST(arguments, os_file_test_end() == 1);
+                BUSTER_TEST_RAW(arguments, compiled.error == (action == 3 ? COMPILER_DRIVER_ERROR_LINK : COMPILER_DRIVER_ERROR_FILE_WRITE),
+                    string_format(scratch.arena, S8("write failure action={u32} mode={u32}: {S8}"), action, mode, compiled.diagnostic));
+                BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
+                if (compiled.diagnostic_count == 1)
+                {
+                    BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, action == 3 ? S8("link.file-write") : S8("driver.file-write"));
+                }
+                if (action != 3) BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, output) < compiled.diagnostic.length);
+                scratch_end(scratch);
+            }
+        }
+    }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // A real child verifies that the public command reports a failed artifact
+    // with a non-success exit. A missing parent is deterministic on every OS.
+    String8 missing_parent = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-missing-parent"), S8(""));
+    String8 invalid_output = string_format_z(arguments->arena, S8("{S8}/output.i"), missing_parent);
+    String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), input, S8("-o"), invalid_output};
+    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    BUSTER_TEST(arguments, child.handle != 0);
+    if (child.handle)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, child, 30000000);
+        BUSTER_TEST(arguments, !waited.timed_out && waited.result != PROCESS_RESULT_SUCCESS);
+        String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+        BUSTER_TEST(arguments, string_first_sequence(diagnostic, S8("could not write")) < diagnostic.length);
+    }
+#endif
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-input"), S8(".c"));
+    String8 object = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-object"), S8(".o"));
+    String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-output"), S8(".bin"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 make_object[] = {S8("-c"), S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), object};
+    CompilerDriverResult control = compiler_driver_execute_invocation(arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_object)));
+    BUSTER_TEST(arguments, control.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 paths[] = {input, object};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+    {
+        // Exercise the real production fallback after mapping is unavailable.
+        // The transfer/size/close failure then passes through the same driver
+        // input path used on non-mappable files and restricted platforms.
+        OsFileTestStep script[] = {{OS_FILE_TEST_MAP, OS_FILE_TEST_ERROR, 1},
+                                  {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7},
+                                  {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}};
+#if BUSTER_ANDROID || BUSTER_IOS
+        u32 first = 1;
+#else
+        u32 first = 0;
+#endif
+        String8 command[] = {index ? S8("-O0") : S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux"), paths[index], S8("-o"), output};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        os_file_test_begin(paths[index], script + first, 3 - first);
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
+        BUSTER_TEST(arguments, os_file_test_end() == 3 - first);
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_FILE_READ);
+        BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
+        if (compiled.diagnostic_count == 1) BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, S8("driver.file-read"));
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, paths[index]) < compiled.diagnostic.length);
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(object));
+    return result;
+}
+
 UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_read_failures);
     CompilerDiagnostic copy;
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);

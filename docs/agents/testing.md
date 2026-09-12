@@ -103,6 +103,12 @@ the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
 
+The native driver's `compiler_discovery_self_test` runs before every combination
+matrix and covers real Clang identity, platform/override selection, and failed
+GCC requests preserving existing configurations. The GCC row selects Homebrew
+`gcc-15` on macOS; see [build policy](build.md) for `BUSTER_GCC` overrides and
+the logged compiler provenance.
+
 For the user-level GCC workflow, with the selected build directory idle:
 
 ```sh

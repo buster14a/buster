@@ -397,7 +397,8 @@ BUSTER_GLOBAL_LOCAL bool meta_output_present(String8 path, bool require_content)
     bool result = file != 0;
     if (file)
     {
-        result = !require_content || os_file_get_size(file) != 0;
+        FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1});
+        result = stats.valid && (!require_content || stats.size != 0);
         os_file_close(file);
     }
     return result;
