@@ -1,0 +1,2498 @@
+[
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-buster-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-clang-host-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-buster-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/baseline-gcc-host-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-buster-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-clang-host-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-buster-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "mir-stack",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=mir-stack",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-mir-stack--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "fast",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=fast",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-fast--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-fno-frontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--fno-frontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "mode": "quality",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER_ONLY=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=quality",
+        "-ffrontend-ssa",
+        "-fno-machine-fallback",
+        "-fverify-codegen",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--ffrontend-ssa-consumer.o",
+        "-DWIDE_ABI_CONSUMER_ONLY=1"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-corrected-cross-abi1/haswell-gcc-host-quality--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "TMPDIR": "/dev/shm/buster36-evidence-71bf8ace/tmp"
+  }
+]

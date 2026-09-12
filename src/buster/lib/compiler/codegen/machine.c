@@ -477,6 +477,18 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
         .implicit_vector_state = 1,
     },
+    [MACHINE_X64_LOAD_YMM_FRAME256] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_FRAME},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
+        .implicit_vector_state = 1,
+    },
+    [MACHINE_X64_STORE_YMM_FRAME256] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_FRAME},
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+        .implicit_vector_state = 1,
+    },
     [MACHINE_X64_STORE_XMM0_FRAME128] = {
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_FRAME},
@@ -1448,6 +1460,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_X64_STORE_XMM0_FRAME128] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 68,
     [MACHINE_X64_LOAD_XMM_FRAME128] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 83,
     [MACHINE_X64_STORE_XMM_FRAME128] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 84,
+    [MACHINE_X64_LOAD_YMM_FRAME256] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 85,
+    [MACHINE_X64_STORE_YMM_FRAME256] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 86,
     [MACHINE_X64_NOP] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 71,
     [MACHINE_X64_PAUSE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 72,
     [MACHINE_A64_NOP] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 73,
@@ -2702,11 +2716,14 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         } break;
         case MACHINE_X64_LOAD_XMM_FRAME128:
         case MACHINE_X64_STORE_XMM_FRAME128:
+        case MACHINE_X64_LOAD_YMM_FRAME256:
+        case MACHINE_X64_STORE_YMM_FRAME256:
         {
             MachineRef frame = instruction->operands[1];
             u32 slot = machine_ref_payload(frame);
-            valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
-                    function->stack_slot_sizes[slot] >= 16 && instruction->payload == 0;
+            u32 bytes = instruction->opcode == MACHINE_X64_LOAD_YMM_FRAME256 || instruction->opcode == MACHINE_X64_STORE_YMM_FRAME256 ? 32u : 16u;
+            valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && instruction->flags == 0 &&
+                    (u64)instruction->payload + bytes <= function->stack_slot_sizes[slot];
         } break;
         case MACHINE_A64_LOAD_INCOMING:
             valid = instruction->flags == 0 || instruction->flags == 1 || instruction->flags == 2 ||
@@ -3214,8 +3231,11 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
     {
         MachineVaArg* metadata = function->va_args + va_index;
         result.operand = va_index;
+        bool wide_memory = function->target && function->target->copy_opcode == MACHINE_X64_MOV_RR &&
+            metadata->result_is_frame && !metadata->indirect && metadata->part_count == 1 && (metadata->size == 32 || metadata->size == 64);
+        bool wide_overflow = wide_memory && metadata->parts[0].is_memory && metadata->alignment <= metadata->size;
         if (!metadata->part_count || metadata->part_count > MACHINE_VA_ARG_PART_LIMIT || !metadata->size ||
-            metadata->alignment < 8 || metadata->alignment > 16 || (metadata->alignment & (metadata->alignment - 1u)) ||
+            (wide_memory && !metadata->parts[0].is_memory) || metadata->alignment < 8 || (metadata->alignment > 16 && !wide_overflow) || (metadata->alignment & (metadata->alignment - 1u)) ||
             (!metadata->indirect && metadata->stack_size < metadata->size) || (metadata->stack_size & 7u) ||
             metadata->indirect > 1 || (metadata->indirect && (metadata->stack_size != 8 || metadata->part_count != 1 ||
                 metadata->alignment != 8 || !metadata->result_is_frame || metadata->parts[0].is_float || metadata->parts[0].is_memory ||

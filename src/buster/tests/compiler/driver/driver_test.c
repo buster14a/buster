@@ -1288,6 +1288,152 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
 
 // The curated MIR corpus is part of test_all/CI. Keep exclusions in separate
 // negative tests so an unsupported target cannot make a strict gate vacuous.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-android"), S8("x86_64-ios"),
+                        S8("x86_64-windows"), S8("x86_64-uefi")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 cpus[] = {S8("-march=baseline"), S8("-march=haswell"), S8("-march=znver5")};
+    String8 sources[] = {S8("tests/basic_c_vector_argument_ymm.c"), S8("tests/basic_c_wide_vector_abi.c"),
+                         S8("tests/basic_c_wide_vector_argument.c")};
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+    BUSTER_TEST(arguments, clang.length != 0);
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        // This slice adds System V split transport and one-pointer Win64
+        // YMM arguments. The unresolved Win64 split-reference cases remain
+        // supported-native gaps in the complete retirement census.
+        for (u32 cpu = target < 4 ? 0u : 1u; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    for (u32 pic = 0; pic < 2; pic += 1)
+                    {
+                        for (u32 fixture = 0; fixture < (target >= 4 && cpu == 1 ? 2u : 3u); fixture += 1)
+                        {
+                            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                            String8 object = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector"), S8(".o"));
+                            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], cpus[cpu], modes[mode], frontends[frontend],
+                                pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fno-machine-fallback"), S8("-fverify-codegen"), sources[fixture], S8("-o"), object};
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                            String8 description = string_format(temporary.arena, S8("wide vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
+                                sources[fixture], targets[target], cpus[cpu], modes[mode], frontends[frontend], pic, compiled.diagnostic);
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                            BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 5u &&
+                                compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                            bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
+                            bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                            if (native && runnable && clang.length && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-run"), S8(".exe"));
+                                String8 link[] = {clang,
+#if BUSTER_LINUX
+                                    S8("-no-pie"),
+#endif
+                                    object, S8("-o"), executable};
+                                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                bool linked = spawn.handle && os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                BUSTER_TEST(arguments, linked);
+                                if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                            }
+#endif
+                            scratch_end(temporary);
+                        }
+                    }
+                }
+            }
+        }
+    }
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Clang agrees at baseline and AVX width. GCC's baseline result-pointer
+    // convention differs, so its positive exchange uses the AVX contract.
+    {
+        String8 hosts[] = {clang, executable_resolve_in_path(arguments->arena, S8("gcc"))};
+        for (u32 host = 0; host < BUSTER_ARRAY_LENGTH(hosts); host += 1)
+        {
+            bool available = hosts[host].length != 0;
+            if (available && host == 1)
+            {
+                String8 probe[] = {hosts[host], S8("--version")};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = true});
+                ProcessWaitResult waited = {0};
+                if (spawn.handle) { waited = os_process_wait_deadline(arguments->arena, spawn, 30000000); }
+                String8 version = {.pointer = (char8*)waited.streams[STANDARD_STREAM_OUTPUT].pointer,
+                                   .length = waited.streams[STANDARD_STREAM_OUTPUT].length};
+                available = spawn.handle && waited.result == PROCESS_RESULT_SUCCESS &&
+                    string_first_sequence(version, S8("clang")) == BUSTER_STRING_NO_MATCH;
+            }
+#if BUSTER_LINUX
+            BUSTER_TEST(arguments, available);
+#endif
+            for (u32 cpu = host ? 1u : 0u; available && cpu < 2; cpu += 1)
+            {
+                if (cpu && !target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)) { continue; }
+                for (u32 provider = 0; available && provider < 2; provider += 1)
+                {
+                    TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 host_object = buster_test_temporary_path(host_temporary.arena, S8("buster-wide-vector-host"), S8(".o"));
+                    String8 host_command[] = {hosts[host], S8("-O0"), S8("-fno-inline"), cpu ? S8("-march=haswell") : S8("-march=x86-64"), S8("-c"),
+                        provider ? S8("-DWIDE_ABI_PROVIDER_ONLY=1") : S8("-DWIDE_ABI_CONSUMER_ONLY=1"), sources[1], S8("-o"), host_object};
+                    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    bool host_ok = host_spawn.handle && os_process_wait_deadline(host_temporary.arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, host_ok);
+                    for (u32 mode = 0; host_ok && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                    {
+                        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                        {
+                            for (u32 pic = 0; pic < 2; pic += 1)
+                            {
+                                TemporalArena temporary = scratch_begin(&host_temporary.arena, 1);
+                                String8 object = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-mir"), S8(".o"));
+                                String8 command[] = {S8("-c"), S8("-g0"), cpus[cpu], modes[mode], frontends[frontend],
+                                    pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                    provider ? S8("-DWIDE_ABI_CONSUMER_ONLY=1") : S8("-DWIDE_ABI_PROVIDER_ONLY=1"), sources[1], S8("-o"), object};
+                                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                                BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == (provider ? 1u : 4u) &&
+                                    compiled.codegen_statistics.fallback_function_count == 0);
+                                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                                {
+                                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-mixed"), S8(".exe"));
+                                    String8 link[] = {hosts[host],
+#if BUSTER_LINUX
+                                        S8("-no-pie"),
+#endif
+                                        object, host_object, S8("-o"), executable};
+                                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
+                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                    bool linked = spawn.handle && os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                    BUSTER_TEST(arguments, linked);
+                                    if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                                }
+                                scratch_end(temporary);
+                            }
+                        }
+                    }
+                    scratch_end(host_temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3944,6 +4090,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
