@@ -137,3 +137,6 @@ are published together, index arrays exist for counted nonempty ranges, local
 rows and symbol rows share allocation, and metadata helpers retain value
 storage. These checks document the existing validated-input contracts rather
 than suppressing analyzer reports.
+The lexer's final emitted lane comes from the existing contiguous low-bit mask
+using a fixed one-bit shift. This keeps the end-of-window computation defined
+without relying on the analyzer carrying a range proof for a variable shift.
