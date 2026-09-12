@@ -2906,7 +2906,10 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                                      relocation->kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ||
                                      relocation->kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
                                      relocation->kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14);
-                    valid = terminator && (x64_kind || a64_kind);
+                    valid = terminator && (x64_kind || a64_kind) &&
+                            relocation->offset <= assembly->bytes.length &&
+                            sizeof(u32) <= assembly->bytes.length - relocation->offset &&
+                            (!a64_kind || !(relocation->offset & 3u));
                 }
                 else if (valid)
                 {
@@ -3634,6 +3637,25 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
                         edge_found = edge->source_block == block_index && edge->destination_block == destination;
                     }
                     if (!edge_found)
+                    {
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
+                    }
+                }
+                for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+                {
+                    MachineEdge* edge = function->edges + edge_index;
+                    if (edge->source_block != block_index)
+                    {
+                        continue;
+                    }
+                    bool declared = edge->destination_block == assembly->fallthrough_block;
+                    for (u32 relocation_index = 0; !declared && relocation_index < assembly->relocation_count; relocation_index += 1)
+                    {
+                        MachineInlineAssemblyRelocation* relocation =
+                            function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                        declared = relocation->is_block && relocation->block == edge->destination_block;
+                    }
+                    if (!declared)
                     {
                         MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
                     }
