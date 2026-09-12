@@ -56,13 +56,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     String8 invalid_output = string_format_z(arguments->arena, S8("{S8}/output.i"), missing_parent);
     String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), input, S8("-o"), invalid_output};
     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = 1});
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1});
     BUSTER_TEST(arguments, child.handle != 0);
     if (child.handle)
     {
         ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, child, 30000000);
         BUSTER_TEST(arguments, !waited.timed_out && waited.result != PROCESS_RESULT_SUCCESS);
-        String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+        String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
         BUSTER_TEST(arguments, string_first_sequence(diagnostic, S8("could not write")) < diagnostic.length);
     }
 #endif
