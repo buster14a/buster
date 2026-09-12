@@ -7872,22 +7872,23 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_insert_relaxation_bytes(MachineA64Encoder* 
             }
         }
     }
-    for (MachineBuilderChunk* chunk = inline_relocations ? inline_relocations->first : 0; chunk; chunk = chunk->next)
+    bool inline_relocations_valid = true;
+    for (MachineBuilderChunk* chunk = inline_relocations ? inline_relocations->first : 0; inline_relocations_valid && chunk; chunk = chunk->next)
     {
         MachineInlineAssemblyRelocation* rows = (MachineInlineAssemblyRelocation*)(chunk + 1);
-        for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
+        for (u32 row_index = 0; inline_relocations_valid && row_index < chunk->count; row_index += 1)
         {
             if (rows[row_index].offset >= insertion_offset)
             {
-                if (UINT32_MAX - rows[row_index].offset < insertion_bytes)
+                inline_relocations_valid = UINT32_MAX - rows[row_index].offset >= insertion_bytes;
+                if (inline_relocations_valid)
                 {
-                    return false;
+                    rows[row_index].offset += insertion_bytes;
                 }
-                rows[row_index].offset += insertion_bytes;
             }
         }
     }
-    return true;
+    return inline_relocations_valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_expand_fixup(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u32* block_offsets,

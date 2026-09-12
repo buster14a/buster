@@ -8579,6 +8579,18 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                                       0x3f, 0x0c, 0x62, 0x2a,
                                                                       0x3f, 0x0c, 0x42, 0x2a},
                                                          36));
+    AssemblyEncodeResult aarch64_baseline_scalar_and_alias = assembly_encode(
+        arguments->arena,
+        S8("add w0, w1, w2\n"
+           "mov w3, w4\n"
+           "mov x5, x6\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_baseline_scalar_and_alias.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_baseline_scalar_and_alias.bytes,
+                                                         (u8 const[]){0x20, 0x00, 0x02, 0x0b,
+                                                                      0xe3, 0x03, 0x04, 0x2a,
+                                                                      0xe5, 0x03, 0x06, 0xaa},
+                                                         12));
     AssemblyEncodeResult aarch64_m1_unary_gpr_collision_regression = assembly_encode(
         arguments->arena,
         S8("cls w0, w1\n"

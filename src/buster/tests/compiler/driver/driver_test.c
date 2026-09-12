@@ -2374,6 +2374,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         {.path = S8("tests/basic_c_inline_hints.c")},
         {.path = S8("tests/basic_c_asm_identity.c")},
         {.path = S8("tests/basic_c_asm_goto_identity.c")},
+        {.path = S8("tests/basic_c_asm.c")},
+        {.path = S8("tests/basic_c_cleanup.c")},
+        {.path = S8("tests/basic_c_labels.c")},
         {.path = S8("tests/basic_c_statement_expression_value.c"), .variadic_definitions = 1},
     };
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
