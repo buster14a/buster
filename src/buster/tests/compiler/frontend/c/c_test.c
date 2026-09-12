@@ -19068,6 +19068,95 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(symbolic_array_operand_temporary);
     }
     {
+        TemporalArena early_clobber_temporary = scratch_begin(0, 0);
+        Target early_clobber_targets[] = {
+            target_native,
+            target_native,
+        };
+        early_clobber_targets[0].cpu_arch = CPU_ARCH_X86_64;
+        early_clobber_targets[0].cpu_model = CPU_MODEL_BASELINE;
+        early_clobber_targets[1].cpu_arch = CPU_ARCH_AARCH64;
+        early_clobber_targets[1].cpu_model = CPU_MODEL_BASELINE;
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(early_clobber_targets); target_index += 1)
+        {
+            CPreprocessResult early_clobber_tokens = {0};
+            CParseResult early_clobber_parse = {0};
+            CIRLowerResult early_clobber_lowered = c_test_lower_source(
+                early_clobber_temporary.arena,
+                S8("int early_output(int input) { int output; __asm__(\"\" : \"=&r\"(output) : \"r\"(input)); return output; }"
+                   "int early_read_write(int value) { __asm__(\"\" : \"+&r\"(value)); return value; }\n"),
+                S8("early-clobber.c"), early_clobber_targets[target_index], &early_clobber_tokens, &early_clobber_parse);
+            BUSTER_TEST(arguments, early_clobber_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, early_clobber_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, early_clobber_lowered.diagnostic_count == 0);
+            if (early_clobber_lowered.program)
+            {
+                IrModule* module = early_clobber_lowered.program->modules;
+                IrFunction* early_output = c_test_find_ir_function(module, S8("early_output"));
+                IrFunction* early_read_write = c_test_find_ir_function(module, S8("early_read_write"));
+                IrInstruction* output_assembly = 0;
+                IrInstruction* read_write_assembly = 0;
+                IrFunction* functions[] = {early_output, early_read_write};
+                IrInstruction** assemblies[] = {&output_assembly, &read_write_assembly};
+                for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(functions); function_index += 1)
+                {
+                    IrFunction* function = functions[function_index];
+                    for (u32 instruction_index = 0; function && instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                        {
+                            *assemblies[function_index] = function->instructions + instruction_index;
+                            break;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, output_assembly && output_assembly->operand_count == 2);
+                BUSTER_TEST(arguments, read_write_assembly && read_write_assembly->operand_count == 1);
+                if (output_assembly && output_assembly->operand_count == 2)
+                {
+                    u64 output_constraint = output_assembly->immediates[0];
+                    u64 input_constraint = output_assembly->immediates[1];
+                    BUSTER_TEST(arguments, output_constraint == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT |
+                                                                  IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER |
+                                                                  IR_INLINE_ASSEMBLY_CONSTRAINT_R));
+                    BUSTER_TEST(arguments, input_constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_R);
+                    output_assembly->immediates[0] = output_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(early_clobber_lowered.program, module).error != IR_VALIDATION_NONE);
+                    output_assembly->immediates[0] = output_constraint;
+                    output_assembly->immediates[1] = input_constraint | IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(early_clobber_lowered.program, module).error != IR_VALIDATION_NONE);
+                    output_assembly->immediates[1] = input_constraint;
+                }
+                if (read_write_assembly && read_write_assembly->operand_count == 1)
+                {
+                    BUSTER_TEST(arguments,
+                                read_write_assembly->immediates[0] == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT |
+                                                                        IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |
+                                                                        IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER |
+                                                                        IR_INLINE_ASSEMBLY_CONSTRAINT_R));
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(early_clobber_lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        String8 invalid_early_clobber_sources[] = {
+            S8("int invalid_early_input(int value) { __asm__(\"\" : : \"&r\"(value)); return value; }\n"),
+            S8("int invalid_early_missing_class(void) { int output; __asm__(\"\" : \"=&\"(output)); return output; }\n"),
+            S8("int invalid_early_duplicate(void) { int output; __asm__(\"\" : \"=&&r\"(output)); return output; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_early_clobber_sources); source_index += 1)
+        {
+            CPreprocessResult invalid_tokens = {0};
+            CParseResult invalid_parse = {0};
+            CIRLowerResult invalid_lowered = c_test_lower_source(early_clobber_temporary.arena, invalid_early_clobber_sources[source_index],
+                                                                  S8("invalid-early-clobber.c"), early_clobber_targets[0], &invalid_tokens,
+                                                                  &invalid_parse);
+            BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_lowered.diagnostic_count == 1);
+        }
+        scratch_end(early_clobber_temporary);
+    }
+    {
         TemporalArena tied_assembly_temporary = scratch_begin(0, 0);
         String8 tied_assembly_source = S8(
             "int numeric_tied(int input) { int output; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return output; }"
@@ -19137,7 +19226,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, (numeric_tied_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
             BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(numeric_tied_assembly->immediates[1]) == 0);
             u64 saved_constraint = numeric_tied_assembly->immediates[1];
-            numeric_tied_assembly->immediates[1] |= UINT64_C(1) << 11;
+            numeric_tied_assembly->immediates[1] |= UINT64_C(1) << 12;
             BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
             numeric_tied_assembly->immediates[1] = saved_constraint;
             numeric_tied_assembly->immediates[1] = (saved_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK) |

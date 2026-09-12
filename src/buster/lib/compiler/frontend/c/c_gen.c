@@ -32676,8 +32676,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
 // storage rather than its value, so the place has to be kept where an ordinary
 // input would keep the loaded value; the constraint therefore has to be read
 // before the lowered expression is consumed, which is earlier than the parser
-// below runs. The three spellings are matched exactly rather than by scanning
-// for the letter, because an operand name may contain one.
+// below runs. The admitted spellings are matched exactly rather than by
+// scanning for the letter, because an operand name may contain one.
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuilder* builder, u32 constraint_index)
 {
     ByteSlice bytes = {0};
@@ -32687,7 +32687,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuild
         return false;
     }
     String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
-    return string_equal(text, S8("m")) || string_equal(text, S8("=m")) || string_equal(text, S8("+m"));
+    return string_equal(text, S8("m")) || string_equal(text, S8("=m")) || string_equal(text, S8("+m")) ||
+           string_equal(text, S8("=&m")) || string_equal(text, S8("+&m"));
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, CToken token, bool output,
@@ -32700,17 +32701,20 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     }
     u64 constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
     bool read_write = false;
+    bool early_clobber = false;
     bool matching = false;
     u32 match_index = UINT32_MAX;
     if (output)
     {
-        if (bytes.length != 2 || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
+        bool modifier_shape = bytes.length == 2 || (bytes.length == 3 && bytes.pointer[1] == '&');
+        if (!modifier_shape || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
         {
             builder->failure_message = S8("malformed asm output constraint");
             return false;
         }
         read_write = bytes.pointer[0] == '+';
-        switch (bytes.pointer[1])
+        early_clobber = bytes.length == 3;
+        switch (bytes.pointer[1 + early_clobber])
         {
         case 'a':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
@@ -32944,6 +32948,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         }
         constraint |= output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0;
         constraint |= read_write ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
+        constraint |= early_clobber ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
     }
     if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT ||
         (matching && !c_ir_inline_assembly_constraint_class_supported(builder, constraint)))

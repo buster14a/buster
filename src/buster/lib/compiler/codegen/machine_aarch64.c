@@ -175,6 +175,9 @@ struct MachineA64Selector
     MachineBuilderStream stack_slot_alignments;
     MachineBuilderStream call_targets;
     MachineBuilderStream va_args;
+    MachineBuilderStream inline_assemblies;
+    MachineBuilderStream inline_assembly_operands;
+    MachineBuilderStream inline_assembly_relocations;
     MachineBuilderStream switch_cases;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
@@ -5454,6 +5457,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_initialize(&selector.call_targets, sizeof(MachineA64CallTarget));
         machine_stream_initialize(&selector.va_args, sizeof(MachineVaArg));
         machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
+        machine_stream_initialize(&selector.inline_assemblies, sizeof(MachineInlineAssembly));
+        machine_stream_initialize(&selector.inline_assembly_operands, sizeof(MachineInlineAssemblyOperand));
+        machine_stream_initialize(&selector.inline_assembly_relocations, sizeof(MachineInlineAssemblyRelocation));
         MachineBuilderStream line_marks;
         machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
         selector.return_shape = signature_return_shape;
@@ -6595,6 +6601,17 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.function.va_args = arena_allocate(arena, MachineVaArg, selector.va_args.total_count);
         result.function.va_arg_count = selector.va_args.total_count;
         machine_stream_flatten(&selector.va_args, result.function.va_args);
+        result.function.inline_assemblies = arena_allocate(arena, MachineInlineAssembly, selector.inline_assemblies.total_count);
+        result.function.inline_assembly_count = selector.inline_assemblies.total_count;
+        machine_stream_flatten(&selector.inline_assemblies, result.function.inline_assemblies);
+        result.function.inline_assembly_operands =
+            arena_allocate(arena, MachineInlineAssemblyOperand, selector.inline_assembly_operands.total_count);
+        result.function.inline_assembly_operand_count = selector.inline_assembly_operands.total_count;
+        machine_stream_flatten(&selector.inline_assembly_operands, result.function.inline_assembly_operands);
+        result.function.inline_assembly_relocations =
+            arena_allocate(arena, MachineInlineAssemblyRelocation, selector.inline_assembly_relocations.total_count);
+        result.function.inline_assembly_relocation_count = selector.inline_assembly_relocations.total_count;
+        machine_stream_flatten(&selector.inline_assembly_relocations, result.function.inline_assembly_relocations);
         result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
         result.function.line_mark_count = line_marks.total_count;
         machine_stream_flatten(&line_marks, result.function.line_marks);
