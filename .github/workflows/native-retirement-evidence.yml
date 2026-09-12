@@ -4,6 +4,10 @@ on:
   push:
     branches: [codex/36-census-evidence-de594a5]
 
+concurrency:
+  group: retirement-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -48,6 +52,7 @@ jobs:
         working-directory: candidate
         run: '"$RUNNER_TEMP/candidate-build" native_retirement_census --self-test'
       - name: Freeze manifest before execution
+        id: frozen_manifest
         working-directory: candidate
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
@@ -57,6 +62,7 @@ jobs:
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --manifest-only --out evidence/manifest
       - name: Execute complete assigned shard 0
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
         working-directory: candidate
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
@@ -67,6 +73,7 @@ jobs:
           --shard-index 0 --shard-count 4
           --out evidence/census-integrated-0
       - name: Execute complete assigned shard 1
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
         working-directory: candidate
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
@@ -77,6 +84,7 @@ jobs:
           --shard-index 1 --shard-count 4
           --out evidence/census-integrated-1
       - name: Execute complete assigned shard 2
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
         working-directory: candidate
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
@@ -87,6 +95,7 @@ jobs:
           --shard-index 2 --shard-count 4
           --out evidence/census-integrated-2
       - name: Execute complete assigned shard 3
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
         working-directory: candidate
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
