@@ -117,9 +117,9 @@ existing behavior.
 
 `compiler_discovery_self_test` runs before both combination matrices. It checks
 platform/override selection and identity parsing, exercises the real Clang
-preprocessor, and launches negative `generate --cc gcc` children with Clang and
-a missing executable. Both must report the specific failure and preserve an
-existing configuration sentinel. macOS also reports the actual unversioned
+preprocessor, and launches negative `generate --cc gcc` children with Clang,
+a missing executable and a conflicting CMake override. Each must report the
+specific failure and preserve an existing configuration sentinel. macOS also reports the actual unversioned
 `gcc` identity, independently of the selected versioned GCC row.
 
 `musl_directory_self_test` checks complete, unique directory inventories through

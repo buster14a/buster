@@ -210,8 +210,10 @@ AppleClang, Zig, sanitizer, unity/split and static-analysis work is retained.
 The baseline main run [34708311595](https://github.com/buster14a/buster/actions/runs/34708311595)
 at `f75949b0e27820b02a0fe337b58db1fe700e8f54` reported Apple Clang
 21.0.0 for `gcc` on both macOS architectures, confirming the former coverage
-gap. Versioned GCC compilation must be verified in the candidate's complete
-macOS matrices; compiler discovery alone does not establish compilation.
+gap. [PR #500](https://github.com/buster14a/buster/pull/500) records the
+replacement compilers, exact tested revisions and complete CI results. Discovery
+alone does not establish compilation: the GCC Debug build and the full macOS
+matrices must also pass.
 
 The self-host fan-out runs only where the fixed point exists —
 the x86-64 Linux and Windows runners and both macOS runners — so the two

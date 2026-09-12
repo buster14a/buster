@@ -950,7 +950,7 @@ BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 argumen
 BUSTER_GLOBAL_LOCAL bool build_compiler_inspect(Arena* arena, String8 executable, BuildCompilerIdentity* info)
 {
     *info = (BuildCompilerIdentity){.executable = executable};
-    String8 identity_arguments[] = {executable, S8("-E"), S8("-P"), S8("-x"), S8("c"), S8("tests/build_compiler_identity.c")};
+    String8 identity_arguments[] = {executable, S8("-E"), S8("-P"), S8("-x"), S8("c"), S8("tests/build_compiler_identity.h")};
     String8 target_arguments[] = {executable, S8("-dumpmachine")};
     String8 version_arguments[] = {executable, S8("--version")};
     bool result = executable.length &&
@@ -1223,7 +1223,7 @@ BUSTER_GLOBAL_LOCAL void remove_path_recursive(Arena* arena, String8 path)
 #endif
 }
 
-BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, String8 compiler, String8 expected_error)
+BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, String8 compiler, bool cmake_override, String8 expected_error)
 {
     String8 directory = string_format(arena, S8("build/compiler discovery test-{u64}"), os_now_microseconds());
     make_directory_recursive(arena, directory);
@@ -1245,10 +1245,11 @@ BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, S
     keys[count] = S8("BUSTER_GCC");
     values[count++] = compiler;
     String8 arguments[] = {program_state->input.arguments.pointer[0], S8("generate"), S8("--cc"), S8("gcc"),
-                           S8("--build-directory"), directory};
+                           S8("--build-directory"), directory, S8("-DCMAKE_C_COMPILER=clang")};
+    SliceString8 command = {.pointer = arguments, .length = BUSTER_ARRAY_LENGTH(arguments) - !cmake_override};
     if (success)
     {
-        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+        ProcessSpawnResult spawn = os_process_spawn(command,
             (SliceString8){.pointer = keys, .length = count}, (SliceString8){.pointer = values, .length = count},
             (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
         success = spawn.handle != 0;
@@ -1290,8 +1291,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_compiler_discovery_self_test(Arena* aren
     BuildCompilerIdentity unversioned;
     success = build_compiler_inspect(arena, executable_resolve_in_path(arena, S8("gcc")), &unversioned) && success;
 #endif
-    success = build_compiler_discovery_rejection_test(arena, clang.executable, S8("Clang (including Apple's gcc shim) cannot satisfy GCC coverage")) && success;
-    success = build_compiler_discovery_rejection_test(arena, S8("buster-missing-gcc-discovery-fixture"), S8("was not found")) && success;
+    success = build_compiler_discovery_rejection_test(arena, clang.executable, false, S8("Clang (including Apple's gcc shim) cannot satisfy GCC coverage")) && success;
+    success = build_compiler_discovery_rejection_test(arena, S8("buster-missing-gcc-discovery-fixture"), false, S8("was not found")) && success;
+    success = build_compiler_discovery_rejection_test(arena, clang.executable, true, S8("--cc gcc cannot be combined with a CMAKE_C_COMPILER override")) && success;
     string_print(S8("COMPILER_DISCOVERY_SELF_TEST: {S8}\n"), success ? S8("pass") : S8("fail"));
     ProcessResult result = success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     return result;
@@ -1313,8 +1315,9 @@ BUSTER_GLOBAL_LOCAL String8 generate_cc(Arena* arena, Generate generate)
 
 BUSTER_GLOBAL_LOCAL bool generate_cc_contains(Generate generate, String8 cc, String8 needle)
 {
-    BUSTER_UNUSED(generate);
-    bool result = string_first_sequence(cc, needle) != BUSTER_STRING_NO_MATCH;
+    // A verified GCC override can live in a directory containing "clang" or
+    // "zig"; its path spelling must not change the selected compiler policy.
+    bool result = generate.compiler != BUILD_COMPILER_GCC && string_first_sequence(cc, needle) != BUSTER_STRING_NO_MATCH;
     return result;
 }
 
