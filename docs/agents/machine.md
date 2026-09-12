@@ -232,13 +232,28 @@
   `compiler_driver_test_native_frame_vectors` preserves four whole original
   fixtures and a new conditional/loop/cross-compiler fixture over all six x86
   targets, four allocators, both frontend forms, both PIC forms and baseline,
-  Haswell and Zen 5 CPU models. Only matching native baseline objects execute.
+  Haswell and Zen 5 CPU models. Frame-boundary inputs execute matching native baseline objects; the vector
+  arithmetic inputs additionally execute supported Haswell/Zen 5 profiles.
   Its complete independent observer uses Clang: GCC 13 uses a different hidden
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
   narrow signature and vector-load refusals are strict successes; the separate
   `basic_c_machine_fallback_wide_signature.c` retains an explicit 32-byte
   signature refusal for telemetry and artifact-failure checks.
+- X86 vector arithmetic keeps native EVEX rows for their encodable operations
+  and expands the remaining integer/floating operations into ordinary scalar
+  MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
+  signed narrow lanes extend before division, remainder, comparisons and right
+  shifts. Comparison results expand to all-ones masks, and floating negation
+  changes only the sign bit. ZMM operands/results use explicit owned frame
+  snapshots around scalar expansion. Wide vector members store through their
+  exact subobject address. This does not complete model-dependent wide ABI
+  signatures or general assembly.
+  `basic_c_vector.c` and `basic_c_vector_lane_edges.c` remain whole strict inputs.
+  The registered matrix includes baseline/Haswell/Zen 5 object generation and
+  executes matching host CPU profiles. `host_vector_arithmetic.c` independently
+  computes scalar expectations and checks adjacent bytes over 8/16/32/64-byte
+  images; no vector arithmetic is used in that observer.
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete
