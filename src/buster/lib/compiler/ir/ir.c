@@ -692,8 +692,12 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_assembly_constraint_shape_valid(u64 constrain
     bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
     bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
     bool early_clobber = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
+    bool physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint);
     u64 match_bits = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK;
-    if ((read_write && !output) || (early_clobber && !output) || (matching && (output || read_write)))
+    u64 physical_bits = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK;
+    if ((read_write && !output) || (early_clobber && !output) || (matching && (output || read_write)) ||
+        (physical && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != IR_INLINE_ASSEMBLY_CONSTRAINT_R) ||
+        (!physical && physical_bits))
     {
         return false;
     }
@@ -907,6 +911,10 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, 
             valid &= (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0 &&
                      (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) == 0 &&
                      (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) &&
+                     (constraint & (IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                                    IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK)) ==
+                         (output_constraint & (IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                                               IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK)) &&
                      ir_canonical_inline_assembly_types_compatible(output_type, operand_type);
             for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
             {

@@ -18954,7 +18954,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
         CPreprocessResult aarch64_clobber_tokens = c_preprocess(
             aarch64_clobber_temporary.arena,
-            S8("int invalid_aarch64_clobber(void) { __asm__(\"\" ::: \"x19\"); return 0; }\n"),
+            S8("int invalid_aarch64_clobber(void) { __asm__(\"\" ::: \"x28\"); return 0; }\n"),
             (CPreprocessOptions){
                 .target = aarch64_target,
                 .data_layout = target_data_layout(aarch64_target),
@@ -19593,6 +19593,85 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             scratch_end(bound_register_temporary);
         }
     }
+    // AArch64 local register variables carry a target-neutral physical index
+    // beside the ordinary R class. Cover both caller- and callee-saved
+    // allocator registers, and keep encoder/platform scratch names rejected.
+    {
+        typedef struct CTestA64BoundRegisterCase CTestA64BoundRegisterCase;
+        struct CTestA64BoundRegisterCase
+        {
+            String8 source;
+            u32 physical_register;
+        };
+        CTestA64BoundRegisterCase bound_register_cases[] = {
+            {S8("long f(long input) { register long value __asm__(\"x0\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 0},
+            {S8("long f(long input) { register long value __asm__(\"%x15\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 15},
+            {S8("long f(long input) { register long value __asm__(\"x19\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 19},
+            {S8("long f(long input) { register long value __asm__(\"x27\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 27},
+        };
+        Target bound_register_target = target_native;
+        bound_register_target.cpu_arch = CPU_ARCH_AARCH64;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(bound_register_cases); case_index += 1)
+        {
+            TemporalArena bound_register_temporary = scratch_begin(0, 0);
+            CPreprocessResult bound_register_tokens = {0};
+            CParseResult bound_register_parse = {0};
+            CIRLowerResult bound_register_lowered =
+                c_test_lower_source(bound_register_temporary.arena, bound_register_cases[case_index].source, S8("a64-bound-register.c"),
+                                    bound_register_target, &bound_register_tokens, &bound_register_parse);
+            BUSTER_TEST(arguments, !bound_register_tokens.diagnostic_count && !bound_register_parse.diagnostic_count &&
+                                       !bound_register_lowered.diagnostic_count && bound_register_lowered.program);
+            IrInstruction* assembly = 0;
+            IrModule* module = bound_register_lowered.program ? bound_register_lowered.program->modules : 0;
+            for (u32 function_index = 0; module && function_index < module->function_count && !assembly; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, assembly && assembly->operand_count == 2);
+            if (assembly && assembly->operand_count == 2)
+            {
+                u64 constraint = assembly->immediates[1];
+                BUSTER_TEST(arguments, (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R &&
+                                           IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint) &&
+                                           IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint) ==
+                                               bound_register_cases[case_index].physical_register);
+                u64 saved = constraint;
+                assembly->immediates[1] = (saved & ~IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) | IR_INLINE_ASSEMBLY_CONSTRAINT_M;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(bound_register_lowered.program, module).error != IR_VALIDATION_NONE);
+                assembly->immediates[1] = saved;
+            }
+            BUSTER_TEST(arguments, module && ir_validate_canonical_module(bound_register_lowered.program, module).error == IR_VALIDATION_NONE);
+            scratch_end(bound_register_temporary);
+        }
+        String8 invalid_sources[] = {
+            S8("long f(long input) { register long value __asm__(\"x16\") = input; __asm__(\"\" :: \"r\"(value)); return value; }\n"),
+            S8("long f(long input) { register long value __asm__(\"x28\") = input; __asm__(\"\" :: \"r\"(value)); return value; }\n"),
+            S8("long f(long input) { register long value __asm__(\"x19\") = input;"
+                " __asm__(\"\" : \"+r\"(value) : : \"x19\"); return value; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_sources); source_index += 1)
+        {
+            TemporalArena invalid_temporary = scratch_begin(0, 0);
+            CPreprocessResult invalid_tokens = {0};
+            CParseResult invalid_parse = {0};
+            CIRLowerResult invalid_lowered = c_test_lower_source(invalid_temporary.arena, invalid_sources[source_index], S8("invalid-a64-bound-register.c"),
+                                                                 bound_register_target, &invalid_tokens, &invalid_parse);
+            BUSTER_TEST(arguments, !invalid_tokens.diagnostic_count && !invalid_parse.diagnostic_count && invalid_lowered.diagnostic_count == 1);
+            scratch_end(invalid_temporary);
+        }
+    }
     // Call discovery must leave object-size pointer operands unevaluated,
     // even for nested calls and a query embedded in another call's argument.
     String8 unevaluated_predicates[] = {
@@ -19720,6 +19799,49 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 }
                 BUSTER_TEST(arguments, ir_validate_canonical_module(memory_lowered.program, module).error == IR_VALIDATION_NONE);
             }
+            scratch_end(memory_temporary);
+        }
+    }
+    // AArch64 uses the same place-valued M class. Both input and output forms
+    // preserve the address in canonical IR rather than introducing a load.
+    {
+        String8 memory_constraint_sources[] = {
+            S8("void store(volatile int* p, int v) { __asm__ __volatile__(\"str %w1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"),
+            S8("int load(volatile int* p) { int v; __asm__ __volatile__(\"ldr %w0, %1\" : \"=r\"(v) : \"m\"(*p) : \"memory\"); return v; }\n"),
+        };
+        Target memory_target = target_native;
+        memory_target.cpu_arch = CPU_ARCH_AARCH64;
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(memory_constraint_sources); source_index += 1)
+        {
+            TemporalArena memory_temporary = scratch_begin(0, 0);
+            CPreprocessResult memory_tokens = {0};
+            CParseResult memory_parse = {0};
+            CIRLowerResult memory_lowered = c_test_lower_source(memory_temporary.arena, memory_constraint_sources[source_index], S8("a64-memory-constraint.c"),
+                                                               memory_target, &memory_tokens, &memory_parse);
+            BUSTER_TEST(arguments, !memory_tokens.diagnostic_count && !memory_parse.diagnostic_count && !memory_lowered.diagnostic_count &&
+                                       memory_lowered.program);
+            IrInstruction* assembly = 0;
+            IrModule* module = memory_lowered.program ? memory_lowered.program->modules : 0;
+            for (u32 function_index = 0; module && function_index < module->function_count && !assembly; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, assembly && assembly->operand_count == 2);
+            if (assembly && assembly->operand_count == 2)
+            {
+                u32 memory_operand = source_index ? 1 : 0;
+                BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(
+                                           assembly->immediates[memory_operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK));
+            }
+            BUSTER_TEST(arguments, module && ir_validate_canonical_module(memory_lowered.program, module).error == IR_VALIDATION_NONE);
             scratch_end(memory_temporary);
         }
     }

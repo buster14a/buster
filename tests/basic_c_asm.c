@@ -237,6 +237,32 @@ static int explicit_register_clobber_live_values(int left, int right)
     return left * 100 + right;
 }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+static long fixed_bound_input(long input)
+{
+    register long fixed __asm__("x8") = input;
+    long output;
+    __asm__ volatile("mov %0, x8" : "=r"(output) : "r"(fixed));
+    return output;
+}
+
+static long fixed_bound_callee_saved_output(long input)
+{
+    register long output __asm__("x19");
+    __asm__ volatile("mov x19, %1" : "=r"(output) : "0"(input));
+    return output;
+}
+
+static int memory_operands(int input)
+{
+    volatile int value = 0;
+    int output;
+    __asm__ volatile("str %w1, %0" : "=m"(value) : "r"(input) : "memory", "cc", "x15");
+    __asm__ volatile("ldr %w0, %1" : "=r"(output) : "m"(value) : "memory");
+    return output;
+}
+#endif
+
 #if defined(__x86_64__) || defined(_M_X64)
 static int memory_register_and_flags_clobbers(int value)
 {
@@ -255,6 +281,8 @@ int main(void)
     valid = valid && fixed_tied_output(89) == 89 && two_generic_read_write_outputs() == 12 && generic_before_fixed_read_write_output() == 12 &&
             fixed_before_generic_read_write_output() == 12 && dynamic_stack_fixed_b(3) == 7 && exact_width_asm_outputs() &&
             memory_register_and_flags_clobbers(41) == 42;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    valid = valid && fixed_bound_input(101) == 101 && fixed_bound_callee_saved_output(211) == 211 && memory_operands(307) == 307;
 #endif
     return valid ? 0 : 1;
 }
