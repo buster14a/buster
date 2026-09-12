@@ -4857,16 +4857,22 @@ BUSTER_C_INTERNAL void c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     u32 capacity = ssa->slot_capacity ? ssa->slot_capacity * 2 : 64;
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_GROWS, 1);
     CIrSsaSlot* slots = arena_allocate(builder->scratch_arena, CIrSsaSlot, capacity);
     memset(slots, 0, sizeof(*slots) * capacity);
+    IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_GROWS, ssa->predecessor_offsets != 0);
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_GROW_VISITS, ssa->slot_capacity);
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_CLEAR_BYTES, sizeof(*slots) * (u64)capacity);
     for (u32 index = 0; index < ssa->slot_capacity; index += 1)
     {
         CIrSsaSlot entry = ssa->slots[index];
         if (entry.block_plus_one)
         {
             u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
+            IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
             while (slots[slot].block_plus_one)
             {
+                IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
                 slot = (slot + 1) & (capacity - 1);
             }
             slots[slot] = entry;
@@ -4884,9 +4890,14 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
         c_ir_ssa_grow_slots(builder);
     }
     u32 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
+    IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_PROBES, ssa->predecessor_offsets != 0);
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_PROBES, 1);
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_LOOKUPS, 1);
     while (ssa->slots[slot].block_plus_one &&
            (ssa->slots[slot].block_plus_one != block + 1 || ssa->slots[slot].local != local))
     {
+        IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_PROBES, ssa->predecessor_offsets != 0);
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_PROBES, 1);
         slot = (slot + 1) & (ssa->slot_capacity - 1);
     }
     if (!ssa->slots[slot].block_plus_one)
@@ -4897,13 +4908,18 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
         {
             c_ir_ssa_grow_slots(builder);
             slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
+            IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_PROBES, ssa->predecessor_offsets != 0);
+            IR_CONSTRUCTION_RECORD(SSA_SLOT_PROBES, 1);
             while (ssa->slots[slot].block_plus_one)
             {
+                IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_PROBES, ssa->predecessor_offsets != 0);
+                IR_CONSTRUCTION_RECORD(SSA_SLOT_PROBES, 1);
                 slot = (slot + 1) & (ssa->slot_capacity - 1);
             }
         }
         ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
         ssa->slot_count += 1;
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_INSERTS, 1);
     }
     return ssa->slots + slot;
 }
@@ -4970,6 +4986,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
         {
             ssa->read_stamps[block] = ssa->read_stamp;
             ssa->read_blocks[path_count++] = block;
+            IR_CONSTRUCTION_RECORD(SSA_FORWARD_STEPS, 1);
             block = ssa->predecessors[ssa->predecessor_offsets[block]];
             slot = c_ir_ssa_slot(builder, block, local);
             value = slot->value;
@@ -5197,6 +5214,8 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* build
         u32* work = arena_allocate(builder->scratch_arena, u32, count);
         u8* seen = arena_allocate(builder->scratch_arena, u8, count);
         memset(seen, 0, count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, (sizeof(*work) + sizeof(*seen)) * (u64)count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, count);
         u32 work_count = 0;
         // Store operands are also roots: an elided copy can be the only use of
         // an uninitialized read, including one feeding an entry-initialized owner.
@@ -5221,6 +5240,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* build
         }
         for (u32 index = 0; index < work_count; index += 1)
         {
+            IR_CONSTRUCTION_RECORD(SSA_INITIALIZATION_WORK_VISITS, 1);
             u32 value = work[index];
             if (replacements[value] != value)
             {
@@ -5376,6 +5396,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             for (u32 index = 0; index < terminator->target_count; index += 1)
             {
                 u32 target = terminator->targets[index].value;
+                IR_CONSTRUCTION_RECORD(SSA_CFG_TARGET_VISITS, 1);
                 if (stamps[target] != block + 1)
                 {
                     offsets[target + 1] += 1;
@@ -5402,6 +5423,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             for (u32 index = 0; index < terminator->target_count; index += 1)
             {
                 u32 target = terminator->targets[index].value;
+                IR_CONSTRUCTION_RECORD(SSA_CFG_TARGET_VISITS, 1);
                 if (stamps[target] != block + 1)
                 {
                     predecessors[cursor[target]++] = block;
@@ -5430,6 +5452,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             for (u32 target = 0; target < terminator->target_count; target += 1)
             {
                 u32 successor = terminator->targets[target].value;
+                IR_CONSTRUCTION_RECORD(SSA_REACHABLE_TARGET_VISITS, 1);
                 if (!ssa->reachable[successor])
                 {
                     ssa->reachable[successor] = 1;
@@ -5442,6 +5465,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
         {
             IrBlockParameter* parameter = pending->parameter;
+            IR_CONSTRUCTION_RECORD(SSA_PENDING_VISITS, 1);
             if (memory[pending->local])
             {
                 continue;
@@ -5468,6 +5492,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             for (u32 index = offsets[pending->block]; index < offsets[pending->block + 1]; index += 1)
             {
                 IrBlockId predecessor = {.value = predecessors[index]};
+                IR_CONSTRUCTION_RECORD(SSA_PENDING_PREDECESSOR_VISITS, 1);
                 IrValueId value = c_ir_ssa_current(builder, predecessor.value, pending->local);
                 IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, 1);
                 *incoming = (IrIncoming){.predecessor = predecessor, .value = value};
@@ -5486,6 +5511,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         u32 count = function->value_count;
         u32* replacements = arena_allocate(builder->scratch_arena, u32, count);
         u32* value_map = arena_allocate(builder->scratch_arena, u32, count);
+        IR_CONSTRUCTION_RECORD(SSA_REPLACEMENT_ROWS, count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, (sizeof(*replacements) + sizeof(*value_map)) * (u64)count);
         for (u32 value = 0; value < count; value += 1)
         {
             replacements[value] = value;
@@ -5496,6 +5523,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         }
         CIrSsaParameter** pending_by_value = arena_allocate(builder->scratch_arena, CIrSsaParameter*, count);
         memset(pending_by_value, 0, sizeof(*pending_by_value) * count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*pending_by_value) * (u64)count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, sizeof(*pending_by_value) * (u64)count);
         for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
         {
             pending_by_value[pending->parameter->value.value] = pending;
@@ -5524,18 +5553,39 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 }
             }
         }
+        // Predecessor propagation is complete; its read-path cursor is now
+        // scratch. Keep parameter-bearing blocks in their original order and
+        // retire empty ones between sweeps. Simplification only removes rows,
+        // so a retired block can never become active again. Stable order keeps
+        // the same replacement representatives and canonical value IDs.
+        u32 active_block_count = 0;
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
+            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, function->blocks[block].first_parameter == 0);
+            if (function->blocks[block].first_parameter)
+            {
+                cursor[active_block_count++] = block;
+            }
+        }
         bool changed = true;
         while (changed)
         {
+            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, 1);
             changed = false;
-            for (u32 block = 0; block < block_count; block += 1)
+            u32 remaining_block_count = 0;
+            for (u32 active = 0; active < active_block_count; active += 1)
             {
+                u32 block = cursor[active];
+                IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
                 IrBlock* destination = function->blocks + block;
+                IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, destination->first_parameter == 0);
                 IrBlockParameter** link = &destination->first_parameter;
                 destination->last_parameter = 0;
                 while (*link)
                 {
                     IrBlockParameter* parameter = *link;
+                    IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, 1);
                     CIrSsaParameter* pending = pending_by_value[parameter->value.value];
                     if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
                     {
@@ -5548,6 +5598,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                     bool trivial = true;
                     for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
                     {
+                        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
                         u32 value = c_ir_ssa_root(replacements, incoming->value.value);
                         if (value != parameter->value.value)
                         {
@@ -5569,15 +5620,24 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                         link = &parameter->next;
                     }
                 }
+                if (destination->first_parameter)
+                {
+                    cursor[remaining_block_count++] = block;
+                }
             }
+            active_block_count = remaining_block_count;
         }
         // A parenthesized assignment can recover a read's place without ever
         // consuming its provisional value. Prune such parameters (including
         // unused cyclic groups), starting only at actual instruction operands.
         IrBlockParameter** parameter_by_value = arena_allocate(builder->scratch_arena, IrBlockParameter*, count);
         memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*parameter_by_value) * (u64)count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, sizeof(*parameter_by_value) * (u64)count);
         memset(value_map, 0xff, sizeof(*value_map) * count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, sizeof(*value_map) * (u64)count);
         u32* work = arena_allocate(builder->scratch_arena, u32, count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*work) * (u64)count);
         u32 work_count = 0;
         u64 operand_count = 0;
         for (u32 block = 0; block < block_count; block += 1)
@@ -5607,6 +5667,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         }
         for (u32 index = 0; index < work_count; index += 1)
         {
+            IR_CONSTRUCTION_RECORD(SSA_LIVE_WORK_VISITS, 1);
             for (IrIncoming* incoming = parameter_by_value[work[index]]->first_incoming; incoming; incoming = incoming->next)
             {
                 u32 value = c_ir_ssa_root(replacements, incoming->value.value);
@@ -5660,6 +5721,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             destination->sealed = true;
         }
         u32 value_count = 0;
+        IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, (u64)count * 3);
         for (u32 value = 0; value < count; value += 1)
         {
             if (value_map[value] != UINT32_MAX)
@@ -5686,6 +5748,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         // so each old ID is remapped exactly once, never through an updated ID.
         IrValueId* operands = arena_allocate(builder->arena, IrValueId, operand_count);
         u64 operand_cursor = 0;
+        IR_CONSTRUCTION_RECORD(SSA_REMAP_OPERAND_SLOTS, operand_count);
+        IR_CONSTRUCTION_RECORD(SSA_REMAP_INSTRUCTION_ROWS, function->instruction_count);
         for (u32 index = 0; index < function->instruction_count; index += 1)
         {
             IrInstruction* instruction = function->instructions + index;
@@ -5713,6 +5777,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
                 {
                     incoming->value.value = value_map[incoming->value.value];
+                    IR_CONSTRUCTION_RECORD(SSA_REMAP_INCOMING_VISITS, 1);
                     valid &= incoming->value.value != UINT32_MAX;
                 }
             }

@@ -361,6 +361,24 @@ nothing. No extra arena storage or whole-function row stream is retained.
 - `operand_slots_appended` sums appended rows' operand counts. It does
   not count unique operands or repeated downstream decoding passes.
 
+The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
+
+| Fields (under `ir_construction.ssa_`) | Counted work |
+| --- | --- |
+| `slot_lookups`, `slot_probes`, `slot_inserts` | Current-value queries, examined hash slots (including terminal slots and insertion retries), and new keys. |
+| `slot_grows`, `slot_grow_visits`, `slot_rehash_probes`, `slot_clear_bytes` | Table allocations, old-capacity slots scanned, rehash probes, and bytes explicitly zeroed. |
+| `finish_slot_grows`, `finish_slot_probes` | Subsets after predecessor offsets are installed, including propagation; exclude earlier lowering and CFG discovery. |
+| `cfg_target_visits`, `reachable_target_visits` | Targets examined by the two predecessor passes and by reachability, respectively. |
+| `pending_visits`, `pending_predecessor_visits`, `forward_steps` | Pending propagation queue entries, incoming predecessor rows materialized, and single-predecessor path steps. |
+| `simplify_passes`, `simplify_block_visits`, `simplify_empty_block_visits`, `simplify_parameter_visits`, `simplify_incoming_visits` | Fixed-point sweeps and visited blocks/parameters/incoming rows, including revisits and the initial active-block census. Empty-block visits are a subset of block visits. |
+| `value_scratch_bytes`, `value_clear_bytes`, `replacement_rows` | Value-count-sized table allocation requests, explicit memset bytes for those tables, and identity-map initialization rows. These exclude block-sized scratch, restoration tails, and sparse slots. |
+| `initialization_work_visits`, `live_work_visits` | Values popped from the definite-initialization and live-parameter queues. |
+| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the three value compaction passes and final instruction/operand/incoming remapping. |
+
+These share the existing saturation, calling-thread and failed-attempt rules.
+They do not add timers, histograms, per-function storage or a reporting switch.
+Explicit clear bytes exclude ordinary map writes and allocator-internal clears.
+
 Initial estimates and finish populations cover different failure boundaries;
 do not subtract them blindly on invalid sources. Counts do not measure
 append latency, phase times, retained arena memory, or all-consumer cost.

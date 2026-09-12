@@ -1,0 +1,8 @@
+6136d521a01d5d6184bd27c02fff89632c4341ea830808dd882e43cb1dc1870c  build/self-host/Release/ide-stage1
+01892dcc618d6ccd2e2edd6705d5427dbf36ecdd6d93f8c8dc161945ef4b8937  build/self-host/Release/ide-stage1.metrics
+6136d521a01d5d6184bd27c02fff89632c4341ea830808dd882e43cb1dc1870c  build/self-host/Release/ide-stage2
+00d7ffca83e6b4f3bb39b7878cef5ca792bf936ce4a6d14e9db7e6d117a299db  build/self-host/Release/ide-stage2-machine
+0cca4aa724a1292763e2d6504fc0f022ee05ae996b30c20480d58550427c7f08  build/self-host/Release/ide-stage2-machine.metrics
+547688470b636ac105a32c0c9772e0f23b6c4b601ab3ba29dd1e902015f7ac54  build/self-host/Release/ide-stage2-none
+0cca4aa724a1292763e2d6504fc0f022ee05ae996b30c20480d58550427c7f08  build/self-host/Release/ide-stage2-none.metrics
+0cca4aa724a1292763e2d6504fc0f022ee05ae996b30c20480d58550427c7f08  build/self-host/Release/ide-stage2.metrics
