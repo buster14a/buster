@@ -416,6 +416,20 @@
   SP-relative save locations. Capacity planning includes large-offset body
   transfers and aggregate-copy pieces; frame-size sums are checked before
   narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
+- AArch64 calls in functions containing dynamic stack allocations reserve
+  stack arguments below the current SP. The existing canonical row walk
+  records this property before selecting any call, including calls before
+  the first allocation. Ordinary functions retain one reusable fixed area.
+  Dynamic calls use explicit `READ_SP`, `STACK_ALLOCATE`, pointer stores and
+  `WRITE_SP` rows; the saved SP stays live across call clobbers and result
+  capture. Packed Darwin argument widths and aggregate stack images retain
+  the shared ABI placement. No outgoing area is hidden in an emitter pseudo.
+  `basic_c_aarch64_dynamic_calls.c` covers repeated indirect calls, calls on
+  both sides of a VLA, packed narrow arguments, split pairs, indirect large
+  results, ninth floating arguments and variadics. The registered driver
+  matrix retains both original over-aligned stack fixtures, all six AArch64
+  targets, allocator modes, frontend forms and PIC settings. Native AArch64
+  desktop hosts also link the independent host observer in both directions.
 - Win64 x86-64 dynamic frames establish RBP at the bottom of the fixed
   allocation, after the probe, so PE unwind records retain SET_FPREG. Encoding
   rebases logical frame offsets once at the existing exact/fast memory paths.
