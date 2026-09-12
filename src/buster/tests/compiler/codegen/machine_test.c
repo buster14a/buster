@@ -4788,84 +4788,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_bank(UnitTestArguments
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    UnitTestResult traffic_result = machine_test_quality_traffic(arguments);
-    result.test_count += traffic_result.test_count;
-    result.succeeded_test_count += traffic_result.succeeded_test_count;
-    UnitTestResult predicate_widths = machine_test_predicate_widths(arguments);
-    result.test_count += predicate_widths.test_count;
-    result.succeeded_test_count += predicate_widths.succeeded_test_count;
-    UnitTestResult predicate_edges = machine_test_predicate_edges(arguments);
-    result.test_count += predicate_edges.test_count;
-    result.succeeded_test_count += predicate_edges.succeeded_test_count;
-    UnitTestResult predicate_source = machine_test_predicate_source(arguments);
-    result.test_count += predicate_source.test_count;
-    result.succeeded_test_count += predicate_source.succeeded_test_count;
-    UnitTestResult predicate_result = machine_test_predicate_bank(arguments);
-    result.test_count += predicate_result.test_count;
-    result.succeeded_test_count += predicate_result.succeeded_test_count;
-    UnitTestResult win64_wide_result = machine_test_win64_wide(arguments);
-    result.test_count += win64_wide_result.test_count;
-    result.succeeded_test_count += win64_wide_result.succeeded_test_count;
-    UnitTestResult aligned_result = machine_test_win64_aligned(arguments);
-    result.test_count += aligned_result.test_count;
-    result.succeeded_test_count += aligned_result.succeeded_test_count;
-    UnitTestResult vector_result = machine_test_win64_vector(arguments);
-    result.test_count += vector_result.test_count;
-    result.succeeded_test_count += vector_result.succeeded_test_count;
-    UnitTestResult aggregate_result = machine_test_native_aggregate(arguments);
-    result.test_count += aggregate_result.test_count;
-    result.succeeded_test_count += aggregate_result.succeeded_test_count;
-    UnitTestResult f80_result = machine_test_f80(arguments);
-    result.test_count += f80_result.test_count;
-    result.succeeded_test_count += f80_result.succeeded_test_count;
-    UnitTestResult variadic_result = machine_test_native_variadic(arguments);
-    result.test_count += variadic_result.test_count;
-    result.succeeded_test_count += variadic_result.succeeded_test_count;
-    UnitTestResult call_relocations = machine_test_aarch64_call_relocations(arguments);
-    result.test_count += call_relocations.test_count;
-    result.succeeded_test_count += call_relocations.succeeded_test_count;
-    UnitTestResult query_result = machine_test_cpu_queries(arguments);
-    result.test_count += query_result.test_count;
-    result.succeeded_test_count += query_result.succeeded_test_count;
-    UnitTestResult barrier_result = machine_test_compiler_barrier(arguments);
-    result.test_count += barrier_result.test_count;
-    result.succeeded_test_count += barrier_result.succeeded_test_count;
-    UnitTestResult atomic_update_result = machine_test_a64_atomic_pair_updates(arguments);
-    result.test_count += atomic_update_result.test_count;
-    result.succeeded_test_count += atomic_update_result.succeeded_test_count;
-    UnitTestResult asm_goto_result = machine_test_inline_assembly_goto(arguments);
-    result.test_count += asm_goto_result.test_count;
-    result.succeeded_test_count += asm_goto_result.succeeded_test_count;
-    UnitTestResult hint_result = machine_test_inline_hints(arguments);
-    result.test_count += hint_result.test_count;
-    result.succeeded_test_count += hint_result.succeeded_test_count;
-    UnitTestResult cache_result = machine_test_clear_instruction_cache(arguments);
-    result.test_count += cache_result.test_count;
-    result.succeeded_test_count += cache_result.succeeded_test_count;
-    UnitTestResult switch_result = machine_test_unsigned_switch(arguments);
-    result.test_count += switch_result.test_count;
-    result.succeeded_test_count += switch_result.succeeded_test_count;
-    UnitTestResult dominance_result = machine_test_disconnected_dominance(arguments);
-    result.test_count += dominance_result.test_count;
-    result.succeeded_test_count += dominance_result.succeeded_test_count;
-    UnitTestResult i128_result = machine_test_i128_block_parameters(arguments);
-    result.test_count += i128_result.test_count;
-    result.succeeded_test_count += i128_result.succeeded_test_count;
-    UnitTestResult pointer_result = machine_test_pointer_block_parameters(arguments);
-    result.test_count += pointer_result.test_count;
-    result.succeeded_test_count += pointer_result.succeeded_test_count;
-    UnitTestResult parameter_split_result = machine_test_parameter_edge_split(arguments);
-    result.test_count += parameter_split_result.test_count;
-    result.succeeded_test_count += parameter_split_result.succeeded_test_count;
-    UnitTestResult edge_index_result = machine_test_fast_edge_index(arguments);
-    result.test_count += edge_index_result.test_count;
-    result.succeeded_test_count += edge_index_result.succeeded_test_count;
-    UnitTestResult dynamic_stack_result = machine_test_x64_dynamic_stack(arguments);
-    result.test_count += dynamic_stack_result.test_count;
-    result.succeeded_test_count += dynamic_stack_result.succeeded_test_count;
-    UnitTestResult complement_result = machine_test_x64_i128_complement(arguments);
-    result.test_count += complement_result.test_count;
-    result.succeeded_test_count += complement_result.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_source);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_bank);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_win64_wide);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_win64_aligned);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_win64_vector);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_native_aggregate);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_f80);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_native_variadic);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_fast_edge_index);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_dynamic_stack);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_i128_complement);
 
     // Malformed publication inputs must fail before placement or encoding.
     MachineInstruction storage_rows[2] = {{.opcode = MACHINE_X64_MOV_RI}, {.opcode = MACHINE_X64_RET}};
@@ -5852,9 +5800,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1466 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
-    UnitTestResult movabs_result = machine_test_prepared_movabs(arguments);
-    result.test_count += movabs_result.test_count;
-    result.succeeded_test_count += movabs_result.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 248);
@@ -6493,9 +6439,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         }
     }
 
-    UnitTestResult alias_tests = machine_test_stack_aliases(arguments);
-    result.test_count += alias_tests.test_count;
-    result.succeeded_test_count += alias_tests.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, machine_test_stack_aliases);
 
     // Stage 2: x86-64 selection, MIR_STACK placement, and encoding over the
     // scalar subset. Selection and encoding are host-independent; execution

@@ -1,0 +1,19 @@
+{
+  "baseline_commit": "8c5a9bd6837a0e4beecbd6fdd1f9adeb175fce96",
+  "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+  "cpu_model": "INTEL(R) XEON(R) PLATINUM 8573C",
+  "test_jobs": 2,
+  "table_audits_environment": null,
+  "compiler": "Clang 18.1.3",
+  "configuration": "Release, split translation units, effective -O2 -march=native -fwrapv -fno-strict-aliasing -funsigned-char",
+  "candidate_source_sha256": {
+    "src/buster/lib/arena.h": "d3e63dc7f3444b8e3535355adbdde9abc9e7be6cf95e73661fc27e75bf295b95",
+    "src/buster/lib/arena.c": "e7e8fd00adf91b91ec675229e18ae8d63f2bffbf7a029fa5b934edc876e646a3",
+    "src/buster/tests/test.h": "1c1b142e3d9d7243a731a79c94b35602e8e65fbf366610be5f992f307a383cb1",
+    "src/buster/tests/test.c": "23583c1557831d76c1257f4546f5b387e48a7d68420be238c396e9989a30e3ae",
+    "src/buster/tests/compiler/frontend/c/c_test.c": "1481a9fd85af087751756deb98a91e5a02cac485c07a021e1848d58e12e9945f",
+    "src/buster/tests/compiler/driver/driver_test.c": "0d93992eae6916634253b2187aad541df56d7fbd4b8c21feb991e41712f44221",
+    "src/buster/tests/compiler/codegen/machine_test.c": "a6d8a424f508cdb0c3d28c88238437f3a410f0420d1b813622de3beaf2b87eb0",
+    "src/buster/apps/ide/ide.c": "a0e6f15b13826c14c9231aacbeceee22bd9ca8f2a26038279603d8bbdcec39bf"
+  }
+}
