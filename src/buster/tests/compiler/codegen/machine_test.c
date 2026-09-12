@@ -402,10 +402,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_atomic_pair_updates(UnitTest
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 bool compare_exchange = operation >= IR_ATOMIC_OPERATION_COUNT;
                 String8 source = compare_exchange
-                    ? string_format(temporary.arena, S8("typedef unsigned __int128 U; int update(_Atomic(U)* cell, U* expected, U const* value) { "
+                    ? string_format(temporary.arena, S8("typedef unsigned __int128 U; int update(_Atomic(U)* cell, U* expected, U const* value) {{ "
                                                         "return __c11_atomic_{S8}(cell, expected, *value, {u32}, {u32}); }"),
                                     builtins[operation], order, failure_orders[order])
-                    : string_format(temporary.arena, S8("typedef unsigned __int128 U; void update(_Atomic(U)* cell, U const* value, U* old) { "
+                    : string_format(temporary.arena, S8("typedef unsigned __int128 U; void update(_Atomic(U)* cell, U const* value, U* old) {{ "
                                                         "*old = __c11_atomic_{S8}(cell, *value, {u32}); }"), builtins[operation], order);
                 IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("atomic-pair-update.c"), source, target,
                                                                          (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
