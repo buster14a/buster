@@ -11666,14 +11666,6 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
         memory_operands[0] = memory_operand;
         memory_operands[1] = xmm_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVSD"), memory_operands, 2, sse2, attributes);
-        memory_operand.width = 32;
-        xmm_operand = machine_x64_exact_xmm_operand(0, 32);
-        memory_operands[0] = xmm_operand;
-        memory_operands[1] = memory_operand;
-        (void)machine_x64_metadata_shape_cache_add(S8("MOVSS"), memory_operands, 2, sse, attributes);
-        memory_operands[0] = memory_operand;
-        memory_operands[1] = xmm_operand;
-        (void)machine_x64_metadata_shape_cache_add(S8("MOVSS"), memory_operands, 2, sse, attributes);
         memory_operand.width = 128;
         xmm_operand = machine_x64_exact_xmm_operand(0, 128);
         memory_operands[0] = xmm_operand;
@@ -14057,9 +14049,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             {
                                 u32 frame_offset = placement->stack_slot_offsets[operand->stack_slot];
                                 u32 xmm = operand->physical_register - MACHINE_X64_ZMM0;
-                                (void)machine_x64_emit_metadata_xmm_memory(&encoder, operand->byte_size == 4 ? S8("MOVSS") : S8("MOVSD"), xmm,
+                                (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm,
                                                                           MACHINE_X64_RBP, -(s64)(s32)frame_offset, false,
-                                                                          (u16)(operand->byte_size * 8u), 0);
+                                                                          64, 0);
                             }
                             else if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)
                             {
@@ -14110,9 +14102,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             {
                                 u32 frame_offset = placement->stack_slot_offsets[operand->stack_slot];
                                 u32 xmm = operand->physical_register - MACHINE_X64_ZMM0;
-                                (void)machine_x64_emit_metadata_xmm_memory(&encoder, operand->byte_size == 4 ? S8("MOVSS") : S8("MOVSD"), xmm,
+                                (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm,
                                                                           MACHINE_X64_RBP, -(s64)(s32)frame_offset, true,
-                                                                          (u16)(operand->byte_size * 8u), 0);
+                                                                          64, 0);
                             }
                             else if ((operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
                                      !(operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP |
