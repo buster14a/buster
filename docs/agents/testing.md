@@ -20,6 +20,11 @@
 - A new production module or public behavior must receive a focused module
   test. Frontend changes should cover preprocessing, parsing/diagnostics,
   semantic typing, canonical-IR lowering, and driver behavior as applicable.
+- `BUSTER_TEST` records a failure and continues. When later reads depend on a
+  pointer, count, status, or other prerequisite, guard that dependent body with
+  `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
+  with normal assertion accounting, evaluates it once, and skips only the
+  guarded body when it fails; unrelated fixtures and modules continue.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.

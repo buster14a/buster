@@ -4354,63 +4354,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             arguments->show(arguments, S8("UEFI compiler driver error for {S8}: {S8}\n"), uefi_targets[target_index], uefi_compile.diagnostic);
         }
-        BUSTER_TEST(arguments, uefi_compile.error == COMPILER_DRIVER_ERROR_NONE);
-        BUSTER_TEST(arguments, uefi_compile.has_object);
-        BUSTER_TEST(arguments, uefi_compile.object.target.os == OPERATING_SYSTEM_UEFI);
-        BUSTER_TEST(arguments, uefi_compile.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length != 0);
-        BUSTER_TEST(arguments, uefi_compile.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
-        ByteSlice image = uefi_compile.native_link.executable;
-        bool image_valid = image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z';
-        BUSTER_TEST(arguments, image_valid);
-        if (image_valid)
+        if (BUSTER_REQUIRE(arguments, uefi_compile.error == COMPILER_DRIVER_ERROR_NONE))
         {
-            u32 pe_offset = compiler_driver_test_pe_read_u32(image, 0x3c);
-            image_valid = pe_offset <= image.length && 24 <= image.length - pe_offset && memcmp(image.pointer + pe_offset, "PE\0\0", 4) == 0;
-            BUSTER_TEST(arguments, image_valid);
-            if (image_valid)
+            if (BUSTER_REQUIRE(arguments, uefi_compile.has_object))
             {
-                u64 coff = (u64)pe_offset + 4;
-                u16 section_count = compiler_driver_test_pe_read_u16(image, coff + 2);
-                u16 optional_size = compiler_driver_test_pe_read_u16(image, coff + 16);
-                u64 optional = coff + 20;
-                u64 section_table = optional + optional_size;
-                bool headers_valid = optional_size >= 240 && section_table <= image.length &&
-                                     (u64)section_count <= (image.length - section_table) / 40;
-                BUSTER_TEST(arguments, headers_valid);
-                if (headers_valid)
+                if (BUSTER_REQUIRE(arguments, uefi_compile.object.sections != 0 && uefi_compile.object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
                 {
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, coff) == uefi_machines[target_index]);
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, optional) == 0x20b);
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, optional + 68) == 10);
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, optional + 70) == 0x8160);
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u32(image, optional + 16) != 0);
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u64(image, optional + 24) == UINT64_C(0x140000000));
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u32(image, optional + 120) == 0);
-                    BUSTER_TEST(arguments, compiler_driver_test_pe_read_u32(image, optional + 124) == 0);
-                    u32 exception_rva = compiler_driver_test_pe_read_u32(image, optional + 136);
-                    u32 exception_size = compiler_driver_test_pe_read_u32(image, optional + 140);
-                    u32 relocation_rva = compiler_driver_test_pe_read_u32(image, optional + 152);
-                    u32 relocation_size = compiler_driver_test_pe_read_u32(image, optional + 156);
-                    BUSTER_TEST(arguments, exception_rva != 0 && exception_size != 0);
-                    BUSTER_TEST(arguments, relocation_rva != 0 && relocation_size >= 12);
-                    u64 exception_offset = 0;
-                    u64 relocation_offset = 0;
-                    BUSTER_TEST(arguments,
-                                compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, exception_rva, exception_size,
-                                                                           &exception_offset));
-                    bool relocation_mapped = compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, relocation_rva,
-                                                                                        relocation_size, &relocation_offset);
-                    BUSTER_TEST(arguments, relocation_mapped);
-                    if (relocation_mapped)
+                    BUSTER_TEST(arguments, uefi_compile.object.target.os == OPERATING_SYSTEM_UEFI);
+                    BUSTER_TEST(arguments, uefi_compile.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length != 0);
+                    BUSTER_TEST(arguments, uefi_compile.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
+                }
+            }
+            ByteSlice image = uefi_compile.native_link.executable;
+            bool image_valid = image.pointer && image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z';
+            if (BUSTER_REQUIRE(arguments, image_valid))
+            {
+                u32 pe_offset = compiler_driver_test_pe_read_u32(image, 0x3c);
+                image_valid = pe_offset <= image.length && 24 <= image.length - pe_offset && memcmp(image.pointer + pe_offset, "PE\0\0", 4) == 0;
+                if (BUSTER_REQUIRE(arguments, image_valid))
+                {
+                    u64 coff = (u64)pe_offset + 4;
+                    u16 section_count = compiler_driver_test_pe_read_u16(image, coff + 2);
+                    u16 optional_size = compiler_driver_test_pe_read_u16(image, coff + 16);
+                    u64 optional = coff + 20;
+                    u64 section_table = optional + optional_size;
+                    bool headers_valid = optional_size >= 240 && section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40;
+                    if (BUSTER_REQUIRE(arguments, headers_valid))
                     {
-                        u16 relocation_entry = compiler_driver_test_pe_read_u16(image, relocation_offset + 8);
-                        BUSTER_TEST(arguments, (relocation_entry >> 12) == 10);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, coff) == uefi_machines[target_index]);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, optional) == 0x20b);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, optional + 68) == 10);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u16(image, optional + 70) == 0x8160);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u32(image, optional + 16) != 0);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u64(image, optional + 24) == UINT64_C(0x140000000));
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u32(image, optional + 120) == 0);
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_read_u32(image, optional + 124) == 0);
+                        u32 exception_rva = compiler_driver_test_pe_read_u32(image, optional + 136);
+                        u32 exception_size = compiler_driver_test_pe_read_u32(image, optional + 140);
+                        u32 relocation_rva = compiler_driver_test_pe_read_u32(image, optional + 152);
+                        u32 relocation_size = compiler_driver_test_pe_read_u32(image, optional + 156);
+                        BUSTER_TEST(arguments, exception_rva != 0 && exception_size != 0);
+                        u64 exception_offset = 0;
+                        u64 relocation_offset = 0;
+                        BUSTER_TEST(arguments, compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, exception_rva, exception_size,
+                                                                                          &exception_offset));
+                        if (BUSTER_REQUIRE(arguments, relocation_rva != 0 && relocation_size >= 12))
+                        {
+                            bool relocation_mapped = compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, relocation_rva,
+                                                                                                relocation_size, &relocation_offset);
+                            if (BUSTER_REQUIRE(arguments, relocation_mapped))
+                            {
+                                u16 relocation_entry = compiler_driver_test_pe_read_u16(image, relocation_offset + 8);
+                                BUSTER_TEST(arguments, (relocation_entry >> 12) == 10);
+                            }
+                        }
                     }
                 }
             }
+            ByteSlice written = file_read(arguments->arena, output_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, written.length == image.length && written.length != 0);
         }
-        ByteSlice written = file_read(arguments->arena, output_path, (FileReadOptions){0});
-        BUSTER_TEST(arguments, written.length == image.length && written.length != 0);
 
         // AArch64 PE unwind emission requires the canonical prologue/epilogue
         // shape even when a machine register allocator was requested. Keep a
@@ -4429,14 +4432,21 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 arguments->show(arguments, S8("optimized AArch64 UEFI compiler driver error: {S8}\n"), optimized_compile.diagnostic);
             }
-            BUSTER_TEST(arguments, optimized_compile.error == COMPILER_DRIVER_ERROR_NONE);
-            BUSTER_TEST(arguments, optimized_compile.has_object);
-            BUSTER_TEST(arguments, optimized_compile.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length != 0);
-            BUSTER_TEST(arguments, optimized_compile.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
-            BUSTER_TEST(arguments, optimized_compile.native_link.executable.length != 0);
-            BUSTER_TEST(arguments,
-                        file_read(arguments->arena, optimized_output_path, (FileReadOptions){0}).length ==
-                            optimized_compile.native_link.executable.length);
+            if (BUSTER_REQUIRE(arguments, optimized_compile.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                if (BUSTER_REQUIRE(arguments, optimized_compile.has_object))
+                {
+                    if (BUSTER_REQUIRE(arguments,
+                                       optimized_compile.object.sections != 0 && optimized_compile.object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+                    {
+                        BUSTER_TEST(arguments, optimized_compile.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length != 0);
+                        BUSTER_TEST(arguments, optimized_compile.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
+                    }
+                }
+                BUSTER_TEST(arguments, optimized_compile.native_link.executable.length != 0);
+                BUSTER_TEST(arguments,
+                            file_read(arguments->arena, optimized_output_path, (FileReadOptions){0}).length == optimized_compile.native_link.executable.length);
+            }
         }
     }
 
@@ -4451,39 +4461,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult member_compile = compiler_driver_execute_invocation(
             uefi_archive_arena,
             compiler_driver_parse_arguments(uefi_archive_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(member_command_line)));
-        BUSTER_TEST(arguments, member_compile.error == COMPILER_DRIVER_ERROR_NONE);
-        FileMapRead member_map = file_map_read(uefi_archive_arena, member_path, (FileReadOptions){0});
-        BUSTER_TEST(arguments, member_map.bytes.length != 0);
-        ByteSlice archive_members[] = {member_map.bytes};
-        String8 archive_member_names[] = {S8("uefi_archive_member.obj")};
-        ByteSlice archive_bytes = compiler_driver_test_archive(uefi_archive_arena, archive_members, archive_member_names,
-                                                               BUSTER_ARRAY_LENGTH(archive_members));
-        file_map_unmap(member_map);
-
-        String8 library_directory = buster_test_temporary_path(uefi_archive_arena, S8("buster-driver-uefi-library"), S8(""));
-        os_make_directory(library_directory);
-        String8 archive_path = string_format_z(uefi_archive_arena, S8("{S8}/libuefi_support.a"), library_directory);
-        String8 shared_path = string_format_z(uefi_archive_arena, S8("{S8}/libuefi_support.so"), library_directory);
-        BUSTER_TEST(arguments, file_write(archive_path, archive_bytes));
-        BUSTER_TEST(arguments, file_write(shared_path, (ByteSlice){.pointer = (u8*)"ignored", .length = 7}));
-
-        String8 archive_output = buster_test_temporary_path(uefi_archive_arena, S8("buster-driver-uefi-archive"), S8(".efi"));
-        String8 archive_command_line[] = {
-            S8("-target"), S8("x86_64-unknown-uefi"), S8("-g0"), S8("-o"), archive_output,
-            S8("tests/basic_c_uefi_archive_main.c"), S8("-L"), library_directory, S8("-luefi_support"),
-        };
-        CompilerDriverResult archive_compile = compiler_driver_execute_invocation(
-            uefi_archive_arena,
-            compiler_driver_parse_arguments(uefi_archive_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(archive_command_line)));
-        if (archive_compile.error != COMPILER_DRIVER_ERROR_NONE && archive_compile.diagnostic.length)
+        if (BUSTER_REQUIRE(arguments, member_compile.error == COMPILER_DRIVER_ERROR_NONE))
         {
-            arguments->show(arguments, S8("UEFI static archive compiler driver error: {S8}\n"), archive_compile.diagnostic);
+            FileMapRead member_map = file_map_read(uefi_archive_arena, member_path, (FileReadOptions){0});
+            if (BUSTER_REQUIRE(arguments, member_map.bytes.pointer && member_map.bytes.length != 0))
+            {
+                ByteSlice archive_members[] = {member_map.bytes};
+                String8 archive_member_names[] = {S8("uefi_archive_member.obj")};
+                ByteSlice archive_bytes =
+                    compiler_driver_test_archive(uefi_archive_arena, archive_members, archive_member_names, BUSTER_ARRAY_LENGTH(archive_members));
+
+                String8 library_directory = buster_test_temporary_path(uefi_archive_arena, S8("buster-driver-uefi-library"), S8(""));
+                os_make_directory(library_directory);
+                String8 archive_path = string_format_z(uefi_archive_arena, S8("{S8}/libuefi_support.a"), library_directory);
+                String8 shared_path = string_format_z(uefi_archive_arena, S8("{S8}/libuefi_support.so"), library_directory);
+                BUSTER_TEST(arguments, file_write(archive_path, archive_bytes));
+                BUSTER_TEST(arguments, file_write(shared_path, (ByteSlice){.pointer = (u8*)"ignored", .length = 7}));
+
+                String8 archive_output = buster_test_temporary_path(uefi_archive_arena, S8("buster-driver-uefi-archive"), S8(".efi"));
+                String8 archive_command_line[] = {
+                    S8("-target"),     S8("x86_64-unknown-uefi"), S8("-g0"), S8("-o"), archive_output, S8("tests/basic_c_uefi_archive_main.c"), S8("-L"),
+                    library_directory, S8("-luefi_support"),
+                };
+                CompilerDriverResult archive_compile = compiler_driver_execute_invocation(
+                    uefi_archive_arena, compiler_driver_parse_arguments(uefi_archive_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(archive_command_line)));
+                if (archive_compile.error != COMPILER_DRIVER_ERROR_NONE && archive_compile.diagnostic.length)
+                {
+                    arguments->show(arguments, S8("UEFI static archive compiler driver error: {S8}\n"), archive_compile.diagnostic);
+                }
+                if (BUSTER_REQUIRE(arguments, archive_compile.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    BUSTER_TEST(arguments, archive_compile.has_object);
+                    BUSTER_TEST(arguments, archive_compile.native_link.executable.length != 0);
+                    BUSTER_TEST(arguments,
+                                file_read(uefi_archive_arena, archive_output, (FileReadOptions){0}).length == archive_compile.native_link.executable.length);
+                }
+            }
+            file_map_unmap(member_map);
         }
-        BUSTER_TEST(arguments, archive_compile.error == COMPILER_DRIVER_ERROR_NONE);
-        BUSTER_TEST(arguments, archive_compile.has_object);
-        BUSTER_TEST(arguments, archive_compile.native_link.executable.length != 0);
-        BUSTER_TEST(arguments,
-                    file_read(uefi_archive_arena, archive_output, (FileReadOptions){0}).length == archive_compile.native_link.executable.length);
         scratch_end(uefi_archive_temporary);
     }
 
@@ -4689,8 +4704,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(uefi_command_line));
     BUSTER_TEST(arguments, uefi_invocation.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, uefi_invocation.target.cpu_arch == CPU_ARCH_X86_64 && uefi_invocation.target.os == OPERATING_SYSTEM_UEFI);
-    BUSTER_TEST(arguments, uefi_invocation.system_include_path_count == 1);
-    BUSTER_STRING_TEST(arguments, uefi_invocation.system_include_paths[0], S8("firmware/include"));
+    if (BUSTER_REQUIRE(arguments, uefi_invocation.system_include_path_count == 1 && uefi_invocation.system_include_paths != 0))
+    {
+        BUSTER_STRING_TEST(arguments, uefi_invocation.system_include_paths[0], S8("firmware/include"));
+    }
     BUSTER_STRING_TEST(arguments, uefi_invocation.entry_symbol, S8("FirmwareEntry"));
     String8 uefi_linker_argument_command_line[] = {
         S8("--target=x86_64-unknown-uefi"), S8("-Wl,--gc-sections"), S8("source.c"),
