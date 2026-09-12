@@ -2106,14 +2106,17 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
             IrAbiValue argument_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
             IrAbiValue result_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
-            IrAbiValue aapcs_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+            IrAbiValue aapcs_argument_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+            IrAbiValue aapcs_result_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
             BUSTER_TEST(arguments, argument_abi.part_count == 1 && !argument_abi.indirect && !argument_abi.memory);
             BUSTER_TEST(arguments, result_abi.part_count == 1 && !result_abi.indirect && !result_abi.memory);
             BUSTER_TEST(arguments, argument_abi.parts[0].size == (u32)type->layout.size);
             IrAbiClass expected_class = type->layout.size < 8 ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_VECTOR;
             BUSTER_TEST(arguments, argument_abi.parts[0].abi_class == expected_class);
             BUSTER_TEST(arguments, result_abi.parts[0].abi_class == expected_class);
-            BUSTER_TEST(arguments, aapcs_abi.part_count == 1 && aapcs_abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR);
+            IrAbiClass aapcs_argument_class = type->layout.size < 8 ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_VECTOR;
+            BUSTER_TEST(arguments, aapcs_argument_abi.part_count == 1 && aapcs_argument_abi.parts[0].abi_class == aapcs_argument_class);
+            BUSTER_TEST(arguments, aapcs_result_abi.part_count == 1 && aapcs_result_abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR);
             tiny_vector_class_count += type->layout.size < 8;
             wide_vector_class_count += type->layout.size >= 8;
         }

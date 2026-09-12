@@ -3625,6 +3625,16 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     }
                     return value;
                 }
+                if (aarch64 && !is_result && size < 8)
+                {
+                    // Clang carries one-, two- and four-byte vector
+                    // arguments in a W register on all three AArch64 C
+                    // conventions. Results keep the vector-file form, so
+                    // this is deliberately directional.
+                    value.part_count = 1;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                    return value;
+                }
                 if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
                 {
                     value.part_count = 1;

@@ -109,6 +109,11 @@ struct MachineA64ValueShape
     bool indirect;
     // Short vectors and homogeneous floating/vector aggregates use direct V transfers.
     bool vector;
+    // AAPCS64 widens the lanes of two- and four-byte multi-lane vector
+    // results across D0. Canonical slots retain their compact source image;
+    // these fields describe the ABI-edge packing only.
+    u8 widened_vector_lane_count;
+    u8 widened_vector_element_bits;
     bool stack_aligned;
     // AAPCS64 starts a sixteen-byte integer pair at an even X argument
     // register.  The bare integer-128 shape deliberately remains outside the
@@ -327,13 +332,21 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
         {
             return false;
         }
+        IrType* vector_element = ir_type_from_id(&program->types, type->element_type);
+        bool widened_result = use == IR_ABI_USE_RESULT && abi.parts[0].size < 8 && vector_element && vector_element->kind == IR_TYPE_INTEGER &&
+                              (type->element_count == 2 || type->element_count == 4) &&
+                              (vector_element->bit_width == 8 || vector_element->bit_width == 16) &&
+                              type->layout.size == type->element_count * (vector_element->bit_width / 8);
         *shape = (MachineA64ValueShape){
             .part_is_float = {1},
             .part_sizes = {(u8)abi.parts[0].size},
             .part_count = 1,
             .byte_size = (abi.parts[0].size + 7u) & ~7u,
+            .exact_byte_size = (u32)type->layout.size,
             .aggregate = true,
             .vector = true,
+            .widened_vector_lane_count = (u8)(widened_result ? type->element_count : 0),
+            .widened_vector_element_bits = (u8)(widened_result ? vector_element->bit_width : 0),
             .stack_aligned = type->layout.alignment > 8,
         };
         return true;
@@ -3643,6 +3656,37 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
                                          });
     }}
 
+// Converts between a compact canonical short-vector image and the AAPCS64
+// result image. For a two-lane result the ABI places each element in a
+// 32-bit lane of D0; for four lanes it uses 16-bit lanes. Only the low source
+// element bits of each ABI lane carry the vector value.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_select_widened_vector_result(MachineA64Selector* selector, u32 source, MachineA64ValueShape* shape,
+                                                                 bool compact)
+{
+    u32 result = machine_a64_select_immediate_register(selector, 0);
+    u32 abi_lane_bits = 64u / shape->widened_vector_lane_count;
+    u32 source_lane_bits = compact ? abi_lane_bits : shape->widened_vector_element_bits;
+    u32 result_lane_bits = compact ? shape->widened_vector_element_bits : abi_lane_bits;
+    u32 mask = machine_a64_select_immediate_register(selector, (UINT64_C(1) << shape->widened_vector_element_bits) - 1);
+    for (u32 lane = 0; lane < shape->widened_vector_lane_count; lane += 1)
+    {
+        u32 lane_value = source;
+        if (lane && source_lane_bits)
+        {
+            u32 shift = machine_a64_select_immediate_register(selector, lane * source_lane_bits);
+            lane_value = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, lane_value, shift);
+        }
+        lane_value = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, lane_value, mask);
+        if (lane && result_lane_bits)
+        {
+            u32 shift = machine_a64_select_immediate_register(selector, lane * result_lane_bits);
+            lane_value = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, lane_value, shift);
+        }
+        result = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, result, lane_value);
+    }
+    return result;
+}
+
 // Collects the returned value: indirect results are already in their slot,
 // aggregates come back in parts, and a scalar arrives in X0 or V0.
 BUSTER_GLOBAL_LOCAL bool machine_a64_receive_call_result(MachineA64Selector* selector, IrInstruction* instruction, MachineA64CallPlan* plan,
@@ -3661,9 +3705,23 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_receive_call_result(MachineA64Selector* sel
         received = result_slot != UINT32_MAX;
         if (received)
         {
-            for (u32 part = 0; part < plan->return_shape.part_count; part += 1)
+            if (plan->return_shape.widened_vector_lane_count)
             {
-                machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, part, part, true));
+                u32 abi_image = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, abi_image)},
+                                                     .payload = 0,
+                                                     .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                 });
+                u32 compact_image = machine_a64_select_widened_vector_result(selector, abi_image, &plan->return_shape, true);
+                machine_a64_select_frame_store64(selector, result_slot, 0, compact_image);
+            }
+            else
+            {
+                for (u32 part = 0; part < plan->return_shape.part_count; part += 1)
+                {
+                    machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, part, part, true));
+                }
             }
         }
     }
@@ -5067,9 +5125,22 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
             selected = value_slot != UINT32_MAX;
             if (selected)
             {
-                for (u32 part = 0; part < selector->return_shape.part_count; part += 1)
+                if (selector->return_shape.widened_vector_lane_count)
                 {
-                    machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, part, part, false));
+                    u32 compact_image = machine_a64_select_frame_load64(selector, value_slot, 0);
+                    u32 abi_image = machine_a64_select_widened_vector_result(selector, compact_image, &selector->return_shape, false);
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, abi_image)},
+                                                         .payload = 0,
+                                                         .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                     });
+                }
+                else
+                {
+                    for (u32 part = 0; part < selector->return_shape.part_count; part += 1)
+                    {
+                        machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, part, part, false));
+                    }
                 }
             }
         }
