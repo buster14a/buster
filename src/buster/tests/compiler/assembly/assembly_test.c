@@ -5390,6 +5390,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(aarch64_jump.bytes.pointer, expected_aarch64_jump, sizeof(expected_aarch64_jump)) == 0);
     BUSTER_TEST(arguments, aarch64_jump.relocation_count == 1 && aarch64_jump.relocations[0].offset == 0 &&
                                aarch64_jump.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_JUMP26);
+    AssemblyEncodeResult aarch64_inline_conditional = assembly_encode(
+        arguments->arena, S8("cbnz w9, .Lbuster.inline.asm.0.1\n"), (AssemblyEncodeOptions){.target = aarch64_target});
+    static u8 const expected_aarch64_inline_conditional[] = {0x09, 0x00, 0x00, 0x35};
+    BUSTER_TEST(arguments, aarch64_inline_conditional.diagnostic_count == 0 &&
+                               aarch64_inline_conditional.bytes.length == sizeof(expected_aarch64_inline_conditional) &&
+                               memcmp(aarch64_inline_conditional.bytes.pointer, expected_aarch64_inline_conditional,
+                                      sizeof(expected_aarch64_inline_conditional)) == 0);
+    BUSTER_TEST(arguments, aarch64_inline_conditional.relocation_count == 1 &&
+                               aarch64_inline_conditional.relocations[0].offset == 0 &&
+                               aarch64_inline_conditional.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19);
 
     AssemblyEncodeResult aarch64_scalar_memory = assembly_encode(
         arguments->arena,

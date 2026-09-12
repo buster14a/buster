@@ -4804,8 +4804,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_fence(MachineA64Selector* sel
     return true;
 }
 
-// The zero-byte row conservatively orders memory and invalidates condition
-// codes, including accepted forms whose clobber list omits one or both.
+// The zero-byte row publishes exactly the memory and condition-code effects
+// named by the admitted clobber list; side-effect retention is opcode metadata.
 BUSTER_GLOBAL_LOCAL u16 machine_a64_inline_effect_opcode(IrInstructionExtra extra)
 {
     u16 effect_index = 0;
