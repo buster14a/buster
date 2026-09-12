@@ -32,6 +32,11 @@ struct BatchTestResult
 
 #define BUSTER_TEST(args, boolean) BUSTER_TEST_RAW((args), (boolean), S8(#boolean))
 
+// A prerequisite is an assertion whose failure makes the dependent test body
+// unsafe or meaningless. Use it as the condition of an if statement; the false
+// branch records the original expression once and skips the guarded body.
+#define BUSTER_REQUIRE(args, boolean) buster_test_require_arguments((args), &(result), (boolean), __LINE__, BUSTER_FUNCTION, S8(__FILE__), S8(#boolean))
+
 #define BUSTER_STRING_TEST(args, a, b)                                                                                                                         \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
@@ -118,6 +123,8 @@ BUSTER_F_DECL void consume_external_tests(BatchTestResult* batch, ProcessResult 
 
 BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...);
 BUSTER_F_DECL void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8 function, String8 file_path, String8 format, ...);
+BUSTER_F_DECL bool buster_test_require_arguments(UnitTestArguments* arguments, UnitTestResult* result, bool success, u32 line, String8 function,
+                                                 String8 file_path, String8 expression);
 BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);
 // Limits test-internal parallel work to a validated positive matrix quota.
 BUSTER_F_DECL u64 buster_test_worker_count(u64 requested);
