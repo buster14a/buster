@@ -1,0 +1,288 @@
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_quality.c b/src/buster/lib/compiler/codegen/register_allocator_quality.c
+index 8e98250..9365230 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_quality.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_quality.c
+@@ -92,23 +92,9 @@ BUSTER_GLOBAL_LOCAL u32 machine_quality_frequency_weight(u16 frequency_class)
+     return 1u << shift;
+ }
+ 
+-typedef struct MachineQualityInterval MachineQualityInterval;
+-struct MachineQualityInterval
+-{
+-    u32 virtual_register;
+-    u32 start;
+-    u32 end;
+-    u32 weight;
+-    // A candidate below the raw-count break-even, admitted on frequency
+-    // alone; it may only take a caller-saved pin register, so it can
+-    // never buy a prologue save with edits a cold loop may never run.
+-    // Split probing honors the same restriction for the same reason.
+-    u32 marginal;
+-};
+-
+ // Sift-down over a max-heap keyed on weight, so the priority walk needs no
+ // sort routine and no recursion.
+-BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
++void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
+ {
+     for (;;)
+     {
+@@ -125,7 +111,7 @@ BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap,
+         }
+         if (largest == root)
+         {
+-            return;
++            break;
+         }
+         MachineQualityInterval swapped = heap[root];
+         heap[root] = heap[largest];
+@@ -134,6 +120,30 @@ BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap,
+     }
+ }
+ 
++// Enumerate positive region costs in descending order, breaking ties by region
++// index. The caller retains the last returned index; UINT32_MAX starts a row.
++u32 machine_quality_region_next(MachineQualityTraffic const* traffic, u32 count, u32 previous_region)
++{
++    MachineQualityTraffic previous_traffic = previous_region == UINT32_MAX ? UINT32_MAX : traffic[previous_region];
++    MachineQualityTraffic best_traffic = 0;
++    u32 best_region = UINT32_MAX;
++    for (u32 region_index = 0; region_index < count; region_index += 1)
++    {
++        MachineQualityTraffic region_traffic = traffic[region_index];
++        if (!region_traffic || region_traffic > previous_traffic ||
++            (region_traffic == previous_traffic && region_index <= previous_region))
++        {
++            continue;
++        }
++        if (region_traffic > best_traffic)
++        {
++            best_traffic = region_traffic;
++            best_region = region_index;
++        }
++    }
++    return best_region;
++}
++
+ // The merged loop region containing an instruction, or UINT32_MAX. The
+ // regions are disjoint and sorted, so the last one starting at or before
+ // the instruction is the only candidate.
+@@ -361,7 +371,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
+             instruction_weights[block->first_instruction + offset] = block_weight;
+         }
+     }
+-    u32* baseline_traffic = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
++    MachineQualityTraffic* baseline_traffic = arena_allocate(scratch.arena, MachineQualityTraffic, register_count ? register_count : 1);
+     u32* baseline_traffic_counts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+     for (u32 register_index = 0; register_index < register_count; register_index += 1)
+     {
+@@ -375,7 +385,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
+         if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
+         {
+             u32 edit_weight = instruction_weights[machine_point_instruction(edit->point)];
+-            baseline_traffic[edit->subject] += edit_weight;
++            machine_quality_traffic_add(baseline_traffic + edit->subject, edit_weight);
+             baseline_traffic_counts[edit->subject] += 1;
+             baseline_traffic_total += edit_weight;
+         }
+@@ -573,7 +583,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
+     u32* region_exit_offsets = 0;
+     u32* region_exit_counts = 0;
+     u32* region_exit_blocks = 0;
+-    u32* candidate_region_traffic = 0;
++    MachineQualityTraffic* candidate_region_traffic = 0;
+     if (merged_span_count)
+     {
+         u32* instruction_blocks = arena_allocate(scratch.arena, u32, function->instruction_count);
+@@ -741,7 +751,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
+         // weight.
+         BUSTER_QUALITY_COUNT(candidate_region_cells, (u64)heap_count * merged_span_count);
+         BUSTER_QUALITY_COUNT(candidate_region_clear_bytes, (u64)heap_count * merged_span_count * sizeof(u32));
+-        candidate_region_traffic = arena_allocate(scratch.arena, u32, (u64)heap_count * merged_span_count);
++        candidate_region_traffic = arena_allocate(scratch.arena, MachineQualityTraffic, (u64)heap_count * merged_span_count);
+         for (u64 cell_index = 0; cell_index < (u64)heap_count * merged_span_count; cell_index += 1)
+         {
+             candidate_region_traffic[cell_index] = 0;
+@@ -763,7 +773,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
+             if (region_index != UINT32_MAX)
+             {
+                 BUSTER_QUALITY_COUNT(candidate_region_updates, 1);
+-                candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index] += instruction_weights[edit_instruction];
++                machine_quality_traffic_add(candidate_region_traffic + (u64)candidate_slot * merged_span_count + region_index,
++                                            instruction_weights[edit_instruction]);
+             }
+         }
+     }
+@@ -961,33 +972,19 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
+             // caller-saved-only restriction here too, for the reason
+             // candidacy imposed it.
+             BUSTER_QUALITY_COUNT(split_candidates, 1);
+-            u32 previous_traffic = UINT32_MAX;
+             u32 previous_region = UINT32_MAX;
+             while (!assigned)
+             {
+                 BUSTER_QUALITY_COUNT(region_selection_passes, 1);
+                 BUSTER_QUALITY_COUNT(region_selection_cells, merged_span_count);
+-                u32 best_region = UINT32_MAX;
+-                u32 best_traffic = 0;
+-                for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
+-                {
+-                    u32 traffic = candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index];
+-                    if (!traffic || traffic > previous_traffic || (traffic == previous_traffic && region_index <= previous_region))
+-                    {
+-                        continue;
+-                    }
+-                    if (traffic > best_traffic)
+-                    {
+-                        best_traffic = traffic;
+-                        best_region = region_index;
+-                    }
+-                }
++                MachineQualityTraffic const* traffic = candidate_region_traffic + (u64)candidate_slot * merged_span_count;
++                u32 best_region = machine_quality_region_next(traffic, merged_span_count, previous_region);
+                 if (best_region == UINT32_MAX)
+                 {
+                     break;
+                 }
++                MachineQualityTraffic best_traffic = traffic[best_region];
+                 BUSTER_QUALITY_COUNT(selected_regions, 1);
+-                previous_traffic = best_traffic;
+                 previous_region = best_region;
+                 u32 region_start = (u32)(loop_spans[best_region] >> 32);
+                 u32 region_end = (u32)loop_spans[best_region];
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_quality_internal.h b/src/buster/lib/compiler/codegen/register_allocator_quality_internal.h
+index 3666527..3804c92 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_quality_internal.h
++++ b/src/buster/lib/compiler/codegen/register_allocator_quality_internal.h
+@@ -2,6 +2,32 @@
+ 
+ #include <buster/lib/base.h>
+ 
++// Shared weighted-cost storage and ordering used by QUALITY and its boundary
++// tests. Instruction weights and raw edit counts retain their separate types.
++typedef u32 MachineQualityTraffic;
++
++typedef struct MachineQualityInterval MachineQualityInterval;
++struct MachineQualityInterval
++{
++    u32 virtual_register;
++    u32 start;
++    u32 end;
++    MachineQualityTraffic weight;
++    // A candidate below the raw-count break-even, admitted on frequency
++    // alone; it may only take a caller-saved pin register, so it can
++    // never buy a prologue save with edits a cold loop may never run.
++    // Split probing honors the same restriction for the same reason.
++    u32 marginal;
++};
++
++BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_quality_traffic_add(MachineQualityTraffic* traffic, u32 weight)
++{
++    *traffic += weight;
++}
++
++BUSTER_F_DECL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root);
++BUSTER_F_DECL u32 machine_quality_region_next(MachineQualityTraffic const* traffic, u32 count, u32 previous_region);
++
+ // Private QUALITY work census. The existing allocation-instrumented compiler
+ // supplies these counters to its source-metrics file; ordinary compilers have
+ // neither storage nor recorder calls. Counts are cumulative on the calling OS
+diff --git a/src/buster/tests/compiler/codegen/machine_test.c b/src/buster/tests/compiler/codegen/machine_test.c
+index 575005a..ee8350d 100644
+--- a/src/buster/tests/compiler/codegen/machine_test.c
++++ b/src/buster/tests/compiler/codegen/machine_test.c
+@@ -42,6 +42,84 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
+ // and this check is what says so.
+ BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 6);
+ 
++// Independent integer goldens at the old 32-bit boundary. These call the same
++// accumulation, heap and regional selection used by real QUALITY placement;
++// seeded costs reach the boundary without constructing a million MIR rows.
++BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    u64 starts[] = {0, 2, UINT32_MAX - 4095u, UINT32_MAX, UINT64_C(4294967296), UINT64_C(17592186036224)};
++    u32 weights[] = {0, 1, 4096, 1, 4096, 4096};
++    u64 expected[] = {0, 3, UINT64_C(4294967296), UINT64_C(4294967296), UINT64_C(4294971392), UINT64_C(17592186040320)};
++    for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(starts); probe += 1)
++    {
++        MachineQualityTraffic traffic = (MachineQualityTraffic)starts[probe];
++        machine_quality_traffic_add(&traffic, weights[probe]);
++        BUSTER_TEST_RAW(arguments, traffic == expected[probe], S8("QUALITY weighted sum"));
++        BUSTER_TEST(arguments, (traffic >= 3) == (expected[probe] >= 3));
++    }
++
++    u64 heap_costs[] = {3, UINT64_C(4294967297), UINT32_MAX, UINT64_C(4294967296)};
++    u32 heap_expected[] = {1, 3, 2, 0};
++    for (u32 repeat = 0; repeat < 3; repeat += 1)
++    {
++        MachineQualityInterval heap[BUSTER_ARRAY_LENGTH(heap_costs)];
++        u32 count = BUSTER_ARRAY_LENGTH(heap);
++        for (u32 index = 0; index < count; index += 1)
++        {
++            heap[index] = (MachineQualityInterval){.virtual_register = index, .weight = (MachineQualityTraffic)heap_costs[index]};
++        }
++        for (u32 root = count / 2; root > 0; root -= 1)
++        {
++            machine_quality_heap_sift(heap, count, root - 1);
++        }
++        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(heap_expected); index += 1)
++        {
++            BUSTER_TEST_RAW(arguments, heap[0].virtual_register == heap_expected[index], S8("QUALITY descending weighted heap"));
++            count -= 1;
++            heap[0] = heap[count];
++            machine_quality_heap_sift(heap, count, 0);
++        }
++        // The existing strict-greater heap tie policy is deterministic but is
++        // not a stable sort: replacing the root with the last item gives 0,2,1.
++        MachineQualityInterval ties[] = {{.virtual_register = 0, .weight = 7},
++                                         {.virtual_register = 1, .weight = 7},
++                                         {.virtual_register = 2, .weight = 7}};
++        u32 tie_expected[] = {0, 2, 1};
++        count = BUSTER_ARRAY_LENGTH(ties);
++        machine_quality_heap_sift(ties, count, 0);
++        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(tie_expected); index += 1)
++        {
++            BUSTER_TEST(arguments, ties[0].virtual_register == tie_expected[index]);
++            count -= 1;
++            ties[0] = ties[count];
++            machine_quality_heap_sift(ties, count, 0);
++        }
++    }
++    machine_quality_heap_sift(0, 0, 0);
++
++    u64 region_costs[] = {0, UINT32_MAX, UINT64_C(4294967296), UINT64_C(4294967296), 3, UINT64_C(17592186040320)};
++    u32 region_expected[] = {5, 2, 3, 1, 4, UINT32_MAX};
++    MachineQualityTraffic regions[BUSTER_ARRAY_LENGTH(region_costs)];
++    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(regions); index += 1)
++    {
++        regions[index] = (MachineQualityTraffic)region_costs[index];
++    }
++    for (u32 repeat = 0; repeat < 3; repeat += 1)
++    {
++        u32 previous = UINT32_MAX;
++        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(region_expected); index += 1)
++        {
++            previous = machine_quality_region_next(regions, BUSTER_ARRAY_LENGTH(regions), previous);
++            BUSTER_TEST_RAW(arguments, previous == region_expected[index], S8("QUALITY descending region order"));
++        }
++    }
++    MachineQualityTraffic zeros[] = {0, 0, 0};
++    BUSTER_TEST(arguments, machine_quality_region_next(0, 0, UINT32_MAX) == UINT32_MAX);
++    BUSTER_TEST(arguments, machine_quality_region_next(zeros, BUSTER_ARRAY_LENGTH(zeros), UINT32_MAX) == UINT32_MAX);
++    return result;
++}
++
+ // Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
+ // bounded producer comparison also checks every byte outside the instruction.
+ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArguments* arguments)
+@@ -3552,6 +3630,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_bank(UnitTestArguments
+ UnitTestResult machine_tests(UnitTestArguments* arguments)
+ {
+     UnitTestResult result = {0};
++    UnitTestResult traffic_result = machine_test_quality_traffic(arguments);
++    result.test_count += traffic_result.test_count;
++    result.succeeded_test_count += traffic_result.succeeded_test_count;
+     UnitTestResult predicate_widths = machine_test_predicate_widths(arguments);
+     result.test_count += predicate_widths.test_count;
+     result.succeeded_test_count += predicate_widths.succeeded_test_count;

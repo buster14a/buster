@@ -1,0 +1,21 @@
+RETAINED TAIL ONLY: last 20 lines of issue298-release-test.log; full local log SHA256 82bb65efa886f12e7cbf0b281c784a30a70002bb0d7ced17a465be963e172b00
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]
+1 warning generated.
+14/14 frontend-to-Wasm over-aligned scalar checks passed
+245 independent Wasm local aggregate executions passed
+245 independent Wasm local aggregate executions passed
+3254/3254 scalar integer Wasm64 engine checks passed
+memory operand ok
+Error creating a process: "No such file or directory" => qemu-aarch64 --version
+Error creating a process: "No such file or directory" => wine --version
+weak reference bound to the library
+weak reference bound to the library
+weak reference bound to the library
+weak reference bound to the library
+[1840515/1840515] Unit tests
+[47/47] Module tests
+[0/0] External tests

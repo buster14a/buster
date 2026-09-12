@@ -1,0 +1,8 @@
+0	tiny_startup/quality
+1	large_function/quality
+2	many_functions/quality
+3	symbol_table/quality
+4	control_flow/quality
+5	backend_pressure/quality
+6	self_host_stage1/fast
+7	self_host_stage2/fast

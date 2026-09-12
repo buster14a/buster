@@ -1,0 +1,9 @@
+wide_live_loop(0x9e3779b97f4a7c15ULL, 0) = 0
+wide_live_loop(0x9e3779b97f4a7c15ULL, 1) = 982
+wide_live_loop(0x9e3779b97f4a7c15ULL, 64) = 13132513170701207948
+call_crossing_loop(0xc2b2ae3d27d4eb4fULL, 0) = 176
+call_crossing_loop(0xc2b2ae3d27d4eb4fULL, 1) = 415753958466312104
+call_crossing_loop(0xc2b2ae3d27d4eb4fULL, 64) = 5876330639124109335
+deep_tree(0ULL) = 10029734777502406277
+deep_tree(1ULL) = 15439450406776879265
+deep_tree(18446744073709551615ULL) = 11627460155176994222
