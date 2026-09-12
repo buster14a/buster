@@ -101,6 +101,165 @@ double native_va_hfa_overflow(double a, double b, double c, double d, double e, 
     return a + b + c + d + e + f + g + marker + first.a + 2 * first.b + 3 * first.c + 4 * first.d + second.a + second.b + tail;
 }
 
+
+#if (defined(__aarch64__) && !defined(__APPLE__) && !defined(_WIN32)) || defined(BUSTER_MACHINE_VA_ELF_AARCH64)
+// These lists cross an independently compiled translation-unit boundary.
+// A self-consistent private producer/consumer representation cannot pass.
+typedef int NativeVaListReader(void*, int);
+typedef int NativeVaListValueReader(va_list, void*);
+struct NativeVaPublicLayout
+{
+    void* stack;
+    void* gr_top;
+    void* vr_top;
+    int gr_offs;
+    int vr_offs;
+};
+struct NativeVaListCopies
+{
+    volatile unsigned long long before;
+    va_list ap;
+    volatile unsigned long long between;
+    va_list copy;
+    volatile unsigned long long after;
+};
+
+int native_va_list_read(void* storage, int scenario)
+{
+    va_list* ap = (va_list*)storage;
+    struct NativeVaPublicLayout image;
+    unsigned char* bytes = (unsigned char*)&image;
+    unsigned char* source = (unsigned char*)storage;
+    for (unsigned long index = 0; index < sizeof(image); index += 1) { bytes[index] = source[index]; }
+    int named_stack = scenario & 256;
+    int bad = sizeof(va_list) != 32 || _Alignof(va_list) != 8;
+    bad |= (unsigned long)image.stack < 4096 || ((unsigned long)image.stack & 7) != 0;
+    if (!named_stack) { bad |= (unsigned long)image.gr_top < 4096 || ((unsigned long)image.gr_top & 7) != 0; }
+    if (!named_stack) { bad |= (unsigned long)image.vr_top < 4096 || ((unsigned long)image.vr_top & 15) != 0; }
+    bad |= image.gr_offs != (named_stack ? 0 : -48) || image.vr_offs != (named_stack ? 0 : -128);
+    scenario &= 255;
+    if (!bad)
+    {
+        if (scenario == 0)
+        {
+            for (int index = 1; index <= 12; index += 1)
+            {
+                bad |= __builtin_va_arg(*ap, long long) != index;
+                bad |= __builtin_va_arg(*ap, double) != index + 0.5;
+                if (index == 5)
+                {
+                    va_list copy;
+                    __builtin_va_copy(copy, *ap);
+                    bad |= __builtin_va_arg(copy, long long) != 6;
+                    bad |= __builtin_va_arg(copy, double) != 6.5;
+                    __builtin_va_end(copy);
+                }
+            }
+        }
+        else if (scenario == 1)
+        {
+            bad |= __builtin_va_arg(*ap, long long) != 1;
+            struct NativeVaHfa4 a = __builtin_va_arg(*ap, struct NativeVaHfa4);
+            struct NativeVaHfa2 b = __builtin_va_arg(*ap, struct NativeVaHfa2);
+            bad |= a.a != 1 || a.b != 2 || a.c != 3 || a.d != 4 || b.a != 5 || b.b != 6;
+            bad |= __builtin_va_arg(*ap, double) != 7.5;
+        }
+        else if (scenario == 2)
+        {
+            for (int index = 1; index <= 7; index += 1) { bad |= __builtin_va_arg(*ap, long long) != index; }
+            unsigned __int128 pair = __builtin_va_arg(*ap, unsigned __int128);
+            bad |= (unsigned long long)pair != 0x123456789abcdef0ull || (unsigned long long)(pair >> 64) != 0xfedcba9876543210ull;
+            bad |= __builtin_va_arg(*ap, long long) != 8;
+            bad |= __builtin_va_arg(*ap, double) != 9.5;
+        }
+        else if (scenario == 3)
+        {
+            bad |= __builtin_va_arg(*ap, long long) != 1;
+            for (int index = 1; index <= 7; index += 1) { bad |= __builtin_va_arg(*ap, double) != index + 0.5; }
+            struct NativeVaHfa4 a = __builtin_va_arg(*ap, struct NativeVaHfa4);
+            bad |= a.a != 1 || a.b != 2 || a.c != 3 || a.d != 4;
+            bad |= __builtin_va_arg(*ap, double) != 8.5;
+            bad |= __builtin_va_arg(*ap, long long) != 8;
+        }
+        else if (scenario == 4)
+        {
+            bad |= __builtin_va_arg(*ap, long long) != 1;
+            unsigned __int128 first = __builtin_va_arg(*ap, unsigned __int128);
+            bad |= (unsigned long long)first != 0x123456789abcdef0ull || (unsigned long long)(first >> 64) != 0xfedcba9876543210ull;
+            bad |= __builtin_va_arg(*ap, long long) != 3;
+            unsigned __int128 second = __builtin_va_arg(*ap, unsigned __int128);
+            bad |= (unsigned long long)second != 0x9876543210abcdefull || (unsigned long long)(second >> 64) != 0x1122334455667788ull;
+            bad |= __builtin_va_arg(*ap, long long) != 8;
+            bad |= __builtin_va_arg(*ap, double) != 9.5;
+        }
+        else { bad = 1; }
+    }
+    return bad;
+}
+
+int native_va_list_produce(int scenario, NativeVaListReader* reader, ...)
+{
+    struct NativeVaListCopies lists;
+    lists.before = 0x1234567887654321ull;
+    lists.between = 0xfedcba9876543210ull;
+    lists.after = 0x1122334455667788ull;
+    __builtin_va_start(lists.ap, reader);
+    __builtin_va_copy(lists.copy, lists.ap);
+    int bad = reader(&lists.ap, scenario);
+    bad |= __builtin_va_arg(lists.ap, long long) != 99;
+    bad |= __builtin_va_arg(lists.copy, long long) != 1;
+    __builtin_va_end(lists.copy);
+    __builtin_va_end(lists.ap);
+    bad |= lists.before != 0x1234567887654321ull || lists.between != 0xfedcba9876543210ull || lists.after != 0x1122334455667788ull;
+    return bad;
+}
+
+// Seven named GP scalars leave only X7. The named pair does not fit and
+// closes the file; the marker and reader must not reuse X7 afterwards.
+int native_va_list_named(long long a, long long b, long long c, long long d,
+    long long e, long long f, long long g, struct NativeVaIndirect pair, int marker,
+    double f0, double f1, double f2, double f3, double f4, double f5, double f6, double f7, double f8,
+    NativeVaListReader* reader, ...)
+{
+    va_list ap;
+    __builtin_va_start(ap, reader);
+    int bad = a != 1 || b != 2 || c != 3 || d != 4 || e != 5 || f != 6 || g != 7;
+    bad |= pair.first != 8 || pair.second != 9 || marker != 10;
+    bad |= f0 != 1 || f1 != 2 || f2 != 3 || f3 != 4 || f4 != 5 || f5 != 6 || f6 != 7 || f7 != 8 || f8 != 9;
+    bad |= reader(&ap, 256);
+    bad |= __builtin_va_arg(ap, long long) != 99;
+    __builtin_va_end(ap);
+    return bad;
+}
+
+// AAPCS64 passes va_list as a struct with distinct callee storage. The
+// caller passes a separate copy and only ends that consumed list afterwards.
+int native_va_list_value(va_list ap, void* caller_list)
+{
+    va_list copy;
+    __builtin_va_copy(copy, ap);
+    int bad = (void*)&ap == caller_list;
+    bad |= __builtin_va_arg(ap, long long) != 1;
+    bad |= __builtin_va_arg(ap, double) != 2.5;
+    bad |= __builtin_va_arg(ap, long long) != 3;
+    bad |= __builtin_va_arg(copy, long long) != 1;
+    __builtin_va_end(copy);
+    return bad;
+}
+int native_va_list_pass_value(NativeVaListValueReader* reader, int tag, ...)
+{
+    va_list ap;
+    va_list passed;
+    __builtin_va_start(ap, tag);
+    __builtin_va_copy(passed, ap);
+    int bad = reader(passed, &passed);
+    __builtin_va_end(passed);
+    bad |= __builtin_va_arg(ap, long long) != 1;
+    __builtin_va_end(ap);
+    return bad;
+}
+#endif
+
 #ifndef BUSTER_MACHINE_VA_TEST
 long long native_va_host_ints(int, ...);
 double native_va_host_floats(double, int, ...);

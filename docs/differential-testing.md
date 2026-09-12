@@ -28,6 +28,21 @@ including a spill that closes the floating register file before a smaller
 following argument. Machine unit tests select and verify the fixture for ELF
 AArch64 as well as x86-64 and execute it when the host ABI matches.
 
+On ELF AArch64, fourteen additional relations exchange actual public `va_list`
+objects, rather than only calling variadic functions compiled by the other
+compiler. Independent producers and consumers check the three-pointer/two-offset
+layout, pointer and by-value list parameters, original-versus-copy independence,
+canaries, mixed named register/stack arguments, i128 register/stack alignment,
+HFA overflow and independent GP/FP exhaustion. By-value calls pass a separate
+`va_copy`, end that consumed copy before any further use, and continue through
+an independent original list. The consumer checks distinct caller/callee storage;
+no check relies on reusing the consumed by-value list. These relations use the
+existing scalar and at-most-sixteen-byte aggregate subset; larger HFAs, indirect
+aggregate reads and vector/HVA reads are not claimed. The existing native
+configuration matrix runs them on Linux AArch64; other hosts do not count the
+guarded relations as executed. QEMU cross-compiler checks are separate emulator
+evidence.
+
 The native aggregate case covers Windows indirect arguments in both call
 directions, including 3/5/7-byte values, 12/16/24/32-byte values, aligned
 objects, hidden return pointers and function-pointer calls. Volatile writes
@@ -133,7 +148,7 @@ that share their low 32 bits but must remain distinct in a 64-bit comparison.
 The machine unit tests additionally require zero fallback in all four modes.
 
 The clear-cache fixture checks empty and short unaligned ranges, both argument
-side effects, and values kept live across the cache operation. AArch64 machine
+side effects, and values kept live across the operation. AArch64 machine
 tests also compare the emitted sequence with the independent Clang assembly
 fixture, including both loop targets and barriers. These checks do not assume
 that a hardware cache failure is observable on every host.
