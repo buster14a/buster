@@ -1326,7 +1326,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
                             String8 description = string_format(temporary.arena, S8("wide vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
                                 sources[fixture], targets[target], cpus[cpu], modes[mode], frontends[frontend], pic, compiled.diagnostic);
                             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
-                            BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == (fixture == 1 ? 4u : 5u) &&
+                            BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 5u &&
                                 compiled.codegen_statistics.fallback_function_count == 0, description);
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
                             bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
@@ -1355,10 +1355,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
         }
     }
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
-    // AVX gives these 32-byte types the same YMM ABI in Clang, GCC and
-    // Buster. Baseline System V arguments differ (stack versus Buster's
-    // inherited XMM split), so those recorded disagreements are not oracles.
-    if (target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2))
+    // Clang agrees at baseline and AVX width. GCC's baseline result-pointer
+    // convention differs, so its positive exchange uses the AVX contract.
     {
         String8 hosts[] = {clang, executable_resolve_in_path(arguments->arena, S8("gcc"))};
         for (u32 host = 0; host < BUSTER_ARRAY_LENGTH(hosts); host += 1)
@@ -1379,51 +1377,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #if BUSTER_LINUX
             BUSTER_TEST(arguments, available);
 #endif
-            for (u32 provider = 0; available && provider < 2; provider += 1)
+            for (u32 cpu = host ? 1u : 0u; available && cpu < 2; cpu += 1)
             {
-                TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
-                String8 host_object = buster_test_temporary_path(host_temporary.arena, S8("buster-wide-vector-host"), S8(".o"));
-                String8 host_command[] = {hosts[host], S8("-O0"), S8("-fno-inline"), S8("-march=haswell"), S8("-c"),
-                    provider ? S8("-DWIDE_ABI_PROVIDER_ONLY=1") : S8("-DWIDE_ABI_CONSUMER_ONLY=1"), sources[1], S8("-o"), host_object};
-                ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command),
-                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
-                bool host_ok = host_spawn.handle && os_process_wait_deadline(host_temporary.arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
-                BUSTER_TEST(arguments, host_ok);
-                for (u32 mode = 0; host_ok && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                if (cpu && !target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)) { continue; }
+                for (u32 provider = 0; available && provider < 2; provider += 1)
                 {
-                    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                    TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 host_object = buster_test_temporary_path(host_temporary.arena, S8("buster-wide-vector-host"), S8(".o"));
+                    String8 host_command[] = {hosts[host], S8("-O0"), S8("-fno-inline"), cpu ? S8("-march=haswell") : S8("-march=x86-64"), S8("-c"),
+                        provider ? S8("-DWIDE_ABI_PROVIDER_ONLY=1") : S8("-DWIDE_ABI_CONSUMER_ONLY=1"), sources[1], S8("-o"), host_object};
+                    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    bool host_ok = host_spawn.handle && os_process_wait_deadline(host_temporary.arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, host_ok);
+                    for (u32 mode = 0; host_ok && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
                     {
-                        for (u32 pic = 0; pic < 2; pic += 1)
+                        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
                         {
-                            TemporalArena temporary = scratch_begin(&host_temporary.arena, 1);
-                            String8 object = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-mir"), S8(".o"));
-                            String8 command[] = {S8("-c"), S8("-g0"), S8("-march=haswell"), modes[mode], frontends[frontend],
-                                pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
-                                provider ? S8("-DWIDE_ABI_CONSUMER_ONLY=1") : S8("-DWIDE_ABI_PROVIDER_ONLY=1"), sources[1], S8("-o"), object};
-                            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
-                                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-                            BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == (provider ? 1u : 3u) &&
-                                compiled.codegen_statistics.fallback_function_count == 0);
-                            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                            for (u32 pic = 0; pic < 2; pic += 1)
                             {
-                                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-mixed"), S8(".exe"));
-                                String8 link[] = {hosts[host],
+                                TemporalArena temporary = scratch_begin(&host_temporary.arena, 1);
+                                String8 object = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-mir"), S8(".o"));
+                                String8 command[] = {S8("-c"), S8("-g0"), cpus[cpu], modes[mode], frontends[frontend],
+                                    pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                    provider ? S8("-DWIDE_ABI_CONSUMER_ONLY=1") : S8("-DWIDE_ABI_PROVIDER_ONLY=1"), sources[1], S8("-o"), object};
+                                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                                BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == (provider ? 1u : 4u) &&
+                                    compiled.codegen_statistics.fallback_function_count == 0);
+                                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                                {
+                                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-wide-vector-mixed"), S8(".exe"));
+                                    String8 link[] = {hosts[host],
 #if BUSTER_LINUX
-                                    S8("-no-pie"),
+                                        S8("-no-pie"),
 #endif
-                                    object, host_object, S8("-o"), executable};
-                                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
-                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
-                                bool linked = spawn.handle && os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
-                                BUSTER_TEST(arguments, linked);
-                                if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                                        object, host_object, S8("-o"), executable};
+                                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
+                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                    bool linked = spawn.handle && os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                    BUSTER_TEST(arguments, linked);
+                                    if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                                }
+                                scratch_end(temporary);
                             }
-                            scratch_end(temporary);
                         }
                     }
+                    scratch_end(host_temporary);
                 }
-                scratch_end(host_temporary);
             }
         }
     }

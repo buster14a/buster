@@ -1,0 +1,42 @@
+[
+  {
+    "path": "throughput-pilot/artifacts/self_host_stage3-fast-1.exe",
+    "sha256": "81ed57bca9a574755b93f64ebe1d520dee7d83f23a6e0d2ee3c226910a2bb6b7",
+    "bytes": 38446632
+  },
+  {
+    "path": "throughput-pilot/artifacts/self_host_stage3-fast-0.exe",
+    "sha256": "81ed57bca9a574755b93f64ebe1d520dee7d83f23a6e0d2ee3c226910a2bb6b7",
+    "bytes": 38446632
+  },
+  {
+    "path": "throughput-pilot/artifacts/self_host_stage2-fast-1.exe",
+    "sha256": "81ed57bca9a574755b93f64ebe1d520dee7d83f23a6e0d2ee3c226910a2bb6b7",
+    "bytes": 38446632
+  },
+  {
+    "path": "throughput-pilot/artifacts/self_host_stage2-fast-0.exe",
+    "sha256": "81ed57bca9a574755b93f64ebe1d520dee7d83f23a6e0d2ee3c226910a2bb6b7",
+    "bytes": 38446632
+  },
+  {
+    "path": "throughput-pilot/artifacts/self_host_stage1-fast-1.exe",
+    "sha256": "81ed57bca9a574755b93f64ebe1d520dee7d83f23a6e0d2ee3c226910a2bb6b7",
+    "bytes": 38446632
+  },
+  {
+    "path": "throughput-pilot/artifacts/self_host_stage1-fast-0.exe",
+    "sha256": "81ed57bca9a574755b93f64ebe1d520dee7d83f23a6e0d2ee3c226910a2bb6b7",
+    "bytes": 38446632
+  },
+  {
+    "path": "throughput-pilot/artifacts/control_flow-fast-1.o",
+    "sha256": "b036e4ffabd0892e0dd3381a2b1bc3ee6da7442a454b443b81b5d92263b6e0e6",
+    "bytes": 93384
+  },
+  {
+    "path": "throughput-pilot/artifacts/control_flow-fast-0.o",
+    "sha256": "b036e4ffabd0892e0dd3381a2b1bc3ee6da7442a454b443b81b5d92263b6e0e6",
+    "bytes": 93384
+  }
+]

@@ -3231,8 +3231,11 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
     {
         MachineVaArg* metadata = function->va_args + va_index;
         result.operand = va_index;
+        bool wide_overflow = function->target && function->target->copy_opcode == MACHINE_X64_MOV_RR &&
+            metadata->result_is_frame && !metadata->indirect && metadata->part_count == 1 && metadata->parts[0].is_memory &&
+            (metadata->size == 32 || metadata->size == 64) && metadata->alignment == metadata->size;
         if (!metadata->part_count || metadata->part_count > MACHINE_VA_ARG_PART_LIMIT || !metadata->size ||
-            metadata->alignment < 8 || metadata->alignment > 16 || (metadata->alignment & (metadata->alignment - 1u)) ||
+            metadata->alignment < 8 || (metadata->alignment > 16 && !wide_overflow) || (metadata->alignment & (metadata->alignment - 1u)) ||
             (!metadata->indirect && metadata->stack_size < metadata->size) || (metadata->stack_size & 7u) ||
             metadata->indirect > 1 || (metadata->indirect && (metadata->stack_size != 8 || metadata->part_count != 1 ||
                 metadata->alignment != 8 || !metadata->result_is_frame || metadata->parts[0].is_float || metadata->parts[0].is_memory ||

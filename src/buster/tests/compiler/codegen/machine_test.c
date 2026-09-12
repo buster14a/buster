@@ -3724,7 +3724,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_wide_vector_boundaries(UnitTestA
             if (program && program->module_count == 1)
             {
                 IrModule* module = program->modules;
-                BUSTER_TEST(arguments, module->function_count == 4);
+                BUSTER_TEST(arguments, module->function_count == 5);
                 for (u32 index = 0; index < module->function_count; index += 1)
                 {
                     IrFunction* function = module->functions + index;
@@ -3733,6 +3733,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_wide_vector_boundaries(UnitTestA
                     if (selected.supported)
                     {
                         BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        for (u32 va = 0; va < selected.function.va_arg_count; va += 1)
+                        {
+                            MachineVaArg* metadata = selected.function.va_args + va;
+                            if (metadata->size == 32)
+                            {
+                                BUSTER_TEST(arguments, metadata->alignment == 32 && metadata->part_count == 1 && metadata->parts[0].is_memory);
+                                metadata->alignment = 128;
+                                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
+                                metadata->alignment = 32;
+                                metadata->parts[0].is_memory = 0;
+                                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
+                                metadata->parts[0].is_memory = 1;
+                                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                            }
+                        }
                         for (u32 row_index = 0; row_index < selected.function.instruction_count; row_index += 1)
                         {
                             MachineInstruction* row = selected.function.instructions + row_index;

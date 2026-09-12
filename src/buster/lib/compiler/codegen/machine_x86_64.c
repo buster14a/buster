@@ -520,13 +520,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             (indirect || (abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && abi.parts[0].size == type->layout.size));
         if (supported)
         {
+            // A split result owns consecutive vector registers. A split
+            // System V argument instead uses memory, preserving the current
+            // direct ABI and Clang's caller/consumer contract.
+            bool force_stack = !indirect && use != IR_ABI_USE_RESULT && part_bytes < type->layout.size;
             *shape = (MachineX64ValueShape){
-                .part_count = indirect ? 1u : (u32)type->layout.size / part_bytes,
+                .part_count = indirect ? 1u : force_stack ? 0u : (u32)type->layout.size / part_bytes,
                 .byte_size = (u32)type->layout.size,
                 .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = indirect,
-                .vector_part_bytes = indirect ? 0 : (u8)part_bytes,
+                .vector_part_bytes = indirect || force_stack ? 0 : (u8)part_bytes,
+                .force_stack = force_stack,
                 .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
             };
         }
@@ -992,64 +997,72 @@ BUSTER_GLOBAL_LOCAL void machine_x64_va_named_cursors(MachineX64Selector* select
 BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_metadata(MachineX64Selector* selector, IrType* type, u32 result_slot, bool result_is_frame,
                                                      MachineVaArg* metadata)
 {
-    if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX || type->layout.alignment > 16)
+    bool result;
+    if (type && type->layout.resolved && type->kind == IR_TYPE_VECTOR && result_is_frame &&
+        (type->layout.size == 32 || type->layout.size == 64))
     {
-        return false;
+        *metadata = (MachineVaArg){.size = (u32)type->layout.size, .alignment = type->layout.alignment,
+            .stack_size = (u32)type->layout.size, .part_count = 1, .scalar_size = 8,
+            .result_slot = result_slot, .result_is_frame = true, .parts = {{.size = 8, .is_memory = 1}}};
+        result = true;
     }
-    if (codegen_canonical_x64_type_is_f80(type))
+    else if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX || type->layout.alignment > 16)
+    {
+        result = false;
+    }
+    else if (codegen_canonical_x64_type_is_f80(type))
     {
         *metadata = (MachineVaArg){.size = 10, .alignment = 16, .stack_size = 16, .part_count = 2, .scalar_size = 8,
             .result_slot = result_slot, .result_is_frame = result_is_frame,
             .parts = {{.size = 8, .is_memory = 1}, {.value_offset = 8, .size = 2, .is_memory = 1}}};
-        return true;
+        result = true;
     }
-    IrTypeId type_id = {.value = (u32)(type - selector->program->types.types)};
-    IrAbiValue abi = ir_type_abi_value(selector->program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);
-    if (!abi.part_count || abi.part_count > MACHINE_VA_ARG_PART_LIMIT)
+    else
     {
-        return false;
+        IrTypeId type_id = {.value = (u32)(type - selector->program->types.types)};
+        IrAbiValue abi = ir_type_abi_value(selector->program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);
+        result = abi.part_count && abi.part_count <= MACHINE_VA_ARG_PART_LIMIT;
+        MachineVaArg value = {
+            .size = (u32)type->layout.size,
+            .alignment = BUSTER_MAX(type->layout.alignment, 8u),
+            .stack_size = ((u32)type->layout.size + 7u) & ~7u,
+            .part_count = abi.part_count,
+            .result_slot = result_slot,
+            .result_is_frame = result_is_frame,
+            .scalar_size = (u8)BUSTER_MIN(type->layout.size, 8u),
+        };
+        u32 gp_index = 0;
+        u32 fp_index = 0;
+        for (u32 part_index = 0; result && part_index < abi.part_count; part_index += 1)
+        {
+            IrAbiPart* part = abi.parts + part_index;
+            MachineVaArgPart* output = value.parts + part_index;
+            output->value_offset = part->value_offset;
+            output->size = (u8)(part->abi_class == IR_ABI_CLASS_VECTOR && part->size == 16 ? 16u : BUSTER_MIN(part->size, 8u));
+            output->is_memory = part->abi_class == IR_ABI_CLASS_MEMORY;
+            if (part->abi_class == IR_ABI_CLASS_FLOAT || part->abi_class == IR_ABI_CLASS_VECTOR)
+            {
+                output->is_float = 1;
+                // The va_list fp_offset already includes the 48-byte GP save
+                // area.  Unlike the fixed-parameter placement index, each
+                // variadic part adds this relative offset exactly once to the
+                // live fp cursor.
+                output->save_offset = fp_index * 16u;
+                fp_index += 1;
+            }
+            else if (part->abi_class == IR_ABI_CLASS_INTEGER || part->abi_class == IR_ABI_CLASS_POINTER)
+            {
+                output->save_offset = gp_index * 8u;
+                gp_index += 1;
+            }
+            else if (!output->is_memory)
+            {
+                result = false;
+            }
+        }
+        if (result) { *metadata = value; }
     }
-    MachineVaArg value = {
-        .size = (u32)type->layout.size,
-        .alignment = BUSTER_MAX(type->layout.alignment, 8u),
-        .stack_size = ((u32)type->layout.size + 7u) & ~7u,
-        .part_count = abi.part_count,
-        .result_slot = result_slot,
-        .result_is_frame = result_is_frame,
-        .scalar_size = (u8)BUSTER_MIN(type->layout.size, 8u),
-    };
-    u32 gp_index = 0;
-    u32 fp_index = 0;
-    for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
-    {
-        IrAbiPart* part = abi.parts + part_index;
-        MachineVaArgPart* output = value.parts + part_index;
-        output->value_offset = part->value_offset;
-        output->size = (u8)(part->abi_class == IR_ABI_CLASS_VECTOR && part->size == 16 ? 16u : BUSTER_MIN(part->size, 8u));
-        output->is_memory = part->abi_class == IR_ABI_CLASS_MEMORY;
-        if (part->abi_class == IR_ABI_CLASS_FLOAT || part->abi_class == IR_ABI_CLASS_VECTOR)
-        {
-            output->is_float = 1;
-            // The va_list fp_offset already includes the 48-byte GP save
-            // area.  Unlike the fixed-parameter placement index, each
-            // variadic part adds this relative offset exactly once to the
-            // live fp cursor.
-            output->save_offset = fp_index * 16u;
-            fp_index += 1;
-        }
-        else if (part->abi_class == IR_ABI_CLASS_INTEGER || part->abi_class == IR_ABI_CLASS_POINTER)
-        {
-            output->save_offset = 0;
-            output->save_offset = gp_index * 8u;
-            gp_index += 1;
-        }
-        else if (!output->is_memory)
-        {
-            return false;
-        }
-    }
-    *metadata = value;
-    return true;
+    return result;
 }
 
 // Mirrors the canonical emitter's indirect-place test: an over-aligned
@@ -1649,7 +1662,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_arg(MachineX64Selector* selector,
                       (value_type && value_type->kind == IR_TYPE_FLOAT && (value_type->bit_width == 32 || value_type->bit_width == 64));
         bool aggregate = value_type && value_type->layout.resolved &&
                          (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
-                          value_type->kind == IR_TYPE_ARRAY || (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||
+                          value_type->kind == IR_TYPE_ARRAY || (value_type->kind == IR_TYPE_VECTOR && result_is_frame) ||
+                          (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||
                           machine_x64_type_is_f80(selector, instruction->canonical_type));
         MachineVaArg metadata;
         bool vector = selector->vector_registers_supported && machine_x64_type_is_vector_register(value_type);
@@ -5170,6 +5184,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
                 // Win64's indirect vector tail consumes only pointer slots.
                 planned = machine_x64_value_shape(program, argument_type_id, IR_ABI_USE_ARGUMENT, selector->target, tail_shapes + argument_index) &&
                           !(plan->variadic_call && !plan->windows_call && tail_shapes[argument_index].vector);
+                if (planned && plan->variadic_call && !plan->windows_call && tail_shapes[argument_index].aggregate &&
+                    machine_x64_type_class(selector, argument_type_id).kind == IR_TYPE_VECTOR && tail_shapes[argument_index].byte_size > 16)
+                {
+                    // Unnamed wide vectors always occupy the overflow area,
+                    // even when a named parameter would fit one YMM register.
+                    tail_shapes[argument_index].force_stack = true;
+                    tail_shapes[argument_index].part_count = 0;
+                    tail_shapes[argument_index].vector_part_bytes = 0;
+                }
                 planned = planned && machine_x64_argument_area_fits(tail_shapes + argument_index, plan->stack_part_count);
                 if (planned)
                 {

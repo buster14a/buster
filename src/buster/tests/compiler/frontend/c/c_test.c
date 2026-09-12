@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
@@ -15286,6 +15287,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_orders(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 sizes[] = {8, 32, 128};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 size = sizes[size_index];
+        u64 capacity = (u64)size * 128 + 256;
+        char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        // Reverse source-order diamonds leave many parameter-free blocks.
+        // Two stores of the same definition prevent the entry-only shortcut;
+        // sealing must propagate through the real predecessor graph.
+        c_test_append_source(bytes, capacity, &length,
+            S8("int test(int c){int seed=7;int x=seed;if(c)x=seed;"));
+        c_test_append_source(bytes, capacity, &length,
+            string_format(temporary.arena, S8("goto b{u32};b0:return x;"), size));
+        for (u32 block = 1; block <= size; block += 1)
+        {
+            c_test_append_source(bytes, capacity, &length,
+                string_format(temporary.arena, S8("b{u32}:if(c)goto b{u32};goto t{u32};t{u32}:goto b{u32};"),
+                              block, block - 1, block, block, block - 1));
+        }
+        c_test_append_source(bytes, capacity, &length, S8("}"));
+        CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters before = ir_construction_counters();
+#endif
+        CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("sparse-finish.c"), tokens, parse, target_native);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters after = ir_construction_counters();
+        u64 blocks = after.values[IR_CONSTRUCTION_BEFORE_SSA_BLOCK_ROWS] - before.values[IR_CONSTRUCTION_BEFORE_SSA_BLOCK_ROWS];
+        u64 visits = after.values[IR_CONSTRUCTION_SSA_SIMPLIFY_BLOCK_VISITS] - before.values[IR_CONSTRUCTION_SSA_SIMPLIFY_BLOCK_VISITS];
+        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+        // Include the initial block census in this budget. A whole-CFG second
+        // sweep exceeds it at every geometric size in this corpus.
+        BUSTER_TEST(arguments, visits * 2 < blocks * 3);
+#endif
+        CIRLowerResult reference = c_lower_to_ir_with_options(temporary.arena, S8("sparse-finish.c"), tokens, parse, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = true});
+        BUSTER_TEST(arguments, direct.program && !direct.diagnostic_count && reference.program && !reference.diagnostic_count);
+        BUSTER_TEST(arguments, direct.direct_ssa.locals == 3);
+        BUSTER_TEST(arguments, direct.direct_ssa.parameters_created > size);
+        BUSTER_TEST(arguments, direct.direct_ssa.parameters_created == direct.direct_ssa.parameters_removed);
+        if (direct.program && reference.program && !direct.diagnostic_count && !reference.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(reference.program, reference.program->modules).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, ir_prepare_canonical_module(reference.program, reference.program->modules, false).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15331,6 +15390,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
         {S8("int test(int c){int x;if(c)goto a;x=2;goto end;a:x=7;end:return x;}"), 2, 0, false},
         {S8("int test(int c){int x=1;switch(c){case 1:x=3;break;case 2:x+=4;default:x+=7;}return x;}"), 2, 0, false},
         {S8("int test(int c){int x=0;start:if(c-->0){x+=c;goto start;}return x;}"), 2, 0, false},
+        // Stable sparse finish sweeps must retain mutually dependent joins,
+        // eliminate trivial cycles, and retire disconnected parameter blocks.
+        {S8("int test(int n,int c){int x=1;if(c)goto b;a:x+=2;if(n-->0)goto b;return x;b:x+=3;if(n-->0)goto a;return x;}"), 3, 0, false},
+        {S8("int test(int n){int x=1;while(n-->0){x=x;}return x;}"), 2, 0, false},
+        {S8("int test(int x){return x;unused:x+=1;goto unused;}"), 1, 0, false},
+        {S8("int test(int n){int x=1;int y=1;while(n-->0){x=y;y=x;}return x+y;}"), 3, 0, false},
         {S8("int test(int x,int y){return x && y;}"), 3, 0, false},
         {S8("int test(int x,int y,int c){return c ? x : y;}"), 4, 0, false},
         {S8("int test(void){return (int){7};}"), 1, 0, false},
@@ -16118,6 +16183,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);

@@ -263,8 +263,11 @@
 - Frame-backed 32-byte vectors and non-ZMM 64-byte vectors use explicit
   XMM/YMM register-frame rows at System V call boundaries. The shared ABI
   classification determines the value, and the CPU register width determines
-  its consecutive pieces. Whole-value register exhaustion still sends the
-  value to its aligned stack home. Win64 32-byte arguments at AVX width use
+  its consecutive result pieces. An argument wider than one CPU register or
+  exhausting the argument register file uses its aligned stack home. Unnamed
+  wide vectors always use the overflow area; their MIR variadic reads retain
+  the full 32/64-byte alignment and advance by the complete value. Win64
+  32-byte arguments at AVX width use
   the existing private-copy pointer transport; baseline split references
   remain an unresolved retirement gap. The new part-width byte fits existing
   padding in the 40-byte signature shape, with no additional per-value table.
@@ -274,13 +277,14 @@
   `basic_c_vector_argument_ymm.c` and `basic_c_wide_vector_argument.c` remain
   whole registered strict inputs. `basic_c_wide_vector_abi.c` adds indirect
   calls, a ninth vector argument, scalar expected lanes and sentinels. Its
-  PROVIDER_ONLY/CONSUMER_ONLY configurations exchange 32-byte values with
-  Clang and real GCC in both directions at Haswell width, all MIR allocators,
-  both C frontend forms and both PIC modes. Baseline System V Clang/GCC
-  arguments use stack transport while Buster retains its prior XMM split;
-  GCC also uses a hidden result pointer there. Failed baseline cross-compiler
-  observations are preserved as compatibility disagreements, not expected
-  answers. Native execution requires the relevant host CPU features; other
+  PROVIDER_ONLY/CONSUMER_ONLY configurations exchange 32-byte values, copied
+  variadic cursors and scalar tails with Clang and real GCC. Baseline Clang
+  arguments use the same stack transport as Buster, with split XMM results;
+  GCC uses a different hidden result pointer there. AVX-width results agree
+  in all three compilers. An initial MIR baseline argument-placement defect
+  was caught by Clang exchange; its failed runs are preserved as a regression,
+  not reclassified as a compatibility disagreement. Native execution requires
+  the relevant host CPU features; other
   matrix entries are object generation. MIR tests reject truncated frames and
   overflowing offsets before placement.
 - System V x86-64 machine callers retain the sixteen-aligned push area for

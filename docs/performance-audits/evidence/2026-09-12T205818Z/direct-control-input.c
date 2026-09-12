@@ -8,30 +8,7 @@ WideAbiVector wide_abi_mix(WideAbiVector first, unsigned int tag, WideAbiVector 
 WideAbiVector wide_abi_ninth(WideAbiVector, WideAbiVector, WideAbiVector, WideAbiVector,
                            WideAbiVector, WideAbiVector, WideAbiVector, WideAbiVector, WideAbiVector);
 
-unsigned long long wide_abi_varargs(unsigned int marker, ...);
-
-#if !defined(WIDE_ABI_CONSUMER_ONLY)
-unsigned long long wide_abi_varargs(unsigned int marker, ...)
-{
-    __builtin_va_list cursor;
-    __builtin_va_list copied;
-    __builtin_va_start(cursor, marker);
-    unsigned long long prefix = __builtin_va_arg(cursor, unsigned long long);
-    __builtin_va_copy(copied, cursor);
-    WideAbiStorage first = {.vector = __builtin_va_arg(cursor, WideAbiVector)};
-    WideAbiStorage again = {.vector = __builtin_va_arg(copied, WideAbiVector)};
-    WideAbiStorage second = {.vector = __builtin_va_arg(cursor, WideAbiVector)};
-    unsigned long long tail = __builtin_va_arg(cursor, unsigned long long);
-    unsigned long long result = marker + prefix + tail;
-    for (unsigned int lane = 0; lane < 8; lane += 1)
-    {
-        result += first.lanes[lane] + second.lanes[lane] + again.lanes[lane];
-    }
-    __builtin_va_end(copied);
-    __builtin_va_end(cursor);
-    return result;
-}
-
+#if defined(WIDE_ABI_PROVIDER)
 WideAbiVector wide_abi_make(unsigned int seed)
 {
     WideAbiStorage result;
@@ -51,9 +28,7 @@ WideAbiVector wide_abi_ninth(WideAbiVector a, WideAbiVector b, WideAbiVector c, 
 {
     return a + b + c + d + e + f + g + h + i;
 }
-#endif
-
-#if !defined(WIDE_ABI_PROVIDER_ONLY)
+#else
 int main(void)
 {
     struct { unsigned int before[4]; WideAbiStorage value; unsigned int after[4]; } destination;
@@ -91,9 +66,6 @@ int main(void)
     {
         if (destination.before[lane] != 0x51c0ffeeu + lane || destination.after[lane] != 0xdecaf00du + lane) { result = 4; }
     }
-    unsigned long long expected = 7u + 11u + 13u;
-    for (unsigned int lane = 0; lane < 8; lane += 1) { expected += 2u * first.lanes[lane] + second.lanes[lane]; }
-    if (wide_abi_varargs(7u, 11ull, first.vector, second.vector, 13ull) != expected) { result = 5; }
     return result;
 }
 #endif
