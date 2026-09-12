@@ -15,27 +15,33 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: cb7783632c3f182f70004be730aecd81aff24867
+          ref: 1c3fcc78e13d5695fee362baf4b5246573ef6094
           persist-credentials: true
-      - name: Correct literal braces in generated test source
+      - name: Register contention and portable aggregate controls
         id: publish
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          from pathlib import Path
-          p = Path('src/buster/tests/compiler/codegen/machine_test.c')
+          import base64, hashlib, pathlib, subprocess, zlib
+          payload = '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'
+          patch = zlib.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '6ff9ea66455fea1462ca0d21639f3368a135d20f312c60b28298e1fa779c8d2a'
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          p = pathlib.Path('src/buster/tests/compiler/driver/driver_test.c')
           text = p.read_text()
-          for old, new in [('U const* value) { "', 'U const* value) {{ "'), ('U* old) { "', 'U* old) {{ "')]:
-              assert text.count(old) == 1
-              text = text.replace(old, new)
+          first = text.index('S8("buster-a64-atomic-update")')
+          end = text.index('// Count primitives are shared', first)
+          fragment = text[first:end]
+          assert fragment.count('function_count == 9') == 1
+          text = text[:first] + fragment.replace('function_count == 9', 'function_count == 10') + text[end:]
           p.write_text(text)
           PY
           git diff --check
           git config user.name 'OpenAI'
           git config user.email 'noreply@openai.com'
-          git add src/buster/tests/compiler/codegen/machine_test.c
-          git commit -m 'test: escape literal C braces in atomic source formatting'
+          git add src/buster/tests/compiler/codegen/machine_test.c src/buster/tests/compiler/driver/driver_test.c tests/basic_c_aarch64_atomic_update_pair.c
+          git commit -m 'test: register native atomic contention and separate portable aggregate oracles'
           git push origin HEAD:refs/heads/astra/issue36-aarch64-wide-atomic-rmw-cas
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git show --stat --oneline HEAD
@@ -63,6 +69,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/issue36-logs"
           exec > >(tee "$RUNNER_TEMP/issue36-logs/release.log") 2>&1
+          git rev-parse HEAD
           clang --version
           uname -a
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/issue36-build"
@@ -84,6 +91,10 @@ jobs:
           for opt in 0 2; do
             clang -std=gnu11 -O"$opt" -funsigned-char -fwrapv -fno-strict-aliasing tests/basic_c_aarch64_atomic_update_pair.c -latomic -o "$RUNNER_TEMP/atomic-reference-$opt"
             "$RUNNER_TEMP/atomic-reference-$opt"
+            for cc in clang gcc; do
+              "$cc" -std=gnu11 -O"$opt" -funsigned-char -fwrapv -fno-strict-aliasing -pthread tests/host_atomic_pair_contention.c tests/basic_c_atomic_pair_contention.c -latomic -o "$RUNNER_TEMP/atomic-contention-$cc-$opt"
+              "$RUNNER_TEMP/atomic-contention-$cc-$opt"
+            done
           done
           clang -c tests/aarch64_atomic_update_pair_oracle.s -o "$RUNNER_TEMP/atomic-oracle.o"
           objdump -dr "$RUNNER_TEMP/atomic-oracle.o"
