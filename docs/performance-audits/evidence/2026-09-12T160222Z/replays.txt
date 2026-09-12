@@ -1,0 +1,224 @@
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=1 ns=312908 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=2 ns=193614 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=3 ns=268007 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=4 ns=190757 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=5 ns=185968 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=6 ns=574144 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=0 imports=0 exports=0 iteration=7 ns=227723 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=1 ns=372112 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=2 ns=233969 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=3 ns=208191 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=4 ns=202789 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=5 ns=316544 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=6 ns=242283 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=1 imports=2 exports=4 iteration=7 ns=447288 bytes=6272 retained=7246 temporary=812 hash=18133683608915068449
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=1 ns=352036 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=2 ns=325045 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=3 ns=452871 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=4 ns=328735 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=5 ns=325071 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=6 ns=342929 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=8 imports=16 exports=32 iteration=7 ns=325483 bytes=6384 retained=10420 temporary=5760 hash=16318590027745218804
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=1 ns=964234 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=2 ns=791836 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=3 ns=743406 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=4 ns=762736 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=5 ns=791691 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=6 ns=762461 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=32 imports=64 exports=128 iteration=7 ns=917295 bytes=14960 retained=29508 temporary=22944 hash=3734353733146621229
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=1 ns=2663539 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=2 ns=5856479 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=3 ns=3712434 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=4 ns=2995641 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=5 ns=2593470 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=6 ns=2777580 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=128 imports=256 exports=512 iteration=7 ns=2594884 bytes=36976 retained=93572 temporary=91680 hash=10475633758584370838
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=1 ns=11534128 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=2 ns=15402630 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=3 ns=11591303 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=4 ns=12837355 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=5 ns=16499885 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=6 ns=19674225 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=512 imports=1024 exports=2048 iteration=7 ns=11553634 bytes=141424 retained=366212 temporary=366624 hash=11888449220415017514
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=1 ns=19628064 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=2 ns=21466255 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=3 ns=20792918 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=4 ns=20282119 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=5 ns=20033092 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=6 ns=28907199 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=1024 imports=2048 exports=4096 iteration=7 ns=29810087 bytes=280688 retained=729732 temporary=733216 hash=5472978497219743155
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=1 ns=42720050 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=2 ns=39559616 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=3 ns=40056286 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=4 ns=39285647 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=5 ns=39502408 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=6 ns=39820702 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=2048 imports=4096 exports=8192 iteration=7 ns=42067187 bytes=559216 retained=1456772 temporary=1466400 hash=9878541103045494294
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=1 ns=93670108 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=2 ns=82548400 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=3 ns=82231340 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=4 ns=81036383 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=5 ns=80870739 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=6 ns=77505524 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=0 count=4096 imports=8192 exports=16384 iteration=7 ns=83009523 bytes=1116272 retained=2910852 temporary=2932768 hash=9931755769622882034
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=1 ns=437893 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=2 ns=1003698 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=3 ns=3475471 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=4 ns=239702 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=5 ns=190508 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=6 ns=6868140 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=0 imports=0 exports=0 iteration=7 ns=270765 bytes=6024 retained=6556 temporary=48 hash=14526042965852401531
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=1 ns=253905 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=2 ns=202307 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=3 ns=198367 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=4 ns=196935 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=5 ns=194769 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=6 ns=1354169 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=1 imports=1 exports=2 iteration=7 ns=219785 bytes=6256 retained=7042 temporary=452 hash=6304493967662685504
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=1 ns=292089 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=2 ns=232088 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=3 ns=197423 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=4 ns=195420 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=5 ns=195382 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=6 ns=298673 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=8 imports=1 exports=16 iteration=7 ns=223976 bytes=6256 retained=8012 temporary=2880 hash=12622897739620703654
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=1 ns=1645676 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=2 ns=308562 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=3 ns=210585 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=4 ns=230368 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=5 ns=201929 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=6 ns=584109 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=32 imports=1 exports=64 iteration=7 ns=247111 bytes=6256 retained=11324 temporary=11424 hash=12644842504063587445
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=1 ns=254262 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=2 ns=221205 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=3 ns=271477 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=4 ns=223158 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=5 ns=262646 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=6 ns=216819 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=128 imports=1 exports=256 iteration=7 ns=399237 bytes=10352 retained=28668 temporary=45600 hash=18334513842210896317
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=1 ns=474857 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=2 ns=677243 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=3 ns=912333 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=4 ns=2319254 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=5 ns=421221 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=6 ns=310589 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=512 imports=1 exports=1024 iteration=7 ns=332346 bytes=26736 retained=98044 temporary=182304 hash=8387286898474934706
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=1 ns=429529 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=2 ns=442955 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=3 ns=498932 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=4 ns=580392 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=5 ns=468598 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=6 ns=408568 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=1024 imports=1 exports=2048 iteration=7 ns=382035 bytes=47216 retained=189180 temporary=364576 hash=4433641079252770962
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=1 ns=818084 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=2 ns=692185 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=3 ns=767857 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=4 ns=637464 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=5 ns=654307 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=6 ns=902113 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=2048 imports=1 exports=4096 iteration=7 ns=743985 bytes=88176 retained=371452 temporary=729120 hash=14374840037558120512
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=1 ns=2155387 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=2 ns=2145598 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=3 ns=1931300 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=4 ns=2220525 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=5 ns=2144410 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=6 ns=1897118 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DATA shape=1 count=4096 imports=1 exports=8192 iteration=7 ns=2090596 bytes=174192 retained=740092 temporary=1458208 hash=5727266481897938565
+BENCH_ELF_DSO shape=0 count=4 iteration=1 ns=697697 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=4 iteration=2 ns=632193 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=4 iteration=3 ns=646949 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=4 iteration=4 ns=777087 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=4 iteration=5 ns=685194 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=4 iteration=6 ns=596617 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=4 iteration=7 ns=611177 retained=256598 hash=3175315404021230847 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4
+BENCH_ELF_DSO shape=0 count=128 iteration=1 ns=4650245 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=128 iteration=2 ns=4479395 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=128 iteration=3 ns=5873909 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=128 iteration=4 ns=4580929 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=128 iteration=5 ns=4641710 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=128 iteration=6 ns=4365724 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=128 iteration=7 ns=4517847 retained=605472 hash=3368733891180178970 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-128
+BENCH_ELF_DSO shape=0 count=256 iteration=1 ns=10036406 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=256 iteration=2 ns=7599660 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=256 iteration=3 ns=8255635 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=256 iteration=4 ns=8618225 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=256 iteration=5 ns=7648694 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=256 iteration=6 ns=8067515 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=256 iteration=7 ns=8037464 retained=964640 hash=2357869650026849852 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-256
+BENCH_ELF_DSO shape=0 count=512 iteration=1 ns=18269614 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=512 iteration=2 ns=15801196 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=512 iteration=3 ns=15669248 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=512 iteration=4 ns=14658752 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=512 iteration=5 ns=15963098 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=512 iteration=6 ns=17501089 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=512 iteration=7 ns=18222448 retained=1682976 hash=16346330946439154314 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-512
+BENCH_ELF_DSO shape=0 count=1024 iteration=1 ns=29810576 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=1024 iteration=2 ns=29317173 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=1024 iteration=3 ns=31068094 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=1024 iteration=4 ns=29140979 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=1024 iteration=5 ns=32396761 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=1024 iteration=6 ns=31351331 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=1024 iteration=7 ns=29575597 retained=3124017 hash=3235778798943452019 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-1024
+BENCH_ELF_DSO shape=0 count=2048 iteration=1 ns=67875106 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=2048 iteration=2 ns=61746929 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=2048 iteration=3 ns=60808901 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=2048 iteration=4 ns=60139026 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=2048 iteration=5 ns=61771698 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=2048 iteration=6 ns=59632406 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=2048 iteration=7 ns=58399596 retained=6013745 hash=4699980899381379996 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-2048
+BENCH_ELF_DSO shape=0 count=4096 iteration=1 ns=147448207 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=0 count=4096 iteration=2 ns=123065782 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=0 count=4096 iteration=3 ns=129763282 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=0 count=4096 iteration=4 ns=124880690 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=0 count=4096 iteration=5 ns=122284133 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=0 count=4096 iteration=6 ns=120517959 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=0 count=4096 iteration=7 ns=119975510 retained=11793201 hash=2068572650019675555 directory=/dev/shm/buster-117-work/dso-bench/shape-0-count-4096
+BENCH_ELF_DSO shape=1 count=4 iteration=1 ns=674885 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=4 iteration=2 ns=673901 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=4 iteration=3 ns=552362 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=4 iteration=4 ns=583852 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=4 iteration=5 ns=617954 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=4 iteration=6 ns=580009 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=4 iteration=7 ns=520450 retained=253098 hash=15634698745833021728 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4
+BENCH_ELF_DSO shape=1 count=128 iteration=1 ns=1924671 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=128 iteration=2 ns=1838153 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=128 iteration=3 ns=1771896 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=128 iteration=4 ns=1706029 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=128 iteration=5 ns=1766155 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=128 iteration=6 ns=2009172 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=128 iteration=7 ns=1697762 retained=444044 hash=662354777597386513 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-128
+BENCH_ELF_DSO shape=1 count=256 iteration=1 ns=3039970 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=256 iteration=2 ns=2962497 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=256 iteration=3 ns=2954476 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=256 iteration=4 ns=2903456 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=256 iteration=5 ns=3028710 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=256 iteration=6 ns=3182422 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=256 iteration=7 ns=2890864 retained=641676 hash=6079341106958619994 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-256
+BENCH_ELF_DSO shape=1 count=512 iteration=1 ns=6602263 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=512 iteration=2 ns=10843090 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=512 iteration=3 ns=6221997 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=512 iteration=4 ns=9604892 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=512 iteration=5 ns=5850684 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=512 iteration=6 ns=5865309 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=512 iteration=7 ns=5682166 retained=1041036 hash=4823126643583537805 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-512
+BENCH_ELF_DSO shape=1 count=1024 iteration=1 ns=12975097 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=1024 iteration=2 ns=10679248 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=1024 iteration=3 ns=10547302 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=1024 iteration=4 ns=10704728 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=1024 iteration=5 ns=10637943 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=1024 iteration=6 ns=11054255 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=1024 iteration=7 ns=11808638 retained=1839877 hash=14218835299614069372 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-1024
+BENCH_ELF_DSO shape=1 count=2048 iteration=1 ns=21615407 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=2048 iteration=2 ns=25188657 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=2048 iteration=3 ns=22616714 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=2048 iteration=4 ns=21023316 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=2048 iteration=5 ns=21827079 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=2048 iteration=6 ns=21713459 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=2048 iteration=7 ns=24229063 retained=3435269 hash=3528505913659617361 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-2048
+BENCH_ELF_DSO shape=1 count=4096 iteration=1 ns=41216972 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096
+BENCH_ELF_DSO shape=1 count=4096 iteration=2 ns=40713697 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096
+BENCH_ELF_DSO shape=1 count=4096 iteration=3 ns=45324879 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096
+BENCH_ELF_DSO shape=1 count=4096 iteration=4 ns=41535355 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096
+BENCH_ELF_DSO shape=1 count=4096 iteration=5 ns=46967345 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096
+BENCH_ELF_DSO shape=1 count=4096 iteration=6 ns=41151286 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096
+BENCH_ELF_DSO shape=1 count=4096 iteration=7 ns=40036888 retained=6626053 hash=381649252239232838 directory=/dev/shm/buster-117-work/dso-bench/shape-1-count-4096

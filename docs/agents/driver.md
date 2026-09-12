@@ -298,6 +298,17 @@ symbol, since a link with none has nothing to copy, and a library that cannot
 be found or parsed leaves the pointer-sized slots the writer reserved before
 alias sets existed.
 
+`link_elf_index_initialize` builds one temporary index per ELF link, shared by
+writer selection, weak/strong import classification, version binding and the
+AArch64 staging writer. Names keep the first data definition and the first
+default version in runtime/library/export order. Data objects are grouped by
+export-table identity and address; their alias chains retain export order.
+The first imported name owns the copy slot. Global-name membership and per-slot
+alias deduplication are indexed too. Skipped aliases do not enlarge a slot.
+Version pairs retain first-use numbering and per-library emission order.
+Aggregate counts and index storage are checked before allocation; all indexes
+are rewound on both successful and failed links.
+
 The second is the **symbol version** of every defined entry, functions
 included, read from the library's `.gnu.version` and `.gnu.version_d` into
 `NativeDynamicVersionedSymbol` arrays. That half is collected on every hosted

@@ -253,7 +253,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and weak entry of every shared library on every hosted ELF link, functions
   included, and sets `exports_known`: `versioned_symbols` is the ELF export
   list, `exported_symbols` stays PE's. Absence is evidence only when **every**
-  library was read — `link_elf_exports_complete` — because a library the
+  library was read — `LinkElfIndex.exports_complete` — because a library the
   driver could not open exports whatever it happens to export; a link missing
   one of them keeps the import it made before, which is also why a target
   whose libraries are never read, Android today, is unchanged.

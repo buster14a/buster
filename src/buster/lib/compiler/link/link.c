@@ -47,7 +47,7 @@
 // referenced. When the driver was able to read the library's symbol table
 // (NativeDynamicDataSymbol), the writer defines every name exported at that
 // address on the slot, sizes the slot from the library, and gives two imported
-// names for one object one slot; see link_elf_exported_data_find. Defining
+// names for one object one slot; see link_elf_index_initialize. Defining
 // only the referenced name leaves the library binding its own post-startup
 // stores — glibc's `__environ = ev` — to its own storage while the program
 // reads a copy taken before startup ran.
@@ -64,9 +64,10 @@
 // and the AArch64 dynamic writer re-derives the x86-64 writer's import
 // numbering from it, so the two cannot be allowed to disagree. The dynamic
 // writers ask it once per symbol and then read their own import numbering,
-// because the answer costs a scan of every library's exports.
+// using the same link-local export index as version and alias construction.
 
 #include <buster/lib/compiler/link/link.h>
+#include <buster/lib/compiler/link/link_internal.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
@@ -3089,74 +3090,212 @@ enum
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
 };
 
-// The version one library publishes a name's default definition under, and
-// whether the library defines the name at all.  A library that defines it only
-// as `name@VER` reports `defined` without a definition: an unversioned
-// reference has nothing there to bind to, which is what makes GNU ld refuse
-// glibc's `sys_errlist`.
-BUSTER_GLOBAL_LOCAL NativeDynamicVersionedSymbol* link_elf_versioned_find(NativeDynamicVersionedSymbol* symbols, u32 symbol_count, String8 name,
-                                                                         bool* defined)
+// One link-local name index serves import classification, version binding and
+// copy relocation construction. Insertion follows DT_NEEDED order (runtime
+// first); the first data definition and first default version win independently.
+typedef struct LinkElfName LinkElfName;
+struct LinkElfName
 {
-    NativeDynamicVersionedSymbol* result = 0;
-    for (u32 index = 0; !result && index < symbol_count; index += 1)
+    String8 name;
+    NativeDynamicVersionedSymbol* version;
+    u32 library;
+    u32 data;
+    u32 alias_owner;
+};
+
+typedef struct LinkElfDataEntry LinkElfDataEntry;
+struct LinkElfDataEntry
+{
+    NativeDynamicDataSymbol* symbol;
+    u32 table_count;
+    u32 group;
+    u32 next;
+    u32 name;
+};
+
+typedef struct LinkElfDataGroup LinkElfDataGroup;
+struct LinkElfDataGroup
+{
+    NativeDynamicDataSymbol* table;
+    u64 address;
+    u32 first;
+    u32 last;
+    u32 owner;
+};
+
+typedef struct LinkElfIndex LinkElfIndex;
+struct LinkElfIndex
+{
+    Arena* arena;
+    LinkElfName* names;
+    LinkElfDataEntry* data;
+    LinkElfDataGroup* groups;
+    u32* name_slots;
+    u32* group_slots;
+    u64 name_capacity;
+    u64 group_capacity;
+    u32 name_count;
+    u32 data_count;
+    u32 group_count;
+    bool exports_complete;
+};
+
+// Counts are bounded before either rounding or multiplying. UINT32_MAX is
+// reserved for empty slots and links; no table can fill even half its buckets.
+BUSTER_GLOBAL_LOCAL u64 link_elf_index_capacity(u64 count)
+{
+    u64 capacity = 0;
+    if (count && count < UINT32_MAX)
     {
-        if (string_equal(symbols[index].name, name))
+        capacity = 1;
+        while (capacity < count * 2) capacity *= 2;
+    }
+    return capacity;
+}
+
+BUSTER_GLOBAL_LOCAL LinkElfName* link_elf_name(LinkElfIndex* index, String8 name, bool insert)
+{
+    LinkElfName* result = 0;
+    if (index->name_capacity)
+    {
+        u64 mask = index->name_capacity - 1;
+        u64 bucket = buster_hash_64((u8*)name.pointer, name.length) & mask;
+        for (u64 probe = 0; !result && probe < index->name_capacity; probe += 1)
         {
-            *defined = true;
-            result = symbols[index].has_default ? symbols + index : 0;
+            u32* slot = index->name_slots + bucket;
+            if (*slot == UINT32_MAX)
+            {
+                if (insert)
+                {
+                    *slot = index->name_count++;
+                    result = index->names + *slot;
+                    *result = (LinkElfName){.name = name, .data = UINT32_MAX, .alias_owner = UINT32_MAX};
+                }
+                break;
+            }
+            if (string_equal(index->names[*slot].name, name)) result = index->names + *slot;
+            bucket = (bucket + 1) & mask;
         }
     }
-
     return result;
 }
 
-// The same question across every library the image will name, in the order the
-// writers put them in DT_NEEDED -- the runtime first, then the requested ones
-// -- because that is the order the loader searches.  `no_default` separates
-// the two ways this fails: a name no library defines records no version, which
-// is also the only honest answer for a library the driver could not read,
-// while a name that is defined but never as a default is the divergence worth
-// refusing.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_version(NativeExecutableLinkOptions options, String8 name, u32* library_index, String8* version, bool* no_default)
+BUSTER_GLOBAL_LOCAL u32 link_elf_data_group(LinkElfIndex* index, NativeDynamicDataSymbol* table, u64 address)
 {
-    bool result = false;
-    bool defined = false;
-    for (u32 index = 0; !result && index < options.dynamic_library_count + 1; index += 1)
+    u32 result = UINT32_MAX;
+    u64 key[] = {(u64)table, address};
+    u64 mask = index->group_capacity - 1;
+    u64 bucket = buster_hash_64((u8*)key, sizeof(key)) & mask;
+    for (u64 probe = 0; result == UINT32_MAX && probe < index->group_capacity; probe += 1)
     {
-        NativeDynamicVersionedSymbol* symbols = index ? options.dynamic_libraries[index - 1].versioned_symbols : options.runtime_versioned_symbols;
-        u32 symbol_count = index ? options.dynamic_libraries[index - 1].versioned_symbol_count : options.runtime_versioned_symbol_count;
-        NativeDynamicVersionedSymbol* found = link_elf_versioned_find(symbols, symbol_count, name, &defined);
-        if (found)
+        u32* slot = index->group_slots + bucket;
+        if (*slot == UINT32_MAX)
         {
-            *library_index = index;
-            *version = found->version;
-            result = true;
+            *slot = index->group_count++;
+            index->groups[*slot] = (LinkElfDataGroup){.table = table, .address = address,
+                .first = UINT32_MAX, .last = UINT32_MAX, .owner = UINT32_MAX};
+        }
+        LinkElfDataGroup* group = index->groups + *slot;
+        if (group->table == table && group->address == address) result = *slot;
+        bucket = (bucket + 1) & mask;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_index_initialize(Arena* arena, NativeExecutableLinkOptions options, LinkElfIndex* index)
+{
+    *index = (LinkElfIndex){.arena = arena, .exports_complete = options.runtime_exports_known};
+    bool valid = options.dynamic_library_count != UINT32_MAX && (!options.dynamic_library_count || options.dynamic_libraries) &&
+                 (!options.runtime_data_symbol_count || options.runtime_data_symbols) &&
+                 (!options.runtime_versioned_symbol_count || options.runtime_versioned_symbols);
+    u64 data_count = options.runtime_data_symbol_count;
+    u64 name_count = data_count + options.runtime_versioned_symbol_count;
+    for (u32 library = 0; valid && library < options.dynamic_library_count; library += 1)
+    {
+        NativeDynamicLibrary* source = options.dynamic_libraries + library;
+        valid = (!source->exported_data_symbol_count || source->exported_data_symbols) &&
+                (!source->versioned_symbol_count || source->versioned_symbols);
+        data_count += source->exported_data_symbol_count;
+        name_count += (u64)source->exported_data_symbol_count + source->versioned_symbol_count;
+        valid = valid && name_count < UINT32_MAX;
+        index->exports_complete = index->exports_complete && source->exports_known;
+    }
+    valid = valid && name_count < UINT32_MAX;
+    if (valid)
+    {
+        index->name_capacity = link_elf_index_capacity(name_count);
+        index->group_capacity = link_elf_index_capacity(data_count);
+        // Include alignment for all five arrays in the preflight. Aggregate
+        // counts are already below 2^32, so these byte products cannot wrap.
+        u64 bytes = name_count * sizeof(LinkElfName) + data_count * (sizeof(LinkElfDataEntry) + sizeof(LinkElfDataGroup)) +
+                    (index->name_capacity + index->group_capacity) * sizeof(u32) + 5 * BUSTER_ALIGN_OF(LinkElfName);
+        valid = bytes <= arena->reserved_size - arena->position;
+    }
+    if (valid)
+    {
+        index->names = arena_allocate(arena, LinkElfName, name_count);
+        index->data = arena_allocate(arena, LinkElfDataEntry, data_count);
+        index->groups = arena_allocate(arena, LinkElfDataGroup, data_count);
+        index->name_slots = arena_allocate(arena, u32, index->name_capacity);
+        index->group_slots = arena_allocate(arena, u32, index->group_capacity);
+        memset(index->name_slots, 0xff, index->name_capacity * sizeof(u32));
+        memset(index->group_slots, 0xff, index->group_capacity * sizeof(u32));
+    }
+    for (u32 library = 0; valid && library <= options.dynamic_library_count; library += 1)
+    {
+        NativeDynamicDataSymbol* data = library ? options.dynamic_libraries[library - 1].exported_data_symbols : options.runtime_data_symbols;
+        u32 count = library ? options.dynamic_libraries[library - 1].exported_data_symbol_count : options.runtime_data_symbol_count;
+        for (u32 entry = 0; valid && entry < count; entry += 1)
+        {
+            NativeDynamicDataSymbol* symbol = data + entry;
+            valid = !symbol->name.length || symbol->name.pointer;
+            if (valid)
+            {
+                LinkElfName* name = link_elf_name(index, symbol->name, true);
+                u32 group_index = link_elf_data_group(index, data, symbol->address);
+                LinkElfDataGroup* group = index->groups + group_index;
+                u32 data_index = index->data_count++;
+                index->data[data_index] = (LinkElfDataEntry){.symbol = symbol, .table_count = count, .group = group_index,
+                    .next = UINT32_MAX, .name = (u32)(name - index->names)};
+                if (name->data == UINT32_MAX) name->data = data_index;
+                if (group->last != UINT32_MAX) index->data[group->last].next = data_index;
+                else group->first = data_index;
+                group->last = data_index;
+            }
+        }
+        NativeDynamicVersionedSymbol* versions = library ? options.dynamic_libraries[library - 1].versioned_symbols : options.runtime_versioned_symbols;
+        count = library ? options.dynamic_libraries[library - 1].versioned_symbol_count : options.runtime_versioned_symbol_count;
+        for (u32 entry = 0; valid && entry < count; entry += 1)
+        {
+            NativeDynamicVersionedSymbol* symbol = versions + entry;
+            valid = (!symbol->name.length || symbol->name.pointer) && (!symbol->version.length || symbol->version.pointer);
+            if (valid)
+            {
+                LinkElfName* name = link_elf_name(index, symbol->name, true);
+                if (!name->version || (!name->version->has_default && symbol->has_default))
+                {
+                    name->version = symbol;
+                    name->library = library;
+                }
+            }
         }
     }
-    *no_default = !result && defined;
-
-    return result;
+    return valid;
 }
 
-// Whether the absence of a name from the export lists above means the name is
-// absent.  Every library this image will name has to have been read for that:
-// one the driver could not open exports whatever it happens to define, so a
-// link missing even one of them knows nothing about any name it did not find.
-// `exports_known` is what the driver sets per library once it has read that
-// library's dynamic symbol table, so the answer is the same on every machine
-// that has the same libraries in the same places -- and false for a target
-// whose libraries are never read at all, which is where the weak references
-// below keep the answer they had before there was an export list.
-BUSTER_GLOBAL_LOCAL bool link_elf_exports_complete(NativeExecutableLinkOptions options)
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_version(LinkElfIndex* index, String8 name, u32* library_index, String8* version, bool* no_default)
 {
-    bool result = options.runtime_exports_known && !(options.dynamic_library_count && !options.dynamic_libraries);
-    for (u32 index = 0; result && index < options.dynamic_library_count; index += 1)
+    LinkElfName* found = link_elf_name(index, name, false);
+    bool result = found && found->version && found->version->has_default;
+    *no_default = found && found->version && !result;
+    if (result)
     {
-        result = options.dynamic_libraries[index].exports_known;
+        *library_index = found->library;
+        *version = found->version->version;
     }
-
     return result;
 }
+
 
 // An undefined symbol only weak references name resolves to address zero
 // rather than to anything in the image: ELF gives an unresolved weak
@@ -3183,7 +3322,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_exports_complete(NativeExecutableLinkOptions o
 // every one of its libraries, an absent name proves nothing -- ignorance is
 // not evidence of absence -- so the reference stays the import it was before
 // there was an export list to consult.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(NativeExecutableLinkOptions options, ObjectSymbol const* symbol, bool dynamic_image)
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(LinkElfIndex* exports, ObjectSymbol const* symbol, bool dynamic_image)
 {
     bool result = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->weak;
     if (result && dynamic_image && !symbol->hidden)
@@ -3191,7 +3330,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(NativeExecutableLinkOp
         u32 library_index = 0;
         String8 version = {0};
         bool no_default = false;
-        result = link_elf_exports_complete(options) && !link_elf_symbol_version(options, symbol->name, &library_index, &version, &no_default);
+        result = exports->exports_complete && !link_elf_symbol_version(exports, symbol->name, &library_index, &version, &no_default);
     }
 
     return result;
@@ -3204,9 +3343,9 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(NativeExecutableLinkOp
 // between the static and dynamic writers asks this, and the dynamic writers
 // ask it again to number their imports, so the two cannot disagree about
 // which symbols reach .dynsym.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(NativeExecutableLinkOptions options, ObjectSymbol const* symbol)
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(LinkElfIndex* exports, ObjectSymbol const* symbol)
 {
-    return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, true);
+    return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(exports, symbol, true);
 }
 
 // A strong undefined reference no library on the link line publishes a
@@ -3220,7 +3359,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(NativeExecutableLi
 // library's export list was read is absence evidence of absence, and a name
 // published only as `name@VER` has no default an unversioned reference could
 // bind to, which is ld's answer too.
-BUSTER_GLOBAL_LOCAL bool link_elf_strong_import_unresolved(NativeExecutableLinkOptions options, ObjectSymbol const* symbol)
+BUSTER_GLOBAL_LOCAL bool link_elf_strong_import_unresolved(LinkElfIndex* exports, ObjectSymbol const* symbol)
 {
     bool result = false;
     // __tls_get_addr is defined by the dynamic loader rather than by
@@ -3228,12 +3367,12 @@ BUSTER_GLOBAL_LOCAL bool link_elf_strong_import_unresolved(NativeExecutableLinkO
     // library so ld resolves it, but the driver's export scan reads only the
     // library file.  The writer names that same loader in PT_INTERP, so the
     // name is answered in every image this writer can produce.
-    if (!symbol->weak && link_elf_exports_complete(options) && !string_equal(symbol->name, S8("__tls_get_addr")))
+    if (!symbol->weak && exports->exports_complete && !string_equal(symbol->name, S8("__tls_get_addr")))
     {
         u32 library_index = 0;
         String8 version = {0};
         bool no_default = false;
-        result = !link_elf_symbol_version(options, symbol->name, &library_index, &version, &no_default);
+        result = !link_elf_symbol_version(exports, symbol->name, &library_index, &version, &no_default);
     }
 
     return result;
@@ -3337,7 +3476,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, false))
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(0, symbol, false))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
@@ -3452,7 +3591,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         // Address zero is the answer for a reference nothing defines and
         // nothing can define; every other undefined symbol was rejected above.
-        bool absent_weak = link_elf_symbol_resolves_to_zero(options, symbol, false);
+        bool absent_weak = link_elf_symbol_resolves_to_zero(0, symbol, false);
         if (!absent_weak && symbol->section >= OBJECT_SECTION_COUNT)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -3690,23 +3829,6 @@ BUSTER_GLOBAL_LOCAL bool link_elf_hosted_call_address(ObjectFile* object, u32 sy
     return valid;
 }
 
-// The shared library's own entry for an imported data name, or nothing when
-// the driver could not read the library.  Callers use the entry's address to
-// find the other names the library exports for that one object.
-BUSTER_GLOBAL_LOCAL NativeDynamicDataSymbol* link_elf_exported_data_find(NativeDynamicDataSymbol* symbols, u32 symbol_count, String8 name)
-{
-    NativeDynamicDataSymbol* result = 0;
-    for (u32 index = 0; !result && index < symbol_count; index += 1)
-    {
-        if (string_equal(symbols[index].name, name))
-        {
-            result = symbols + index;
-        }
-    }
-
-    return result;
-}
-
 // The System V hash of a version string.  .gnu.version_r records it beside
 // every version it names so the loader can match the library's own
 // .gnu.version_d entry without comparing strings.
@@ -3725,7 +3847,7 @@ BUSTER_GLOBAL_LOCAL u32 link_elf_hash(String8 name)
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                           NativeExecutableLinkOptions options)
+                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports)
 {
     NativeExecutableLinkResult result = {0};
     enum
@@ -3754,7 +3876,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     bool has_undefined_symbol = false;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
-        has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]);
+        has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(exports, &object->symbols[symbol_index]);
     }
     if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count)
     {
@@ -3800,11 +3922,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (!link_elf_symbol_needs_dynamic_import(options, symbol))
+        if (!link_elf_symbol_needs_dynamic_import(exports, symbol))
         {
             continue;
         }
-        if (link_elf_strong_import_unresolved(options, symbol))
+        if (link_elf_strong_import_unresolved(exports, symbol))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
@@ -3841,18 +3963,34 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // every exported name at its address, takes the library's own size, and is
     // shared by two imports that name one object.  When the library's symbol
     // table was not read, the slot keeps the pointer-sized shape it had.
-    u64 exported_data_total = options.runtime_data_symbol_count;
-    for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
-    {
-        exported_data_total += options.dynamic_libraries[library_index].exported_data_symbol_count;
-    }
-    String8* alias_names = arena_allocate(arena, String8, exported_data_total + 1);
+    String8* alias_names = arena_allocate(arena, String8, (u64)exports->data_count + 1);
     u32* import_alias_first = arena_allocate(arena, u32, import_count);
     u32* import_alias_counts = arena_allocate(arena, u32, import_count);
     u32* import_copy_owners = arena_allocate(arena, u32, import_count);
     u64* import_copy_sizes = arena_allocate(arena, u64, import_count);
-    NativeDynamicDataSymbol** import_export_tables = arena_allocate(arena, NativeDynamicDataSymbol*, import_count);
-    u64* import_export_addresses = arena_allocate(arena, u64, import_count);
+    LinkGlobalSymbolTable globals = {0};
+    bool globals_valid = true;
+    if (exports->data_count)
+    {
+        u64 capacity = link_elf_index_capacity(object->symbol_count);
+        globals_valid = object->symbol_count < UINT32_MAX &&
+                        capacity * sizeof(u32) + BUSTER_ALIGN_OF(u32) <= exports->arena->reserved_size - exports->arena->position;
+        if (globals_valid) globals_valid = link_global_symbol_table_initialize(exports->arena, object->symbols, object->symbol_count, &globals);
+        for (u32 symbol = 0; globals_valid && symbol < object->symbol_count; symbol += 1)
+        {
+            if (object->symbols[symbol].global)
+            {
+                u32* slot = link_global_symbol_table_slot(&globals, object->symbols[symbol].name);
+                if (slot) *slot = symbol;
+                else globals_valid = false;
+            }
+        }
+    }
+    if (!globals_valid)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     u32 alias_count = 0;
     u32 copy_slot_count = 0;
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
@@ -3861,88 +3999,41 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         import_alias_counts[import_index] = 0;
         import_copy_owners[import_index] = UINT32_MAX;
         import_copy_sizes[import_index] = 0;
-        import_export_tables[import_index] = 0;
-        import_export_addresses[import_index] = 0;
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA)
+        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA) continue;
+        LinkElfName* name = link_elf_name(exports, import_names[import_index], false);
+        LinkElfDataEntry* definition = name && name->data != UINT32_MAX ? exports->data + name->data : 0;
+        LinkElfDataGroup* group = definition ? exports->groups + definition->group : 0;
+        u64 slot_size = definition && definition->symbol->size ? definition->symbol->size : sizeof(u64);
+        if (group && group->owner != UINT32_MAX)
         {
+            import_copy_owners[import_index] = group->owner;
             continue;
-        }
-        NativeDynamicDataSymbol* table = 0;
-        u32 table_count = 0;
-        NativeDynamicDataSymbol* definition =
-            link_elf_exported_data_find(options.runtime_data_symbols, options.runtime_data_symbol_count, import_names[import_index]);
-        if (definition)
-        {
-            table = options.runtime_data_symbols;
-            table_count = options.runtime_data_symbol_count;
-        }
-        for (u32 library_index = 0; !definition && library_index < options.dynamic_library_count; library_index += 1)
-        {
-            NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
-            definition = link_elf_exported_data_find(library->exported_data_symbols, library->exported_data_symbol_count, import_names[import_index]);
-            if (definition)
-            {
-                table = library->exported_data_symbols;
-                table_count = library->exported_data_symbol_count;
-            }
-        }
-        u64 slot_size = sizeof(u64);
-        if (definition)
-        {
-            import_export_tables[import_index] = table;
-            import_export_addresses[import_index] = definition->address;
-            slot_size = definition->size ? definition->size : sizeof(u64);
-            for (u32 previous = 0; previous < import_index; previous += 1)
-            {
-                if (import_export_tables[previous] == table && import_export_addresses[previous] == definition->address)
-                {
-                    import_copy_owners[import_index] = import_copy_owners[previous];
-                    break;
-                }
-            }
-        }
-        if (import_copy_owners[import_index] != UINT32_MAX)
-        {
-            continue;
-        }
-        if (copy_slot_count == UINT32_MAX)
-        {
-            result.error = LINK_ERROR_INVALID_INPUT;
-            return result;
         }
         import_copy_owners[import_index] = import_index;
         copy_slot_count += 1;
-        for (u32 export_index = 0; definition && export_index < table_count; export_index += 1)
+        if (group) group->owner = import_index;
+        // Walk only this object's exports, in their original table order.
+        // Table identity (not virtual address alone) distinguishes libraries.
+        // A caller may expose the same table through different-length views;
+        // only the selected definition's view contributes aliases.
+        for (u32 entry = group ? group->first : UINT32_MAX; entry != UINT32_MAX; entry = exports->data[entry].next)
         {
-            NativeDynamicDataSymbol* exported = table + export_index;
-            if (exported->address != definition->address || string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
-                exported->name.length > UINT32_MAX || imported_name_size > UINT32_MAX - exported->name.length - 1)
+            LinkElfDataEntry* data = exports->data + entry;
+            NativeDynamicDataSymbol* exported = data->symbol;
+            if ((u64)(exported - group->table) >= definition->table_count ||
+                string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
+                exported->name.length >= UINT32_MAX || imported_name_size > UINT32_MAX - exported->name.length - 1)
             {
                 continue;
             }
-            // Two names the executable would then define twice: one this
-            // program has a global symbol for already — an import of its own,
-            // which carries a dynamic symbol pointing at this same shared
-            // slot, or a definition of its own, which the program means to
-            // use instead — and one this group already collected, because a
-            // library publishes a versioned object once per version symbol
-            // (glibc's `_sys_errlist` appears four times at one address).
-            bool defined = false;
-            for (u32 other = 0; !defined && other < object->symbol_count; other += 1)
-            {
-                defined = object->symbols[other].global && string_equal(object->symbols[other].name, exported->name);
-            }
-            for (u32 other = import_alias_first[import_index]; !defined && other < alias_count; other += 1)
-            {
-                defined = string_equal(alias_names[other], exported->name);
-            }
-            if (defined)
-            {
-                continue;
-            }
+            u32* global = link_global_symbol_table_slot(&globals, exported->name);
+            LinkElfName* alias = exports->names + data->name;
+            if ((global && *global != UINT32_MAX) || alias->alias_owner == import_index) continue;
+            // Preserve the old sizing rule: an existing global/import or a
+            // duplicate version-name does not enlarge the owner's slot.
+            alias->alias_owner = import_index;
             slot_size = BUSTER_MAX(slot_size, exported->size);
-            alias_names[alias_count] = exported->name;
-            alias_count += 1;
+            alias_names[alias_count++] = exported->name;
             imported_name_size += exported->name.length + 1;
         }
         if (slot_size > UINT32_MAX)
@@ -4085,6 +4176,22 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u32* version_name_offsets = arena_allocate(arena, u32, versioned_name_count + 1);
     u16* import_versions = arena_allocate(arena, u16, (u64)import_count + 1);
     u16* alias_versions = arena_allocate(arena, u16, (u64)alias_count + 1);
+    u64 maximum_versions = BUSTER_MIN(versioned_name_count, (u64)ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX + 1);
+    u64 version_capacity = link_elf_index_capacity(maximum_versions);
+    u64 version_index_bytes = (version_capacity + maximum_versions + (u64)needed_library_count * 3) * sizeof(u32) + 5 * BUSTER_ALIGN_OF(u32);
+    if (version_index_bytes > exports->arena->reserved_size - exports->arena->position)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u32* version_slots = arena_allocate(exports->arena, u32, version_capacity);
+    u32* version_next = arena_allocate(exports->arena, u32, maximum_versions);
+    u32* library_version_first = arena_allocate(exports->arena, u32, needed_library_count);
+    u32* library_version_last = arena_allocate(exports->arena, u32, needed_library_count);
+    u32* library_version_counts = arena_allocate_zeroed(exports->arena, u32, needed_library_count);
+    memset(version_slots, 0xff, version_capacity * sizeof(u32));
+    memset(library_version_first, 0xff, (u64)needed_library_count * sizeof(u32));
+    memset(library_version_last, 0xff, (u64)needed_library_count * sizeof(u32));
     u32 version_count = 0;
     u64 version_name_size = 0;
     for (u64 entry = 0; entry < versioned_name_count; entry += 1)
@@ -4094,18 +4201,27 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         String8 version = {0};
         bool no_default = false;
         u16 version_index = 0;
-        if (link_elf_symbol_version(options, name, &library_index, &version, &no_default))
+        if (link_elf_symbol_version(exports, name, &library_index, &version, &no_default))
         {
-            for (u32 existing = 0; !version_index && existing < version_count; existing += 1)
+            u64 bucket = 0;
+            if (version.length)
             {
-                if (version_libraries[existing] == library_index && string_equal(version_names[existing], version))
+                bucket = (buster_hash_64((u8*)version.pointer, version.length) ^ library_index) & (version_capacity - 1);
+                while (version_slots[bucket] != UINT32_MAX)
                 {
-                    version_index = (u16)(ELF_VERSION_FIRST_INDEX + existing);
+                    u32 existing = version_slots[bucket];
+                    if (version_libraries[existing] == library_index && string_equal(version_names[existing], version))
+                    {
+                        version_index = (u16)(ELF_VERSION_FIRST_INDEX + existing);
+                        break;
+                    }
+                    bucket = (bucket + 1) & (version_capacity - 1);
                 }
             }
             if (!version_index && version.length)
             {
-                if (version_count > ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX || version_name_size > UINT32_MAX - version.length - 1)
+                if (version_count > ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX || version.length >= UINT32_MAX ||
+                    version_name_size > UINT32_MAX - version.length - 1)
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                     result.symbol = name;
@@ -4113,6 +4229,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 }
                 version_libraries[version_count] = library_index;
                 version_names[version_count] = version;
+                version_slots[bucket] = version_count;
+                version_next[version_count] = UINT32_MAX;
+                if (library_version_last[library_index] != UINT32_MAX) version_next[library_version_last[library_index]] = version_count;
+                else library_version_first[library_index] = version_count;
+                library_version_last[library_index] = version_count;
+                library_version_counts[library_index] += 1;
                 version_index = (u16)(ELF_VERSION_FIRST_INDEX + version_count);
                 version_count += 1;
                 version_name_size += version.length + 1;
@@ -4143,11 +4265,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u32 version_need_count = 0;
     for (u32 library_index = 0; version_count && library_index < needed_library_count; library_index += 1)
     {
-        u32 library_version_count = 0;
-        for (u32 index = 0; index < version_count; index += 1)
-        {
-            library_version_count += version_libraries[index] == library_index;
-        }
+        u32 library_version_count = library_version_counts[library_index];
         version_need_size += library_version_count ? ELF_VERSION_NEED_SIZE + (u64)library_version_count * ELF_VERSION_AUXILIARY_SIZE : 0;
         version_need_count += library_version_count != 0;
     }
@@ -4352,11 +4470,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         u64 previous_need = 0;
         for (u32 library_index = 0; library_index < needed_library_count; library_index += 1)
         {
-            u32 library_version_count = 0;
-            for (u32 index = 0; index < version_count; index += 1)
-            {
-                library_version_count += version_libraries[index] == library_index;
-            }
+            u32 library_version_count = library_version_counts[library_index];
             if (!library_version_count)
             {
                 continue;
@@ -4372,12 +4486,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             previous_need = need_cursor;
             u64 auxiliary = need_cursor + ELF_VERSION_NEED_SIZE;
             u32 written = 0;
-            for (u32 index = 0; index < version_count; index += 1)
+            for (u32 index = library_version_first[library_index]; index != UINT32_MAX; index = version_next[index])
             {
-                if (version_libraries[index] != library_index)
-                {
-                    continue;
-                }
                 written += 1;
                 link_write_u32(bytes, auxiliary, link_elf_hash(version_names[index]));
                 link_write_u16(bytes, auxiliary + 6, (u16)(ELF_VERSION_FIRST_INDEX + index));
@@ -4908,7 +5018,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, false))
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(0, symbol, false))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
@@ -5024,7 +5134,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         // Address zero is the answer for a reference nothing defines and
         // nothing can define; every other undefined symbol was rejected above.
-        bool absent_weak = link_elf_symbol_resolves_to_zero(options, symbol, false);
+        bool absent_weak = link_elf_symbol_resolves_to_zero(0, symbol, false);
         if (!absent_weak && symbol->section >= OBJECT_SECTION_COUNT)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -5174,7 +5284,7 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                            NativeExecutableLinkOptions options)
+                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports)
 {
     // argc, argv and envp off the stack, the initializers, `bl main`,
     // `bl exit` and a trap — link_aarch64_build_elf_entry_stub emits the
@@ -5269,7 +5379,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // stub slot this overlay has to reproduce.  Everything below reads the
     // stripped copy, whose relocations no longer name sections the image does
     // not carry.
-    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options);
+    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports);
     if (result.error != LINK_ERROR_NONE)
     {
         return result;
@@ -5291,7 +5401,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
-        if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
+        if (link_elf_symbol_needs_dynamic_import(exports, &object->symbols[symbol_index]))
         {
             import_indices[symbol_index] = import_count++;
         }
@@ -10631,7 +10741,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_elf64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_elf64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options, LinkElfIndex* exports)
 {
     static char8 const interpreter[] = "/system/bin/linker64";
     static char8 const library[] = "libc.so";
@@ -10642,7 +10752,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     bool has_import = options.dynamic_library_count != 0;
     for (u32 index = 0; index < object->symbol_count; index += 1)
     {
-        if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[index]))
+        if (link_elf_symbol_needs_dynamic_import(exports, &object->symbols[index]))
         {
             has_import = true;
             break;
@@ -10651,12 +10761,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     NativeExecutableLinkResult result = {0};
     if (object->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options)
+        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
-        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options)
+        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options, exports)
                             : link_native_executable_elf64_aarch64(arena, &staging_object, staging_options);
     }
     else
@@ -10804,13 +10914,20 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
     return result;
 }
 
-NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
+    LinkElfIndex elf_index = {0};
+    LinkElfIndex* exports = &elf_index;
     if (!arena || !object || object->error != OBJECT_ERROR_NONE || object->section_count != OBJECT_SECTION_COUNT || !object->sections ||
         (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
         (options.library_path_count && !options.library_paths) || (options.framework_path_count && !options.framework_paths) ||
         (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
+             !link_elf_index_initialize(temporary, options, exports))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
     }
@@ -10830,16 +10947,16 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
             for (u32 index = 0; !dynamic_image && index < object->symbol_count; index += 1)
             {
-                dynamic_image = link_elf_symbol_needs_dynamic_import(options, object->symbols + index);
+                dynamic_image = link_elf_symbol_needs_dynamic_import(exports, object->symbols + index);
             }
             if (object->target.cpu_arch == CPU_ARCH_X86_64)
             {
-                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options)
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports)
                                        : link_native_executable_elf64_x86_64(arena, object, options);
             }
             else
             {
-                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options)
+                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options, exports)
                                        : link_native_executable_elf64_aarch64(arena, object, options);
             }
         }
@@ -10859,7 +10976,7 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
     }
     else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        result = link_native_executable_android_elf64(arena, object, options);
+        result = link_native_executable_android_elf64(arena, object, options, exports);
     }
     else
     {
@@ -10868,3 +10985,21 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
 
     return result;
 }
+
+NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
+{
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    NativeExecutableLinkResult result = link_native_executable_with_scratch(arena, temporary.arena, object, options);
+    scratch_end(temporary);
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
+{
+    TemporalArena scope = arena_begin_temporal(temporary);
+    NativeExecutableLinkResult result = link_native_executable_with_scratch(arena, temporary, object, options);
+    scratch_end(scope);
+    return result;
+}
+#endif
