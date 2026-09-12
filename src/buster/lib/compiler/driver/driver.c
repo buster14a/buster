@@ -2009,7 +2009,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             memset(version_names, 0, (u64)version_name_count * sizeof(*version_names));
         }
     }
-    if (symbol_size)
+    // Export arrays use u32 counts and the link indexes reserve UINT32_MAX
+    // as an empty entry. Check before allocating or narrowing the ELF count.
+    if (symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX)
     {
         u64 symbol_count = symbol_size / DRIVER_ELF_SYMBOL_SIZE;
         bool versioned = version_symbol_size / sizeof(u16) >= symbol_count;

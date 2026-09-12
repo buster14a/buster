@@ -2,9 +2,11 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/link/link_internal.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/time.h>
 
 BUSTER_GLOBAL_LOCAL String8 link_test_temporary_executable_path(Arena* arena, String8 name, String8 suffix)
 {
@@ -2579,9 +2581,221 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_unused_got_marker(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_indexes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool benchmark = os_get_environment_variable(S8("BUSTER_ELF_DATA_BENCH")).length != 0;
+    u32 counts[] = {0, 1, 8, 32, 128, 512, 1024, 2048, 4096};
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(counts); population += 1)
+        {
+            u32 count = counts[population];
+            if (!benchmark && count > 128) continue;
+            TemporalArena fixture = arena_begin_temporal(arguments->arena);
+            Arena* arena = arguments->arena;
+            u32 groups = shape ? (count != 0) : count;
+            u32 export_count = shape ? count * 2 : count * 4;
+            u32 import_count = shape ? groups : count * 2;
+            NativeDynamicDataSymbol* data = arena_allocate(arena, NativeDynamicDataSymbol, export_count);
+            NativeDynamicVersionedSymbol* versions = arena_allocate(arena, NativeDynamicVersionedSymbol, export_count);
+            ObjectSymbol* symbols = arena_allocate_zeroed(arena, ObjectSymbol, (u64)import_count + count + 1);
+            u8 text[] = {0x31, 0xc0, 0xc3};
+            symbols[0] = (ObjectSymbol){.name = S8("main"), .kind = OBJECT_SYMBOL_FUNCTION,
+                .section = OBJECT_SECTION_TEXT, .size = sizeof(text), .global = true};
+            for (u32 entry = 0; entry < export_count; entry += 1)
+            {
+                u32 group = shape ? 0 : entry / 4;
+                u32 alias = shape ? entry / 2 : BUSTER_MIN(entry % 4, 2u);
+                String8 name = string_format(arena, S8("data_{u32}_{u32}"), group, alias);
+                u64 size = shape ? (entry % 2 ? 65536 : 16) : entry % 4 == 0 ? 8 : entry % 4 == 1 ? 32 : entry % 4 == 2 ? 16 : 65536;
+                data[entry] = (NativeDynamicDataSymbol){.name = name, .address = 0x1000 + (u64)group * 64, .size = size};
+                versions[entry] = (NativeDynamicVersionedSymbol){.name = name,
+                    .version = string_format(arena, S8("DATA_{u32}"), group), .has_default = true};
+            }
+            for (u32 entry = 0; entry < import_count; entry += 1)
+            {
+                symbols[entry + 1] = (ObjectSymbol){.name = data[shape ? 0 : entry / 2 * 4 + entry % 2].name,
+                    .kind = OBJECT_SYMBOL_DATA, .section = OBJECT_SECTION_UNDEFINED, .global = true};
+            }
+            // Unrelated globals made the old alias membership scan I*S. They
+            // stay local to the object and are deliberately not exported.
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+                symbols[import_count + entry + 1] = (ObjectSymbol){.name = string_format(arena, S8("global_{u32}"), entry),
+                    .kind = OBJECT_SYMBOL_DATA, .section = OBJECT_SECTION_ZERO, .global = true};
+            }
+            ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), symbols, import_count + count + 1, 0, 0);
+            NativeDynamicLibrary library = {.name = S8("libdatafixture.so"), .exported_data_symbols = data,
+                .exported_data_symbol_count = export_count, .versioned_symbols = versions, .versioned_symbol_count = export_count};
+            NativeExecutableLinkOptions options = {.dynamic_libraries = &library, .dynamic_library_count = 1};
+            Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+            Arena* temporary = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+            u64 first_hash = 0;
+            for (u32 iteration = 0; iteration < (benchmark ? 8u : 2u); iteration += 1)
+            {
+                u64 output_position = output->position;
+                u64 temporary_position = temporary->position;
+                TimeDataType start = timestamp_take();
+                NativeExecutableLinkResult linked = link_elf_test_executable(output, temporary, &object, options);
+                u64 ns = timestamp_ns_between(start, timestamp_take());
+                BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+                BUSTER_TEST(arguments, temporary->position == temporary_position);
+                BUSTER_TEST(arguments, link_test_elf_relocation_count(linked.executable, 5) == groups);
+                u64 hash = buster_hash_64(linked.executable.pointer, linked.executable.length);
+                if (!iteration) first_hash = hash;
+                BUSTER_TEST(arguments, hash == first_hash);
+                if (!iteration)
+                {
+                    u64 previous = 0;
+                    for (u32 group = 0; group < groups; group += 1)
+                    {
+                        u64 address = 0;
+                        u64 size = 0;
+                        BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, data[shape ? 0 : group * 4].name, &address, &size, 0));
+                        BUSTER_TEST(arguments, address && address != previous && size == 16);
+                        if (count <= 128 || group == 0 || group + 1 == groups)
+                        {
+                            String8 version = {0};
+                            String8 version_library = {0};
+                            BUSTER_TEST(arguments, link_test_elf_symbol_version(linked.executable, data[shape ? 0 : group * 4].name,
+                                &version, &version_library));
+                            BUSTER_STRING_TEST(arguments, version, versions[shape ? 0 : group * 4].version);
+                            BUSTER_STRING_TEST(arguments, version_library, library.name);
+                        }
+                        previous = address;
+                        if (!shape)
+                        {
+                            u64 pair = 0;
+                            BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, data[group * 4 + 1].name, &pair, 0, 0));
+                            BUSTER_TEST(arguments, pair == address);
+                        }
+                    }
+                    u64 header = 0;
+                    BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".dynsym"), 0, &header));
+                    u32 aliases = shape ? count - groups : count;
+                    // Null entry, the two hosted-runtime imports, data imports,
+                    // and unique aliases. No global definition is exported here.
+                    BUSTER_TEST(arguments, header && link_read_u64(linked.executable.pointer, header + 32) / 24 == 3 + import_count + aliases);
+                }
+                if (benchmark && iteration)
+                {
+                    string_print(S8("BENCH_ELF_DATA shape={u32} count={u32} imports={u32} exports={u32} iteration={u32} ns={u64} bytes={u64} retained={u64} temporary={u64} hash={u64}\n"),
+                        shape, count, import_count, export_count, iteration, ns, linked.executable.length,
+                        output->position - output_position, arena_dirty_position(temporary) - temporary_position, hash);
+                }
+                arena_set_position(output, output_position);
+            }
+            arena_destroy(temporary, 1);
+            arena_destroy(output, 1);
+            scratch_end(fixture);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_precedence(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 text[] = {0x31, 0xc0, 0xc3};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .kind = OBJECT_SYMBOL_FUNCTION, .section = OBJECT_SECTION_TEXT, .size = sizeof(text), .global = true},
+        {.name = S8("first"), .kind = OBJECT_SYMBOL_DATA, .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        {.name = S8("second"), .kind = OBJECT_SYMBOL_DATA, .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        {.name = S8("own"), .kind = OBJECT_SYMBOL_DATA, .section = OBJECT_SECTION_ZERO, .global = true},
+        {.name = S8("local"), .kind = OBJECT_SYMBOL_DATA, .section = OBJECT_SECTION_ZERO},
+    };
+    NativeDynamicDataSymbol runtime[] = {
+        {.name = S8("first"), .address = 0x1000, .size = 8},
+        {.name = S8("own"), .address = 0x1000, .size = 65536},
+        {.name = S8("local"), .address = 0x1000, .size = 16},
+        {.name = S8("local"), .address = 0x1000, .size = 65536},
+        {.name = S8("first"), .address = 0x2000, .size = 65536},
+    };
+    NativeDynamicDataSymbol other[] = {
+        {.name = S8("first"), .address = 0x1000, .size = 65536},
+        {.name = S8("second"), .address = 0x1000, .size = 32},
+        {.name = S8("other_alias"), .address = 0x1000, .size = 32},
+    };
+    NativeDynamicLibrary library = {.name = S8("libsecond.so"), .exported_data_symbols = other,
+        .exported_data_symbol_count = BUSTER_ARRAY_LENGTH(other)};
+    NativeDynamicVersionedSymbol runtime_versions[] = {
+        {.name = S8("first"), .version = S8("HIDDEN")},
+        {.name = S8("first"), .version = S8("RUNTIME"), .has_default = true},
+        {.name = S8("first"), .version = S8("LATER"), .has_default = true},
+        {.name = S8("second"), .version = S8("HIDDEN")},
+    };
+    NativeDynamicVersionedSymbol library_versions[] = {
+        {.name = S8("first"), .version = S8("LIBRARY"), .has_default = true},
+        {.name = S8("second"), .version = S8("LIBRARY"), .has_default = true},
+    };
+    library.versioned_symbols = library_versions;
+    library.versioned_symbol_count = BUSTER_ARRAY_LENGTH(library_versions);
+    NativeExecutableLinkOptions options = {.runtime_data_symbols = runtime, .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(runtime),
+        .dynamic_libraries = &library, .dynamic_library_count = 1, .runtime_versioned_symbols = runtime_versions,
+        .runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(runtime_versions)};
+    ObjectFile object = link_test_object_make(arguments->arena, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), symbols, BUSTER_ARRAY_LENGTH(symbols), 0, 0);
+    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, options);
+    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+    u64 first = 0;
+    u64 second = 0;
+    u64 local = 0;
+    u64 first_size = 0;
+    u64 second_size = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("first"), &first, &first_size, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("second"), &second, &second_size, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("local"), &local, 0, 0));
+    BUSTER_TEST(arguments, first && first != second && local == first && first_size == 16 && second_size == 32);
+    BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(linked.executable, S8("own"), 0, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(linked.executable, 5) == 2);
+    String8 version = {0};
+    String8 version_library = {0};
+    BUSTER_TEST(arguments, link_test_elf_symbol_version(linked.executable, S8("first"), &version, &version_library));
+    BUSTER_STRING_TEST(arguments, version, S8("RUNTIME"));
+    BUSTER_STRING_TEST(arguments, version_library, S8("libc.so.6"));
+    BUSTER_TEST(arguments, link_test_elf_symbol_version(linked.executable, S8("second"), &version, &version_library));
+    BUSTER_STRING_TEST(arguments, version, S8("LIBRARY"));
+    BUSTER_STRING_TEST(arguments, version_library, S8("libsecond.so"));
+    // Identical backing tables, with different view lengths, still denote one
+    // object. Only the first imported definition's view supplies its aliases.
+    other[0] = (NativeDynamicDataSymbol){.name = S8("first"), .address = 0x1000, .size = 8};
+    options.runtime_data_symbols = other;
+    options.runtime_data_symbol_count = 1;
+    linked = link_native_executable(arguments->arena, &object, options);
+    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("first"), &first, &first_size, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("second"), &second, 0, 0));
+    BUSTER_TEST(arguments, first == second && first_size == 8);
+    BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(linked.executable, S8("other_alias"), 0, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(linked.executable, 5) == 1);
+    // Reject aggregate sizing and missing-table errors before walking exports.
+    NativeExecutableLinkOptions invalid[] = {
+        {.runtime_data_symbols = runtime, .runtime_data_symbol_count = UINT32_MAX},
+        {.runtime_versioned_symbol_count = 1},
+        {.runtime_data_symbol_count = 1},
+        {.dynamic_libraries = &library, .dynamic_library_count = UINT32_MAX},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        BUSTER_TEST(arguments, link_native_executable(arguments->arena, &object, invalid[index]).error == LINK_ERROR_INVALID_INPUT);
+    }
+    options.runtime_data_symbol_count = UINT32_MAX / 2;
+    library.exported_data_symbol_count = UINT32_MAX / 2;
+    BUSTER_TEST(arguments, link_native_executable(arguments->arena, &object, options).error == LINK_ERROR_INVALID_INPUT);
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult data_indexes = link_test_elf_data_indexes(arguments);
+    result.succeeded_test_count += data_indexes.succeeded_test_count;
+    result.test_count += data_indexes.test_count;
+    UnitTestResult data_precedence = link_test_elf_data_precedence(arguments);
+    result.succeeded_test_count += data_precedence.succeeded_test_count;
+    result.test_count += data_precedence.test_count;
     UnitTestResult initializer_order = link_test_initializer_order(arguments);
     result.succeeded_test_count += initializer_order.succeeded_test_count;
     result.test_count += initializer_order.test_count;

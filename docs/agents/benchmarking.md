@@ -448,3 +448,37 @@ Keep this isolated printer replay separate from the native throughput harness's
 `--artifact assembly` whole-process measurements. The #116 audit retains a
 supplement using the same collector for geometric call/function-pointer C
 inputs, object controls, alternating A/B pairs and separate PMU probes.
+
+## ELF imported-data scaling
+
+`BUSTER_TEST_JOBS=1 BUSTER_ELF_DATA_BENCH=1 build/Release/ide test --ci=1`
+adds geometric imported-data replays to the registered link and driver tests.
+Use the trusted Clang Release executable. Ordinary tests keep the bounded
+cases and never gate on timing.
+
+`BENCH_ELF_DATA` times the complete ELF writer, including index construction
+and scratch rewind, with generated library export tables and object symbols.
+Shape 0 scales separate objects, paired imports, duplicate aliases, unrelated
+globals and distinct versions; shape 1 scales one object's duplicate aliases.
+There is one warmup and seven samples through 4,096 entries. `temporary` is
+the high-water byte count of the dedicated index arena; `retained` is output
+arena growth, including writer work arrays and the image. Neither is RSS.
+Output size/hash, copy counts, slot sharing, sizing and version binding are
+checked outside the interval. Repeated dirty-arena runs must agree exactly.
+
+On native Linux, `BENCH_ELF_DSO` builds real shared libraries and PIE-compiled
+objects with the configured host compiler. Shape 0 has N data objects, 3N
+data exports, 2N data imports, N function imports and N unrelated globals.
+Shape 1 has one data object, N aliases, N+1 data imports and one function
+import. N is 4, 128, 256, 512, 1,024, 2,048 or 4,096. Construction and the
+system-linker reference are outside the one-warmup/seven-sample driver timer.
+The timed invocation reads the object and DSOs, links and writes its image;
+`retained` measures the invocation arena after that work. Both native images
+execute afterward, verifying shared addresses and writes visible through the
+DSO's own references. Set `BUSTER_ELF_DATA_OUTPUT` to an output directory to
+retain generated C, shared libraries, objects and images for paired compiler
+runs and independent ELF inspection. Tests use temporary paths by default.
+
+Keep whole-process paired timing/PMU probes separate from these in-process
+replays. Compare identical saved objects/libraries, target and flags; require
+byte-identical baseline/candidate ELF images before interpreting a speedup.
