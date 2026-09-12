@@ -73,6 +73,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
         case CODEGEN_MODULE_RELOCATION_X86_64_PC32:
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26:
+        case CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26:
             aarch64 = true;
             break;
         case CODEGEN_MODULE_RELOCATION_ABSOLUTE32:
@@ -6070,6 +6071,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
         case ASSEMBLY_RELOCATION_AARCH64_CALL26:
             *module_kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26;
             break;
+        case ASSEMBLY_RELOCATION_AARCH64_BRANCH26:
+            *module_kind = CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26;
+            break;
         default:
             result = false;
             break;
@@ -6140,7 +6144,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena
                 .symbol = symbol,
                 .offset = instruction_offset + (u32)relocation.offset,
                 .source = CODEGEN_MODULE_RELOCATION_CODE,
-                .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+                .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 ||
+                           kind == CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
                 .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                 .kind = (u8)kind,
             };
@@ -9995,7 +10000,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         .symbol = symbol,
                                         .offset = (u32)buffer.count + relocation.offset,
                                         .source = CODEGEN_MODULE_RELOCATION_CODE,
-                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 ||
+                                                   kind == CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
                                         .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                                         .kind = (u8)kind,
                                     };
@@ -10176,7 +10182,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         .symbol = symbol,
                                         .offset = (u32)buffer.count + relocation.offset,
                                         .source = CODEGEN_MODULE_RELOCATION_CODE,
-                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 ||
+                                                   kind == CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
                                         .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                                         .kind = (u8)kind,
                                     };

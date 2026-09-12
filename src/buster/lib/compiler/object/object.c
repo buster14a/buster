@@ -9703,6 +9703,7 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
         {
             case CODEGEN_MODULE_RELOCATION_X86_64_PC32: *destination = OBJECT_RELOCATION_X86_64_PC32; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26: *destination = OBJECT_RELOCATION_AARCH64_CALL26; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26: *destination = OBJECT_RELOCATION_AARCH64_JUMP26; return true;
             case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; return true;
             case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; return true;
             case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; return true;
