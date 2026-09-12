@@ -13,7 +13,9 @@
 #include <buster/lib/string.h>
 
 #define TTF_GLYPH_RECURSION_LIMIT 8u
-#define TTF_CURVE_SEGMENTS 12u
+#define TTF_CURVE_FLATNESS_TOLERANCE 0.25f
+#define TTF_CURVE_SUBDIVISION_LIMIT 10u
+#define TTF_CURVE_STACK_CAPACITY (TTF_CURVE_SUBDIVISION_LIMIT + 1u)
 #define TTF_RASTER_SUBSAMPLES 4u
 
 typedef struct TTF_TableRecord TTF_TableRecord;
@@ -44,6 +46,23 @@ struct TTF_RasterPoint
 {
     f32 x;
     f32 y;
+};
+
+typedef struct TTF_QuadraticWork TTF_QuadraticWork;
+struct TTF_QuadraticWork
+{
+    TTF_RasterPoint from;
+    TTF_RasterPoint control;
+    TTF_RasterPoint to;
+    u32 depth;
+};
+
+typedef struct TTF_QuadraticStatistics TTF_QuadraticStatistics;
+struct TTF_QuadraticStatistics
+{
+    f32 maximum_error;
+    bool subdivision_limit_reached;
+    u8 reserved[3];
 };
 
 typedef struct TTF_RasterPath TTF_RasterPath;
@@ -559,7 +578,10 @@ BUSTER_GLOBAL_LOCAL void ttf_raster_path_add_point(TTF_RasterPath* path, TTF_Ras
 {
     if (path->point_count < path->point_capacity)
     {
-        path->points[path->point_count] = point;
+        if (path->points)
+        {
+            path->points[path->point_count] = point;
+        }
         path->point_count += 1;
     }
     else
@@ -572,7 +594,10 @@ BUSTER_GLOBAL_LOCAL void ttf_raster_path_end_contour(TTF_RasterPath* path)
 {
     if (path->contour_count < path->contour_capacity)
     {
-        path->contour_ends[path->contour_count] = path->point_count;
+        if (path->contour_ends)
+        {
+            path->contour_ends[path->contour_count] = path->point_count;
+        }
         path->contour_count += 1;
     }
     else
@@ -602,20 +627,88 @@ BUSTER_GLOBAL_LOCAL void ttf_append_line(TTF_RasterPath* path, TTF_Point to, f32
     ttf_raster_path_add_point(path, ttf_pixel_point(to, scale_x, scale_y, x0, y0));
 }
 
-BUSTER_GLOBAL_LOCAL void ttf_append_quadratic(TTF_RasterPath* path, TTF_Point from, TTF_Point control, TTF_Point to, f32 scale_x, f32 scale_y, s32 x0, s32 y0)
+BUSTER_GLOBAL_LOCAL TTF_RasterPoint ttf_raster_midpoint(TTF_RasterPoint a, TTF_RasterPoint b)
 {
-    for (u32 segment = 1; segment <= TTF_CURVE_SEGMENTS; segment += 1)
+    TTF_RasterPoint result = {
+        .x = (a.x + b.x) * 0.5f,
+        .y = (a.y + b.y) * 0.5f,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ttf_append_quadratic(TTF_RasterPath* path, TTF_Point from, TTF_Point control, TTF_Point to, f32 scale_x, f32 scale_y, s32 x0,
+                                              s32 y0, TTF_QuadraticStatistics* statistics)
+{
+    TTF_QuadraticWork work[TTF_CURVE_STACK_CAPACITY];
+    u32 work_count = 1;
+    work[0] = (TTF_QuadraticWork){
+        .from = ttf_pixel_point(from, scale_x, scale_y, x0, y0),
+        .control = ttf_pixel_point(control, scale_x, scale_y, x0, y0),
+        .to = ttf_pixel_point(to, scale_x, scale_y, x0, y0),
+    };
+    while (work_count != 0 && !path->overflowed)
     {
-        f32 t = (f32)segment / (f32)TTF_CURVE_SEGMENTS;
-        f32 omt = 1.0f - t;
-        TTF_Point point = {
-            .x = omt * omt * from.x + 2.0f * omt * t * control.x + t * t * to.x,
-            .y = omt * omt * from.y + 2.0f * omt * t * control.y + t * t * to.y,
-            .on_curve = true,
-        };
-        ttf_raster_path_add_point(path, ttf_pixel_point(point, scale_x, scale_y, x0, y0));
+        TTF_QuadraticWork curve = work[work_count - 1u];
+        work_count -= 1u;
+        // For a quadratic, the vector from the curve to the chord at the
+        // same parameter is t(1-t) * (2*control-from-to). Its maximum length
+        // is therefore one quarter of the second-difference vector below.
+        // Testing this in device space bounds every emitted chord to 0.25px.
+        f32 second_x = curve.from.x - 2.0f * curve.control.x + curve.to.x;
+        f32 second_y = curve.from.y - 2.0f * curve.control.y + curve.to.y;
+        f32 error_squared = (second_x * second_x + second_y * second_y) * (1.0f / 16.0f);
+        bool flat = error_squared <= TTF_CURVE_FLATNESS_TOLERANCE * TTF_CURVE_FLATNESS_TOLERANCE;
+        if (flat || curve.depth == TTF_CURVE_SUBDIVISION_LIMIT)
+        {
+            ttf_raster_path_add_point(path, curve.to);
+            if (statistics)
+            {
+                f32 error = sqrt_f32(error_squared);
+                if (error > statistics->maximum_error)
+                {
+                    statistics->maximum_error = error;
+                }
+                statistics->subdivision_limit_reached |= !flat;
+            }
+        }
+        else
+        {
+            TTF_RasterPoint from_control = ttf_raster_midpoint(curve.from, curve.control);
+            TTF_RasterPoint control_to = ttf_raster_midpoint(curve.control, curve.to);
+            TTF_RasterPoint split = ttf_raster_midpoint(from_control, control_to);
+            u32 next_depth = curve.depth + 1u;
+            // Depth-first emission needs only depth+1 stack entries. Push the
+            // right half first so the left half is emitted first.
+            work[work_count] = (TTF_QuadraticWork){.from = split, .control = control_to, .to = curve.to, .depth = next_depth};
+            work_count += 1u;
+            work[work_count] = (TTF_QuadraticWork){.from = curve.from, .control = from_control, .to = split, .depth = next_depth};
+            work_count += 1u;
+        }
     }
 }
+
+#if BUSTER_INCLUDE_TESTS
+TTF_QuadraticTestResult truetype_flatten_quadratic_for_test(TTF_RasterTestPoint from, TTF_RasterTestPoint control, TTF_RasterTestPoint to, f32 scale_x,
+                                                            f32 scale_y)
+{
+    TTF_RasterPoint points[1u << TTF_CURVE_SUBDIVISION_LIMIT];
+    TTF_RasterPath path = {
+        .points = points,
+        .point_capacity = BUSTER_ARRAY_LENGTH(points),
+    };
+    TTF_QuadraticStatistics statistics = {0};
+    TTF_Point source_from = {.x = from.x, .y = from.y, .on_curve = true};
+    TTF_Point source_control = {.x = control.x, .y = control.y};
+    TTF_Point source_to = {.x = to.x, .y = to.y, .on_curve = true};
+    ttf_append_quadratic(&path, source_from, source_control, source_to, scale_x, scale_y, 0, 0, &statistics);
+    TTF_QuadraticTestResult result = {
+        .segment_count = path.point_count,
+        .maximum_error = statistics.maximum_error,
+        .subdivision_limit_reached = statistics.subdivision_limit_reached,
+    };
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool ttf_append_glyph_path(Arena* arena, const TTF_FontInformation* information, u32 glyph, TTF_Transform transform, f32 scale_x,
                                                f32 scale_y, s32 x0, s32 y0, u32 recursion_depth, TTF_RasterPath* path);
@@ -778,14 +871,14 @@ BUSTER_GLOBAL_LOCAL bool ttf_append_simple_glyph_path(Arena* arena, const TTF_Fo
                 TTF_Point next = point == contour_end ? first : points[point + 1u];
                 if (next.on_curve)
                 {
-                    ttf_append_quadratic(path, current, p, next, scale_x, scale_y, x0, y0);
+                    ttf_append_quadratic(path, current, p, next, scale_x, scale_y, x0, y0, 0);
                     current = next;
                     point += 2u;
                 }
                 else
                 {
                     TTF_Point mid = ttf_midpoint(p, next);
-                    ttf_append_quadratic(path, current, p, mid, scale_x, scale_y, x0, y0);
+                    ttf_append_quadratic(path, current, p, mid, scale_x, scale_y, x0, y0, 0);
                     current = mid;
                     point += 1u;
                 }
@@ -1262,7 +1355,7 @@ BUSTER_GLOBAL_LOCAL TTF_Bitmap ttf_bitmap_box(const TTF_FontInformation* informa
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ttf_bitmap_work_is_valid(u32 width, u32 height, u32 point_count)
+BUSTER_GLOBAL_LOCAL u32 ttf_bitmap_point_limit(u32 width, u32 height)
 {
     // Each point contributes at most one edge. Conservatively assume every
     // edge is active on every sampled row, with a full binary search in x.
@@ -1273,8 +1366,22 @@ BUSTER_GLOBAL_LOCAL bool ttf_bitmap_work_is_valid(u32 width, u32 height, u32 poi
     {
         search_steps += 1;
     }
-    bool result = sample_height != 0 && search_steps != 0 &&
-                  point_count <= BUSTER_TTF_MAX_RASTER_EDGE_STEPS / sample_height / search_steps;
+    u64 result = 0;
+    if (sample_height != 0 && search_steps != 0)
+    {
+        result = BUSTER_TTF_MAX_RASTER_EDGE_STEPS / sample_height / search_steps;
+        if (result > BUSTER_TTF_MAX_RASTER_POINTS)
+        {
+            result = BUSTER_TTF_MAX_RASTER_POINTS;
+        }
+    }
+    return (u32)result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ttf_bitmap_work_is_valid(u32 width, u32 height, u32 point_count)
+{
+    u32 point_limit = ttf_bitmap_point_limit(width, height);
+    bool result = point_limit != 0 && point_count <= point_limit;
     return result;
 }
 
@@ -1298,38 +1405,48 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
         if (result.width != 0 && result.height != 0)
         {
             u64 position = arena->position;
-            u32 max_points = (u32)information->max_points + (u32)information->max_composite_points;
             u32 max_contours = (u32)information->max_contours + (u32)information->max_composite_contours;
-            if (max_points < 256u)
-            {
-                max_points = 256u;
-            }
             if (max_contours < 64u)
             {
                 max_contours = 64u;
             }
-            u32 raster_point_capacity = max_points * (TTF_CURVE_SEGMENTS + 1u) + max_contours * 2u + 64u;
-            TTF_RasterPath path = {
-                .points = arena_allocate(arena, TTF_RasterPoint, raster_point_capacity),
-                .contour_ends = arena_allocate(arena, u32, max_contours),
-                .point_capacity = raster_point_capacity,
+            TTF_RasterPath counted_path = {
+                .point_capacity = ttf_bitmap_point_limit((u32)result.width, (u32)result.height),
                 .contour_capacity = max_contours,
             };
 
             TTF_Transform identity = {.m00 = 1.0f, .m11 = 1.0f};
-            if (ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, result.x_offset, result.y_offset, 0, &path) &&
-                !path.overflowed && path.point_count != 0 &&
-                ttf_bitmap_work_is_valid((u32)result.width, (u32)result.height, path.point_count))
+            bool counted = ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, result.x_offset, result.y_offset, 0, &counted_path) &&
+                           !counted_path.overflowed && counted_path.point_count != 0;
+            u32 raster_point_count = counted_path.point_count;
+            u32 raster_contour_count = counted_path.contour_count;
+            arena_set_position(arena, position);
+            if (counted)
             {
-                // ttf_bitmap_box checked this product against the pixel
-                // budget. One byte per pixel makes it the byte count too.
-                u64 pixel_count = (u64)(u32)result.width * (u64)(u32)result.height;
-                result.pixels = arena_allocate(arena, u8, pixel_count);
-                ttf_rasterize_path(arena, &path, result.pixels, (u32)result.width, (u32)result.height);
+                TTF_RasterPath path = {
+                    .points = arena_allocate(arena, TTF_RasterPoint, raster_point_count),
+                    .contour_ends = arena_allocate(arena, u32, raster_contour_count),
+                    .point_capacity = raster_point_count,
+                    .contour_capacity = raster_contour_count,
+                };
+                if (ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, result.x_offset, result.y_offset, 0, &path) && !path.overflowed &&
+                    path.point_count == raster_point_count && path.contour_count == raster_contour_count &&
+                    ttf_bitmap_work_is_valid((u32)result.width, (u32)result.height, path.point_count))
+                {
+                    // ttf_bitmap_box checked this product against the pixel
+                    // budget. One byte per pixel makes it the byte count too.
+                    u64 pixel_count = (u64)(u32)result.width * (u64)(u32)result.height;
+                    result.pixels = arena_allocate(arena, u8, pixel_count);
+                    ttf_rasterize_path(arena, &path, result.pixels, (u32)result.width, (u32)result.height);
+                }
+                else
+                {
+                    arena_set_position(arena, position);
+                    result = (TTF_Bitmap){0};
+                }
             }
             else
             {
-                arena_set_position(arena, position);
                 result = (TTF_Bitmap){0};
             }
         }

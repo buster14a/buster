@@ -10,7 +10,7 @@ never copied into or patched in this repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_quickjs --config Release /path/to/quickjs /path/to/test262
+./build.sh test_quickjs --config Release /path/to/quickjs /path/to/test262
 ```
 
 QuickJS publishes releases as dated tarballs rather than tags, so the pin is

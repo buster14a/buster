@@ -29,6 +29,17 @@ BUSTER_GLOBAL_LOCAL u32 truetype_test_random(u32* state)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 truetype_test_bitmap_hash(TTF_Bitmap bitmap)
+{
+    u64 result = 14695981039346656037ull;
+    u64 pixel_count = (u64)(u32)bitmap.width * (u64)(u32)bitmap.height;
+    for (u64 pixel = 0; pixel < pixel_count; pixel += 1)
+    {
+        result = (result ^ bitmap.pixels[pixel]) * 1099511628211ull;
+    }
+    return result;
+}
+
 UnitTestResult truetype_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -60,6 +71,56 @@ UnitTestResult truetype_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, solid);
     arena_set_position(arena, position);
+
+    TTF_RasterTestPoint curve_from = {.x = 0.0f, .y = 0.0f};
+    TTF_RasterTestPoint curve_control = {.x = 50.0f, .y = 100.0f};
+    TTF_RasterTestPoint curve_to = {.x = 100.0f, .y = 0.0f};
+    TTF_QuadraticTestResult flat_curve = truetype_flatten_quadratic_for_test(curve_from, (TTF_RasterTestPoint){.x = 50.0f, .y = 0.01f}, curve_to, 1.0f, 1.0f);
+    BUSTER_TEST(arguments, flat_curve.segment_count == 1 && flat_curve.maximum_error <= 0.25f && !flat_curve.subdivision_limit_reached);
+
+    f32 curve_scales[] = {0.01f, 0.1f, 1.0f};
+    u32 curve_segment_counts[] = {2, 8, 16};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(curve_scales); index += 1)
+    {
+        TTF_QuadraticTestResult curve =
+            truetype_flatten_quadratic_for_test(curve_from, curve_control, curve_to, curve_scales[index], curve_scales[index]);
+        BUSTER_TEST(arguments, curve.segment_count == curve_segment_counts[index] && curve.maximum_error <= 0.25f && !curve.subdivision_limit_reached);
+    }
+
+    TTF_QuadraticTestResult extreme_curve =
+        truetype_flatten_quadratic_for_test(curve_from, (TTF_RasterTestPoint){.x = 50.0f, .y = 10000000000.0f}, curve_to, 1.0f, 1.0f);
+    BUSTER_TEST(arguments, extreme_curve.segment_count == 1024 && extreme_curve.maximum_error > 0.25f && extreme_curve.subdivision_limit_reached);
+
+    // One quadratic arch and three lines form a deterministic curved glyph.
+    // These three pixel-space scales are visual goldens for small, normal and
+    // large rendering, including a curve that exceeds the old 12 segments.
+    u8 curve_bytes[] = {
+        0, 0, 0, 0, 0, 0, 0, 39,
+        0, 1, 0, 0, 0, 0, 0, 64, 0, 64,
+        0, 4, 0, 0,
+        1, 0, 1, 1, 1,
+        0, 0, 0, 32, 0, 32, 0, 0, 255, 192,
+        0, 0, 0, 64, 255, 192, 0, 64, 0, 0,
+    };
+    TTF_FontInformation curve_font = {
+        .data = {.pointer = curve_bytes, .length = sizeof(curve_bytes)},
+        .glyf = 8,
+        .num_glyphs = 1,
+        .index_to_loc_format = 1,
+        .max_points = 5,
+        .max_contours = 1,
+    };
+    f32 bitmap_scales[] = {0.125f, 0.5f, 2.0f};
+    u32 bitmap_dimensions[] = {8, 32, 128};
+    u64 bitmap_hashes[] = {5808018917995742617ull, 17460563367413290325ull, 11190615675908677403ull};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bitmap_scales); index += 1)
+    {
+        bitmap = truetype_get_codepoint_bitmap(arena, &curve_font, bitmap_scales[index], bitmap_scales[index], 0);
+        u64 hash = bitmap.pixels ? truetype_test_bitmap_hash(bitmap) : 0;
+        BUSTER_TEST(arguments,
+                    bitmap.pixels && bitmap.width == (s32)bitmap_dimensions[index] && bitmap.height == (s32)bitmap_dimensions[index] && hash == bitmap_hashes[index]);
+        arena_set_position(arena, position);
+    }
 
     bitmap = truetype_get_codepoint_bitmap(arena, &font, 0.5f, 0.25f, 0);
     BUSTER_TEST(arguments, bitmap.pixels && bitmap.width == 4 && bitmap.height == 3 && bitmap.x_offset == -1 && bitmap.y_offset == -2);
@@ -173,7 +234,9 @@ UnitTestResult truetype_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, truetype_bitmap_work_is_valid_for_test(1, 4096, edge_limit));
     BUSTER_TEST(arguments, !truetype_bitmap_work_is_valid_for_test(1, 4096, edge_limit + 1u));
     BUSTER_TEST(arguments, !truetype_bitmap_work_is_valid_for_test(4096, 256, UINT32_MAX));
+    BUSTER_TEST(arguments, !truetype_bitmap_work_is_valid_for_test(1, 1, BUSTER_TTF_MAX_RASTER_POINTS + 1u));
     BUSTER_TEST(arguments, !truetype_bitmap_work_is_valid_for_test(0, 1, 1));
+    BUSTER_TEST(arguments, !truetype_bitmap_work_is_valid_for_test(0, 1, 0));
     BUSTER_TEST(arguments, !truetype_bitmap_work_is_valid_for_test(1, 0, 1));
 
     // Six repeated-flag runs encode 1536 stationary on-curve points. Even

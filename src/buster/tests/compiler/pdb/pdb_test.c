@@ -214,14 +214,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
         .sections = &section, .section_count = 1, .age = 1, .code_section = 1, .code_size = 16, .machine = 0x8664,
     };
     PdbResult built = pdb_build(arguments->arena, input);
-    BUSTER_TEST(arguments, built.valid);
+    bool first_build_valid = BUSTER_REQUIRE(arguments, built.valid);
     BUSTER_TEST(arguments, memcmp(blob, original, sizeof(blob)) == 0);
-    if (built.valid)
+    if (first_build_valid)
     {
         ByteSlice module = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_MODULE);
         // Symbol signature, checksum header/payload, line header/payload, then global-ref count.
-        BUSTER_TEST(arguments, module.length == 4 + 108 + 100 + 4);
-        if (module.length >= 212)
+        if (BUSTER_REQUIRE(arguments, module.length == 4 + 108 + 100 + 4))
         {
             BUSTER_TEST(arguments, pdb_read_u32(module, 4) == 0xf4);
             BUSTER_TEST(arguments, pdb_read_u32(module, 8) == 100);
@@ -247,12 +246,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
     input.module_count = BUSTER_ARRAY_LENGTH(modules);
     section.virtual_size = 32; // Both modules' sixteen-byte ranges are in the image.
     built = pdb_build(arguments->arena, input);
-    BUSTER_TEST(arguments, built.valid);
-    if (built.valid)
+    if (BUSTER_REQUIRE(arguments, built.valid))
     {
         ByteSlice second = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_COUNT);
-        BUSTER_TEST(arguments, second.length >= 212);
-        if (second.length >= 212)
+        if (BUSTER_REQUIRE(arguments, second.length >= 212))
         {
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(record_offsets); index += 1)
             {
@@ -313,7 +310,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_scope_links(UnitTestArguments* argum
         symbol_size += kind == 0xf1 ? length : 0;
         cursor += 8 + (((u64)length + 3) & ~(u64)3);
     }
-    BUSTER_TEST(arguments, symbol_size <= stream.length);
+    bool stream_complete = BUSTER_REQUIRE(arguments, symbol_size <= stream.length);
     u32 stack[16] = {0};
     u32 ends[16] = {0};
     u32 depth = 0;
@@ -321,29 +318,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_scope_links(UnitTestArguments* argum
     u32 blocks = 0;
     u32 inlines = 0;
     u64 cursor = 4;
-    while (cursor + 4 <= symbol_size && symbol_size <= stream.length)
+    while (cursor + 4 <= symbol_size && stream_complete)
     {
         u16 length = 0;
         u16 kind = 0;
         memcpy(&length, stream.pointer + cursor, 2);
         memcpy(&kind, stream.pointer + cursor + 2, 2);
-        BUSTER_TEST(arguments, length >= 2 && (u64)length + 2 <= symbol_size - cursor);
-        if (length < 2 || (u64)length + 2 > symbol_size - cursor)
+        if (!BUSTER_REQUIRE(arguments, length >= 2 && (u64)length + 2 <= symbol_size - cursor))
         {
             break;
         }
         if (kind == 0x1110 || kind == 0x1103 || kind == 0x114d)
         {
-            BUSTER_TEST(arguments, depth < BUSTER_ARRAY_LENGTH(stack) && length >= 14);
-            if (depth == BUSTER_ARRAY_LENGTH(stack) || length < 14)
+            if (!BUSTER_REQUIRE(arguments, depth < BUSTER_ARRAY_LENGTH(stack) && length >= 14))
             {
                 break;
             }
             u32 parent = pdb_read_u32(stream, cursor + 4);
             u32 end = pdb_read_u32(stream, cursor + 8);
             BUSTER_TEST(arguments, parent == (depth ? stack[depth - 1] : 0));
-            BUSTER_TEST(arguments, end > cursor && (u64)end + 4 <= symbol_size);
-            if (end > cursor && (u64)end + 4 <= symbol_size)
+            if (BUSTER_REQUIRE(arguments, end > cursor && (u64)end + 4 <= symbol_size))
             {
                 u16 end_kind = 0;
                 memcpy(&end_kind, stream.pointer + end + 2, 2);
@@ -357,8 +351,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_scope_links(UnitTestArguments* argum
         }
         else if (kind == 0x0006 || kind == 0x114e)
         {
-            BUSTER_TEST(arguments, depth && ends[depth - 1] == cursor);
-            if (!depth)
+            if (!BUSTER_REQUIRE(arguments, depth && ends[depth - 1] == cursor))
             {
                 break;
             }
@@ -400,8 +393,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_continuation_merge(UnitTestArguments
     PdbSection section = {.name = S8(".text"), .virtual_address = 0x1000, .virtual_size = 32, .raw_size = 32, .characteristics = 0x60000020};
     PdbResult built = pdb_build(arguments->arena, (PdbInput){.sections = &section, .section_count = 1, .modules = modules,
         .module_count = 2, .code_section = 1, .code_size = 32, .machine = 0x8664, .age = 1});
-    BUSTER_TEST(arguments, built.valid);
-    if (built.valid)
+    if (BUSTER_REQUIRE(arguments, built.valid))
     {
         ByteSlice tpi = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_TPI);
         u64 offsets[64] = {0};
@@ -591,17 +583,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_layout_regressions(UnitTestArguments
          .code_section = 1, .code_offset = 32, .code_size = 24},
     };
     PdbResult built = pdb_build(arena, (PdbInput){.sections = &section, .section_count = 1, .modules = modules, .module_count = 2});
-    BUSTER_TEST(arguments, built.valid);
-    if (built.valid)
+    if (BUSTER_REQUIRE(arguments, built.valid))
     {
         BUSTER_TEST(arguments, pdb_test_check_msf(arena, built.bytes));
         ByteSlice dbi = pdb_test_stream_bytes(arena, built.bytes, 3);
-        BUSTER_TEST(arguments, dbi.length >= 64);
-        if (dbi.length >= 64)
+        if (BUSTER_REQUIRE(arguments, dbi.length >= 64))
         {
             u64 contribution = 64 + pdb_test_load32(dbi.pointer + 24) + 4;
-            BUSTER_TEST(arguments, contribution + 56 <= dbi.length);
-            if (contribution + 56 <= dbi.length)
+            if (BUSTER_REQUIRE(arguments, contribution + 56 <= dbi.length))
             {
                 BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + contribution + 8) == 16);
                 BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + contribution + 28 + 4) == 32);
@@ -633,8 +622,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_msf_boundaries(UnitTestArguments* ar
         }
         ByteWriter stream = {.bytes = payload, .count = size, .capacity = size};
         PdbResult built = pdb_msf_build(arena, &stream, 1);
-        BUSTER_TEST(arguments, built.valid);
-        if (built.valid)
+        if (BUSTER_REQUIRE(arguments, built.valid))
         {
             BUSTER_TEST(arguments, pdb_test_load32(built.bytes.pointer + 40) == expected_blocks[fixture]);
             BUSTER_TEST(arguments, pdb_test_check_msf(arena, built.bytes));
@@ -702,23 +690,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_contributions(UnitTestArguments* arg
     PdbInput input = {.sections = sections, .section_count = 3, .modules = modules, .module_count = 3};
     PdbResult built = pdb_build(arguments->arena, input);
     PdbResult repeated = pdb_build(arguments->arena, input);
-    BUSTER_TEST(arguments, built.valid && repeated.valid);
-    if (built.valid && repeated.valid)
+    if (BUSTER_REQUIRE(arguments, built.valid && repeated.valid))
     {
         BUSTER_TEST(arguments, built.bytes.length == repeated.bytes.length && memcmp(built.bytes.pointer, repeated.bytes.pointer, built.bytes.length) == 0);
         ByteSlice dbi = pdb_test_stream_bytes(arguments->arena, built.bytes, 3);
-        BUSTER_TEST(arguments, dbi.length >= 64);
-        if (dbi.length >= 64)
+        if (BUSTER_REQUIRE(arguments, dbi.length >= 64))
         {
             u64 contributions = 64 + pdb_test_load32(dbi.pointer + 24) + 4;
             BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + 28) == 4 + 4 * 28);
-            BUSTER_TEST(arguments, contributions + 4 * 28 <= dbi.length);
-            u64 module = 64;
-            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modules); index += 1)
+            if (BUSTER_REQUIRE(arguments, contributions + 4 * 28 <= dbi.length))
             {
-                BUSTER_TEST(arguments, module + 64 <= dbi.length);
-                if (module + 64 <= dbi.length && contributions + 4 * 28 <= dbi.length)
+                u64 module = 64;
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modules); index += 1)
                 {
+                    if (!BUSTER_REQUIRE(arguments, module + 64 <= dbi.length))
+                    {
+                        break;
+                    }
                     if (index < 2)
                     {
                         BUSTER_TEST(arguments, memcmp(dbi.pointer + module + 4, dbi.pointer + contributions + index * 2 * 28, 28) == 0);
@@ -811,19 +799,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
     };
     PdbInput input = {.sections = &section, .section_count = 1, .modules = modules, .module_count = 2};
     PdbResult built = pdb_build(arena, input);
-    BUSTER_TEST(arguments, built.valid);
-    if (built.valid)
+    if (BUSTER_REQUIRE(arguments, built.valid))
     {
         ByteSlice dbi = pdb_test_stream_bytes(arena, built.bytes, PDB_TEST_STREAM_DBI);
-        BUSTER_TEST(arguments, dbi.length >= PDB_TEST_DBI_HEADER_SIZE);
-        if (dbi.length >= PDB_TEST_DBI_HEADER_SIZE)
+        if (BUSTER_REQUIRE(arguments, dbi.length >= PDB_TEST_DBI_HEADER_SIZE))
         {
             u64 source_start = PDB_TEST_DBI_HEADER_SIZE + (u64)pdb_read_u32(dbi, 24) + pdb_read_u32(dbi, 28) + pdb_read_u32(dbi, 32);
             u64 source_size = pdb_read_u32(dbi, 36);
             bool valid = source_start <= dbi.length && source_size <= dbi.length - source_start &&
                          source_size >= 12 + (u64)total_files * 4;
-            BUSTER_TEST(arguments, valid);
-            if (valid)
+            if (BUSTER_REQUIRE(arguments, valid))
             {
                 // NumSourceFiles wraps to zero; readers recover the full total
                 // by summing the two 16-bit ModFileCounts instead.
@@ -1002,8 +987,7 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                                                                   .line_count = BUSTER_ARRAY_LENGTH(lines),
                                                                   .machine = CODEVIEW_MACHINE_X64,
                                                               });
-    BUSTER_TEST(arguments, codeview.valid);
-    if (codeview.valid)
+    if (BUSTER_REQUIRE(arguments, codeview.valid))
     {
         PdbSection sections[] = {
             {
@@ -1037,250 +1021,250 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
             input.guid[index] = (u8)(index + 1);
         }
         PdbResult built = pdb_build(arguments->arena, input);
-        BUSTER_TEST(arguments, built.valid);
-        if (!built.valid)
+        if (BUSTER_REQUIRE(arguments, built.valid))
         {
-            return result;
-        }
-        UnitTestResult scope_links = pdb_test_scope_links(arguments, built, codeview);
-        result.test_count += scope_links.test_count;
-        result.succeeded_test_count += scope_links.succeeded_test_count;
-        BUSTER_TEST(arguments, built.bytes.length % PDB_TEST_BLOCK_SIZE == 0);
-        BUSTER_TEST(arguments, memcmp(built.bytes.pointer, "Microsoft C/C++ MSF 7.00\r\n\x1a" "DS", 30) == 0);
-        u32 block_size = pdb_read_u32(built.bytes, 32);
-        u32 block_count = pdb_read_u32(built.bytes, 40);
-        u32 directory_size = pdb_read_u32(built.bytes, 44);
-        u32 block_map = pdb_read_u32(built.bytes, 52);
-        BUSTER_TEST(arguments, block_size == PDB_TEST_BLOCK_SIZE);
-        BUSTER_TEST(arguments, (u64)block_count * PDB_TEST_BLOCK_SIZE == built.bytes.length);
-        BUSTER_TEST(arguments, block_map < block_count);
-        // Walk the directory the way a reader would and check every stream lands
-        // inside the file.
-        u32 directory_block = pdb_read_u32(built.bytes, (u64)block_map * PDB_TEST_BLOCK_SIZE);
-        BUSTER_TEST(arguments, directory_block < block_count);
-        u64 directory_base = (u64)directory_block * PDB_TEST_BLOCK_SIZE;
-        BUSTER_TEST(arguments, directory_size >= 4);
-        u32 stream_count = pdb_read_u32(built.bytes, directory_base);
-        BUSTER_TEST(arguments, stream_count == PDB_TEST_STREAM_COUNT);
-        if (stream_count != PDB_TEST_STREAM_COUNT)
-        {
-            return result;
-        }
-        u64 block_cursor = directory_base + 4 + (u64)stream_count * 4;
-        u32 info_block = 0;
-        u32 dbi_block = 0;
-        u32 module_block = 0;
-        for (u32 index = 0; index < stream_count; index += 1)
-        {
-            u32 size = pdb_read_u32(built.bytes, directory_base + 4 + (u64)index * 4);
-            u32 blocks = (size + PDB_TEST_BLOCK_SIZE - 1) / PDB_TEST_BLOCK_SIZE;
-            for (u32 block = 0; block < blocks; block += 1)
+            UnitTestResult scope_links = pdb_test_scope_links(arguments, built, codeview);
+            result.test_count += scope_links.test_count;
+            result.succeeded_test_count += scope_links.succeeded_test_count;
+            BUSTER_TEST(arguments, built.bytes.length % PDB_TEST_BLOCK_SIZE == 0);
+            BUSTER_TEST(arguments, memcmp(built.bytes.pointer,
+                                          "Microsoft C/C++ MSF 7.00\r\n\x1a"
+                                          "DS",
+                                          30) == 0);
+            u32 block_size = pdb_read_u32(built.bytes, 32);
+            u32 block_count = pdb_read_u32(built.bytes, 40);
+            u32 directory_size = pdb_read_u32(built.bytes, 44);
+            u32 block_map = pdb_read_u32(built.bytes, 52);
+            BUSTER_TEST(arguments, block_size == PDB_TEST_BLOCK_SIZE);
+            BUSTER_TEST(arguments, (u64)block_count * PDB_TEST_BLOCK_SIZE == built.bytes.length);
+            BUSTER_TEST(arguments, block_map < block_count);
+            // Walk the directory the way a reader would and check every stream lands
+            // inside the file.
+            u32 directory_block = pdb_read_u32(built.bytes, (u64)block_map * PDB_TEST_BLOCK_SIZE);
+            BUSTER_TEST(arguments, directory_block < block_count);
+            u64 directory_base = (u64)directory_block * PDB_TEST_BLOCK_SIZE;
+            BUSTER_TEST(arguments, directory_size >= 4);
+            u32 stream_count = pdb_read_u32(built.bytes, directory_base);
+            if (BUSTER_REQUIRE(arguments, stream_count == PDB_TEST_STREAM_COUNT))
             {
-                u32 block_index = pdb_read_u32(built.bytes, block_cursor);
-                block_cursor += 4;
-                BUSTER_TEST(arguments, block_index < block_count);
-                if (!block && index == PDB_TEST_STREAM_INFO)
+                u64 block_cursor = directory_base + 4 + (u64)stream_count * 4;
+                u32 info_block = 0;
+                u32 dbi_block = 0;
+                u32 module_block = 0;
+                for (u32 index = 0; index < stream_count; index += 1)
                 {
-                    info_block = block_index;
+                    u32 size = pdb_read_u32(built.bytes, directory_base + 4 + (u64)index * 4);
+                    u32 blocks = (size + PDB_TEST_BLOCK_SIZE - 1) / PDB_TEST_BLOCK_SIZE;
+                    for (u32 block = 0; block < blocks; block += 1)
+                    {
+                        u32 block_index = pdb_read_u32(built.bytes, block_cursor);
+                        block_cursor += 4;
+                        BUSTER_TEST(arguments, block_index < block_count);
+                        if (!block && index == PDB_TEST_STREAM_INFO)
+                        {
+                            info_block = block_index;
+                        }
+                        if (!block && index == PDB_TEST_STREAM_DBI)
+                        {
+                            dbi_block = block_index;
+                        }
+                        if (!block && index == PDB_TEST_STREAM_MODULE)
+                        {
+                            module_block = block_index;
+                        }
+                    }
                 }
-                if (!block && index == PDB_TEST_STREAM_DBI)
+                // The info stream must carry the identity the image will repeat.
+                BUSTER_TEST(arguments, info_block != 0);
+                u64 info_base = (u64)info_block * PDB_TEST_BLOCK_SIZE;
+                BUSTER_TEST(arguments, pdb_read_u32(built.bytes, info_base) == PDB_TEST_INFO_VERSION_VC70);
+                BUSTER_TEST(arguments, pdb_read_u32(built.bytes, info_base + 8) == 1);
+                BUSTER_TEST(arguments, memcmp(built.bytes.pointer + info_base + 12, input.guid, sizeof(input.guid)) == 0);
+                // The DBI header must point at the module and section header streams.
+                BUSTER_TEST(arguments, dbi_block != 0);
+                u64 dbi_base = (u64)dbi_block * PDB_TEST_BLOCK_SIZE;
+                BUSTER_TEST(arguments, pdb_read_u32(built.bytes, dbi_base) == 0xffffffff);
+                BUSTER_TEST(arguments, pdb_read_u32(built.bytes, dbi_base + 4) == PDB_TEST_DBI_VERSION_V70);
+                u16 dbi_machine = 0;
+                memcpy(&dbi_machine, built.bytes.pointer + dbi_base + 58, sizeof(dbi_machine));
+                BUSTER_TEST(arguments, dbi_machine == 0x8664);
+                u32 dbi_module_size = pdb_read_u32(built.bytes, dbi_base + 24);
+                u32 dbi_contribution_size = pdb_read_u32(built.bytes, dbi_base + 28);
+                BUSTER_TEST(arguments, dbi_module_size != 0 && dbi_contribution_size != 0);
+                u16 module_stream = 0;
+                memcpy(&module_stream, built.bytes.pointer + dbi_base + PDB_TEST_DBI_HEADER_SIZE + 4 + PDB_TEST_SECTION_CONTRIBUTION_SIZE + 2,
+                       sizeof(module_stream));
+                BUSTER_TEST(arguments, module_stream == PDB_TEST_STREAM_MODULE);
+                BUSTER_TEST(arguments, module_block != 0);
+                bool found_procedure = false;
+                bool found_local = false;
+                bool found_frame = false;
+                if (module_block)
                 {
-                    dbi_block = block_index;
+                    u64 module_base = (u64)module_block * PDB_TEST_BLOCK_SIZE;
+                    u64 module_end = BUSTER_MIN(module_base + PDB_TEST_BLOCK_SIZE, built.bytes.length);
+                    u64 symbol_offset = module_base + 4;
+                    while (symbol_offset + 4 <= module_end)
+                    {
+                        u16 record_length = 0;
+                        u16 record_kind = 0;
+                        memcpy(&record_length, built.bytes.pointer + symbol_offset, sizeof(record_length));
+                        memcpy(&record_kind, built.bytes.pointer + symbol_offset + 2, sizeof(record_kind));
+                        if (record_length < 2 || symbol_offset + 2 + record_length > module_end)
+                        {
+                            break;
+                        }
+                        found_procedure |= record_kind == PDB_TEST_S_GPROC32;
+                        found_local |= record_kind == PDB_TEST_S_LOCAL;
+                        found_frame |= record_kind == PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                        symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
+                    }
                 }
-                if (!block && index == PDB_TEST_STREAM_MODULE)
-                {
-                    module_block = block_index;
-                }
-            }
-        }
-        // The info stream must carry the identity the image will repeat.
-        BUSTER_TEST(arguments, info_block != 0);
-        u64 info_base = (u64)info_block * PDB_TEST_BLOCK_SIZE;
-        BUSTER_TEST(arguments, pdb_read_u32(built.bytes, info_base) == PDB_TEST_INFO_VERSION_VC70);
-        BUSTER_TEST(arguments, pdb_read_u32(built.bytes, info_base + 8) == 1);
-        BUSTER_TEST(arguments, memcmp(built.bytes.pointer + info_base + 12, input.guid, sizeof(input.guid)) == 0);
-        // The DBI header must point at the module and section header streams.
-        BUSTER_TEST(arguments, dbi_block != 0);
-        u64 dbi_base = (u64)dbi_block * PDB_TEST_BLOCK_SIZE;
-        BUSTER_TEST(arguments, pdb_read_u32(built.bytes, dbi_base) == 0xffffffff);
-        BUSTER_TEST(arguments, pdb_read_u32(built.bytes, dbi_base + 4) == PDB_TEST_DBI_VERSION_V70);
-        u16 dbi_machine = 0;
-        memcpy(&dbi_machine, built.bytes.pointer + dbi_base + 58, sizeof(dbi_machine));
-        BUSTER_TEST(arguments, dbi_machine == 0x8664);
-        u32 dbi_module_size = pdb_read_u32(built.bytes, dbi_base + 24);
-        u32 dbi_contribution_size = pdb_read_u32(built.bytes, dbi_base + 28);
-        BUSTER_TEST(arguments, dbi_module_size != 0 && dbi_contribution_size != 0);
-        u16 module_stream = 0;
-        memcpy(&module_stream, built.bytes.pointer + dbi_base + PDB_TEST_DBI_HEADER_SIZE + 4 + PDB_TEST_SECTION_CONTRIBUTION_SIZE + 2, sizeof(module_stream));
-        BUSTER_TEST(arguments, module_stream == PDB_TEST_STREAM_MODULE);
-        BUSTER_TEST(arguments, module_block != 0);
-        bool found_procedure = false;
-        bool found_local = false;
-        bool found_frame = false;
-        if (module_block)
-        {
-            u64 module_base = (u64)module_block * PDB_TEST_BLOCK_SIZE;
-            u64 module_end = BUSTER_MIN(module_base + PDB_TEST_BLOCK_SIZE, built.bytes.length);
-            u64 symbol_offset = module_base + 4;
-            while (symbol_offset + 4 <= module_end)
-            {
-                u16 record_length = 0;
-                u16 record_kind = 0;
-                memcpy(&record_length, built.bytes.pointer + symbol_offset, sizeof(record_length));
-                memcpy(&record_kind, built.bytes.pointer + symbol_offset + 2, sizeof(record_kind));
-                if (record_length < 2 || symbol_offset + 2 + record_length > module_end)
-                {
-                    break;
-                }
-                found_procedure |= record_kind == PDB_TEST_S_GPROC32;
-                found_local |= record_kind == PDB_TEST_S_LOCAL;
-                found_frame |= record_kind == PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
-                symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
-            }
-        }
-        BUSTER_TEST(arguments, found_procedure && found_local && found_frame);
+                BUSTER_TEST(arguments, found_procedure && found_local && found_frame);
 #if !BUSTER_IOS
-        // Leave the file on disk where external validators can read it. The iOS
-        // app keeps the complete PDB validation above in memory instead.
-        String8 pdb_path = buster_test_temporary_path(arguments->arena, S8("buster-pdb"), S8(".pdb"));
-        BUSTER_TEST(arguments, file_write(pdb_path, built.bytes));
+                // Leave the file on disk where external validators can read it. The iOS
+                // app keeps the complete PDB validation above in memory instead.
+                String8 pdb_path = buster_test_temporary_path(arguments->arena, S8("buster-pdb"), S8(".pdb"));
+                BUSTER_TEST(arguments, file_write(pdb_path, built.bytes));
 #endif
-        // Type indices are local to each object, so records that are byte-identical
-        // across two modules can still name different types. Both modules below
-        // contribute the same three raw records, but their first record modifies a
-        // different base type, so their second record — identical bytes, pointing
-        // at local 0x1000 — must survive as two distinct types. Only the third
-        // record, a pointer to the same builtin in both, may merge.
-        PdbTestTypeBuffer first_types = pdb_test_build_types(PDB_TEST_T_INT32);
-        PdbTestTypeBuffer second_types = pdb_test_build_types(PDB_TEST_T_REAL32);
-        BUSTER_TEST(arguments, first_types.count == second_types.count && first_types.count <= sizeof(first_types.bytes));
-        BUSTER_TEST(arguments, memcmp(first_types.bytes + 16, second_types.bytes + 16, 24) == 0);
-        PdbModule merge_modules[] = {
-            {
-                .name = S8("first.obj"),
-                .codeview_symbols = codeview.symbols,
-                .codeview_types = {.pointer = first_types.bytes, .length = first_types.count},
-                .code_size = 0x100,
-                .code_section = 1,
-            },
-            {
-                .name = S8("second.obj"),
-                .codeview_symbols = codeview.symbols,
-                .codeview_types = {.pointer = second_types.bytes, .length = second_types.count},
-                .code_offset = 0x100,
-                .code_size = 0x100,
-                .code_section = 1,
-            },
-        };
-        PdbInput merge_input = input;
-        merge_input.modules = merge_modules;
-        merge_input.module_count = BUSTER_ARRAY_LENGTH(merge_modules);
-        PdbResult merged = pdb_build(arguments->arena, merge_input);
-        BUSTER_TEST(arguments, merged.valid);
-        ByteSlice tpi = merged.valid ? pdb_test_stream_bytes(arguments->arena, merged.bytes, PDB_TEST_STREAM_TPI) : (ByteSlice){0};
-        BUSTER_TEST(arguments, tpi.length > PDB_TEST_TPI_HEADER_SIZE);
-        if (tpi.length > PDB_TEST_TPI_HEADER_SIZE)
-        {
-            u32 index_begin = pdb_read_u32(tpi, 8);
-            u32 index_end = pdb_read_u32(tpi, 12);
-            BUSTER_TEST(arguments, index_begin == PDB_TEST_TYPE_INDEX_BASE);
-            // Five types, not four: the two pointers to a modified type stay apart
-            // while the two pointers to `int` collapse into one.
-            BUSTER_TEST(arguments, index_end == PDB_TEST_TYPE_INDEX_BASE + 5);
-            u32 const_int_index = UINT32_MAX;
-            u32 const_float_index = UINT32_MAX;
-            u32 pointer_to_const_int = UINT32_MAX;
-            u32 pointer_to_const_float = UINT32_MAX;
-            u32 pointer_to_int_count = 0;
-            u32 modifier_count = 0;
-            u32 pointer_count = 0;
-            u64 offset = PDB_TEST_TPI_HEADER_SIZE;
-            u32 type_index = PDB_TEST_TYPE_INDEX_BASE;
-            // Two passes: the first names the modifier records, the second checks
-            // which of them each pointer record refers to.
-            for (u32 pass = 0; pass < 2; pass += 1)
-            {
-                offset = PDB_TEST_TPI_HEADER_SIZE;
-                type_index = PDB_TEST_TYPE_INDEX_BASE;
-                while (offset + 4 <= tpi.length)
+                // Type indices are local to each object, so records that are byte-identical
+                // across two modules can still name different types. Both modules below
+                // contribute the same three raw records, but their first record modifies a
+                // different base type, so their second record — identical bytes, pointing
+                // at local 0x1000 — must survive as two distinct types. Only the third
+                // record, a pointer to the same builtin in both, may merge.
+                PdbTestTypeBuffer first_types = pdb_test_build_types(PDB_TEST_T_INT32);
+                PdbTestTypeBuffer second_types = pdb_test_build_types(PDB_TEST_T_REAL32);
+                BUSTER_TEST(arguments, first_types.count == second_types.count && first_types.count <= sizeof(first_types.bytes));
+                BUSTER_TEST(arguments, memcmp(first_types.bytes + 16, second_types.bytes + 16, 24) == 0);
+                PdbModule merge_modules[] = {
+                    {
+                        .name = S8("first.obj"),
+                        .codeview_symbols = codeview.symbols,
+                        .codeview_types = {.pointer = first_types.bytes, .length = first_types.count},
+                        .code_size = 0x100,
+                        .code_section = 1,
+                    },
+                    {
+                        .name = S8("second.obj"),
+                        .codeview_symbols = codeview.symbols,
+                        .codeview_types = {.pointer = second_types.bytes, .length = second_types.count},
+                        .code_offset = 0x100,
+                        .code_size = 0x100,
+                        .code_section = 1,
+                    },
+                };
+                PdbInput merge_input = input;
+                merge_input.modules = merge_modules;
+                merge_input.module_count = BUSTER_ARRAY_LENGTH(merge_modules);
+                PdbResult merged = pdb_build(arguments->arena, merge_input);
+                BUSTER_TEST(arguments, merged.valid);
+                ByteSlice tpi = merged.valid ? pdb_test_stream_bytes(arguments->arena, merged.bytes, PDB_TEST_STREAM_TPI) : (ByteSlice){0};
+                BUSTER_TEST(arguments, tpi.length > PDB_TEST_TPI_HEADER_SIZE);
+                if (tpi.length > PDB_TEST_TPI_HEADER_SIZE)
                 {
-                    u16 record_length = 0;
-                    u16 leaf = 0;
-                    memcpy(&record_length, tpi.pointer + offset, sizeof(record_length));
-                    memcpy(&leaf, tpi.pointer + offset + 2, sizeof(leaf));
-                    if (record_length < 2 || offset + 2 + record_length > tpi.length)
+                    u32 index_begin = pdb_read_u32(tpi, 8);
+                    u32 index_end = pdb_read_u32(tpi, 12);
+                    BUSTER_TEST(arguments, index_begin == PDB_TEST_TYPE_INDEX_BASE);
+                    // Five types, not four: the two pointers to a modified type stay apart
+                    // while the two pointers to `int` collapse into one.
+                    BUSTER_TEST(arguments, index_end == PDB_TEST_TYPE_INDEX_BASE + 5);
+                    u32 const_int_index = UINT32_MAX;
+                    u32 const_float_index = UINT32_MAX;
+                    u32 pointer_to_const_int = UINT32_MAX;
+                    u32 pointer_to_const_float = UINT32_MAX;
+                    u32 pointer_to_int_count = 0;
+                    u32 modifier_count = 0;
+                    u32 pointer_count = 0;
+                    u64 offset = PDB_TEST_TPI_HEADER_SIZE;
+                    u32 type_index = PDB_TEST_TYPE_INDEX_BASE;
+                    // Two passes: the first names the modifier records, the second checks
+                    // which of them each pointer record refers to.
+                    for (u32 pass = 0; pass < 2; pass += 1)
                     {
-                        break;
+                        offset = PDB_TEST_TPI_HEADER_SIZE;
+                        type_index = PDB_TEST_TYPE_INDEX_BASE;
+                        while (offset + 4 <= tpi.length)
+                        {
+                            u16 record_length = 0;
+                            u16 leaf = 0;
+                            memcpy(&record_length, tpi.pointer + offset, sizeof(record_length));
+                            memcpy(&leaf, tpi.pointer + offset + 2, sizeof(leaf));
+                            if (record_length < 2 || offset + 2 + record_length > tpi.length)
+                            {
+                                break;
+                            }
+                            u32 referenced = pdb_read_u32(tpi, offset + 4);
+                            if (leaf == PDB_TEST_LF_MODIFIER)
+                            {
+                                modifier_count += !pass;
+                                const_int_index = referenced == PDB_TEST_T_INT32 ? type_index : const_int_index;
+                                const_float_index = referenced == PDB_TEST_T_REAL32 ? type_index : const_float_index;
+                            }
+                            else if (leaf == PDB_TEST_LF_POINTER && pass)
+                            {
+                                pointer_count += 1;
+                                pointer_to_int_count += referenced == PDB_TEST_T_INT32;
+                                pointer_to_const_int = referenced == const_int_index ? type_index : pointer_to_const_int;
+                                pointer_to_const_float = referenced == const_float_index ? type_index : pointer_to_const_float;
+                            }
+                            offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
+                            type_index += 1;
+                        }
                     }
-                    u32 referenced = pdb_read_u32(tpi, offset + 4);
-                    if (leaf == PDB_TEST_LF_MODIFIER)
+                    BUSTER_TEST(arguments, type_index == index_end);
+                    BUSTER_TEST(arguments, modifier_count == 2 && pointer_count == 3);
+                    BUSTER_TEST(arguments, const_int_index != UINT32_MAX && const_float_index != UINT32_MAX);
+                    BUSTER_TEST(arguments, const_int_index != const_float_index);
+                    // The bug this guards against merged these two into one record, so the
+                    // second module's `const float*` resolved to the first module's
+                    // `const int*`.
+                    BUSTER_TEST(arguments, pointer_to_const_int != UINT32_MAX && pointer_to_const_float != UINT32_MAX);
+                    BUSTER_TEST(arguments, pointer_to_const_int != pointer_to_const_float);
+                    BUSTER_TEST(arguments, pointer_to_int_count == 1);
+                    // Both modules were handed the same symbol blob, whose S_GPROC32 names
+                    // local type 0x1001 — the pointer record. Each module's symbols must
+                    // therefore land on its own pointer, not on a shared one.
+                    u32 procedure_types[BUSTER_ARRAY_LENGTH(merge_modules)] = {UINT32_MAX, UINT32_MAX};
+                    for (u32 module_index = 0; module_index < BUSTER_ARRAY_LENGTH(merge_modules); module_index += 1)
                     {
-                        modifier_count += !pass;
-                        const_int_index = referenced == PDB_TEST_T_INT32 ? type_index : const_int_index;
-                        const_float_index = referenced == PDB_TEST_T_REAL32 ? type_index : const_float_index;
+                        u32 stream_index = module_index ? PDB_TEST_STREAM_COUNT + module_index - 1 : PDB_TEST_STREAM_MODULE;
+                        ByteSlice module_symbols = pdb_test_stream_bytes(arguments->arena, merged.bytes, stream_index);
+                        u64 symbol_offset = 4;
+                        while (symbol_offset + 4 <= module_symbols.length)
+                        {
+                            u16 record_length = 0;
+                            u16 record_kind = 0;
+                            memcpy(&record_length, module_symbols.pointer + symbol_offset, sizeof(record_length));
+                            memcpy(&record_kind, module_symbols.pointer + symbol_offset + 2, sizeof(record_kind));
+                            if (record_length < 2 || symbol_offset + 2 + record_length > module_symbols.length)
+                            {
+                                break;
+                            }
+                            if (record_kind == PDB_TEST_S_GPROC32 && symbol_offset + 32 <= module_symbols.length)
+                            {
+                                procedure_types[module_index] = pdb_read_u32(module_symbols, symbol_offset + 28);
+                            }
+                            symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
+                        }
                     }
-                    else if (leaf == PDB_TEST_LF_POINTER && pass)
-                    {
-                        pointer_count += 1;
-                        pointer_to_int_count += referenced == PDB_TEST_T_INT32;
-                        pointer_to_const_int = referenced == const_int_index ? type_index : pointer_to_const_int;
-                        pointer_to_const_float = referenced == const_float_index ? type_index : pointer_to_const_float;
-                    }
-                    offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
-                    type_index += 1;
+                    BUSTER_TEST(arguments, procedure_types[0] == pointer_to_const_int);
+                    BUSTER_TEST(arguments, procedure_types[1] == pointer_to_const_float);
                 }
-            }
-            BUSTER_TEST(arguments, type_index == index_end);
-            BUSTER_TEST(arguments, modifier_count == 2 && pointer_count == 3);
-            BUSTER_TEST(arguments, const_int_index != UINT32_MAX && const_float_index != UINT32_MAX);
-            BUSTER_TEST(arguments, const_int_index != const_float_index);
-            // The bug this guards against merged these two into one record, so the
-            // second module's `const float*` resolved to the first module's
-            // `const int*`.
-            BUSTER_TEST(arguments, pointer_to_const_int != UINT32_MAX && pointer_to_const_float != UINT32_MAX);
-            BUSTER_TEST(arguments, pointer_to_const_int != pointer_to_const_float);
-            BUSTER_TEST(arguments, pointer_to_int_count == 1);
-            // Both modules were handed the same symbol blob, whose S_GPROC32 names
-            // local type 0x1001 — the pointer record. Each module's symbols must
-            // therefore land on its own pointer, not on a shared one.
-            u32 procedure_types[BUSTER_ARRAY_LENGTH(merge_modules)] = {UINT32_MAX, UINT32_MAX};
-            for (u32 module_index = 0; module_index < BUSTER_ARRAY_LENGTH(merge_modules); module_index += 1)
-            {
-                u32 stream_index = module_index ? PDB_TEST_STREAM_COUNT + module_index - 1 : PDB_TEST_STREAM_MODULE;
-                ByteSlice module_symbols = pdb_test_stream_bytes(arguments->arena, merged.bytes, stream_index);
-                u64 symbol_offset = 4;
-                while (symbol_offset + 4 <= module_symbols.length)
-                {
-                    u16 record_length = 0;
-                    u16 record_kind = 0;
-                    memcpy(&record_length, module_symbols.pointer + symbol_offset, sizeof(record_length));
-                    memcpy(&record_kind, module_symbols.pointer + symbol_offset + 2, sizeof(record_kind));
-                    if (record_length < 2 || symbol_offset + 2 + record_length > module_symbols.length)
-                    {
-                        break;
-                    }
-                    if (record_kind == PDB_TEST_S_GPROC32 && symbol_offset + 32 <= module_symbols.length)
-                    {
-                        procedure_types[module_index] = pdb_read_u32(module_symbols, symbol_offset + 28);
-                    }
-                    symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
-                }
-            }
-            BUSTER_TEST(arguments, procedure_types[0] == pointer_to_const_int);
-            BUSTER_TEST(arguments, procedure_types[1] == pointer_to_const_float);
-        }
 #if !BUSTER_IOS
-        if (merged.valid)
-        {
-            String8 merged_path = buster_test_temporary_path(arguments->arena, S8("buster-pdb-merged"), S8(".pdb"));
-            BUSTER_TEST(arguments, file_write(merged_path, merged.bytes));
-        }
+                if (merged.valid)
+                {
+                    String8 merged_path = buster_test_temporary_path(arguments->arena, S8("buster-pdb-merged"), S8(".pdb"));
+                    BUSTER_TEST(arguments, file_write(merged_path, merged.bytes));
+                }
 #endif
 
-        // Invalid input must be rejected rather than producing a broken file.
-        PdbInput invalid = input;
-        invalid.section_count = 0;
-        BUSTER_TEST(arguments, !pdb_build(arguments->arena, invalid).valid);
+                // Invalid input must be rejected rather than producing a broken file.
+                PdbInput invalid = input;
+                invalid.section_count = 0;
+                BUSTER_TEST(arguments, !pdb_build(arguments->arena, invalid).valid);
+            }
+        }
     }
 
     return result;

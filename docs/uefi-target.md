@@ -79,8 +79,8 @@ From the repository root, after building `ide`:
 
 ```sh
 ./build.sh build --config Release -t ide
-build/build test_uefi --self-test build/uefi-self-test
-build/build test_uefi build/Release/ide build/uefi
+./build.sh test_uefi --self-test build/uefi-self-test
+./build.sh test_uefi build/Release/ide build/uefi
 ```
 
 Both output directories must be new. The harness refuses existing output,

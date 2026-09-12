@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # Exercise the real APK dependency graph before introducing fake CMake/Ninja.
 python3 "$repo_root/tests/android_apk_assets_test.py"
+# Exercise the iOS bundle graph without requiring an Apple SDK or simulator.
+python3 "$repo_root/tests/ios_bundle_assets_test.py"
 
 fake_tool="$repo_root/tests/mobile_ci_fake_tool.sh"
 if [[ -n ${BUSTER_MOBILE_TEST_EVIDENCE_DIR:-} ]]; then

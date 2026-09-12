@@ -11,7 +11,7 @@ in it at all:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_doom --config Release /path/to/doomgeneric /path/to/DOOM1.WAD
+./build.sh test_doom --config Release /path/to/doomgeneric /path/to/DOOM1.WAD
 ```
 
 The checkout must be commit

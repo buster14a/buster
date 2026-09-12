@@ -9,7 +9,7 @@ checkout; upstream headers are never copied into or patched in this repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_stb --config Release /path/to/stb
+./build.sh test_stb --config Release /path/to/stb
 ```
 
 The checkout must be commit

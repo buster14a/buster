@@ -243,8 +243,9 @@
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
   narrow signature and vector-load refusals are strict successes; the separate
-  `basic_c_machine_fallback_wide_signature.c` retains an explicit 32-byte
-  signature refusal for telemetry and artifact-failure checks.
+  `basic_c_machine_fallback_wide_signature.c` retains a Win64 baseline split-
+  reference signature refusal for telemetry and artifact-failure checks; its
+  System V and AVX-width signatures select through MIR.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
@@ -252,13 +253,47 @@
   shifts. Comparison results expand to all-ones masks, and floating negation
   changes only the sign bit. ZMM operands/results use explicit owned frame
   snapshots around scalar expansion. Wide vector members store through their
-  exact subobject address. This does not complete model-dependent wide ABI
-  signatures or general assembly.
+  exact subobject address. General assembly and the remaining model-dependent
+  wide ABI signatures are separate from this arithmetic lowering.
   `basic_c_vector.c` and `basic_c_vector_lane_edges.c` remain whole strict inputs.
   The registered matrix includes baseline/Haswell/Zen 5 object generation and
   executes matching host CPU profiles. `host_vector_arithmetic.c` independently
   computes scalar expectations and checks adjacent bytes over 8/16/32/64-byte
   images; no vector arithmetic is used in that observer.
+- Frame-backed 32-byte vectors and non-ZMM 64-byte vectors use explicit
+  XMM/YMM register-frame rows at System V call boundaries. The shared ABI
+  classification determines the value, and the CPU register width determines
+  its consecutive result pieces. An argument wider than one CPU register or
+  exhausting the argument register file uses its aligned stack home. Unnamed
+  wide vectors always use the overflow area; their MIR variadic reads retain
+  the target ABI alignment and advance by the complete value. Win64
+  32-byte arguments at AVX width use
+  the existing private-copy pointer transport; baseline split references
+  remain an unresolved retirement gap. The new part-width byte fits existing
+  padding in the 40-byte signature shape, with no additional per-value table.
+  XMM/YMM frame rows carry byte offsets checked against owned storage. YMM
+  encodings use serially prepared AVX metadata tokens; a missing token remains
+  an encoding failure. Return/call vector-live flags preserve upper lanes.
+  `basic_c_vector_argument_ymm.c` and `basic_c_wide_vector_argument.c` remain
+  whole registered strict inputs. `basic_c_wide_vector_abi.c` adds indirect
+  calls, a ninth vector argument, scalar expected lanes and sentinels. Its
+  PROVIDER_ONLY/CONSUMER_ONLY configurations exchange 32-byte values, copied
+  variadic cursors and scalar tails with Clang and real GCC. Baseline Clang
+  arguments use the same stack transport as Buster, with split XMM results;
+  GCC uses a different hidden result pointer there. AVX-width results agree
+  in all three compilers. An initial MIR baseline argument-placement defect
+  was caught by Clang exchange; its failed runs are preserved as a regression,
+  not reclassified as a compatibility disagreement. Native execution requires
+  the relevant host CPU features; other
+  matrix entries are object generation. MIR tests reject truncated frames and
+  overflowing offsets before placement. Darwin bare-vector ABI stack
+  alignment is capped at the CPU register
+  width (16 at baseline, 32 with AVX, 64 with AVX-512), including wide
+  overflow-list reads. ELF retains the full vector type alignment. This ABI
+  rule does not change the frontend's storage layout. Registered metadata
+  checks cover Linux/macOS/iOS and all three CPU models; native macOS Clang
+  producer/consumer tests detect a wrongly rounded overflow cursor.
+
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete

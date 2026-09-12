@@ -24,7 +24,7 @@ From the repository root, after building two uninstrumented Release compilers:
 On GitHub-hosted machines, bootstrap `build/build` with the image's Clang as
 `.github/workflows/compiler-throughput.yml` does, then use `./build/build` in
 place of `./build.sh`. Canonical local bootstrapping still uses TCC. On Windows
-use `build.ps1` / `build/build.exe` from a configured native developer shell.
+use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
 all three. Hardware counters currently have a Linux implementation only.
 

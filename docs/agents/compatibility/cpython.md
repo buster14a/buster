@@ -11,7 +11,7 @@ repository:
 ```sh
 ./build.sh build --config Release -t ide
 tools/fetch_cpython.sh /path/to/cpython-v3.13.9
-./build/build test_cpython --config Release /path/to/cpython-v3.13.9
+./build.sh test_cpython --config Release /path/to/cpython-v3.13.9
 ```
 
 The checkout must be tag `v3.13.9` at commit

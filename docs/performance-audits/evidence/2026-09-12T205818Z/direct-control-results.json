@@ -1,0 +1,754 @@
+[
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "buster",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-buster--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "clang",
+    "provider": "host",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-clang-host--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "buster",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-buster--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      3
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ]
+  },
+  {
+    "cpu": "baseline",
+    "host": "gcc",
+    "provider": "host",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=x86-64",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=baseline",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/baseline-gcc-host--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      -11
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "buster",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-buster--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "clang",
+    "provider": "host",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "clang",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "clang",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-clang-host--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "buster",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-buster--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "frontend": "-fno-frontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--fno-frontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-fno-frontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--fno-frontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--fno-frontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--fno-frontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--fno-frontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--fno-frontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "cpu": "haswell",
+    "host": "gcc",
+    "provider": "host",
+    "frontend": "-ffrontend-ssa",
+    "argv": [
+      [
+        "gcc",
+        "-O0",
+        "-fno-inline",
+        "-march=haswell",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--ffrontend-ssa-provider.o",
+        "-DWIDE_ABI_PROVIDER=1"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/ide",
+        "cc",
+        "-march=haswell",
+        "-fregister-allocator=none",
+        "-ffrontend-ssa",
+        "-c",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/input.c",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--ffrontend-ssa-consumer.o"
+      ],
+      [
+        "gcc",
+        "-no-pie",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--ffrontend-ssa-provider.o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--ffrontend-ssa-consumer.o",
+        "-o",
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--ffrontend-ssa"
+      ],
+      [
+        "/dev/shm/buster36-evidence-71bf8ace/wide-direct-abi-control1/haswell-gcc-host--ffrontend-ssa"
+      ]
+    ],
+    "exits": [
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+]

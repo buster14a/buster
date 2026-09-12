@@ -302,7 +302,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult uefi_boot_main(Arena *arena, SliceString8 argu
     }
     else if (arguments.length != 2)
     {
-        string_print(S8("usage: build/build test_uefi <built-ide|--self-test> <fresh-output-directory>\n"));
+        string_print(S8("usage: ./build.sh test_uefi <built-ide|--self-test> <fresh-output-directory>\n"));
     }
     else if (path_exists(arena, arguments.pointer[1]))
     {

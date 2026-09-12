@@ -10,7 +10,7 @@ copied into or patched in this repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_sqlite --config Release /path/to/sqlite-amalgamation-3530400 /path/to/sqlite-src-3530400
+./build.sh test_sqlite --config Release /path/to/sqlite-amalgamation-3530400 /path/to/sqlite-src-3530400
 ```
 
 The first path is the extracted `sqlite-amalgamation-3530400.zip`, the second

@@ -51,9 +51,15 @@ contract](../self-host-audit.md); this does not replace the ordinary gate.
 
 ## Build
 
-Three layers: `./build.sh` bootstraps `build/build` from `build.c` using
-**tcc**, which then drives CMake + ninja (multi-config, outputs in
-`build/<Config>/`).
+Three layers: `./build.sh` / `./build.ps1` bootstrap `build.c` using **tcc**,
+then the native driver runs CMake + ninja (multi-config, outputs in
+`build/<Config>/`). The wrappers retain immutable drivers under
+`.cache/bootstrap-driver/`, outside generated build trees. A warm invocation
+reuses an entry only after validating its compiler-and-flags key, complete TCC
+dependency closure and executable SHA-256. Cold concurrent invocations publish
+unique executable names and complete markers, so no process replaces a driver
+another process is constructing or executing. Failed or interrupted entries
+lack a valid marker and are ignored.
 
 The GitHub-hosted workflows are the bootstrap exception: the supplementary
 privacy broker and `.github/workflows/ci.yml` both compile `build.c` with the
@@ -75,7 +81,7 @@ to report a Clang-built driver as the canonical TCC bootstrap.
 
 Keep build orchestration and policy in `build.c`, with the least practical
 process-launch and scripting overhead. Shell and PowerShell scripts exist only
-to bootstrap `build/build`; do not grow them into build systems. Use CMake only
+to select or bootstrap the cached driver; do not grow them into build systems. Use CMake only
 to generate/cache the platform build graph and let Ninja execute that graph;
 do not implement workflows, iteration, comparison, parsing, timing, or other
 general scripting in the CMake language when `build.c` can do the work
@@ -91,7 +97,7 @@ shell, CMake, and utility subprocesses.
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
-`build/build` commands: `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
+Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`,
@@ -313,6 +319,23 @@ signing or device execution; those remain the regular Android mobile CI gates.
 Do not run two configurations' packaging concurrently in one build directory:
 the existing APK and staging paths are shared.
 
+## Incremental iOS test assets
+
+The iOS `ide` target stages active files under `tests/` through
+`cmake/IOSBundleAssets.cmake`. Its filtered, content-stable inventory makes
+fixture edits, additions, renames and removals update the configuration's app
+bundle without relinking the native executable. The owned `tests` subtree is
+rebuilt on a real input change, so deleted files cannot survive; preserved
+`.bbb` inputs are excluded and do not invalidate the graph. Debug and Release
+use separate stamps and bundles, and an unchanged build does not rewrite either.
+
+`python3 tests/ios_bundle_assets_test.py` exercises the production CMake graph
+with Ninja Multi-Config in paths containing spaces. It covers both configurations,
+stale-file removal, old-timestamp additions, dormant/empty inventories, native
+target stability, no-op builds and command failure propagation without requiring
+an Apple SDK. Actual iOS compilation, bundle validation and simulator execution
+remain in `ios/test_ci.sh` and the mobile CI lanes.
+
 The Clang/GCC build-driver binary now leaves the existing lane implementation
 available for opt-in `test_differential --jobs N`. The default remains one case
 worker; other build workflows never dispatch a lane gang. TCC still defines
@@ -320,9 +343,9 @@ worker; other build workflows never dispatch a lane gang. TCC still defines
 `-DBUSTER_SINGLE_THREADED=1` preserves the same worker loop in serial builds.
 ## UEFI firmware execution
 
-`build/build test_uefi <built-ide> <fresh-output-directory>` boots both UEFI
+`./build.sh test_uefi <built-ide> <fresh-output-directory>` boots both UEFI
 targets in all four allocators against pinned QEMU/EDK2, with bounded children
-and retained evidence. Run `build/build test_uefi --self-test <fresh-directory>`
+and retained evidence. Run `./build.sh test_uefi --self-test <fresh-directory>`
 first. Missing firmware or mismatched pins fail explicitly. See
 [the reference lane](../uefi-target.md#reference-firmware-execution-gate) for
 prerequisites, negative controls, pins and the runtime success contract.

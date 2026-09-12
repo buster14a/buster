@@ -7,6 +7,12 @@
 - All tests run inside the `ide` executable; there is no external unit-test
   framework. From the repository root, run `ide test --verbose=1 --ci=1` or
   build the `test_all` target.
+- The bootstrap wrappers have a controlled platform test at
+  `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
+  driver, and covers cold/warm reuse, dependency and compiler invalidation,
+  corrupt/incomplete entries, failure propagation, argument forwarding and
+  concurrent immutable publication. CI runs it on every desktop OS/architecture
+  lane before installing optional tools.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
@@ -20,6 +26,11 @@
 - A new production module or public behavior must receive a focused module
   test. Frontend changes should cover preprocessing, parsing/diagnostics,
   semantic typing, canonical-IR lowering, and driver behavior as applicable.
+- `BUSTER_TEST` records a failure and continues. When later reads depend on a
+  pointer, count, status, or other prerequisite, guard that dependent body with
+  `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
+  with normal assertion accounting, evaluates it once, and skips only the
+  guarded body when it fails; unrelated fixtures and modules continue.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
@@ -76,6 +87,12 @@
 - Headers are included as `<buster/lib/...>` or `<buster/tests/...>` (include
   root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
+
+- Mobile build-graph regressions run at the start of
+  `tests/mobile_ci_scripts_test.sh`. The Android and iOS fixture suites include
+  the production CMake graph with controlled targets and real Ninja
+  Multi-Config scheduling. They are host graph evidence; native mobile
+  compilation and device/simulator execution remain separate CI gates.
 
 ## Throughput runner integration
 

@@ -9,7 +9,7 @@ checkout; upstream sources are never copied into or patched in this repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_lua --config Release /path/to/lua-5.4.8/src /path/to/lua-v5.4.8
+./build.sh test_lua --config Release /path/to/lua-5.4.8/src /path/to/lua-v5.4.8
 ```
 
 The first path is `src/` from the official `lua-5.4.8.tar.gz` release

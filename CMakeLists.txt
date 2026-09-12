@@ -9,6 +9,7 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
+include(cmake/IOSBundleAssets.cmake)
 
 set(BUSTER_CONFIG_TYPES Debug Release)
 
@@ -727,7 +728,10 @@ if (BUSTER_DEVELOPER_TARGETS)
     find_program(gdb_executable gdb)
     find_program(lldb_executable lldb)
 endif()
-set(BUSTER_CLANG_ANALYZE_DRIVER "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}")
+if (NOT DEFINED BUSTER_BUILD_DRIVER OR BUSTER_BUILD_DRIVER STREQUAL "")
+    set(BUSTER_BUILD_DRIVER "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}")
+endif()
+set(BUSTER_CLANG_ANALYZE_DRIVER "${BUSTER_BUILD_DRIVER}")
 
 if (BUSTER_DEVELOPER_TARGETS)
     message(STATUS "GDB: ${gdb_executable}")
@@ -1698,12 +1702,9 @@ function(executable_add name is_buster_program main_file)
                 "${CMAKE_BINARY_DIR}/ios/Info-${name}.plist"
                 @ONLY)
 
-            # Bundle test data (read at runtime via relative paths) into Resources/tests.
-            add_custom_command(TARGET ${name} POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_directory
-                    "${CMAKE_SOURCE_DIR}/tests"
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${name}>/tests"
-                COMMENT "Bundling test data into ${name}.app")
+            # Test data is read at runtime through repository-relative paths.
+            # Keep it in a separate graph so fixture changes do not relink the app.
+            buster_add_ios_test_assets(${name})
 
         endif()
     endif()
@@ -1825,7 +1826,7 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
     (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS"))
     add_custom_target(test_self_host
         COMMAND
-            "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"
+            "${BUSTER_BUILD_DRIVER}"
             test_self_host
             --build-directory "${CMAKE_BINARY_DIR}"
             --config "$<CONFIG>"
@@ -1835,7 +1836,7 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
     )
     add_custom_target(test_mode_matrix
         COMMAND
-            "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"
+            "${BUSTER_BUILD_DRIVER}"
             test_mode_matrix
             --build-directory "${CMAKE_BINARY_DIR}"
             --config "$<CONFIG>"
