@@ -7198,7 +7198,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
                 valid = valid && (!expect_parameter || parameter_count == 0);
-                parsed_name_end = token.offset + c_token_length(lex.spelling_base, token);
+                parsed_name_end = token.offset + (u32)c_token_length(lex.spelling_base, token);
                 *token_index += 1;
                 break;
             }
