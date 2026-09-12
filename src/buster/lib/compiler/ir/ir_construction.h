@@ -26,6 +26,34 @@
     X(INITIAL_BLOCK_SLOTS, initial_block_slots) \
     X(INITIAL_INSTRUCTION_SLOTS, initial_instruction_slots) \
     X(INITIAL_VALUE_SLOTS, initial_value_slots) \
+    X(SSA_SLOT_GROWS, ssa_slot_grows) \
+    X(SSA_SLOT_CLEAR_BYTES, ssa_slot_clear_bytes) \
+    X(SSA_SLOT_GROW_VISITS, ssa_slot_grow_visits) \
+    X(SSA_FINISH_SLOT_GROWS, ssa_finish_slot_grows) \
+    X(SSA_SLOT_REHASH_PROBES, ssa_slot_rehash_probes) \
+    X(SSA_SLOT_LOOKUPS, ssa_slot_lookups) \
+    X(SSA_SLOT_PROBES, ssa_slot_probes) \
+    X(SSA_FINISH_SLOT_PROBES, ssa_finish_slot_probes) \
+    X(SSA_SLOT_INSERTS, ssa_slot_inserts) \
+    X(SSA_FORWARD_STEPS, ssa_forward_steps) \
+    X(SSA_VALUE_CLEAR_BYTES, ssa_value_clear_bytes) \
+    X(SSA_VALUE_SCRATCH_BYTES, ssa_value_scratch_bytes) \
+    X(SSA_INITIALIZATION_WORK_VISITS, ssa_initialization_work_visits) \
+    X(SSA_CFG_TARGET_VISITS, ssa_cfg_target_visits) \
+    X(SSA_REACHABLE_TARGET_VISITS, ssa_reachable_target_visits) \
+    X(SSA_PENDING_VISITS, ssa_pending_visits) \
+    X(SSA_PENDING_PREDECESSOR_VISITS, ssa_pending_predecessor_visits) \
+    X(SSA_REPLACEMENT_ROWS, ssa_replacement_rows) \
+    X(SSA_SIMPLIFY_PASSES, ssa_simplify_passes) \
+    X(SSA_SIMPLIFY_BLOCK_VISITS, ssa_simplify_block_visits) \
+    X(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, ssa_simplify_empty_block_visits) \
+    X(SSA_SIMPLIFY_PARAMETER_VISITS, ssa_simplify_parameter_visits) \
+    X(SSA_SIMPLIFY_INCOMING_VISITS, ssa_simplify_incoming_visits) \
+    X(SSA_LIVE_WORK_VISITS, ssa_live_work_visits) \
+    X(SSA_REMAP_VALUE_ROWS, ssa_remap_value_rows) \
+    X(SSA_REMAP_INSTRUCTION_ROWS, ssa_remap_instruction_rows) \
+    X(SSA_REMAP_OPERAND_SLOTS, ssa_remap_operand_slots) \
+    X(SSA_REMAP_INCOMING_VISITS, ssa_remap_incoming_visits) \
     X(SSA_FINISH_CALLS, ssa_finish_calls) \
     X(SSA_FINISH_FAILURES, ssa_finish_failures) \
     X(BEFORE_SSA_BLOCK_ROWS, before_ssa_block_rows) \
