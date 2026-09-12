@@ -1,3 +1,6 @@
+// File content ownership and transfer policy: file_write_checked preserves
+// transfer/close failures; file_read owns padded arena reads; file_map_read and
+// file_map_unmap own optional mappings; file_copy streams between descriptors.
 #include <buster/lib/file.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/integer.h>
@@ -29,19 +32,22 @@ BUSTER_GLOBAL_LOCAL const char* buster_ios_bundle_resource_path(void)
 }
 #endif
 
+OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+{
+    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, permissions);
+    OsFileTransferResult result = {.error = opened.error};
+    if (opened.file)
+    {
+        result = os_file_write_checked(opened.file, content);
+        OsError close_error = os_file_close_checked(opened.file);
+        if (!result.error.v) result.error = close_error;
+    }
+    return result;
+}
+
 bool file_write(String8 path, ByteSlice content)
 {
-    OsFileDescriptor* fd = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
-    bool result = false;
-
-    result = fd != 0;
-    if (result)
-    {
-        os_file_write(fd, content);
-        os_file_close(fd);
-    }
-
-    return result;
+    return !file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1}).error.v;
 }
 
 FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)

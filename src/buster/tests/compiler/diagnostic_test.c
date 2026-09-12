@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_diagnostic_test_compile(Arena* arena, String8 path, bool suppress)
 {
@@ -14,9 +15,48 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_diagnostic_test_compile(Arena*
     return compiler_driver_execute_invocation(arena, invocation);
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-output"), S8(".bin"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-nostdlib")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    OsFileTestStep failures[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}};
+    for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 command[] = {actions[action], modes[mode], S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), output};
+            for (u32 failure = 0; failure < BUSTER_ARRAY_LENGTH(failures); failure += 1)
+            {
+                TemporalArena scratch = scratch_begin(&arguments->arena, 1);
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(scratch.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                os_file_test_begin(output, &failures[failure], 1);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(scratch.arena, invocation);
+                BUSTER_TEST(arguments, os_file_test_end() == 1);
+                BUSTER_TEST(arguments, compiled.error == (action == 3 ? COMPILER_DRIVER_ERROR_LINK : COMPILER_DRIVER_ERROR_FILE_WRITE));
+                BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
+                if (compiled.diagnostic_count == 1)
+                {
+                    BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, action == 3 ? S8("link.file-write") : S8("driver.file-write"));
+                }
+                if (action != 3) BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, output) < compiled.diagnostic.length);
+                scratch_end(scratch);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    return result;
+}
+
 UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
     CompilerDiagnostic copy;
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);

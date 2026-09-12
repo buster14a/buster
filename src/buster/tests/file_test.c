@@ -1,10 +1,90 @@
 #include <buster/tests/file_test.h>
 #include <buster/lib/system_headers.h>
+#include <buster/lib/os_internal.h>
 #if BUSTER_INCLUDE_TESTS
+
+// Use distinct native-error values to prove cleanup does not replace the
+// original transfer failure. The seam closes real handles even on failure.
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_write_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("file-write-fault"), S8(".bin"));
+    String8 other = buster_test_temporary_path(arguments->arena, S8("file-write-unaffected"), S8(".bin"));
+    u64 length = BUSTER_KB(128) + 1;
+    u8* data = arena_allocate(arguments->arena, u8, length);
+    for (u64 index = 0; index < length; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    ByteSlice content = {data, length};
+    OsFileTestStep scripts[][4] = {
+        {{OS_FILE_TEST_OPEN, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ZERO, 0}},
+        {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 100}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 100}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ZERO, 0}},
+        {{OS_FILE_TEST_WRITE, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 100},
+         {OS_FILE_TEST_WRITE, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 3}},
+        {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
+        {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 100}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345},
+         {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
+    };
+    u32 counts[] = {1, 1, 1, 2, 2, 4, 1, 3};
+    u64 transferred[] = {0, 0, 0, 100, 100, length, length, 100};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(scripts); index += 1)
+    {
+        os_file_delete(path);
+        os_file_test_begin(path, scripts[index], counts[index]);
+        BUSTER_TEST(arguments, file_write(other, content));
+        OsFileTransferResult written = file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, os_file_test_end() == counts[index]);
+        BUSTER_TEST(arguments, written.transferred == transferred[index]);
+        BUSTER_TEST(arguments, (written.error.v == 0) == (index == 5));
+        if (index == 0 || index == 1 || index == 3 || index == 7) BUSTER_TEST(arguments, written.error.v == 12345);
+        if (index == 6) BUSTER_TEST(arguments, written.error.v == 23456);
+        ByteSlice actual = file_read(arguments->arena, path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, actual.length == transferred[index]);
+        if (actual.length) BUSTER_TEST(arguments, memory_compare(actual.pointer, data, actual.length));
+        // The existing boolean entry must propagate the same outcome.
+        os_file_test_begin(path, scripts[index], counts[index]);
+        bool success = file_write(path, content);
+        BUSTER_TEST(arguments, os_file_test_end() == counts[index]);
+        BUSTER_TEST(arguments, success == (index == 5));
+    }
+    BUSTER_TEST(arguments, file_write(path, (ByteSlice){0}));
+    OsFileTestStep close_step = {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456};
+    os_file_test_begin(path, &close_step, 1);
+    OsFileTransferResult empty = file_write_checked(path, (ByteSlice){0}, (OpenPermissions){.write = 1});
+    BUSTER_TEST(arguments, os_file_test_end() == 1);
+    BUSTER_TEST(arguments, empty.transferred == 0 && empty.error.v == 23456);
+
+    OsFileTestStep flush_step = {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345};
+    os_file_test_begin(path, &flush_step, 1);
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
+    BUSTER_TEST(arguments, file != 0);
+    if (file)
+    {
+        BUSTER_TEST(arguments, os_file_flush(file).v == 12345);
+        BUSTER_TEST(arguments, !os_file_flush(file).v);
+        BUSTER_TEST(arguments, os_file_close(file));
+    }
+    BUSTER_TEST(arguments, os_file_test_end() == 1);
+    BUSTER_TEST(arguments, os_file_flush(0).v != 0 && os_file_close_checked(0).v != 0);
+    BUSTER_TEST(arguments, os_file_write_checked(0, (ByteSlice){0}).error.v == 0);
+    BUSTER_TEST(arguments, os_file_write_checked(0, content).error.v != 0);
+    BUSTER_TEST(arguments, os_file_open_checked((String8){0}, (OpenFlags){.read = 1}, (OpenPermissions){0}).error.v != 0);
+
+    // file_copy must include completion of the destination in its boolean.
+    BUSTER_TEST(arguments, file_write(other, content));
+    os_file_test_begin(path, &close_step, 1);
+    BUSTER_TEST(arguments, !file_copy((CopyFileArguments){.original_path = other, .new_path = path}));
+    BUSTER_TEST(arguments, os_file_test_end() == 1);
+    BUSTER_TEST(arguments, os_file_delete(path));
+    BUSTER_TEST(arguments, os_file_delete(other));
+    return result;
+}
 
 UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, file_test_write_failures);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("file-test-source"), S8(".bin"));
     String8 destination_path = buster_test_temporary_path(arguments->arena, S8("file-test-destination"), S8(".bin"));
