@@ -4009,6 +4009,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         }
         else
         {
+            if (!target_cpu_features_are_valid(target))
+            {
+                return false;
+            }
             if (assembly_aarch64_direct_simd_lookup(mnemonic, result))
             {
                 return true;
@@ -8047,7 +8051,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_m1_collision_parse(AssemblyBuilder* builder, String8 mnemonic, String8 operands_text,
                                                              AssemblyInstruction* instruction, u32 line, u32 column)
 {
-    if (builder && instruction)
+    if (builder && instruction && target_cpu_features_are_valid(builder->target))
     {
         u32 initial_diagnostic_count = builder->result.diagnostic_count;
         u32 saved_diagnostic_count = initial_diagnostic_count;
