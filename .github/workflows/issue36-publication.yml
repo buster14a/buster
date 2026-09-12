@@ -1,0 +1,117 @@
+name: Issue 36 candidate publication and validation
+on:
+  push:
+    branches: [astra/issue36-atomic-publication]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: true
+      - name: Validate the patch and publish only the implementation branch
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp issue36.patch.zlib.base64 "$RUNNER_TEMP/issue36-payload.txt"
+          python3 - <<'PY'
+          import base64, hashlib, os, pathlib, zlib
+          payload = pathlib.Path(os.environ['RUNNER_TEMP'], 'issue36-payload.txt').read_text()
+          patch = zlib.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '98aa183217e1e7a55c8063bfd8716248671d37a0222db1468f73b11191d85e90'
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue36.patch').write_bytes(patch)
+          PY
+          git fetch --no-tags origin 641cd88d33decfd56fa2da9a960c6ac075935a71
+          git checkout --detach 641cd88d33decfd56fa2da9a960c6ac075935a71
+          git apply --check "$RUNNER_TEMP/issue36.patch"
+          git apply --index "$RUNNER_TEMP/issue36.patch"
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 11
+          test -z "$(git diff --cached --name-only -- .github .forgejo CMakeLists.txt build.c)"
+          git config user.name 'OpenAI'
+          git config user.email 'noreply@openai.com'
+          git commit -m 'codegen: lower AArch64 wide atomic updates with validated exclusive reads'
+          git push origin HEAD:refs/heads/astra/issue36-aarch64-wide-atomic-rmw-cas
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git show --stat --oneline HEAD | tee "$RUNNER_TEMP/issue36-publication.txt"
+          git archive HEAD | gzip > "$RUNNER_TEMP/issue36-source.tar.gz"
+      - name: Preserve publication evidence including failed payloads
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue36-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue36-*
+          retention-days: 7
+  validate:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      BUSTER_TEST_JOBS: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      ASAN_OPTIONS: halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Release build and full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue36-logs"
+          exec > >(tee "$RUNNER_TEMP/issue36-logs/release.log") 2>&1
+          clang --version
+          uname -a
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/issue36-build"
+          "$RUNNER_TEMP/issue36-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/issue36-build" build --config Release -t test_all
+      - name: Self-host fixed point and target mode matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/issue36-logs/self-host-modes.log") 2>&1
+          "$RUNNER_TEMP/issue36-build" test_self_host --config Release
+          "$RUNNER_TEMP/issue36-build" test_mode_matrix --config Release
+      - name: Native independent atomic controls
+        if: ${{ !cancelled() && runner.arch == 'ARM64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/issue36-logs/atomic-oracles.log") 2>&1
+          for opt in 0 2; do
+            clang -std=gnu11 -O"$opt" -funsigned-char -fwrapv -fno-strict-aliasing tests/basic_c_aarch64_atomic_update_pair.c -latomic -o "$RUNNER_TEMP/atomic-reference-$opt"
+            "$RUNNER_TEMP/atomic-reference-$opt"
+          done
+          clang -c tests/aarch64_atomic_update_pair_oracle.s -o "$RUNNER_TEMP/atomic-oracle.o"
+          objdump -dr "$RUNNER_TEMP/atomic-oracle.o"
+      - name: Strict sanitizer full suite
+        if: ${{ !cancelled() && steps.publish.outcome != 'failure' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/issue36-logs/sanitizer.log") 2>&1
+          "$RUNNER_TEMP/issue36-build" generate --build-dir build-san --cc clang --ci --linker DEFAULT --sanitize -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/issue36-build" build --build-dir build-san --config Debug -t test_all
+      - name: Preserve all validation logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue36-validation-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue36-logs
+          retention-days: 7
