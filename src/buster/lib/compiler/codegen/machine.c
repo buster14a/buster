@@ -2763,18 +2763,55 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             {
                 valid = (assembly->clobber_mask >> function->target->register_count) == 0;
             }
+            u32 x87_top_count = 0;
+            u32 x87_below_count = 0;
             for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
             {
                 MachineInlineAssemblyOperand* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
+                bool memory = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY) != 0;
+                bool vector = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR) != 0;
+                bool x87_top = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP) != 0;
+                bool x87_below = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW) != 0;
                 valid = operand->stack_slot < function->stack_slot_count && operand->byte_size && operand->byte_size <= 16 &&
+                        function->stack_slot_sizes[operand->stack_slot] >= operand->byte_size &&
                         operand->constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT &&
                         operand->physical_register < (function->target ? function->target->register_count : MACHINE_TARGET_REGISTER_LIMIT) &&
                         (operand->flags & ~(MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT |
                                             MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR |
                                             MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW |
                                             MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER)) == 0 &&
-                        (operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) != 0;
+                        (operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) != 0 &&
+                        (!(operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER) ||
+                         (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) &&
+                        memory == IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(operand->constraint_class) &&
+                        vector == IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(operand->constraint_class) &&
+                        x87_top == (operand->constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T) &&
+                        x87_below == (operand->constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_U) && !(x87_top && x87_below);
+                if (valid && function->target)
+                {
+                    bool physical_vector = (function->target->vector_register_mask & (UINT64_C(1) << operand->physical_register)) != 0;
+                    valid = physical_vector == vector && ((!x87_top && !x87_below) || function->target == machine_target_x86_64());
+                }
+                x87_top_count += x87_top;
+                x87_below_count += x87_below;
+                for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
+                {
+                    MachineInlineAssemblyOperand* previous = function->inline_assembly_operands + assembly->first_operand + previous_index;
+                    bool shared_register = previous->physical_register == operand->physical_register;
+                    bool shared_slot = previous->stack_slot == operand->stack_slot;
+                    bool early_conflict = shared_register && !shared_slot &&
+                        (((previous->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                          (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) ||
+                         ((operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                          (previous->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)));
+                    valid = !shared_slot || (shared_register && previous->byte_size == operand->byte_size);
+                    valid = valid && !early_conflict;
+                }
             }
+            valid = valid && x87_top_count <= 1 && x87_below_count <= 1 &&
+                    (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) || x87_top_count == 1);
             for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
             {
                 MachineInlineAssemblyRelocation* relocation =

@@ -5359,6 +5359,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_YIELD] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_ASM_IDENTITY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_ASM_IDENTITY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_INLINE_ASSEMBLY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_INLINE_ASSEMBLY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_INLINE_EFFECTS_NONE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_INLINE_EFFECTS_MEMORY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_INLINE_EFFECTS_FLAGS] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_INLINE_EFFECTS_NONE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_INLINE_EFFECTS_MEMORY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_INLINE_EFFECTS_FLAGS] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -5972,7 +5982,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 248);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 254);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate
@@ -6151,6 +6161,58 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     MachineFunction bad_opcode_range = machine_test_build_function(arguments->arena);
     bad_opcode_range.instructions[0].opcode = MACHINE_OPCODE_COUNT;
     BUSTER_TEST(arguments, machine_verify_function(&bad_opcode_range).error == MACHINE_VERIFY_OPCODE);
+
+    u8 inline_bytes[] = {0x90};
+    u32 inline_slot_sizes[] = {16};
+    MachineInlineAssemblyOperand inline_operand = {
+        .stack_slot = 0,
+        .physical_register = MACHINE_X64_RAX,
+        .byte_size = 8,
+        .constraint_class = IR_INLINE_ASSEMBLY_CONSTRAINT_R,
+        .flags = MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT,
+    };
+    MachineInlineAssembly inline_descriptor = {
+        .source = S8("nop"),
+        .bytes = {.pointer = inline_bytes, .length = sizeof(inline_bytes)},
+        .operand_count = 1,
+    };
+    MachineInstruction inline_instructions[] = {
+        {.opcode = MACHINE_X64_INLINE_ASSEMBLY},
+        {.opcode = MACHINE_OPCODE_SKELETON_RETURN},
+    };
+    MachineBlock inline_blocks[] = {{.instruction_count = BUSTER_ARRAY_LENGTH(inline_instructions)}};
+    MachineFunction inline_function = {
+        .instructions = inline_instructions,
+        .blocks = inline_blocks,
+        .stack_slot_sizes = inline_slot_sizes,
+        .inline_assemblies = &inline_descriptor,
+        .inline_assembly_operands = &inline_operand,
+        .target = machine_target_x86_64(),
+        .instruction_count = BUSTER_ARRAY_LENGTH(inline_instructions),
+        .block_count = BUSTER_ARRAY_LENGTH(inline_blocks),
+        .stack_slot_count = BUSTER_ARRAY_LENGTH(inline_slot_sizes),
+        .inline_assembly_count = 1,
+        .inline_assembly_operand_count = 1,
+    };
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_NONE);
+    inline_descriptor.first_operand = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
+    inline_descriptor.first_operand = 0;
+    inline_operand.flags |= MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
+    inline_operand.flags = MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
+    inline_operand.flags = MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT;
+    inline_operand.physical_register = MACHINE_X64_ZMM0;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
+    inline_operand.physical_register = MACHINE_X64_RAX;
+    inline_descriptor.effects = MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
+    inline_descriptor.effects = 0;
+    inline_slot_sizes[0] = 4;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_PAYLOAD);
+    inline_slot_sizes[0] = 16;
+    BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_NONE);
 
     MachineFunction early_terminator = machine_test_build_function(arguments->arena);
     early_terminator.instructions[0].opcode = MACHINE_OPCODE_SKELETON_RETURN;
