@@ -1,0 +1,72 @@
+baseline-self-host.log
+src/buster/lib/string.c:991: error: array type expected
+
+baseline-self-host-clang.log
+SELF_HOST fixed_point bytes=38382528 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+Self-host stage 1 took 6.420553 seconds (6420553000 nanoseconds)
+Self-host stage 2 took 21.258569 seconds (21258569000 nanoseconds)
+Self-host stage 2 benchmark took 0.137189 seconds (137189000 nanoseconds)
+Self-host machine stage took 32.929563 seconds (32929563000 nanoseconds)
+Self-host machine stage benchmark took 0.344213 seconds (344213000 nanoseconds)
+Self-host canonical stage took 31.941747 seconds (31941747000 nanoseconds)
+
+final-release-bench-tests.log
+[2165701/2165701] Unit tests
+[47/47] Module tests
+
+final-sanitize-tests.log
+[2116134/2116134] Unit tests
+[47/47] Module tests
+
+final-self-host.log
+SELF_HOST fixed_point bytes=38389720 stage1=build-final/self-host/Release/ide-stage1 stage2=build-final/self-host/Release/ide-stage2
+Self-host stage 1 took 2.688518 seconds (2688518000 nanoseconds)
+Self-host stage 2 took 10.831422 seconds (10831422000 nanoseconds)
+Self-host stage 2 benchmark took 0.132072 seconds (132072000 nanoseconds)
+Self-host machine stage took 26.364231 seconds (26364231000 nanoseconds)
+Self-host machine stage benchmark took 0.202608 seconds (202608000 nanoseconds)
+Self-host canonical stage took 22.997003 seconds (22997003000 nanoseconds)
+
+final-cjson-exact.log
+CJSON_HARNESS ide=build/Release/ide clang=/usr/bin/clang output=/dev/shm/buster-117-work/buster/build-final/cjson-v1.7.19-8
+CJSON_ROUNDTRIP allocator=fast equal_clang=1 output={"z":3,"a":[true,null,1.25]}
+CJSON_ROUNDTRIP allocator=none equal_clang=1 output={"z":3,"a":[true,null,1.25]}
+CJSON_ROUNDTRIP allocator=mir-stack equal_clang=1 output={"z":3,"a":[true,null,1.25]}
+CJSON_ROUNDTRIP allocator=quality equal_clang=1 output={"z":3,"a":[true,null,1.25]}
+CJSON_IDE_LINK status=pass equal_reference=1
+CJSON_RESULT commit=c859b25da02955fef659d658b8f324b5cde87be3 core_tests=18 utils_tests=3 allocators=4 status=pass
+
+final-mode-matrix.log
+MODE_MATRIX_HARNESS ide=/dev/shm/buster-117-work/buster/build-final/Release/ide targets=6 modes=4 fixtures=6 qemu=0 wine=0 oracle=0
+MODE_MATRIX leg=x86_64-linux/none avenue=native status=pass fixtures=6 elapsed_us=303569
+MODE_MATRIX leg=x86_64-linux/mir-stack avenue=native status=pass fixtures=6 elapsed_us=303406
+MODE_MATRIX leg=x86_64-linux/fast avenue=native status=pass fixtures=6 elapsed_us=280574
+MODE_MATRIX leg=x86_64-linux/quality avenue=native status=pass fixtures=6 elapsed_us=276174
+MODE_MATRIX leg=aarch64-linux/none avenue=link status=pass fixtures=6 elapsed_us=46100
+MODE_MATRIX leg=aarch64-linux/mir-stack avenue=link status=pass fixtures=6 elapsed_us=52180
+MODE_MATRIX leg=aarch64-linux/fast avenue=link status=pass fixtures=6 elapsed_us=66577
+MODE_MATRIX leg=aarch64-linux/quality avenue=link status=pass fixtures=6 elapsed_us=115774
+MODE_MATRIX leg=x86_64-windows/none avenue=link status=pass fixtures=6 elapsed_us=301766
+MODE_MATRIX leg=x86_64-windows/mir-stack avenue=link status=pass fixtures=6 elapsed_us=269792
+MODE_MATRIX leg=x86_64-windows/fast avenue=link status=pass fixtures=6 elapsed_us=223895
+MODE_MATRIX leg=x86_64-windows/quality avenue=link status=pass fixtures=6 elapsed_us=271561
+MODE_MATRIX leg=aarch64-windows/none avenue=link status=pass fixtures=6 elapsed_us=32521
+MODE_MATRIX leg=aarch64-windows/mir-stack avenue=link status=pass fixtures=6 elapsed_us=48147
+MODE_MATRIX leg=aarch64-windows/fast avenue=link status=pass fixtures=6 elapsed_us=30831
+MODE_MATRIX leg=aarch64-windows/quality avenue=link status=pass fixtures=6 elapsed_us=41497
+MODE_MATRIX leg=x86_64-macos/none avenue=link status=pass fixtures=6 elapsed_us=220244
+MODE_MATRIX leg=x86_64-macos/mir-stack avenue=link status=pass fixtures=6 elapsed_us=201998
+MODE_MATRIX leg=x86_64-macos/fast avenue=link status=pass fixtures=6 elapsed_us=221106
+MODE_MATRIX leg=x86_64-macos/quality avenue=link status=pass fixtures=6 elapsed_us=247337
+MODE_MATRIX leg=aarch64-macos/none avenue=link status=pass fixtures=6 elapsed_us=70994
+MODE_MATRIX leg=aarch64-macos/mir-stack avenue=link status=pass fixtures=6 elapsed_us=100701
+MODE_MATRIX leg=aarch64-macos/fast avenue=link status=pass fixtures=6 elapsed_us=96251
+MODE_MATRIX leg=aarch64-macos/quality avenue=link status=pass fixtures=6 elapsed_us=99264
+MODE_MATRIX_RESULT legs=24 executed=4 oracle_checked=0 expected_failures=0 failures=0 elapsed_us=3922960 status=pass
+
+san-probe.log
+==9==Can't open /proc/8/task for reading.
+==8==LeakSanitizer has encountered a fatal error.
+==8==HINT: LeakSanitizer does not work under ptrace (strace, gdb, etc)
+
+PMU probe: instructions unavailable: No such file or directory (2)

@@ -5,6 +5,8 @@
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/lib/hash.h>
+#include <buster/lib/time.h>
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
 {
@@ -2972,6 +2974,155 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
 }
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
+// Generated DSOs and real native objects complement the synthetic linker
+// replay. Library construction is outside the timed driver/link interval.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool benchmark = os_get_environment_variable(S8("BUSTER_ELF_DATA_BENCH")).length != 0;
+    String8 saved_directory = os_get_environment_variable(S8("BUSTER_ELF_DATA_OUTPUT"));
+    u32 counts[] = {4, 128, 256, 512, 1024, 2048, 4096};
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        for (u32 population = 0; population < (benchmark ? BUSTER_ARRAY_LENGTH(counts) : 1u); population += 1)
+        {
+            u32 count = counts[population];
+            TemporalArena fixture = scratch_begin(&arguments->arena, 1);
+            Arena* arena = fixture.arena;
+            String8 root = saved_directory.length ? string_duplicate_arena(arena, saved_directory, true)
+                                                   : buster_test_temporary_path(arena, S8("buster-elf-data"), S8(""));
+            os_make_directory(root);
+            String8 directory = string_format_z(arena, S8("{S8}/shape-{u32}-count-{u32}"), root, shape, count);
+            os_make_directory(directory);
+            String8 library_source = string_format_z(arena, S8("{S8}/library.c"), directory);
+            String8 main_source = string_format_z(arena, S8("{S8}/main.c"), directory);
+            String8 library_path = string_format_z(arena, S8("{S8}/libdataprobe.so"), directory);
+            String8 object_path = string_format_z(arena, S8("{S8}/main.o"), directory);
+            String8 buster_path = string_format_z(arena, S8("{S8}/buster"), directory);
+            String8 reference_path = string_format_z(arena, S8("{S8}/reference"), directory);
+            String8* library_parts = arena_allocate(arena, String8, count + 2);
+            String8* main_parts = arena_allocate(arena, String8, (u64)count * 2 + 2);
+            u32 library_part_count = 0;
+            u32 main_part_count = 0;
+            if (shape) library_parts[library_part_count++] = S8("long data_0 = 7; long read_0(void) { return data_0; }\n");
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+                if (shape)
+                {
+                    library_parts[library_part_count++] = string_format(arena,
+                        S8("extern long alias_{u32} __attribute__((alias(\"data_0\")));\n"), entry);
+                    main_parts[main_part_count++] = string_format(arena, S8("extern long alias_{u32};\n"), entry);
+                }
+                else
+                {
+                    library_parts[library_part_count++] = string_format(arena,
+                        S8("long data_{u32} = 7; extern long pair_{u32} __attribute__((alias(\"data_{u32}\"))); "
+                           "extern long alias_{u32} __attribute__((alias(\"data_{u32}\"))); "
+                           "long read_{u32}(void) {{ return data_{u32}; }\n"), entry, entry, entry, entry, entry, entry, entry);
+                    main_parts[main_part_count++] = string_format(arena,
+                        S8("extern long data_{u32}, pair_{u32}; extern long read_{u32}(void); long global_{u32};\n"), entry, entry, entry, entry);
+                }
+            }
+            main_parts[main_part_count++] = shape ? S8("extern long data_0; extern long read_0(void); int main(void) { long *volatile left; long *volatile right;\n") : S8("int main(void) { long *volatile left; long *volatile right;\n");
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+                main_parts[main_part_count++] = shape
+                    ? string_format(arena, S8("left = &alias_{u32}; right = &data_0; if (left != right || alias_{u32} != {u32}) return 1; alias_{u32}++; "
+                                             "if (read_0() != {u32}) return 2;\n"), entry, entry, 7 + entry, entry, 8 + entry)
+                    : string_format(arena, S8("left = &pair_{u32}; right = &data_{u32}; if (left != right || data_{u32} != 7) return 1; pair_{u32}++; "
+                                             "if (read_{u32}() != 8) return 2;\n"), entry, entry, entry, entry, entry);
+            }
+            main_parts[main_part_count++] = S8("return 0; }\n");
+            String8 library_text = string_join_arena(arena, (SliceString8){.pointer = library_parts, .length = library_part_count}, false);
+            String8 main_text = string_join_arena(arena, (SliceString8){.pointer = main_parts, .length = main_part_count}, false);
+            bool prepared = file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(library_text)) &&
+                            file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(main_text));
+            BUSTER_TEST(arguments, prepared);
+            ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .use_process_environment = true};
+            for (u32 step = 0; prepared && step < 3; step += 1)
+            {
+                String8 command[16] = {0};
+                u64 command_count = 0;
+                command[command_count++] = S8(BUSTER_HOST_C_COMPILER);
+                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) command[command_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                command[command_count++] = S8("-g0");
+                command[command_count++] = S8("-O0");
+                if (step == 0)
+                {
+                    command[command_count++] = S8("-fPIC");
+                    command[command_count++] = S8("-shared");
+                    command[command_count++] = library_source;
+                }
+                else if (step == 1)
+                {
+                    // PIE address-taking uses PC-relative relocations, including
+                    // the volatile pointer comparison that prevents the host
+                    // compiler from folding two extern names as unequal.
+                    command[command_count++] = S8("-fPIE");
+                    command[command_count++] = S8("-c");
+                    command[command_count++] = main_source;
+                }
+                else
+                {
+                    command[command_count++] = S8("-no-pie");
+                    command[command_count++] = object_path;
+                    command[command_count++] = S8("-L");
+                    command[command_count++] = directory;
+                    command[command_count++] = S8("-ldataprobe");
+                }
+                command[command_count++] = S8("-o");
+                command[command_count++] = step == 0 ? library_path : step == 1 ? object_path : reference_path;
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = command_count},
+                    (SliceString8){0}, (SliceString8){0}, capture);
+                prepared = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST(arguments, prepared);
+            }
+            Arena* link_arena = arena_create((ArenaCreation){0});
+            u64 first_hash = 0;
+            for (u32 iteration = 0; prepared && iteration < (benchmark ? 8u : 1u); iteration += 1)
+            {
+                String8 command[] = {S8("-g0"), S8("-L"), directory, S8("-ldataprobe"), object_path, S8("-o"), buster_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(link_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                TimeDataType start = timestamp_take();
+                CompilerDriverResult linked = compiler_driver_execute_invocation(link_arena, invocation);
+                u64 ns = timestamp_ns_between(start, timestamp_take());
+                BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                prepared = linked.error == COMPILER_DRIVER_ERROR_NONE;
+                if (prepared)
+                {
+                    FileMapRead image = file_map_read(link_arena, buster_path, (FileReadOptions){0});
+                    u64 hash = buster_hash_64(image.bytes.pointer, image.bytes.length);
+                    if (!iteration) first_hash = hash;
+                    BUSTER_TEST(arguments, image.bytes.length && hash == first_hash);
+                    file_map_unmap(image);
+                    if (benchmark && iteration)
+                    {
+                        string_print(S8("BENCH_ELF_DSO shape={u32} count={u32} iteration={u32} ns={u64} retained={u64} hash={u64} directory={S8}\n"),
+                            shape, count, iteration, ns, link_arena->position - arena_minimum_position, hash, directory);
+                    }
+                }
+                arena_reset_to_start(link_arena);
+            }
+            arena_destroy(link_arena, 1);
+            for (u32 variant = 0; prepared && variant < 2; variant += 1)
+            {
+                String8 command[] = {variant ? reference_path : buster_path};
+                String8 keys[] = {S8("LD_LIBRARY_PATH")};
+                String8 values[] = {directory};
+                ProcessSpawnOptions run = capture;
+                run.use_process_environment = false;
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), run);
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle) BUSTER_TEST(arguments, os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+            scratch_end(fixture);
+        }
+    }
+    return result;
+}
+
 // Real object/archive and shared-library boundaries: execute the linked
 // artifacts so valid-looking section tables cannot hide placement or startup
 // errors. The host compiler builds only the reference and the shared library.
@@ -3523,6 +3674,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     result.test_count += codeview_limit.test_count;
     result.succeeded_test_count += codeview_limit.succeeded_test_count;
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
+    UnitTestResult elf_data = compiler_driver_test_elf_data_scaling(arguments);
+    result.succeeded_test_count += elf_data.succeeded_test_count;
+    result.test_count += elf_data.test_count;
     UnitTestResult elf_boundaries = compiler_driver_test_elf_link_boundaries(arguments);
     result.succeeded_test_count += elf_boundaries.succeeded_test_count;
     result.test_count += elf_boundaries.test_count;
