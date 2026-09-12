@@ -736,6 +736,17 @@ typedef enum MachineOpcode
     // simultaneous clobber point.
     MACHINE_X64_INLINE_ASSEMBLY,
     MACHINE_A64_INLINE_ASSEMBLY,
+    // Operand-free assembly keeps its actual zero-byte/hint payload separate
+    // from its independently modeled scheduler effects.  The four rows are
+    // contiguous so selectors can index them by memory | (flags << 1).
+    MACHINE_X64_INLINE_EFFECTS_NONE,
+    MACHINE_X64_INLINE_EFFECTS_MEMORY,
+    MACHINE_X64_INLINE_EFFECTS_FLAGS,
+    MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS,
+    MACHINE_A64_INLINE_EFFECTS_NONE,
+    MACHINE_A64_INLINE_EFFECTS_MEMORY,
+    MACHINE_A64_INLINE_EFFECTS_FLAGS,
+    MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

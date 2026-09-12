@@ -339,6 +339,20 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .clobber_mask = (UINT64_C(1) << MACHINE_X64_REGISTER_COUNT) - 1u,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
+    [MACHINE_X64_INLINE_EFFECTS_NONE] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
     [MACHINE_X64_SHL32] = MACHINE_INFO_SHIFT(),
     [MACHINE_X64_SHL64] = MACHINE_INFO_SHIFT(),
     [MACHINE_X64_SAR32] = MACHINE_INFO_SHIFT(),
@@ -1126,6 +1140,20 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_A64_INLINE_ASSEMBLY] = {
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
         .clobber_mask = (UINT64_C(1) << MACHINE_A64_REGISTER_COUNT) - 1u,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_NONE] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
     [MACHINE_A64_LEA_TLS] = {
@@ -2772,6 +2800,16 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                         (relocation->is_block ? relocation->block < function->block_count : relocation->symbol.length && relocation->symbol.pointer);
             }
         } break;
+        case MACHINE_X64_INLINE_EFFECTS_NONE:
+        case MACHINE_X64_INLINE_EFFECTS_MEMORY:
+        case MACHINE_X64_INLINE_EFFECTS_FLAGS:
+        case MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS:
+        case MACHINE_A64_INLINE_EFFECTS_NONE:
+        case MACHINE_A64_INLINE_EFFECTS_MEMORY:
+        case MACHINE_A64_INLINE_EFFECTS_FLAGS:
+        case MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS:
+            valid = instruction->payload <= 2;
+            break;
         case MACHINE_A64_LOAD_INCOMING:
             valid = instruction->flags == 0 || instruction->flags == 1 || instruction->flags == 2 ||
                     instruction->flags == 4 || instruction->flags == 8;
