@@ -18,5 +18,14 @@
 - Share CPU-side draw generation, font/texture orchestration, event-list
   ownership, and lifecycle policy. Keep device resources, synchronization,
   swapchains, native event translation, and native handles backend-specific.
+- TrueType bitmaps accept finite scales from zero through
+  `BUSTER_TTF_MAX_SCALE` (65536). Zero on either axis, empty glyphs, invalid
+  bounds/scales and exceeded budgets return an all-zero bitmap. Admission
+  checks ordered glyph bounds, rounded integer endpoints, dimensions of at
+  most 4096 per axis and at most 1,048,576 one-byte pixels before allocating
+  outline or bitmap storage. After outline extraction, a conservative limit
+  of 67,108,864 scanline edge-search steps bounds raster work. The headless
+  `truetype_tests` module covers these contracts, including a deterministic
+  malformed-parameter sweep in sanitizer and fuzz-enabled CI configurations.
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
