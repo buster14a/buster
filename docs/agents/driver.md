@@ -325,6 +325,26 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
   Clang-differential fixture** — a harness that reads "Clang refuses, Buster
   accepts" as a Buster success measures nothing (issue #660).
 
+## External ELF debug information
+
+The ELF object reader carries the DWARF 5 `.debug_addr`, `.debug_str_offsets`,
+`.debug_line_str`, `.debug_rnglists`, and `.debug_loclists` sections alongside
+its existing DWARF 4 sections. Unit headers and payloads remain opaque; the
+compiler's own DWARF writer still emits version 4. `link_objects` concatenates
+contributions and rebases their symbols and relocations. The ELF image writer
+resolves references into debug sections as section offsets at either 32- or
+64-bit width, and address-table entries as link-time addresses. Empty new
+sections add no executable section headers.
+
+Compressed debug sections require decompression and are explicitly refused
+with the section name. A relocation into an unsupported section likewise
+names that section instead of leaving the driver with a numeric error alone.
+Split DWARF and accelerator-section support are outside this section family.
+The registered object tests exercise both ELF architectures; Linux driver
+regressions build and link two optimized external CUs with the configured
+compiler in DWARF 4, DWARF 5, and DWARF64 modes, inspect relocated offsets,
+and run the result. They also check the compressed-section driver diagnostic.
+
 ## Native invariant verification
 
 `-fverify-codegen` validates canonical IR even when the frontend certified it,
