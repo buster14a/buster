@@ -623,15 +623,19 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     {
                         MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
                         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                        u8 flags = machine_instruction_opcode_row(function, instruction).schedule_flags;
+                        MachineOpcodeRow instruction_row = machine_instruction_opcode_row(function, instruction);
+                        u8 flags = instruction_row.schedule_flags;
                         for (u32 slot = 0; slot < info->operand_count; slot += 1)
                         {
                             flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
                         }
-                        if (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE)
+                        if (instruction_row.flags & MACHINE_OPCODE_ROW_FLAGS_USE)
                         {
-                            MachineOpcodeInfo const* above = offset ? machine_opcode_info(function->instructions[block->first_instruction + offset - 1].opcode) : 0;
-                            if (!above || !(above->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE))
+                            MachineOpcodeRow above = offset
+                                                         ? machine_instruction_opcode_row(function,
+                                                                                          function->instructions + block->first_instruction + offset - 1)
+                                                         : (MachineOpcodeRow){0};
+                            if (!offset || !(above.flags & MACHINE_OPCODE_ROW_FLAGS_DEFINE))
                             {
                                 block_supported = false;
                                 break;

@@ -1589,6 +1589,8 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
         flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0u;
         flags |= (opcode == MACHINE_X64_INDIRECT_BRANCH || opcode == MACHINE_A64_INDIRECT_BRANCH) ? MACHINE_OPCODE_ROW_INDIRECT_BRANCH : 0u;
         flags |= info->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) ? MACHINE_OPCODE_ROW_FLAGS_DEFINE : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE) ? MACHINE_OPCODE_ROW_FLAGS_USE : 0u;
         // The encoder's per-row byte budget, which was a nine-arm switch over
         // the same opcode this row is keyed by. Switches and aggregate copies
         // expand with their side data and keep the flag; everything else is
@@ -1691,9 +1693,10 @@ MachineOpcodeRow machine_instruction_opcode_row(MachineFunction const* function,
         {
             MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
             row.clobber_mask = assembly->clobber_mask;
-            row.flags &= (u8)~(MACHINE_OPCODE_ROW_CLOBBERS | MACHINE_OPCODE_ROW_TERMINATOR);
+            row.flags &= (u8)~(MACHINE_OPCODE_ROW_CLOBBERS | MACHINE_OPCODE_ROW_TERMINATOR | MACHINE_OPCODE_ROW_FLAGS_DEFINE);
             row.flags |= assembly->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0;
             row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0;
+            row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS) ? MACHINE_OPCODE_ROW_FLAGS_DEFINE : 0;
             row.schedule_flags = MACHINE_SCHEDULE_UNIT_BARRIER |
                                  ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0);
         }

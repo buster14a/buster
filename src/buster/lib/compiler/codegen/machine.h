@@ -1043,6 +1043,8 @@ BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
 #define MACHINE_OPCODE_ROW_INDIRECT_BRANCH (1u << 3)
 #define MACHINE_OPCODE_ROW_CLOBBERS (1u << 4)
 #define MACHINE_OPCODE_ROW_VARIABLE_BUDGET (1u << 5)
+#define MACHINE_OPCODE_ROW_FLAGS_DEFINE (1u << 6)
+#define MACHINE_OPCODE_ROW_FLAGS_USE (1u << 7)
 // The byte budget of an ordinary row: no encoding the tables publish is
 // longer, and the allocator's edits are budgeted separately.
 #define MACHINE_OPCODE_ROW_FLAT_BUDGET 24u

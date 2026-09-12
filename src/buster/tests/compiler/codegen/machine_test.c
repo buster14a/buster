@@ -5709,6 +5709,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, (machine_opcode_memory_effect(info) != MACHINE_MEMORY_EFFECT_NONE) == expected_memory);
         BUSTER_TEST(arguments, opcode_rows[opcode].clobber_mask == info->clobber_mask);
         BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_CLOBBERS) != 0) == (info->clobber_mask != 0));
+        BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_FLAGS_DEFINE) != 0) ==
+                                   ((info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) != 0));
+        BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_FLAGS_USE) != 0) ==
+                                   ((info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE) != 0));
         bool constrained = info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
                            (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED);
         BUSTER_TEST(arguments, machine_opcode_has_constraints(info) == constrained);
@@ -6397,10 +6401,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, inline_row.clobber_mask == inline_descriptor.clobber_mask &&
                                (inline_row.flags & MACHINE_OPCODE_ROW_CLOBBERS) != 0 &&
                                (inline_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) == 0 &&
+                               (inline_row.flags & MACHINE_OPCODE_ROW_FLAGS_DEFINE) == 0 &&
                                inline_row.schedule_flags == MACHINE_SCHEDULE_UNIT_BARRIER);
-    inline_descriptor.effects = MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY | MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR;
+    inline_descriptor.effects = MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY | MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS |
+                                MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR;
     inline_row = machine_instruction_opcode_row(&inline_function, inline_instructions);
     BUSTER_TEST(arguments, (inline_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0 &&
+                               (inline_row.flags & MACHINE_OPCODE_ROW_FLAGS_DEFINE) != 0 &&
                                inline_row.schedule_flags == (MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY));
     inline_descriptor.effects = 0;
     inline_descriptor.first_operand = 1;
