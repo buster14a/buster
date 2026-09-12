@@ -49,7 +49,7 @@ index 615d2c1..8e5167e 100644
 +    C_DIAGNOSTIC_INVALID_UTF8,
      C_DIAGNOSTIC_KIND_COUNT,
  } CDiagnosticKind;
- 
+
 diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
 index 0167b50..8581ce4 100644
 --- a/src/buster/lib/compiler/frontend/c/c_source.c
@@ -65,7 +65,7 @@ index 0167b50..8581ce4 100644
 @@ -339,9 +340,9 @@ BUSTER_C_INTERNAL bool c_identifier_continue(char8 character)
      return c_identifier_start(character) || c_ascii_digit(character);
  }
- 
+
 -// One byte per character value: nonzero when the character continues an
 -// identifier. Built from c_identifier_continue at first use so the two can
 -// never drift; the lexer's identifier run scan ANDs eight entries per step
@@ -85,9 +85,9 @@ index 0167b50..8581ce4 100644
      c_identifier_continue_table_built = true;
  }
 @@ -1382,13 +1383,45 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_block_comment_stop_find(String8 source,
- 
+
  #endif
- 
+
 +// Only identifier/pp-number spellings use this source-input contract. Comments
 +// and literal payloads retain their byte policy; OS utf8_decode is unrelated.
 +// Report the first byte of the first ill-formed sequence, including a truncated
@@ -187,7 +187,7 @@ index 0167b50..8581ce4 100644
 +        // below for UTF-8 validation before it can reach the batch emitter.
          u64 word = high_byte | (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WORD));
          u64 white = (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WHITE));
- 
+
 @@ -2205,12 +2252,25 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
          // punctuator byte is C_TOKEN_INVALID, whose diagnostic the scalar path
          // formats.
@@ -217,7 +217,7 @@ index 0167b50..8581ce4 100644
 +                trigger_at = BUSTER_MIN(trigger_at, candidate);
              }
          }
- 
+
 diff --git a/src/buster/tests/compiler/driver/driver_test.c b/src/buster/tests/compiler/driver/driver_test.c
 index e4cd5ab..dfded35 100644
 --- a/src/buster/tests/compiler/driver/driver_test.c
@@ -336,7 +336,7 @@ index f3ecafa..bd7501e 100644
 @@ -2934,6 +2934,193 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
      return result;
  }
- 
+
 +// Independent oracle: reconstruct the scalar and compare its minimum encoding
 +// width/range, rather than reproducing the production leader/second-byte table.
 +BUSTER_GLOBAL_LOCAL bool c_test_utf8_scalar_valid(String8 bytes)
