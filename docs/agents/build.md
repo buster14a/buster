@@ -245,7 +245,11 @@ code generation but cost 0.065% of instructions on a unity self-compile
 (29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
 and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
-Clang static analysis runs only against unsanitized Release. Every Clang matrix
+Clang static analysis runs only against unsanitized Release. The native driver
+now freezes deterministic module shards and requires complete fail-closed
+aggregation; CI also exercises the authoritative split-source Clang database.
+See [analyzer sharding](../clang-analyze-shards.md) for independent shard
+reproduction, deadlines, retained evidence and CI measurement semantics. Every Clang matrix
 configuration runs `test_all`; GCC, Zig, and MSVC are compile-only, and platform
 packages use their native test runner.
 The one carve-out inside `test_all` is a **whole-table audit**: a module whose

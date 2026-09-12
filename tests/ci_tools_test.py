@@ -434,7 +434,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
         self.assertNotIn("needs:", mobile)
-        self.assertIn("needs: [lint, test, native, mobile, uefi]", text)
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_windows_runs_native_worker_controls_before_the_combination_matrix(self):
@@ -559,7 +559,7 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile, uefi]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
         # predicate. Exercise all 625 existing shard outcomes with UEFI green,
@@ -574,8 +574,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             script = r"""
 set -eu
 checked=0
-UEFI_RESULT=success
-export UEFI_RESULT
+UEFI_RESULT=success ANALYZER_RESULT=success
+export UEFI_RESULT ANALYZER_RESULT
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
     for NATIVE_RESULT in success failure cancelled skipped ''; do
@@ -602,6 +602,15 @@ for UEFI_RESULT in failure cancelled skipped ''; do
   [[ "$actual" -ne 0 ]] || exit 1
   checked=$((checked + 1))
 done
+UEFI_RESULT=success
+export UEFI_RESULT
+for ANALYZER_RESULT in failure cancelled skipped ''; do
+  export ANALYZER_RESULT
+  actual=0
+  ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+  [[ "$actual" -ne 0 ]] || exit 1
+  checked=$((checked + 1))
+done
 printf '%s\n' "$checked"
 """
             # Windows CreateProcess can choose System32/bash.exe (WSL)
@@ -618,7 +627,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "629")
+            self.assertEqual(result.stdout.strip(), "633")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):
