@@ -4586,6 +4586,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     bool reserved[48] = {0};
     u64 exact_clobbers = 0;
     u8 effects = 0;
+    u8 preserved_vector_mask = 0;
     for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
     {
         X64Register clobber = X64_REGISTER_RAX;
@@ -4658,6 +4659,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                 vector_registers[index] = candidate;
                 used[16 + candidate] = true;
                 exact_clobbers |= UINT64_C(1) << (16 + candidate);
+                if (machine_x64_target_is_windows(selector->target) && candidate >= 6)
+                {
+                    preserved_vector_mask |= (u8)(1u << candidate);
+                }
                 slots[index] = machine_x64_append_slot(selector, 16, 16);
             }
         }
@@ -4779,6 +4784,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     }
     if (selected)
     {
+        u32 preserved_vector_count = ((preserved_vector_mask >> 6) & 1u) + ((preserved_vector_mask >> 7) & 1u);
+        u32 preserved_vector_slot = preserved_vector_count ? machine_x64_append_slot(selector, 16u * preserved_vector_count, 16) : UINT32_MAX;
         u32 first_operand = selector->inline_assembly_operands.total_count;
         for (u32 index = 0; index < instruction->operand_count; index += 1)
         {
@@ -4797,7 +4804,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         *descriptor = (MachineInlineAssembly){.source = source, .bytes = encoded.bytes, .clobber_mask = exact_clobbers,
                                               .first_operand = first_operand, .first_relocation = first_relocation,
                                               .operand_count = (u16)instruction->operand_count,
-                                              .relocation_count = (u16)encoded.relocation_count, .effects = effects};
+                                              .relocation_count = (u16)encoded.relocation_count, .effects = effects,
+                                              .preserved_vector_mask = preserved_vector_mask,
+                                              .preserved_vector_slot = preserved_vector_slot};
         machine_x64_select_row(selector, (MachineInstruction){.payload = descriptor_index, .opcode = MACHINE_X64_INLINE_ASSEMBLY});
         for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
         {
@@ -14180,6 +14189,21 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
                         u32 x87_top = UINT32_MAX;
                         u32 x87_below = UINT32_MAX;
+                        if (assembly->preserved_vector_mask)
+                        {
+                            u32 preserve_offset = placement->stack_slot_offsets[assembly->preserved_vector_slot];
+                            u32 preserve_index = 0;
+                            for (u32 xmm = 6; xmm < 8; xmm += 1)
+                            {
+                                if (assembly->preserved_vector_mask & (1u << xmm))
+                                {
+                                    s64 displacement = -(s64)(s32)(preserve_offset - preserve_index * 16u);
+                                    (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,
+                                                                                displacement, true, 128, 0);
+                                    preserve_index += 1;
+                                }
+                            }
+                        }
                         for (u32 operand_index = 0; operand_index < assembly->operand_count && !encoder.overflow; operand_index += 1)
                         {
                             u32 side_index = assembly->first_operand + operand_index;
@@ -14212,15 +14236,24 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                                                    placement->stack_slot_offsets[operand->stack_slot], 8, 0);
                             }
                         }
+                        u32 x87_depth = 0;
                         if (x87_below != UINT32_MAX)
                         {
                             MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + x87_below;
-                            machine_x64_emit_x87_memory(&encoder, S8("FLD"), -(s32)placement->stack_slot_offsets[operand->stack_slot], 80);
+                            if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)
+                            {
+                                machine_x64_emit_x87_memory(&encoder, S8("FLD"), -(s32)placement->stack_slot_offsets[operand->stack_slot], 80);
+                                x87_depth += 1;
+                            }
                         }
                         if (x87_top != UINT32_MAX)
                         {
                             MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + x87_top;
-                            machine_x64_emit_x87_memory(&encoder, S8("FLD"), -(s32)placement->stack_slot_offsets[operand->stack_slot], 80);
+                            if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)
+                            {
+                                machine_x64_emit_x87_memory(&encoder, S8("FLD"), -(s32)placement->stack_slot_offsets[operand->stack_slot], 80);
+                                x87_depth += 1;
+                            }
                         }
                         u32 assembly_start = encoder.count;
                         if (assembly->bytes.length > encoder.capacity - encoder.count)
@@ -14267,27 +14300,69 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                                                    placement->stack_slot_offsets[operand->stack_slot], 8, 0);
                             }
                         }
-                        u32 x87_depth = (x87_below != UINT32_MAX) + (x87_top != UINT32_MAX);
+                        MachineInlineAssemblyOperand const* top_operand =
+                            x87_top != UINT32_MAX ? function->inline_assembly_operands + x87_top : 0;
+                        MachineInlineAssemblyOperand const* below_operand =
+                            x87_below != UINT32_MAX ? function->inline_assembly_operands + x87_below : 0;
+                        if (top_operand && (top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                            !(top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+                        {
+                            x87_depth += 1;
+                        }
+                        if (below_operand && (below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                            !(below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+                        {
+                            x87_depth += 1;
+                        }
                         if ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) && x87_depth)
                         {
                             x87_depth -= 1;
                         }
-                        if (x87_top != UINT32_MAX && x87_depth)
+                        if (top_operand && x87_depth)
                         {
-                            MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + x87_top;
-                            if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+                            if (top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
                             {
-                                s32 displacement = -(s32)placement->stack_slot_offsets[operand->stack_slot];
+                                s32 displacement = -(s32)placement->stack_slot_offsets[top_operand->stack_slot];
                                 machine_x64_emit_x87_memory(&encoder, S8("FSTP"), displacement, 80);
                                 machine_x64_emit_f80_padding(&encoder, displacement);
                                 x87_depth -= 1;
                             }
+                            else if (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP))
+                            {
+                                BusterX86MetadataPhysicalOperand st0 = machine_x64_x87_operand(0);
+                                (void)machine_x64_emit_x87(&encoder, S8("FSTP"), &st0, 1);
+                                x87_depth -= 1;
+                            }
                         }
-                        if (x87_depth && x87_below != UINT32_MAX)
+                        if (below_operand && x87_depth)
                         {
-                            MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + x87_below;
-                            machine_x64_emit_x87_memory(&encoder, S8("FSTP"), -(s32)placement->stack_slot_offsets[operand->stack_slot], 80);
+                            if (below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+                            {
+                                s32 displacement = -(s32)placement->stack_slot_offsets[below_operand->stack_slot];
+                                machine_x64_emit_x87_memory(&encoder, S8("FSTP"), displacement, 80);
+                                machine_x64_emit_f80_padding(&encoder, displacement);
+                            }
+                            else
+                            {
+                                BusterX86MetadataPhysicalOperand st0 = machine_x64_x87_operand(0);
+                                (void)machine_x64_emit_x87(&encoder, S8("FSTP"), &st0, 1);
+                            }
                             x87_depth -= 1;
+                        }
+                        if (assembly->preserved_vector_mask)
+                        {
+                            u32 preserve_offset = placement->stack_slot_offsets[assembly->preserved_vector_slot];
+                            u32 preserve_index = 0;
+                            for (u32 xmm = 6; xmm < 8; xmm += 1)
+                            {
+                                if (assembly->preserved_vector_mask & (1u << xmm))
+                                {
+                                    s64 displacement = -(s64)(s32)(preserve_offset - preserve_index * 16u);
+                                    (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,
+                                                                                displacement, false, 128, 0);
+                                    preserve_index += 1;
+                                }
+                            }
                         }
                         if (x87_depth)
                         {

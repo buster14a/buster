@@ -1191,7 +1191,14 @@ struct MachineInlineAssembly
     u16 operand_count;
     u16 relocation_count;
     u8 effects;
-    u8 reserved[7];
+    // Win64 preserves the low 128 bits of XMM6/XMM7.  General x-constraint
+    // allocation still needs the complete eight-register closed pool, so a
+    // transaction that occupies either register owns one contiguous frame
+    // image and saves/restores the named low halves around its bytes.  Bit N
+    // names XMMN; the only admitted bits are 6 and 7.
+    u8 preserved_vector_mask;
+    u8 reserved[2];
+    u32 preserved_vector_slot;
 };
 
 // Optional selector certificates for individual frame objects in a function
