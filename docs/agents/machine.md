@@ -222,6 +222,23 @@
   calls and every payload bit are covered. The native differential runner
   includes the same pair. This does not change narrow-vector arithmetic or
   the model-dependent splitting of larger vectors.
+- Short x86-64 vector values use exact frame images for construction, loads,
+  stores and ABI transport. One-, two-, four-, eight- and sixteen-byte
+  signatures follow the shared classifier on SysV and Win64; incoming and
+  outgoing XMM transfers preserve the complete sixteen-byte part. Canonical
+  joins use the existing pair mapping, allocated only when a vector participates
+  in an edge. Baseline wider local vector images can also use frame copies;
+  this does not admit missing vector arithmetic or split wide signatures.
+  `compiler_driver_test_x64_frame_vectors` preserves four whole original
+  fixtures and a new conditional/loop/cross-compiler fixture over all six x86
+  targets, four allocators, both frontend forms, both PIC forms and baseline,
+  Haswell and Zen 5 CPU models. Only matching native baseline objects execute.
+  Its complete independent observer uses Clang: GCC 13 uses a different hidden
+  result-pointer ABI for single-lane float vectors. This known cross-compiler
+  mismatch is not interpreted as a successful differential run. The original
+  narrow signature and vector-load refusals are strict successes; the separate
+  `basic_c_machine_fallback_wide_signature.c` retains an explicit 32-byte
+  signature refusal for telemetry and artifact-failure checks.
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete

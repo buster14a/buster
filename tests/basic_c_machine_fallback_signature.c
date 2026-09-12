@@ -1,5 +1,5 @@
-// The direct emitter supports narrow Win64 vectors; their MIR signature
-// transport remains a separate capability, independent of argument count.
+// The original narrow signature rejection is now a strict MIR success.
+// Keep its source and function identity while the wider control stays separate.
 typedef unsigned long long MachineFallbackVector __attribute__((vector_size(8)));
 
 int machine_fallback_signature(MachineFallbackVector value)

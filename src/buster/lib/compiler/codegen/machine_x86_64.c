@@ -409,8 +409,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_scalar_register(IrType* type)
 }
 
 // The vector subset is the target-fixed 512-bit vocabulary: 64-byte vector
-// values travel in ZMM-class virtual registers. Narrower vector types stay
-// outside the subset and keep the per-function canonical fallback.
+// values travel in ZMM-class virtual registers. Other vector values use their
+// exact frame image, with sized transfers at ABI boundaries.
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_vector_register(IrType* type)
 {
     return type && type->layout.resolved && type->kind == IR_TYPE_VECTOR && type->layout.size == 64;
@@ -561,7 +561,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         };
         return true;
     }
-    if (!type || !type->layout.resolved || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_SLICE))
+    if (!type || !type->layout.resolved || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_SLICE &&
+                                           !(type->kind == IR_TYPE_VECTOR && type->layout.size <= 16)))
     {
         return false;
     }
@@ -622,7 +623,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
     {
-        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT || built.xmm128;
+        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT || abi.parts[part_index].abi_class == IR_ABI_CLASS_VECTOR;
         if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
             (abi.parts[part_index].size > 8 && !built.xmm128))
         {
@@ -3792,7 +3793,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_array(MachineX64Selector* selector, 
         // array. Stage its complete lanes into memory, then define its ZMM value.
         slot = machine_x64_append_slot(selector, 64, 16);
     }
-    if (type && (type->kind == IR_TYPE_ARRAY || vector) && slot != UINT32_MAX)
+    if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && slot != UINT32_MAX)
     {
         IrType* element_type = ir_type_from_id(&program->types, type->element_type);
         u64 element_size = element_type && element_type->layout.resolved ? element_type->layout.size : 0;
@@ -6205,7 +6206,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
             MachineTypeClass parameter_class = machine_x64_type_class(&selector, parameter->canonical_type);
             bool wide = (parameter_class.flags & MACHINE_TYPE_CLASS_INTEGER128) != 0 ||
-                        machine_x64_type_is_f80(&selector, parameter->canonical_type);
+                        machine_x64_type_is_f80(&selector, parameter->canonical_type) ||
+                        (parameter_class.kind == IR_TYPE_VECTOR && (parameter_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
+                         parameter_class.size_log2 <= 4);
             bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
             if (parameter->value.value >= function->value_count ||
                 (!wide && !vector && !(parameter_class.flags & (MACHINE_TYPE_CLASS_SCALAR_REGISTER | MACHINE_TYPE_CLASS_FLOAT_SCALAR))))
@@ -6637,7 +6640,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             {
                 selector.value_stack_slots[instruction->result.value] = machine_x64_append_slot(&selector, 16, 16);
             }
-            else if (value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER)
+            else if ((value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
             {
                 // 64-byte vector values live in ZMM-class virtual
                 // registers; the rows that cannot keep one there reject at
@@ -6662,7 +6665,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                       // compare on a row that already fails them all.
                       instruction->opcode == IR_OPCODE_CONSTANT_INTEGER) &&
                      (value_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
-                     ((value_class.flags & (MACHINE_TYPE_CLASS_AGGREGATE | MACHINE_TYPE_CLASS_INTEGER128)) ||
+                     ((value_class.flags & (MACHINE_TYPE_CLASS_AGGREGATE | MACHINE_TYPE_CLASS_INTEGER128)) || value_class.kind == IR_TYPE_VECTOR ||
                       ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_class.kind == IR_TYPE_ARRAY)))
             {
                 // Aggregate values own a frame slot like the canonical
@@ -6673,7 +6676,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 if (value_type->layout.size <= UINT32_MAX - 7)
                 {
                     selector.value_stack_slots[instruction->result.value] =
-                        machine_x64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
+                        machine_x64_append_slot(&selector,
+                            (u32)BUSTER_MAX((value_type->layout.size + 7) & ~(u64)7,
+                                selector.value_pairs && selector.value_pairs[instruction->result.value].registers[0] != UINT32_MAX ? 16u : 8u), 8);
                 }
             }
         }

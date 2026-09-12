@@ -74,7 +74,7 @@ area and float-register duplication described in the [machine guide](machine.md)
 Win64 indirect aggregate arguments use private caller copies with up to
 sixteen-byte alignment, as described in the [machine guide](machine.md).
 Win64 128-bit integer signatures pass arguments indirectly and return in XMM0.
-Shapes the Win64 subset does not build yet — vector signatures and
+Shapes the Win64 subset does not build yet — split wide vector signatures and
 aggregate arguments aligned above sixteen bytes — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
@@ -87,8 +87,8 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
-The signature-reason negative control uses the currently direct-only narrow
-Win64 vector ABI. Argument count is covered by strict-success regressions and
+The signature-reason negative control uses the currently direct-only 32-byte
+Win64 vector ABI. Narrow vectors and argument count have strict-success regressions and
 must not be constrained to keep a telemetry test failing.
 
 For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
