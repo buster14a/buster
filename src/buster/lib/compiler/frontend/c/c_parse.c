@@ -5106,49 +5106,99 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
     }
 }
 
+// Diagnostic counts stay out of ordinary compilers and timing builds.
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_AGGREGATE_LOOKUP_COUNT(lookup, field) do { if (lookup) { (lookup)->field += 1; } } while (0)
+#else
+#define C_AGGREGATE_LOOKUP_COUNT(lookup, field) ((void)0)
+#endif
+
+BUSTER_C_INTERNAL CAggregateLookupSlot* c_parse_aggregate_lookup_slot(CAggregateLookup* lookup, CTypeKind kind, String8 tag)
+{
+    u32 mask = lookup->slot_count - 1;
+    u32 slot_index = (u32)(c_macro_name_hash(tag) & mask) ^ ((u32)kind & mask);
+    CAggregateLookupSlot* slot = lookup->slots + slot_index;
+    C_AGGREGATE_LOOKUP_COUNT(lookup, probe_count);
+    while (slot->used && (slot->kind != (u32)kind || !string_equal(slot->tag, tag)))
+    {
+        slot_index = (slot_index + 1) & mask;
+        slot = lookup->slots + slot_index;
+        C_AGGREGATE_LOOKUP_COUNT(lookup, probe_count);
+    }
+    return slot;
+}
+
+BUSTER_C_INTERNAL bool c_parse_aggregate_lookup_grow(CParseResult* result)
+{
+    CAggregateLookup* lookup = result->aggregate_lookup;
+    bool grown = false;
+    if (lookup->slot_count <= UINT32_MAX / 2)
+    {
+        u32 slot_count = lookup->slot_count * 2;
+        u64 size = (u64)slot_count * sizeof(CAggregateLookupSlot);
+        if (c_parse_arena_can_allocate(result->arena, size, BUSTER_ALIGN_OF(CAggregateLookupSlot)))
+        {
+            CAggregateLookupSlot* old_slots = lookup->slots;
+            u32 old_count = lookup->slot_count;
+            lookup->slots = arena_allocate_zeroed(result->arena, CAggregateLookupSlot, slot_count);
+            lookup->slot_count = slot_count;
+            // Preserve even stale and multiple entries: rollback restores the
+            // type table, but never rewinds this stable header or its arena.
+            for (u32 index = 0; index < old_count; index += 1)
+            {
+                C_AGGREGATE_LOOKUP_COUNT(lookup, rehash_slot_count);
+                CAggregateLookupSlot slot = old_slots[index];
+                if (slot.used)
+                {
+                    *c_parse_aggregate_lookup_slot(lookup, (CTypeKind)slot.kind, slot.tag) = slot;
+                }
+            }
+            grown = true;
+        }
+    }
+    return grown;
+}
+
 BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTypeId id)
 {
     CAggregateLookup* lookup = result->aggregate_lookup;
     CType* type = &result->types[id.value];
-    // A qualified copy carries its base's tag but is not the tag's type --
-    // `typedef const struct T*` adds one per qualifier run -- so indexing it
-    // would both mark the slot as holding several types and let a lookup
-    // answer with the copy.  The tag's own record is the unqualified one.
-    if (lookup && !lookup->saturated && type->tag.length && !type->has_unqualified_type)
+    // Qualified aliases carry the tag but never own its identity.
+    if (lookup && type->tag.length && !type->has_unqualified_type)
     {
-        u32 mask = lookup->slot_count - 1;
-        u32 slot_index = (u32)(c_macro_name_hash(type->tag) & mask) ^ ((u32)type->kind & mask);
-        CAggregateLookupSlot* slot = lookup->slots + slot_index;
-        while (slot->used && (slot->kind != (u32)type->kind || !string_equal(slot->tag, type->tag)))
-        {
-            slot_index = (slot_index + 1) & mask;
-            slot = lookup->slots + slot_index;
-        }
+        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
         if (slot->used)
         {
-            // Keep the recorded id only while it still names an older live type
-            // with this key; a rolled-back id is replaced by the new one.  Two
-            // live types under one key mark the slot, which is what sends
-            // lookups to the scope-aware scan.
             u32 existing = slot->type_index;
-            if (existing < id.value && result->types[existing].kind == type->kind && string_equal(result->types[existing].tag, type->tag))
+            if (existing < id.value && result->types[existing].kind == type->kind &&
+                !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
             {
                 slot->multiple = true;
-                return;
             }
-            slot->type_index = id.value;
-            return;
+            else
+            {
+                slot->type_index = id.value;
+            }
         }
-        if (lookup->fill >= lookup->slot_count / 2)
+        else if (!lookup->incomplete)
         {
-            lookup->saturated = true;
-            return;
+            if (lookup->fill >= lookup->slot_count / 2)
+            {
+                lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
+                // Growth invalidates the slot pointer, including its empty slot.
+                slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+            }
+            if (!lookup->incomplete)
+            {
+                lookup->fill += 1;
+                *slot = (CAggregateLookupSlot){
+                    .tag = type->tag,
+                    .kind = (u32)type->kind,
+                    .type_index = id.value,
+                    .used = true,
+                };
+            }
         }
-        lookup->fill += 1;
-        slot->used = true;
-        slot->tag = type->tag;
-        slot->kind = (u32)type->kind;
-        slot->type_index = id.value;
     }
 }
 
@@ -5797,87 +5847,84 @@ BUSTER_C_SHARED u32 c_parse_scope_distance(CParseResult* result, CScopeId candid
 
 BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope)
 {
+    CTypeId found = C_TYPE_ID_INVALID;
     if (tag.length)
     {
         CAggregateLookup* lookup = result->aggregate_lookup;
+        bool scan = !lookup;
         bool scan_by_scope = false;
         if (lookup)
         {
-            u32 mask = lookup->slot_count - 1;
-            u32 slot_index = (u32)(c_macro_name_hash(tag) & mask) ^ ((u32)kind & mask);
-            CAggregateLookupSlot* slot = lookup->slots + slot_index;
-            bool stale = false;
-            while (slot->used)
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
+            scan = lookup->incomplete;
+            scan_by_scope = lookup->incomplete;
+            if (slot->used)
             {
-                if (slot->kind == (u32)kind && string_equal(slot->tag, tag))
+                u32 type_index = slot->type_index;
+                bool live = type_index < result->type_count && result->types[type_index].kind == kind &&
+                    !result->types[type_index].has_unqualified_type && string_equal(result->types[type_index].tag, tag);
+                if (live && !slot->multiple)
                 {
-                    u32 type_index = slot->type_index;
-                    if (type_index < result->type_count && result->types[type_index].kind == kind && string_equal(result->types[type_index].tag, tag))
-                    {
-                        // One live type under this key answers for every
-                        // scope, which is the whole translation unit's common
-                        // case; a marked slot resolves by scope instead.
-                        if (!slot->multiple)
-                        {
-                            return (CTypeId){
-                                .value = type_index,
-                            };
-                        }
-                        scan_by_scope = true;
-                        break;
-                    }
-                    stale = true;
-                    break;
+                    found = (CTypeId){.value = type_index};
+                    scan = false;
                 }
-                slot_index = (slot_index + 1) & mask;
-                slot = lookup->slots + slot_index;
-            }
-            if (!stale && !scan_by_scope && !lookup->saturated)
-            {
-                return C_TYPE_ID_INVALID;
+                else
+                {
+                    scan = true;
+                    scan_by_scope = scan_by_scope || slot->multiple;
+                }
             }
         }
-        // With several same-named tags alive, the innermost visible one wins
-        // and a later definition beats an earlier one at equal depth (`<=`).
-        // A scope the caller does not have keeps the pre-scope behavior: the
-        // oldest match, which is also what every unique-tag unit resolved to
-        // before scopes were consulted.
-        if (scan_by_scope && scope.value != C_ID_UNDERLYING_INVALID)
+        if (scan)
         {
-            CTypeId best = C_TYPE_ID_INVALID;
+            // Duplicate scoped tags retain their established resolution:
+            // innermost visible type, latest at equal depth; without a scope,
+            // the oldest unqualified match. Stale slots validate live rows.
             u32 best_distance = UINT32_MAX;
+            bool scoped = scan_by_scope && scope.value != C_ID_UNDERLYING_INVALID;
             for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
             {
+                C_AGGREGATE_LOOKUP_COUNT(lookup, fallback_type_count);
                 CType* type = &result->types[type_index];
-                if (type->kind != kind || type->has_unqualified_type || !string_equal(type->tag, tag))
+                if (type->kind == kind && !type->has_unqualified_type && string_equal(type->tag, tag))
                 {
-                    continue;
+                    if (!scoped)
+                    {
+                        found = (CTypeId){.value = type_index};
+                        break;
+                    }
+                    u32 distance = c_parse_scope_distance(result, type->tag_scope, scope);
+                    if (distance != UINT32_MAX && distance <= best_distance)
+                    {
+                        found = (CTypeId){.value = type_index};
+                        best_distance = distance;
+                    }
                 }
-                u32 distance = c_parse_scope_distance(result, type->tag_scope, scope);
-                if (distance <= best_distance)
-                {
-                    best = (CTypeId){
-                        .value = type_index,
-                    };
-                    best_distance = distance;
-                }
-            }
-            return best_distance != UINT32_MAX ? best : C_TYPE_ID_INVALID;
-        }
-        for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
-        {
-            CType* type = &result->types[type_index];
-            if (type->kind == kind && !type->has_unqualified_type && string_equal(type->tag, tag))
-            {
-                return (CTypeId){
-                    .value = type_index,
-                };
             }
         }
     }
-
-    return C_TYPE_ID_INVALID;
+    return found;
 }
+
+#undef C_AGGREGATE_LOOKUP_COUNT
+
+#if BUSTER_INCLUDE_TESTS
+CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type)
+{
+    return c_parse_add_type(result, type);
+}
+
+CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope)
+{
+    return c_parse_aggregate_lookup(result, kind, tag, scope);
+}
+
+void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint)
+{
+    CTypeParseMachine machine = {0};
+    c_type_parse_rollback(&machine, result, checkpoint, 0);
+}
+#endif
 
 // True when `index` starts a GNU assembler label: the keyword, a parenthesis, at
 // least one string literal, and the matching close. The shape is checked rather
@@ -15696,7 +15743,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         u32 aggregate_slot_count = 16384;
         result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
         *result.aggregate_lookup = (CAggregateLookup){
-            // An empty slot is a zero slot; fresh arena bytes are zero.
+            // Reused arena bytes can be dirty; empty slots must be zeroed.
             .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
             .slot_count = aggregate_slot_count,
         };
