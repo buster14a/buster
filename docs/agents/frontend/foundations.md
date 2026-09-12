@@ -221,6 +221,15 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Sibling intervals must remain disjoint; equal-range nesting resolves to the
   deepest child. Empty siblings sort before nonempty siblings at the same
   start. Queries before index construction retain the unindexed fallback.
+- `CAggregateLookup` doubles its slot array at half occupancy. Its stable
+  header and every rehashed slot survive speculative rollback; live type IDs
+  are revalidated, qualified aliases cannot own tags, and duplicate scoped
+  tags retain the scope-aware fallback. Only arena exhaustion or count overflow
+  makes the index incomplete. `c_test_aggregate_lookup_growth` covers both
+  8,192 and 16,384 tag boundaries and rollback across growth. With
+  `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
+  and requires zero fallback type visits for unique tags;
+  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts.
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip

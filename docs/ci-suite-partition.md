@@ -179,3 +179,21 @@ reuse is proposed separately in #412. Evidence packaging is described above
 (#409). Internal combination sharding (#333), analyzer partitioning (#92) and
 full coverage manifests (#335) remain separately tracked; no issue is closed
 by the suite split alone.
+
+### Complete evidence publication
+
+The packer stages the archive and both required summaries outside the source
+and upload trees. It copies summaries from the same bytes placed in the archive,
+verifies the archive, and publishes the complete directory with one rename.
+Missing summaries, write/close/verification errors and publication failure do
+not leave an uploadable archive or stale success summaries. Original evidence
+stays in place. All directory modes and mtimes (including fractional seconds)
+are retained, as well as file metadata and bytes; the generated-output exclusion
+policy is unchanged.
+
+If packaging fails, `Record native packaging failure` regenerates the fallback
+`result.json` and `summary.md` with `pack` required before the original diagnostic
+tree is uploaded. Thus passing tests cannot label a packaging failure successful.
+Cancellation keeps the existing workflow conditions. This publication fix makes
+no hosted package/upload speedup claim; the matched timing acceptance in #409
+remains separate.

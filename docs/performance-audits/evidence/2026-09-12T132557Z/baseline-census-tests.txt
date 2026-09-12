@@ -1,0 +1,33 @@
+okAGGREGATE_CENSUS tags=8191 slots=16384 probes=37680 rehash_slots=0 fallback_types=0
+AGGREGATE_CENSUS tags=8192 slots=16384 probes=50249 rehash_slots=0 fallback_types=0
+parse.aggregate_lookup->fill == count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1312
+parse.aggregate_lookup->slot_count >= 2 * count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1313
+!parse.aggregate_lookup->incomplete failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1314
+parse.aggregate_lookup->fallback_type_count == 0 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1322
+AGGREGATE_CENSUS tags=8193 slots=16384 probes=62827 rehash_slots=0 fallback_types=8193
+parse.aggregate_lookup->fill == count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1312
+parse.aggregate_lookup->slot_count >= 2 * count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1313
+!parse.aggregate_lookup->incomplete failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1314
+parse.aggregate_lookup->fallback_type_count == 0 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1322
+AGGREGATE_CENSUS tags=12000 slots=16384 probes=97493 rehash_slots=0 fallback_types=76891137
+parse.aggregate_lookup->fill == count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1312
+parse.aggregate_lookup->slot_count >= 2 * count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1313
+!parse.aggregate_lookup->incomplete failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1314
+parse.aggregate_lookup->fallback_type_count == 0 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1322
+AGGREGATE_CENSUS tags=16384 slots=16384 probes=141058 rehash_slots=0 fallback_types=239774065
+parse.aggregate_lookup->fill == count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1312
+parse.aggregate_lookup->slot_count >= 2 * count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1313
+!parse.aggregate_lookup->incomplete failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1314
+parse.aggregate_lookup->fallback_type_count == 0 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1322
+AGGREGATE_CENSUS tags=16385 slots=16384 probes=174651 rehash_slots=0 fallback_types=340474226
+parse.aggregate_lookup->slot_count >= 2 * maximum failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_growth:1341
+lookup.slot_count > old_count failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_identity:1385
+!lookup.incomplete failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_identity:1386
+c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Stale"), (CScopeId){0}).value == C_ID_UNDERLYING_INVALID failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_identity:1394
+parse.diagnostic_count == 0 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_frontend:1434
+lowered.program != 0 && lowered.diagnostic_count == 0 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_frontend:1435
+parse.aggregate_lookup->fill == 8193 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_frontend:1436
+parse.aggregate_lookup->slot_count > 16384 failed at /workspace/scratch/7b7041409b7c/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_aggregate_lookup_frontend:1437
+[2045733/2045757] Unit tests
+[46/47] Module tests
+[0/0] External tests

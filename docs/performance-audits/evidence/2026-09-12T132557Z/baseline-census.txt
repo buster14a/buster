@@ -1,0 +1,6 @@
+AGGREGATE_CENSUS tags=8191 slots=16384 probes=37680 rehash_slots=0 fallback_types=0
+AGGREGATE_CENSUS tags=8192 slots=16384 probes=50249 rehash_slots=0 fallback_types=0
+AGGREGATE_CENSUS tags=8193 slots=16384 probes=62827 rehash_slots=0 fallback_types=8193
+AGGREGATE_CENSUS tags=12000 slots=16384 probes=97493 rehash_slots=0 fallback_types=76891137
+AGGREGATE_CENSUS tags=16384 slots=16384 probes=141058 rehash_slots=0 fallback_types=239774065
+AGGREGATE_CENSUS tags=16385 slots=16384 probes=174651 rehash_slots=0 fallback_types=340474226
