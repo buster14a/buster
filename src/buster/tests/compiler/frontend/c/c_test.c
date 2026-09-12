@@ -19963,31 +19963,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             S8("aarch64-legacy-fixed.c"), aarch64_fixed_target, &aarch64_fixed_tokens, &aarch64_fixed_parse);
         BUSTER_TEST(arguments, aarch64_fixed_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_fixed_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, aarch64_fixed_lowered.diagnostic_count == 0);
-        if (aarch64_fixed_lowered.program)
-        {
-            IrModule* module = aarch64_fixed_lowered.program->modules;
-            IrFunction* function = c_test_find_ir_function(module, S8("aarch64_legacy_fixed"));
-            IrInstruction* assembly = 0;
-            if (function)
-            {
-                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-                {
-                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
-                    {
-                        assembly = function->instructions + instruction_index;
-                        break;
-                    }
-                }
-            }
-            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED && assembly && assembly->operand_count == 2);
-            if (assembly)
-            {
-                BUSTER_TEST(arguments, (assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
-                BUSTER_TEST(arguments, (assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
-            }
-            BUSTER_TEST(arguments, ir_validate_canonical_module(aarch64_fixed_lowered.program, module).error == IR_VALIDATION_NONE);
-        }
+        // 'a' names x86's accumulator class. AArch64 fixed registers are
+        // expressed by a bound register variable and retain the general 'r'
+        // class plus the target-neutral physical-register payload.
+        BUSTER_TEST(arguments, aarch64_fixed_lowered.diagnostic_count == 1);
 
         CPreprocessResult aarch64_fixed_tie_tokens = {0};
         CParseResult aarch64_fixed_tie_parse = {0};
