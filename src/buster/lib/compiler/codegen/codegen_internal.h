@@ -92,6 +92,20 @@ struct X64Builder
 typedef IrAbiPart CodegenCanonicalAbiPart;
 typedef IrAbiValue CodegenCanonicalAbiValue;
 
+// Shared inline-assembly planning services. Machine selection uses these to
+// close a template over explicit physical registers before the shared
+// assembler encodes it; none of them emit canonical instructions.
+BUSTER_F_DECL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function,
+                                                            IrInstruction* instruction, IrInstructionExtra extra,
+                                                            X64Register* registers, u32* vector_registers,
+                                                            AssemblySyntax syntax, String8* source_out, String8* reason_out);
+BUSTER_F_DECL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
+BUSTER_F_DECL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
+BUSTER_F_DECL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target, IrSymbolKind kind);
+BUSTER_F_DECL bool codegen_assembly_durable_name(String8 durable, String8* name);
+BUSTER_F_DECL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line,
+                                                                  String8 durable_names, bool* recognized);
+
 // What the stack pointer is worth on entry to a body and at every call, and so
 // the alignment an outgoing-argument area gets for free.
 #define CODEGEN_X64_STACK_ALIGNMENT 16

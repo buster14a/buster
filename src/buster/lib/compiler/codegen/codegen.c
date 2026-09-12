@@ -314,8 +314,8 @@ BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value);
 BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value);
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST void codegen_buffer_report_exhausted(CodegenBuffer* buffer);
 BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type);
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
+bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
+bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
 
 BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
 {
@@ -834,9 +834,9 @@ BUSTER_GLOBAL_LOCAL void codegen_inline_assembly_normalize_statements(String8* s
     source->length = write;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                   IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
-                                                                   AssemblySyntax syntax, String8* source_out, String8* reason_out)
+bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                              IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
+                                              AssemblySyntax syntax, String8* source_out, String8* reason_out)
 {
     String8 template_source = extra.literal;
     // Validated assembly has one constraint and value for every operand.
@@ -1004,7 +1004,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_is_rbx(String8 clobber)
     return string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) || string_equal(clobber, S8("bx")) || string_equal(clobber, S8("bl"));
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out)
+bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out)
 {
     if (string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) || string_equal(clobber, S8("al")))
     {
@@ -1052,7 +1052,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_register(String8 clobbe
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out)
+bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out)
 {
     switch (constraint & 0xff)
     {
@@ -5641,7 +5641,7 @@ BUSTER_GLOBAL_LOCAL u64 codegen_global_assembly_alignment_padding(String8 source
 // the very block that defines `_start` on the label that names it. `kind`
 // decides only what a newly created symbol becomes; an existing one keeps the
 // kind its declaration gave it.
-BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target, IrSymbolKind kind)
+IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target, IrSymbolKind kind)
 {
     String8 alternate = name;
     if ((target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) && alternate.length && alternate.pointer[0] == '_')
@@ -5694,7 +5694,7 @@ BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program
 // substitution verbatim, so the same bytes sit in the literal, which nothing
 // rewinds. A name that is not there is refused rather than recorded, because
 // the only thing left to record would be the copy.
-BUSTER_GLOBAL_LOCAL bool codegen_assembly_durable_name(String8 durable, String8* name)
+bool codegen_assembly_durable_name(String8 durable, String8* name)
 {
     if (!durable.length)
     {
@@ -5880,8 +5880,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_directive(String8 line, String8
 // in the table claims, which the caller reports as unsupported. `durable_names`
 // is where a name a new symbol record keeps has to live; see
 // codegen_assembly_durable_name.
-BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line, String8 durable_names,
-                                                                        bool* recognized)
+bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line, String8 durable_names,
+                                                    bool* recognized)
 {
     bool valid = true;
     for (u32 directive_index = 0; directive_index < BUSTER_ARRAY_LENGTH(codegen_global_assembly_symbol_directives) && !*recognized; directive_index += 1)
@@ -9966,25 +9966,63 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .thread_local_index = thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
                                 };
                             }
-                            buffer.count += encoded.byte_count;
-                            descriptor->prolog_size = machine_prologue_cursor;
-                            descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
-                            machine_function_emitted = true;
-                            if (label_address_relocation_count)
+                            bool machine_inline_relocations_valid =
+                                result.relocation_count <= relocation_capacity &&
+                                encoded.inline_assembly_relocation_count <= relocation_capacity - result.relocation_count;
+                            for (u32 relocation_index = 0;
+                                 relocation_index < encoded.inline_assembly_relocation_count && machine_inline_relocations_valid;
+                                 relocation_index += 1)
                             {
-                                machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
-                                memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                                MachineInlineAssemblyRelocation relocation = encoded.inline_assembly_relocations[relocation_index];
+                                CodegenModuleRelocationKind kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
+                                machine_inline_relocations_valid = !relocation.is_block &&
+                                    codegen_global_assembly_relocation_kind((AssemblyRelocationKind)relocation.kind, &kind);
+                                s64 addend = relocation.addend;
+                                if (machine_inline_relocations_valid && kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32)
+                                {
+                                    machine_inline_relocations_valid = addend <= INT64_MAX - 4;
+                                    addend += 4;
+                                }
+                                IrSymbolId symbol = machine_inline_relocations_valid
+                                                        ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA)
+                                                        : IR_SYMBOL_ID_INVALID;
+                                machine_inline_relocations_valid = machine_inline_relocations_valid &&
+                                    symbol.value != IR_ID_UNDERLYING_INVALID;
+                                if (machine_inline_relocations_valid)
+                                {
+                                    result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                        .addend = addend,
+                                        .symbol = symbol,
+                                        .offset = (u32)buffer.count + relocation.offset,
+                                        .source = CODEGEN_MODULE_RELOCATION_CODE,
+                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+                                        .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
+                                        .kind = (u8)kind,
+                                    };
+                                }
                             }
-                            machine_stack_frame_size = placement.frame_size;
-                            result.statistics.allocator_reload_count += placement.reload_count;
-                            result.statistics.allocator_spill_count += placement.spill_count;
-                            result.statistics.allocator_copy_count += placement.copy_count;
-                            result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
-                            result.statistics.allocator_boundary_reload_count += placement.boundary_reload_count;
-                            result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
-                            result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
-                            result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
-                            result.statistics.allocator_split_register_count += placement.split_register_count;
+                            if (machine_inline_relocations_valid)
+                            {
+                                buffer.count += encoded.byte_count;
+                                descriptor->prolog_size = machine_prologue_cursor;
+                                descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
+                                machine_function_emitted = true;
+                                if (label_address_relocation_count)
+                                {
+                                    machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
+                                    memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                                }
+                                machine_stack_frame_size = placement.frame_size;
+                                result.statistics.allocator_reload_count += placement.reload_count;
+                                result.statistics.allocator_spill_count += placement.spill_count;
+                                result.statistics.allocator_copy_count += placement.copy_count;
+                                result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
+                                result.statistics.allocator_boundary_reload_count += placement.boundary_reload_count;
+                                result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
+                                result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
+                                result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
+                                result.statistics.allocator_split_register_count += placement.split_register_count;
+                            }
                         }
                     }
                     else if (encoded_fits)

@@ -726,6 +726,12 @@ typedef enum MachineOpcode
     // Complete XMM ABI transfers; explicit register operands expose dataflow.
     MACHINE_X64_LOAD_XMM_FRAME128, // vector definition, frame source
     MACHINE_X64_STORE_XMM_FRAME128, // vector use, frame destination
+    // Closed inline-assembly transactions. The payload indexes the cold
+    // descriptor table; operands are staged through selector-owned frame
+    // slots so the hot row stays fixed-width and every allocator sees one
+    // simultaneous clobber point.
+    MACHINE_X64_INLINE_ASSEMBLY,
+    MACHINE_A64_INLINE_ASSEMBLY,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1118,6 +1124,60 @@ struct MachineTargetDescription
 // not selection output).
 typedef struct MachineFunction MachineFunction;
 
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT (1u << 0)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT (1u << 1)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY (1u << 2)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR (1u << 3)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP (1u << 4)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW (1u << 5)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER (1u << 6)
+
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY (1u << 0)
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS (1u << 1)
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR (1u << 2)
+
+// One operand of a closed inline-assembly transaction. `stack_slot` owns the
+// value image (or the address for a memory operand); the encoder transfers it
+// to/from `physical_register` immediately around the encoded template.
+typedef struct MachineInlineAssemblyOperand MachineInlineAssemblyOperand;
+struct MachineInlineAssemblyOperand
+{
+    u32 stack_slot;
+    u8 physical_register;
+    u8 byte_size;
+    u8 constraint_class;
+    u8 flags;
+};
+
+// A relocation emitted by the shared assembler. External rows retain the
+// durable symbol spelling; block rows name a MIR block and are resolved by
+// the target encoder's ordinary branch-fixup machinery.
+typedef struct MachineInlineAssemblyRelocation MachineInlineAssemblyRelocation;
+struct MachineInlineAssemblyRelocation
+{
+    String8 symbol;
+    s64 addend;
+    u32 offset;
+    u32 block;
+    u8 kind;
+    u8 is_block;
+    u8 reserved[2];
+};
+
+typedef struct MachineInlineAssembly MachineInlineAssembly;
+struct MachineInlineAssembly
+{
+    String8 source;
+    ByteSlice bytes;
+    u64 clobber_mask;
+    u32 first_operand;
+    u32 first_relocation;
+    u16 operand_count;
+    u16 relocation_count;
+    u8 effects;
+    u8 reserved[7];
+};
+
 // Optional selector certificates for individual frame objects in a function
 // that also contains volatile accesses. Zero is deliberately UNKNOWN.
 #define MACHINE_STACK_SLOT_MEMORY_NONVOLATILE 1u
@@ -1191,6 +1251,9 @@ struct MachineFunction
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
     MachineVaArg* va_args;
+    MachineInlineAssembly* inline_assemblies;
+    MachineInlineAssemblyOperand* inline_assembly_operands;
+    MachineInlineAssemblyRelocation* inline_assembly_relocations;
     // The backend that selected this function; placement reads its register
     // file and special-opcode identities from here.
     MachineTargetDescription const* target;
@@ -1206,6 +1269,9 @@ struct MachineFunction
     u32 switch_case_count;
     u32 line_mark_count;
     u32 va_arg_count;
+    u32 inline_assembly_count;
+    u32 inline_assembly_operand_count;
+    u32 inline_assembly_relocation_count;
     // Fixed outgoing argument area, in bytes, or zero for a function whose
     // calls need none. Win64 owns its callees' shadow space and stack
     // arguments in its own frame rather than pushing them, so the stack
@@ -1522,11 +1588,13 @@ struct MachineEncodeResult
     // ahead of its reload edits, parallel to the instruction array.
     u32* row_offsets;
     MachineCallSite* call_sites;
+    MachineInlineAssemblyRelocation* inline_assembly_relocations;
     // Function-relative offset of each emitted epilogue's first
     // instruction, one per return row; the AArch64 encoder fills these for
     // the Windows unwind data, the x86-64 encoder leaves them empty.
     u32* epilog_offsets;
     u32 call_site_count;
+    u32 inline_assembly_relocation_count;
     u32 epilog_count;
     bool valid;
     // Win64 prologues fit the PE byte-sized offset. Dynamic frames

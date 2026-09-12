@@ -14,6 +14,7 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -331,6 +332,11 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .tied_pair = (u8)(1u | (2u << 4)),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_ASSEMBLY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (UINT64_C(1) << MACHINE_X64_REGISTER_COUNT) - 1u,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
     [MACHINE_X64_SHL32] = MACHINE_INFO_SHIFT(),
@@ -1103,6 +1109,11 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .tied_pair = (u8)(1u | (2u << 4)),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_ASSEMBLY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (UINT64_C(1) << MACHINE_A64_REGISTER_COUNT) - 1u,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
     [MACHINE_A64_LEA_TLS] = {
@@ -2708,6 +2719,42 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
                     function->stack_slot_sizes[slot] >= 16 && instruction->payload == 0;
         } break;
+        case MACHINE_X64_INLINE_ASSEMBLY:
+        case MACHINE_A64_INLINE_ASSEMBLY:
+        {
+            valid = instruction->payload < function->inline_assembly_count;
+            MachineInlineAssembly* assembly = valid ? function->inline_assemblies + instruction->payload : 0;
+            valid = valid && assembly->first_operand <= function->inline_assembly_operand_count &&
+                    assembly->operand_count <= function->inline_assembly_operand_count - assembly->first_operand &&
+                    assembly->first_relocation <= function->inline_assembly_relocation_count &&
+                    assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
+                    (assembly->effects & ~(MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY | MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS |
+                                           MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR)) == 0 &&
+                    (!assembly->bytes.length || assembly->bytes.pointer) && (!assembly->source.length || assembly->source.pointer);
+            if (valid && function->target)
+            {
+                valid = (assembly->clobber_mask >> function->target->register_count) == 0;
+            }
+            for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
+            {
+                MachineInlineAssemblyOperand* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
+                valid = operand->stack_slot < function->stack_slot_count && operand->byte_size && operand->byte_size <= 16 &&
+                        operand->constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT &&
+                        operand->physical_register < (function->target ? function->target->register_count : MACHINE_TARGET_REGISTER_LIMIT) &&
+                        (operand->flags & ~(MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER)) == 0 &&
+                        (operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) != 0;
+            }
+            for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
+            {
+                MachineInlineAssemblyRelocation* relocation =
+                    function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                valid = relocation->kind < ASSEMBLY_RELOCATION_COUNT && relocation->offset < assembly->bytes.length &&
+                        (relocation->is_block ? relocation->block < function->block_count : relocation->symbol.length && relocation->symbol.pointer);
+            }
+        } break;
         case MACHINE_A64_LOAD_INCOMING:
             valid = instruction->flags == 0 || instruction->flags == 1 || instruction->flags == 2 ||
                     instruction->flags == 4 || instruction->flags == 8;
@@ -3141,7 +3188,10 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         (function->edge_copy_source_count && !function->edge_copy_sources) ||
         (function->switch_case_count && !function->switch_cases) || (function->immediate_count && !function->immediates) ||
         (function->stack_slot_count && !function->stack_slot_sizes) || (function->call_target_count && !function->call_targets) ||
-        (function->line_mark_count && !function->line_marks) || (function->va_arg_count && !function->va_args))
+        (function->line_mark_count && !function->line_marks) || (function->va_arg_count && !function->va_args) ||
+        (function->inline_assembly_count && !function->inline_assemblies) ||
+        (function->inline_assembly_operand_count && !function->inline_assembly_operands) ||
+        (function->inline_assembly_relocation_count && !function->inline_assembly_relocations))
     {
         result.error = MACHINE_VERIFY_STORAGE;
         return result;

@@ -18,6 +18,7 @@
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/codegen_internal.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -176,6 +177,9 @@ struct MachineX64Selector
     MachineSwitchCase* switch_case_end;
     // Variadic metadata rows are rare enough to keep the generic append.
     MachineBuilderStream va_args;
+    MachineBuilderStream inline_assemblies;
+    MachineBuilderStream inline_assembly_operands;
+    MachineBuilderStream inline_assembly_relocations;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     MachineCanonicalPair* value_pairs;
@@ -4430,6 +4434,287 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_compiler_barrier(MachineX64Selector*
     return selected;
 }
 
+#define MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT 16u
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
+                                                            String8* source_out, AssemblyEncodeResult* encoded_out)
+{
+    String8 resolved = {0};
+    bool selected = codegen_inline_assembly_resolve_template(selector->arena, selector->program, selector->function, instruction, extra,
+                                                              registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved, 0);
+    char8* instructions = selected ? arena_allocate(selector->arena, char8, resolved.length ? resolved.length : 1) : 0;
+    u64 instruction_length = 0;
+    u64 line_start = 0;
+    while (selected && line_start < resolved.length)
+    {
+        u64 line_end = line_start;
+        while (line_end < resolved.length && resolved.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = {.pointer = resolved.pointer + line_start, .length = line_end - line_start};
+        while (line.length && (line.pointer[0] == ' ' || line.pointer[0] == '\t'))
+        {
+            line.pointer += 1;
+            line.length -= 1;
+        }
+        if (line.length && line.pointer[0] == '.')
+        {
+            bool recognized = false;
+            selected = codegen_global_assembly_apply_symbol_directive(selector->program, selector->target, line, extra.literal, &recognized) && recognized;
+        }
+        else if (line.length)
+        {
+            memcpy(instructions + instruction_length, line.pointer, line.length);
+            instruction_length += line.length;
+            instructions[instruction_length++] = '\n';
+        }
+        line_start = line_end < resolved.length ? line_end + 1 : resolved.length;
+    }
+    AssemblyEncodeResult encoded = {0};
+    if (selected)
+    {
+        encoded = assembly_encode(selector->arena, (String8){.pointer = instructions, .length = instruction_length},
+                                  (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        selected = encoded.diagnostic_count == 0;
+    }
+    if (selected)
+    {
+        *source_out = resolved;
+        *encoded_out = encoded;
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+    bool selected = instruction->operand_count <= MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
+                    instruction->operand_count == instruction->immediate_count && !instruction->target_count &&
+                    extra.operand_name_count == instruction->operand_count &&
+                    (!instruction->operand_count || (instruction->operands && instruction->immediates && extra.operand_names));
+    X64Register registers[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
+    u32 vector_registers[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
+    u32 slots[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT];
+    u8 sizes[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
+    u8 operand_flags[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
+    bool used[48] = {0};
+    bool reserved[48] = {0};
+    u64 exact_clobbers = 0;
+    u8 effects = 0;
+    for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
+    {
+        X64Register clobber = X64_REGISTER_RAX;
+        if (string_equal(extra.clobbers[index], S8("memory")))
+        {
+            effects |= MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY;
+        }
+        else if (string_equal(extra.clobbers[index], S8("cc")))
+        {
+            effects |= MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS;
+        }
+        else if (codegen_inline_assembly_clobber_register(extra.clobbers[index], &clobber))
+        {
+            reserved[clobber] = true;
+            exact_clobbers |= UINT64_C(1) << clobber;
+        }
+        else if (!string_equal(extra.clobbers[index], S8("st")))
+        {
+            selected = false;
+        }
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        X64Register fixed = X64_REGISTER_RAX;
+        if (!(instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) &&
+            codegen_inline_assembly_constraint_register(instruction->immediates[index], &fixed))
+        {
+            selected = !reserved[fixed];
+            reserved[fixed] = true;
+        }
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        u64 constraint = instruction->immediates[index];
+        u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        IrValueId operand = instruction->operands[index];
+        IrType* type = operand.value < function->value_count
+                           ? ir_type_from_id(&selector->program->types, function->values[operand.value].canonical_type)
+                           : 0;
+        selected = type && type->layout.resolved && type->layout.size && type->layout.size <= 16 &&
+                   constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+        bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint_class);
+        bool vector = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint_class);
+        bool x87 = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint_class);
+        selected = selected && !vector && !x87;
+        if (selected && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH))
+        {
+            u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+            selected = match < index;
+            if (selected)
+            {
+                registers[index] = registers[match];
+                vector_registers[index] = vector_registers[match];
+                slots[index] = slots[match];
+            }
+        }
+        else if (selected && vector)
+        {
+            u32 candidate = 0;
+            while (candidate < 8 && (used[16 + candidate] || reserved[16 + candidate]))
+            {
+                candidate += 1;
+            }
+            selected = candidate < 8;
+            if (selected)
+            {
+                vector_registers[index] = candidate;
+                used[16 + candidate] = true;
+                exact_clobbers |= UINT64_C(1) << (16 + candidate);
+                slots[index] = machine_x64_append_slot(selector, 16, 16);
+            }
+        }
+        else if (selected && x87)
+        {
+            registers[index] = X64_REGISTER_RAX;
+            slots[index] = machine_x64_append_slot(selector, 16, 16);
+        }
+        else if (selected)
+        {
+            X64Register fixed = X64_REGISTER_RAX;
+            bool has_fixed = codegen_inline_assembly_constraint_register(constraint, &fixed);
+            u32 candidate = has_fixed ? (u32)fixed : 0;
+            while (!has_fixed && candidate < 16 &&
+                   (candidate == MACHINE_X64_RSP || candidate == MACHINE_X64_RBP || used[candidate] || reserved[candidate]))
+            {
+                candidate += 1;
+            }
+            selected = candidate < 16 && (!has_fixed || !used[candidate]);
+            if (selected)
+            {
+                registers[index] = (X64Register)candidate;
+                used[candidate] = true;
+                exact_clobbers |= UINT64_C(1) << candidate;
+                slots[index] = machine_x64_append_slot(selector, 8, 8);
+            }
+        }
+        if (selected)
+        {
+            sizes[index] = (u8)(memory ? 8 : type->layout.size);
+            operand_flags[index] = (u8)(((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) ? MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT : 0) |
+                                        (!(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) ||
+                                                 (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE)
+                                             ? MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT
+                                             : 0) |
+                                        (memory ? MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY : 0) |
+                                        (vector ? MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR : 0) |
+                                        (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T ? MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP : 0) |
+                                        (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_U ? MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW : 0) |
+                                        ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER)
+                                             ? MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER
+                                             : 0));
+            effects |= memory ? MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY : 0;
+        }
+    }
+    // Stage every input image before any output is published. Matching inputs
+    // initialize their output's shared frame slot and therefore preserve
+    // permutations without sequential-register aliasing.
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        if (!(operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+        {
+            continue;
+        }
+        IrValueId source = instruction->operands[index];
+        u64 constraint = instruction->immediates[index];
+        bool memory = (operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY) != 0;
+        u32 source_register = UINT32_MAX;
+        if (memory)
+        {
+            source_register = machine_x64_synthesize_register(selector);
+            selected = machine_x64_select_place_address(selector, source, source_register);
+        }
+        else if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0)
+        {
+            source_register = machine_x64_synthesize_register(selector);
+            IrInstruction load = {.opcode = IR_OPCODE_LOAD, .canonical_type = function->values[source.value].canonical_type,
+                                  .operands = &source, .operand_count = 1, .result = source};
+            selected = machine_x64_select_load(selector, &load, source_register);
+        }
+        else
+        {
+            selected = machine_x64_operand_register(selector, source, &source_register);
+        }
+        if (selected && !(operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP |
+                                                  MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)))
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index]),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                .opcode = MACHINE_X64_STORE_FRAME64,
+            });
+        }
+        else if (selected)
+        {
+            // Vector and x87 values already own frame storage in the machine
+            // selector; their dedicated transaction staging is added below.
+            selected = false;
+        }
+    }
+    String8 source = {0};
+    AssemblyEncodeResult encoded = {0};
+    selected = selected && machine_x64_inline_assembly_source(selector, instruction, extra, registers, vector_registers, &source, &encoded);
+    u32 first_relocation = selector->inline_assembly_relocations.total_count;
+    for (u32 index = 0; selected && index < encoded.relocation_count; index += 1)
+    {
+        AssemblyRelocation relocation = encoded.relocations[index];
+        selected = relocation.symbol < encoded.symbol_count && !encoded.symbols[relocation.symbol].defined && relocation.offset <= UINT32_MAX;
+        String8 name = selected ? encoded.symbols[relocation.symbol].name : (String8){0};
+        selected = selected && codegen_assembly_durable_name(extra.literal, &name);
+        if (selected)
+        {
+            MachineInlineAssemblyRelocation* row =
+                (MachineInlineAssemblyRelocation*)machine_stream_append(selector->arena, &selector->inline_assembly_relocations);
+            *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = relocation.addend, .offset = (u32)relocation.offset,
+                                                     .block = UINT32_MAX, .kind = (u8)relocation.kind};
+        }
+    }
+    if (selected)
+    {
+        u32 first_operand = selector->inline_assembly_operands.total_count;
+        for (u32 index = 0; index < instruction->operand_count; index += 1)
+        {
+            MachineInlineAssemblyOperand* row =
+                (MachineInlineAssemblyOperand*)machine_stream_append(selector->arena, &selector->inline_assembly_operands);
+            *row = (MachineInlineAssemblyOperand){.stack_slot = slots[index], .physical_register = (u8)registers[index],
+                                                  .byte_size = sizes[index],
+                                                  .constraint_class = (u8)(instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK),
+                                                  .flags = operand_flags[index]};
+        }
+        u32 descriptor_index = selector->inline_assemblies.total_count;
+        MachineInlineAssembly* descriptor = (MachineInlineAssembly*)machine_stream_append(selector->arena, &selector->inline_assemblies);
+        *descriptor = (MachineInlineAssembly){.source = source, .bytes = encoded.bytes, .clobber_mask = exact_clobbers,
+                                              .first_operand = first_operand, .first_relocation = first_relocation,
+                                              .operand_count = (u16)instruction->operand_count,
+                                              .relocation_count = (u16)encoded.relocation_count, .effects = effects};
+        machine_x64_select_row(selector, (MachineInstruction){.payload = descriptor_index, .opcode = MACHINE_X64_INLINE_ASSEMBLY});
+        for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+        {
+            if ((operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY)) ==
+                MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+            {
+                u32 value = machine_x64_select_frame_load64(selector, slots[index], 0);
+                IrValueId place = instruction->operands[index];
+                selected = machine_x64_select_scalar_store(selector, place, selector->place_kinds[place.value], sizes[index],
+                                                           selector->value_stack_slots[place.value], value);
+            }
+        }
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL u32 machine_x64_select_block_entry(MachineX64Selector* selector, u32 canonical_block)
 {
     return selector->block_entries ? selector->block_entries[canonical_block] : canonical_block;
@@ -6344,6 +6629,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     machine_stream_initialize(&selector.call_targets, sizeof(MachineX64CallTarget));
     machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
     machine_stream_initialize(&selector.va_args, sizeof(MachineVaArg));
+    machine_stream_initialize(&selector.inline_assemblies, sizeof(MachineInlineAssembly));
+    machine_stream_initialize(&selector.inline_assembly_operands, sizeof(MachineInlineAssemblyOperand));
+    machine_stream_initialize(&selector.inline_assembly_relocations, sizeof(MachineInlineAssemblyRelocation));
     selector.return_shape = signature_return_shape;
     selector.hidden_return_slot = UINT32_MAX;
     selector.va_register_save_slot = UINT32_MAX;
@@ -7617,7 +7905,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     instruction_selected = machine_x64_select_compiler_barrier(&selector, instruction) ||
                                            machine_x64_select_assembly_identity(&selector, instruction) ||
                                            machine_x64_select_inline_hint(&selector, instruction) ||
-                                           machine_x64_select_cpu_query(&selector, instruction);
+                                           machine_x64_select_cpu_query(&selector, instruction) ||
+                                           machine_x64_select_inline_assembly(&selector, instruction);
                     break;
                 case IR_OPCODE_ATOMIC_FENCE:
                     instruction_selected = machine_x64_select_atomic_fence(&selector, instruction);
@@ -7735,6 +8024,17 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.va_args = arena_allocate(arena, MachineVaArg, selector.va_args.total_count);
     result.function.va_arg_count = selector.va_args.total_count;
     machine_stream_flatten(&selector.va_args, result.function.va_args);
+    result.function.inline_assemblies = arena_allocate(arena, MachineInlineAssembly, selector.inline_assemblies.total_count);
+    result.function.inline_assembly_count = selector.inline_assemblies.total_count;
+    machine_stream_flatten(&selector.inline_assemblies, result.function.inline_assemblies);
+    result.function.inline_assembly_operands =
+        arena_allocate(arena, MachineInlineAssemblyOperand, selector.inline_assembly_operands.total_count);
+    result.function.inline_assembly_operand_count = selector.inline_assembly_operands.total_count;
+    machine_stream_flatten(&selector.inline_assembly_operands, result.function.inline_assembly_operands);
+    result.function.inline_assembly_relocations =
+        arena_allocate(arena, MachineInlineAssemblyRelocation, selector.inline_assembly_relocations.total_count);
+    result.function.inline_assembly_relocation_count = selector.inline_assembly_relocations.total_count;
+    machine_stream_flatten(&selector.inline_assembly_relocations, result.function.inline_assembly_relocations);
     if (!machine_function_split_parameter_edges(arena, &result.function))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
@@ -13195,6 +13495,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         MachineOpcodeRow row = opcode_rows[capacity_row->opcode];
         dynamic_stack |= capacity_row->opcode == MACHINE_X64_STACK_ALLOCATE;
         capacity64 += row.encode_budget;
+        if (capacity_row->opcode == MACHINE_X64_INLINE_ASSEMBLY && capacity_row->payload < function->inline_assembly_count)
+        {
+            MachineInlineAssembly const* assembly = function->inline_assemblies + capacity_row->payload;
+            capacity64 += assembly->bytes.length + (u64)assembly->operand_count * 24u;
+        }
         if (BUSTER_UNLIKELY((row.flags & MACHINE_OPCODE_ROW_VARIABLE_BUDGET) != 0))
         {
             capacity64 += capacity_row->opcode == MACHINE_X64_SWITCH ? (u64)capacity_row->flags * 24u : ((u64)capacity_row->payload / 8u) * 24u;
@@ -13238,6 +13543,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     machine_stream_initialize(&fixups, sizeof(MachineX64BranchFixup));
     MachineBuilderStream call_sites;
     machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
+    MachineBuilderStream inline_assembly_relocations;
+    machine_stream_initialize(&inline_assembly_relocations, sizeof(MachineInlineAssemblyRelocation));
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
     result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     // Prologue: the frame base is RBP, matching the canonical path, and
@@ -13606,6 +13913,69 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         (void)machine_x64_emit_metadata_instruction(&encoder, pause ? S8("PAUSE") : S8("NOP"), 0, 0,
                             (BusterX86MetadataFeatureInput){.names = machine_x64_pause_features, .count = pause ? 1u : 0u},
                             (BusterX86MetadataPhysicalAttributes){0}, 0);
+                    }
+                    break; case MACHINE_X64_INLINE_ASSEMBLY:
+                    {
+                        if (instruction->payload >= function->inline_assembly_count)
+                        {
+                            encoder.overflow = true;
+                            break;
+                        }
+                        MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
+                        u32 assembly_start = encoder.count;
+                        for (u32 operand_index = 0; operand_index < assembly->operand_count && !encoder.overflow; operand_index += 1)
+                        {
+                            u32 side_index = assembly->first_operand + operand_index;
+                            if (side_index >= function->inline_assembly_operand_count)
+                            {
+                                encoder.overflow = true;
+                                break;
+                            }
+                            MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + side_index;
+                            if ((operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT) &&
+                                !(operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP |
+                                                    MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)))
+                            {
+                                machine_x64_emit_exact_frame_chunk(&encoder, true, operand->physical_register,
+                                                                   placement->stack_slot_offsets[operand->stack_slot], 8, 0);
+                            }
+                        }
+                        assembly_start = encoder.count;
+                        if (assembly->bytes.length > encoder.capacity - encoder.count)
+                        {
+                            encoder.overflow = true;
+                        }
+                        else
+                        {
+                            memcpy(encoder.bytes + encoder.count, assembly->bytes.pointer, assembly->bytes.length);
+                            encoder.count += (u32)assembly->bytes.length;
+                        }
+                        for (u32 relocation_index = 0; relocation_index < assembly->relocation_count && !encoder.overflow; relocation_index += 1)
+                        {
+                            u32 side_index = assembly->first_relocation + relocation_index;
+                            if (side_index >= function->inline_assembly_relocation_count)
+                            {
+                                encoder.overflow = true;
+                                break;
+                            }
+                            MachineInlineAssemblyRelocation row = function->inline_assembly_relocations[side_index];
+                            row.offset += assembly_start;
+                            MachineInlineAssemblyRelocation* output =
+                                (MachineInlineAssemblyRelocation*)machine_stream_append(arena, &inline_assembly_relocations);
+                            *output = row;
+                        }
+                        for (u32 operand_index = 0; operand_index < assembly->operand_count && !encoder.overflow; operand_index += 1)
+                        {
+                            MachineInlineAssemblyOperand const* operand =
+                                function->inline_assembly_operands + assembly->first_operand + operand_index;
+                            if ((operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                                !(operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR |
+                                                    MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)))
+                            {
+                                machine_x64_emit_exact_frame_chunk(&encoder, false, operand->physical_register,
+                                                                   placement->stack_slot_offsets[operand->stack_slot], 8, 0);
+                            }
+                        }
                     }
                     break; case MACHINE_X64_CPUID:
                     case MACHINE_X64_XGETBV:
@@ -14321,6 +14691,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     result.call_sites = arena_allocate(arena, MachineCallSite, call_sites.total_count);
     result.call_site_count = call_sites.total_count;
     machine_stream_flatten(&call_sites, result.call_sites);
+    result.inline_assembly_relocations =
+        arena_allocate(arena, MachineInlineAssemblyRelocation, inline_assembly_relocations.total_count);
+    result.inline_assembly_relocation_count = inline_assembly_relocations.total_count;
+    machine_stream_flatten(&inline_assembly_relocations, result.inline_assembly_relocations);
     result.bytes = encoder.bytes;
     result.byte_count = encoder.count;
     result.valid = true;

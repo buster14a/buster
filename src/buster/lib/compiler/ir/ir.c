@@ -695,8 +695,9 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_assembly_constraint_shape_valid(u64 constrain
     bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
     bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
     bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+    bool early_clobber = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
     u64 match_bits = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK;
-    if ((read_write && !output) || (matching && (output || read_write)))
+    if ((read_write && !output) || (early_clobber && !output) || (matching && (output || read_write)))
     {
         return false;
     }
