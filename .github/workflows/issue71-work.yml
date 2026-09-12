@@ -1,4 +1,4 @@
-name: Issue 71 development snapshot
+name: Issue 71 diagnostic tooling
 
 on:
   push:
@@ -9,19 +9,26 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
+  tooling:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Archive the exact development revision
+      - name: Install distribution validation tools
         shell: bash
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" "$GITHUB_SHA"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y tcc qemu-user-static
+          mkdir -p "$RUNNER_TEMP/issue71-tools"
+          cp /usr/bin/tcc /usr/bin/qemu-aarch64-static "$RUNNER_TEMP/issue71-tools/"
+          cp -a /usr/lib/x86_64-linux-gnu/tcc "$RUNNER_TEMP/issue71-tools/tcc-lib"
+          dpkg-query -W tcc qemu-user-static > "$RUNNER_TEMP/issue71-tools/packages.txt"
+          tcc -print-search-dirs > "$RUNNER_TEMP/issue71-tools/search-dirs.txt"
+          ldd /usr/bin/tcc > "$RUNNER_TEMP/issue71-tools/tcc-ldd.txt"
+          tar -czf "$RUNNER_TEMP/issue71-tools.tar.gz" -C "$RUNNER_TEMP" issue71-tools
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: issue71-source-${{ github.sha }}
-          path: ${{ runner.temp }}/buster-source.tar.gz
+          name: issue71-tools-${{ github.sha }}
+          path: ${{ runner.temp }}/issue71-tools.tar.gz
           if-no-files-found: error
           retention-days: 1
