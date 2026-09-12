@@ -1,0 +1,112 @@
+name: Native retirement evidence
+
+on:
+  push:
+    branches: [codex/36-census-evidence-de594a5]
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Frozen compiler pair and complete census
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out candidate implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: de594a5be72ab3261f5d88c5372ea2e15c05edee
+          path: candidate
+          persist-credentials: false
+      - name: Check out archived direct source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          path: reference
+          persist-credentials: false
+      - name: Bootstrap candidate build driver
+        working-directory: candidate
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/candidate-build"
+      - name: Build candidate with hosted Clang exception
+        working-directory: candidate
+        run: |
+          "$RUNNER_TEMP/candidate-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/candidate-build" build --config Release -t ide
+      - name: Bootstrap archived build driver
+        working-directory: reference
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/reference-build"
+      - name: Rebuild archived direct reference
+        working-directory: reference
+        run: |
+          "$RUNNER_TEMP/reference-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/reference-build" build --config Release -t ide
+      - name: Validate census harness
+        working-directory: candidate
+        run: '"$RUNNER_TEMP/candidate-build" native_retirement_census --self-test'
+      - name: Freeze manifest before execution
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision de594a5be72ab3261f5d88c5372ea2e15c05edee
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --manifest-only --out evidence/manifest
+      - name: Execute complete assigned shard 0
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision de594a5be72ab3261f5d88c5372ea2e15c05edee
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 0 --shard-count 4
+          --out evidence/census-integrated-0
+      - name: Execute complete assigned shard 1
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision de594a5be72ab3261f5d88c5372ea2e15c05edee
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 1 --shard-count 4
+          --out evidence/census-integrated-1
+      - name: Execute complete assigned shard 2
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision de594a5be72ab3261f5d88c5372ea2e15c05edee
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 2 --shard-count 4
+          --out evidence/census-integrated-2
+      - name: Execute complete assigned shard 3
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision de594a5be72ab3261f5d88c5372ea2e15c05edee
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 3 --shard-count 4
+          --out evidence/census-integrated-3
+      - name: Retain raw evidence and build recipes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-retirement-de594a5-${{ github.run_id }}
+          path: |
+            candidate/evidence/
+            candidate/build/CMakeCache.txt
+            candidate/build/compile_commands.json
+            reference/build/CMakeCache.txt
+            reference/build/compile_commands.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 6
