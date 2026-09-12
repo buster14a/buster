@@ -8751,10 +8751,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_relative_encoded.exact_attempts ==
                                    exact_relative_encoded.exact_successes + exact_relative_encoded.exact_failures);
 
-    // A vector load that the target cannot select must reject the function at
-    // that load and let module generation use the canonical path. Keeping the
-    // signature scalar makes the unsupported instruction internal to the
-    // function instead of letting the vector ABI reject it first.
+    // The original baseline vector-load refusal now selects an exact frame
+    // copy. Keep its source identity and require a strict MIR module.
     Target machine_vector_fallback_target = {
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
@@ -8780,20 +8778,19 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult machine_vector_fallback_selected = machine_select_canonical_function(
                 arguments->arena, machine_vector_fallback_program, machine_vector_fallback_function, machine_vector_fallback_target);
-            BUSTER_TEST(arguments, !machine_vector_fallback_selected.supported);
-            BUSTER_TEST(arguments, machine_vector_fallback_selected.failed_opcode == IR_OPCODE_LOAD);
+            BUSTER_TEST(arguments, machine_vector_fallback_selected.supported);
+            BUSTER_TEST(arguments, machine_vector_fallback_selected.failed_opcode == IR_OPCODE_COUNT);
         }
         CodegenModule machine_vector_fallback_module = codegen_generate_canonical_module(
             arguments->arena, machine_vector_fallback_program, machine_vector_fallback_ir_module, machine_vector_fallback_target,
             (CodegenModuleOptions){
                 .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+                .verify_invariants = true,
             });
         BUSTER_TEST(arguments, machine_vector_fallback_module.error == CODEGEN_ERROR_NONE);
-        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_function_count == 1);
-        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_opcode_counts[IR_OPCODE_LOAD] == 1);
-        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1);
-        BUSTER_TEST(arguments, machine_vector_fallback_module.first_fallback_opcode == IR_OPCODE_LOAD);
-        BUSTER_TEST(arguments, machine_vector_fallback_module.first_fallback_reason == CODEGEN_FALLBACK_OPCODE);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_function_count == 0);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_opcode_counts[IR_OPCODE_LOAD] == 0);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 0);
     }
 
     // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux

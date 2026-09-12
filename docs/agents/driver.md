@@ -74,7 +74,7 @@ area and float-register duplication described in the [machine guide](machine.md)
 Win64 indirect aggregate arguments use private caller copies with up to
 sixteen-byte alignment, as described in the [machine guide](machine.md).
 Win64 128-bit integer signatures pass arguments indirectly and return in XMM0.
-Shapes the Win64 subset does not build yet — vector signatures and
+Shapes the Win64 subset does not build yet — split wide vector signatures and
 aggregate arguments aligned above sixteen bytes — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
@@ -87,8 +87,8 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
-The signature-reason negative control uses the currently direct-only narrow
-Win64 vector ABI. Argument count is covered by strict-success regressions and
+The signature-reason negative control uses the currently direct-only 32-byte
+Win64 vector ABI. Narrow vectors and argument count have strict-success regressions and
 must not be constrained to keep a telemetry test failing.
 
 For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
@@ -175,16 +175,6 @@ outside the eleven-fixture floor above. The direct backend remains its
 semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
-
-`object_print_assembly` builds immutable per-section views of symbol and
-relocation indices. Offset ordering uses original table indices to break ties;
-label and duplicate-relocation order, original `.extern`/`.size` order and
-range-query table precedence are preserved. Section emission advances cursors;
-nonmonotonic decoder/literal queries use binary search without moving them.
-Ordered sections skip sorting, and all index/internal-label scratch is rewound
-before returning the assembly bytes. See the [printer scaling
-replay](benchmarking.md#object-assembly-printer-scaling) for output and memory
-controls.
 
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
