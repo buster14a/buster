@@ -4521,7 +4521,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     String8 resolved = {0};
     bool selected = codegen_inline_assembly_resolve_template(selector->arena, selector->program, selector->function, instruction, extra,
                                                               registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved, 0);
-    char8* instructions = selected ? arena_allocate(selector->arena, char8, resolved.length ? resolved.length : 1) : 0;
+    // Each retained line below gets a newline, including a final unterminated
+    // template line. Reserve that byte instead of overwriting the next arena
+    // object before the standalone assembler parses it.
+    selected = selected && resolved.length != UINT64_MAX;
+    char8* instructions = selected ? arena_allocate(selector->arena, char8, resolved.length + 1) : 0;
     u64 instruction_length = 0;
     u64 line_start = 0;
     while (selected && line_start < resolved.length)
