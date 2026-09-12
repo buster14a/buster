@@ -33,10 +33,12 @@ objects, rather than only calling variadic functions compiled by the other
 compiler. Independent producers and consumers check the three-pointer/two-offset
 layout, pointer and by-value list parameters, original-versus-copy independence,
 canaries, mixed named register/stack arguments, i128 register/stack alignment,
-HFA overflow and independent GP/FP exhaustion. A by-value consumer must leave
-its caller's list unchanged. These relations use the existing scalar and
-at-most-sixteen-byte aggregate subset; larger HFAs, indirect aggregate reads
-and vector/HVA reads are not claimed. The existing native configuration matrix
+HFA overflow and independent GP/FP exhaustion. By-value calls pass a separate
+`va_copy`, end that consumed copy before any further use, and continue through
+an independent original list. The consumer checks distinct caller/callee storage;
+no check relies on reusing the consumed by-value list. These relations use the
+existing scalar and at-most-sixteen-byte aggregate subset; larger HFAs, indirect
+aggregate reads and vector/HVA reads are not claimed. The existing native configuration matrix
 runs them on Linux AArch64; other hosts do not count the guarded relations as
 executed. QEMU cross-compiler checks are separate emulator evidence.
 
@@ -63,10 +65,12 @@ contain `main`; with it, Buster compiles only the subject translation unit and
 the host compiler links it to the fixed caller/observer translation unit.
 This also accepts saved C cases from `tools/differential_c_harness.py`.
 `--host` and `--reject` cannot be combined. The original subject's directory
-remains on the include path during reduction. `--generated N`, `--seed N`,
-`--timeout N`, and `--minimize N` are validated bounded integers; zero reduction
-trials disables automatic reduction. `--no-verify` exists for testing older
-compiler binaries that lack the verification flag, and is recorded explicitly.
+remains on the include path during reduction. `--host` and `--reject` cannot
+be combined. The original subject's directory remains on the include path
+during reduction. `--generated N`, `--seed N`, `--timeout N`, and `--minimize N`
+are validated bounded integers; zero reduction trials disables automatic reduction.
+`--no-verify` exists for testing older compiler binaries that lack the verification
+flag, and is recorded explicitly.
 
 ## Configuration authority
 
@@ -177,7 +181,6 @@ selected/rescheduled function or placement is fatal instead of being hidden by c
 fallback. Ordinary compilation retains its existing fast paths.
 
 Successful native compilation prints:
-
 ```text
 CODEGEN_VERIFY version=1 ir=1 mir=2 scheduled=0 allocator=fast
 ```
