@@ -2,6 +2,16 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+`signbit` reads the original float representation through canonical memory
+operations: bit 31 for binary32, bit 63 for binary64, byte-eight bit 15 for
+x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
+before observing the sign. This preserves signaling NaNs, signed zero and
+floating exception state. `basic_c_signbit_images.c` and its independent host
+observer cover those images across the native target/mode/frontend/PIC matrix.
+AArch64 binary128 widening uses ordinary MIR frame images; see the machine
+guide for its exact conversion and native floating-environment checks. This
+does not claim binary128 scalar ABI or arithmetic support.
+
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
