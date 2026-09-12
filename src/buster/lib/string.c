@@ -1663,6 +1663,10 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
     {
         u64 command_line_length = string16_length(command_line);
         String8* strings = arena_allocate(arena, String8, command_line_length + 1);
+        // Decoding never expands UTF-16. Reuse one buffer for every argument;
+        // each UTF-8 conversion copies its result into independent storage.
+        // Allocating the remaining suffix per argument made arena growth quadratic.
+        char16* argument = arena_allocate(arena, char16, command_line_length + 1);
         u64 string_count = 0;
 
         for (u64 i = 0; i < command_line_length;)
@@ -1677,7 +1681,6 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
                 break;
             }
 
-            char16* argument = arena_allocate(arena, char16, command_line_length - i + 1);
             u64 argument_length = 0;
             bool in_quotes = false;
 
