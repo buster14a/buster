@@ -4955,7 +4955,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     bool selected = instruction->operand_count <= MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
                     instruction->operand_count == instruction->immediate_count && !instruction->target_count &&
-                    extra.operand_name_count == instruction->operand_count;
+                    extra.operand_name_count <= instruction->operand_count &&
+                    (!extra.operand_name_count || extra.operand_names);
     u32 registers[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u32 slots[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT];
     u8 sizes[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};

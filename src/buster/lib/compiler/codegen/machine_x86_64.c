@@ -4574,8 +4574,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     }
     bool selected = instruction->operand_count <= MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
                     instruction->operand_count == instruction->immediate_count && (!instruction->target_count || simple_goto) &&
-                    extra.operand_name_count == instruction->operand_count &&
-                    (!instruction->operand_count || (instruction->operands && instruction->immediates && extra.operand_names));
+                    extra.operand_name_count <= instruction->operand_count &&
+                    (!instruction->operand_count || (instruction->operands && instruction->immediates)) &&
+                    (!extra.operand_name_count || extra.operand_names);
     X64Register registers[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u32 vector_registers[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u32 slots[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT];
