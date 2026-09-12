@@ -7,18 +7,32 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
-  every integer width all lower, and a variadic argument takes the sixteen-
+  integers through 64 bits all lower, and a variadic argument takes the sixteen-
   byte, sixteen-aligned overflow slot the ABI requires. Every one of those is
   a *closed* x87 transaction: it loads its operands from frame slots, operates,
   stores the result back, and leaves the x87 stack as empty as it found it, so
   no value is ever live in an ST register across a machine instruction and the
-  register allocators need no x87 class. Machine selection therefore refuses an
-  f80 function outright and it falls back per function to the canonical
-  emitter, which is where the whole vocabulary lives
-  (`codegen_canonical_x64_emit_f80_*` in `codegen.c`). Do not touch the x87
-  control word outside `codegen_canonical_x64_x87_truncate_begin/end`: its
-  default extended precision is exactly what `long double` wants, and only a
-  float-to-integer conversion may switch the rounding field, for one store.
+  register allocators need no x87 class. Machine selection carries resolved
+  SysV f80 values in sixteen-byte frame slots and selects arithmetic, negate,
+  unordered-aware comparisons, f32/f64 conversion, signed integers through
+  64 bits and unsigned integers through 64 bits. The six `MACHINE_X64_F80_*`
+  rows have explicit frame operands and memory/barrier effects. Only the ABI
+  bridges leave ST(0), or ST(0)/ST(1) for complex results, live beside a call or
+  return. Single-f80 wrappers use the same ABI-proven bridge. SSA joins use
+  two ordinary integer limbs and restore the frame value at block entry.
+  Unsigned-64 conversion composes signed conversion, comparison, scalar masks
+  and an exact zero/2^63 correction at extended precision; it preserves all
+  four rounding modes and restores the complete control word after truncation.
+  The direct implementation is `codegen_canonical_x64_emit_f80_*` in
+  `codegen.c`; f80/i128 conversions remain unsupported by both backends.
+  Preserve the caller's
+  x87 control word: canonical truncate helpers and the MIR conversion row
+  may temporarily change only rounding control for a C integer cast, then
+  restore the exact saved word. `tests/basic_c_f80_machine.c` checks this
+  subset under strict MIR; its HOST/LIBRARY/FENV modes support independent
+  Clang callers and callees. `tests/basic_c_f80_u64.c` covers unsigned
+  thresholds, fractions and positive zero, with CLIENT/LIBRARY/FENV modes
+  for Clang boundary checks across all four rounding-control modes.
   An **aggregate** carrying an f80 payload takes one of two paths, and which
   one is the ABI classification's answer, never a walk of the fields. System
   V's merger algorithm orders its rules equal, NO_CLASS, MEMORY, INTEGER, x87,
@@ -44,13 +58,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   argument side does, and for the same reason. The X87/X87_UP pair classifies
   into memory, so a variadic `long double` is never in the register save area
   whatever the argument counters hold: `va_arg` realigns the overflow cursor
-  to sixteen, takes the slot, advances past all of it, and copies the payload
-  through the x87 stack, which is what leaves the destination's six padding
-  bytes zeroed. An opaque aggregate reads back through the ordinary eightbyte
-  path. `tests/basic_c_va_arg_long_double.c` pins both under all four
+  to sixteen, takes the slot, and advances past all sixteen bytes. Canonical
+  emission copies through x87 and clears padding; MIR copies the ten payload
+  bytes directly, preserving payload/sign and making no padding promise.
+  An opaque aggregate reads back through the ordinary eightbyte path.
+  `tests/basic_c_va_arg_long_double.c` pins both under all four
   allocators, including a read through a `va_list *` and one past a `va_copy`
-  — the spellings musl's `pop_arg` uses, and the ones the canonical emitter
-  alone has the x87 vocabulary for.
+  — the spellings musl's `pop_arg` uses. Strict MIR selection, allocation and
+  execution are also registered for this fixture.
   A *static* x87 initializer is folded rather than emitted:
   `c_ir_ext80_fold_initializer` in `c_gen.c` evaluates a constant expression
   over numeric literals — `+ - * /`, unary sign, parentheses — straight into
@@ -82,12 +97,12 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   that edge. `tests/basic_c_long_double_static_initializer.c` pins the finite
   arithmetic and `tests/basic_c_long_double_static_special.c` everything from
   the infinities out, both against bytes read out of Clang's own object.
-  Still refused with a source diagnostic: a fixed wide-float parameter of a
+  The canonical emitter still refuses a fixed wide-float parameter of a
   variadic *definition* (the SysV `va_start`
   register-save area does not account for it), an aggregate whose
   classification carries an X87 class without being the ABI-proven single-f80
-  shape, and every wide float on a target whose `long double` is not this
-  format.
+  or complex shape, and every wide float on a target whose `long double` is
+  not this format.
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives

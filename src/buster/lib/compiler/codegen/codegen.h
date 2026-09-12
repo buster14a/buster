@@ -341,6 +341,17 @@ typedef enum CodegenFallbackReason
     CODEGEN_FALLBACK_REASON_COUNT,
 } CodegenFallbackReason;
 
+// Optional source-order attribution, independent of the aggregate counters.
+// The array exists only when record_fallbacks is requested. Function IDs refer
+// to the retained canonical module; a retry discards the entire attempt array.
+typedef struct CodegenFallbackRecord CodegenFallbackRecord;
+struct CodegenFallbackRecord
+{
+    IrFunctionId function;
+    IrOpcode opcode;
+    CodegenFallbackReason reason;
+};
+
 typedef struct CodegenStatistics CodegenStatistics;
 struct CodegenStatistics
 {
@@ -452,6 +463,8 @@ struct CodegenModule
     IrFunctionId first_fallback_function;
     IrOpcode first_fallback_opcode;
     CodegenFallbackReason first_fallback_reason;
+    CodegenFallbackRecord* fallback_records;
+    u32 fallback_record_count;
     // Where a module-level assembly block failed. `failed_assembly` indexes
     // IrModule.assemblies and `failed_assembly_line` is the one-based line
     // inside that block's own text, both meaningful only while
@@ -520,6 +533,9 @@ struct CodegenModuleOptions
     // Test/audit mode: validate certified IR and selected/scheduled MIR too;
     // verifier/placement failures must not disappear into canonical fallback.
     bool verify_invariants;
+    // Keep diagnostic flags independently addressable during self-hosting.
+    // Packed _Bool fields can lose their load type during local promotion.
+    bool record_fallbacks;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
     // thread-local block, and a symbol another object could interpose is
@@ -529,11 +545,10 @@ struct CodegenModuleOptions
     // other target's address materialization is a different one and this flag
     // does not reach it.
     bool position_independent;
-    // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
-    // record at its existing size.
+    // A CodegenRegisterAllocatorMode value; byte storage keeps the options
+    // record within one native argument eightbyte.
     u8 register_allocator;
-    // An AssemblySyntax value.  Keep this byte-sized so the public options
-    // record remains ABI-compatible with callers that embed it.
+    // An AssemblySyntax value, also stored as one byte.
     u8 assembly_syntax;
 };
 

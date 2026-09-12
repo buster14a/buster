@@ -9,6 +9,36 @@
 // machine_selection_value_facts_allocate serves
 // the target row walks. machine_selection_validate_function checks only the
 // storage/ownership contract of the unvalidated selector entry point.
+// machine_selection_is_compiler_barrier shares the empty-assembly shape check.
+
+// Literal classification belongs to the caller. The shared operand/clobber
+// contract admits only memory/cc effects, with no register or CFG constraints.
+BUSTER_F_DECL bool machine_selection_is_operand_free_assembly(IrFunction* function, IrInstruction* instruction);
+
+// Validated canonical IR only. Empty assembly with no operands or CFG targets
+// accepts an empty clobber list or any combination of memory/cc clobbers.
+// Consumers must emit a side-effecting memory barrier with a flags definition;
+// this deliberately overstates the effects of forms omitting memory or cc.
+BUSTER_F_DECL bool machine_selection_is_compiler_barrier(IrFunction* function, IrInstruction* instruction);
+
+#define MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS 16u
+typedef struct MachineAssemblyIdentityPlan MachineAssemblyIdentityPlan;
+struct MachineAssemblyIdentityPlan
+{
+    u8 source_operands[MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS];
+    u8 sizes[MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS];
+    u16 outputs;
+    u16 read_write;
+    u16 matching_inputs;
+    u32 target_index; // UINT32_MAX without a control-flow target.
+};
+
+// Empty templates transport only scalar generic-register inputs into
+// read/write or explicitly tied outputs; unspecified pure outputs stay out.
+// A nonempty jump_prefix additionally admits literal unconditional asm-goto
+// branches and empty-template fallthrough. Consumers must prune unused edges.
+BUSTER_F_DECL bool machine_selection_assembly_identity_plan(IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                                            String8 jump_prefix, MachineAssemblyIdentityPlan* plan);
 
 typedef enum MachineSelectionValidationError
 {
@@ -166,6 +196,11 @@ BUSTER_F_DECL MachineSelectionValidationError machine_selection_validate_functio
 BUSTER_F_DECL MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count);
 
 struct MachineFunction;
+// Remap canonical edges after block expansion, retaining only the executable
+// successor and its argument copies for selected literal assembly branches.
+BUSTER_F_DECL void machine_selection_finish_canonical_edges(struct MachineFunction* machine, IrFunction* source,
+                                                             u32 canonical_edge_offset, u32 const* block_entries, u32 const* block_exits);
+
 // Called at selector publication, before row/line-mark remapping. Existing
 // canonical-to-machine spans identify every frame object touched by volatile
 // lowering. Only mixed functions allocate this optional per-object proof.

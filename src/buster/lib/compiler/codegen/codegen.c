@@ -7683,6 +7683,35 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_frame_float_memory_operation(Code
     return codegen_canonical_a64_float_memory_operation_base(buffer, register_number, offset, size, store, 28);
 }
 
+// Reconstruct an ELF va_arg from the ABI image named by X12. Indirect
+// composites must read exactly their object bytes, including a short tail.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_va_value(CodegenBuffer* buffer, IrAbiValue* abi, u32 size,
+    u32 part_count, u32 result_offset, bool from_registers)
+{
+    bool valid = true;
+    bool floating = abi->part_count && codegen_canonical_abi_part_is_float(abi->parts[0].abi_class);
+    if (abi->indirect)
+    {
+        valid = codegen_canonical_a64_memory_operation_base(buffer, 12, 0, 8, false, false, 12);
+    }
+    for (u32 part = 0; part < part_count && valid; part += 1)
+    {
+        u32 offset = floating ? abi->parts[part].value_offset : part * 8u;
+        u32 source_offset = from_registers && floating ? part * 16u : offset;
+        u32 remaining = abi->indirect ? size : floating ? abi->parts[part].size : 8u;
+        u32 copied = 0;
+        while (remaining && valid)
+        {
+            u32 chunk = remaining >= 8 ? 8u : remaining >= 4 ? 4u : remaining >= 2 ? 2u : 1u;
+            valid = codegen_canonical_a64_memory_operation_base(buffer, 9, source_offset + copied, chunk, false, false, 12) &&
+                    codegen_canonical_a64_frame_memory_operation(buffer, 9, result_offset + offset + copied, chunk, true, false);
+            copied += chunk;
+            remaining -= chunk;
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_vector_operation(CodegenBuffer* buffer, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                 u32 const* value_offsets)
 {
@@ -9068,6 +9097,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_capacity) : 0;
     result.debug_info = options.debug_info;
+    if (options.record_fallbacks && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
+    {
+        result.fallback_records = arena_allocate(arena, CodegenFallbackRecord, module->function_count);
+    }
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
@@ -9743,6 +9776,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_frame_area = placement.frame_size + 8 * machine_push_count;
                         bool machine_windows_frame = selected.function.windows_aarch64_frame;
                         u32 machine_chain_size = machine_windows_frame ? codegen_a64_windows_save_area_size(machine_push_count) : 16u;
+                        machine_chain_size += selected.function.windows_aarch64_variadic ? MACHINE_A64_VA_GP_SAVE_BYTES : 0u;
                         u32 machine_frame_total = machine_frame_area + machine_chain_size;
                         bool machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_chain_size);
@@ -10102,6 +10136,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         if (options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
         {
+            if (result.fallback_records)
+            {
+                result.fallback_records[result.fallback_record_count++] = (CodegenFallbackRecord){
+                    .function = {.value = function_index}, .opcode = fallback_opcode, .reason = fallback_reason,
+                };
+            }
             if (!result.statistics.fallback_function_count)
             {
                 result.first_fallback_function = (IrFunctionId){.value = function_index};
@@ -17414,6 +17454,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 else
                                 {
                                     float_register_index = 8;
+                                    prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, prior_type->layout.alignment > 8);
                                     prior_stack_parts += (u32)((prior_type->layout.size + 7) / 8);
                                 }
                                 continue;
@@ -17523,6 +17564,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
+                                prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, argument_type->layout.alignment > 8);
                                 for (u32 part = 0; part < argument_abi.part_count; part += 1)
                                 {
                                     CodegenCanonicalAbiPart* abi_part = argument_abi.parts + part;
@@ -18403,9 +18445,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                 instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
                                                 instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
                             u32 pair_retry_offset = (u32)buffer.count;
-                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
                             c_a64_load(&emitter, 11, instruction->operands[1]);
                             c_a64_load_high(&emitter, 12, instruction->operands[1]);
+                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
                             switch (instruction->atomic_operation)
                             {
                             case IR_ATOMIC_ADD:
@@ -18514,11 +18556,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             value_type->layout.size == 16)
                         {
                             // The sixteen-byte compare-exchange: the expected
-                            // pair reloads inside the loop (the register pair
-                            // doubles as the desired pair on the match path),
-                            // both halves compare through CCMP, a mismatch
-                            // leaves through CLREX like the scalar form, and
-                            // the loop returns the old value pair like every
+                            // and desired pairs reload before each exclusive
+                            // window, which contains no ordinary memory access.
+                            // both halves compare through CCMP, and CSEL
+                            // chooses the observed pair on mismatch. LDXP is
+                            // not itself a single-copy atomic read: even a
+                            // mismatch must complete STXP before returning.
+                            // The loop returns the old value pair like every
                             // other atomic — the frontend owns the success
                             // comparison and the expected write-back.
                             if (indirect)
@@ -18539,21 +18583,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                 instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
                                                 instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
                             u32 pair_retry_offset = (u32)buffer.count;
-                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
+                            // Stage every frame read before the exclusive window.
+                            // X16 remains address scratch; X15/X17 retain desired.
                             c_a64_load(&emitter, 11, instruction->operands[1]);
                             c_a64_load_high(&emitter, 12, instruction->operands[1]);
-                            // CMP X9, X11; CCMP X14, X12, #0, EQ — NE when either
-                            // half differs; the B.NE displacement patches once the
-                            // desired reloads below fix the loop's length.
+                            c_a64_load(&emitter, 15, instruction->operands[2]);
+                            c_a64_load_high(&emitter, 17, instruction->operands[2]);
+                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
                             codegen_emit_u32(&buffer, UINT32_C(0xeb0b013f));
                             codegen_emit_u32(&buffer, UINT32_C(0xfa4c01c0));
-                            u32 pair_mismatch_offset = (u32)buffer.count;
-                            codegen_emit_u32(&buffer, UINT32_C(0x54000001));
-                            c_a64_load(&emitter, 11, instruction->operands[2]);
-                            c_a64_load_high(&emitter, 12, instruction->operands[2]);
+                            codegen_emit_u32(&buffer, UINT32_C(0x9a8901eb)); // csel x11, x15, x9, eq
+                            codegen_emit_u32(&buffer, UINT32_C(0x9a8e022c)); // csel x12, x17, x14, eq
                             a64_emit_atomic_exclusive_store_pair(&buffer, 13, 11, 12, 10, pair_release);
                             a64_emit_exclusive_retry(&buffer, pair_retry_offset);
-                            codegen_canonical_a64_patch_local_branch(&buffer, pair_mismatch_offset, (u32)buffer.count, true);
                             codegen_emit_u32(&buffer, UINT32_C(0xd5033f5f));
                             c_a64_store(&emitter, 9, result_offset);
                             c_a64_store_high(&emitter, 14, result_offset);
@@ -18681,7 +18723,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             IrTypeId parameter_type = canonical_function_type->parameter_types[parameter_index];
                             IrType* parameter = ir_type_from_id(&program->types, parameter_type);
                             IrAbiValue parameter_abi = ir_type_abi_value(program, parameter_type, codegen_canonical_ir_abi_convention(result.abi), IR_ABI_USE_ARGUMENT);
-                            if (!aarch64_windows_variadic && parameter_abi.part_count && parameter_abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT)
+                            if (!aarch64_windows_variadic && parameter_abi.part_count && codegen_canonical_abi_part_is_float(parameter_abi.parts[0].abi_class))
                             {
                                 if (fp_count + parameter_abi.part_count <= 8)
                                 {
@@ -18690,6 +18732,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 else
                                 {
                                     fp_count = 8;
+                                    stack_parts = codegen_canonical_a64_align_stack_pair(stack_parts, parameter->layout.alignment > 8);
                                     stack_parts += (u32)((parameter->layout.size + 7) / 8);
                                 }
                                 continue;
@@ -18813,7 +18856,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         u32 part_count = 1;
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &part_count);
-                        if (!value_type || !value_type->layout.size || value_type->layout.size > 16 ||
+                        IrAbiValue va_abi = ir_type_abi_value(program, instruction->canonical_type, codegen_canonical_ir_abi_convention(result.abi), IR_ABI_USE_VARIADIC_ARGUMENT);
+                        bool indirect = aggregate && va_abi.indirect;
+                        if (!value_type || !value_type->layout.size || value_type->layout.size > UINT32_MAX - 7u ||
+                            ((aarch64_darwin || aarch64_windows_variadic) && value_type->layout.size > 16) ||
+                            (!aarch64_darwin && !aarch64_windows_variadic && (va_abi.memory || (!aggregate && value_type->layout.size > 8))) ||
                             (!aggregate && value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_BOOLEAN && value_type->kind != IR_TYPE_POINTER &&
                              value_type->kind != IR_TYPE_FLOAT))
                         {
@@ -18887,9 +18934,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
-                        IrAbiValue va_abi = ir_type_abi_value(program, instruction->canonical_type, codegen_canonical_ir_abi_convention(result.abi), IR_ABI_USE_VARIADIC_ARGUMENT);
-                        bool floating = va_abi.part_count && va_abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT;
-                        if (floating) { part_count = va_abi.part_count; }
+                        bool floating = va_abi.part_count && codegen_canonical_abi_part_is_float(va_abi.parts[0].abi_class);
+                        if (floating || indirect) { part_count = va_abi.part_count; }
+                        bool stack_aligned = !indirect && value_type->layout.alignment > 8;
                         u32 cursor_offset = floating ? MACHINE_A64_VA_VR_OFFS_OFFSET : MACHINE_A64_VA_GR_OFFS_OFFSET;
                         codegen_canonical_a64_memory_operation_base(&buffer, 11, cursor_offset, 4, false, true, 10);
                         codegen_emit_u32(&buffer, 0xf100017f); // cmp x11, #0
@@ -18910,41 +18957,29 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         codegen_canonical_a64_memory_operation_base(&buffer, 12,
                             floating ? MACHINE_A64_VA_VR_TOP_OFFSET : MACHINE_A64_VA_GR_TOP_OFFSET, 8, false, false, 10);
                         codegen_emit_u32(&buffer, 0x8b0b018c);
-                        for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                        if (!codegen_canonical_a64_va_value(&buffer, &va_abi, (u32)value_type->layout.size, part_count, result_offset, true))
                         {
-                            u32 part_offset = floating ? va_abi.parts[part_index].value_offset : part_index * 8u;
-                            u32 part_size = floating ? va_abi.parts[part_index].size : 8u;
-                            if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_index * (floating ? 16u : 8u), part_size, false, false, 12) ||
-                                !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_offset, part_size, true, false))
-                            {
-                                result.error = CODEGEN_ERROR_CAPACITY;
-                                return result;
-                            }
+                            result.error = CODEGEN_ERROR_CAPACITY;
+                            return result;
                         }
                         u32 end_patch = (u32)buffer.count;
                         codegen_emit_u32(&buffer, 0x14000000);
                         u32 overflow_offset = (u32)buffer.count;
                         codegen_canonical_a64_memory_operation_base(&buffer, 12, MACHINE_A64_VA_STACK_OFFSET, 8, false, false, 10);
-                        if (even_integer_pair)
+                        if (stack_aligned)
                         {
                             codegen_emit_u32(&buffer, 0x91003d8c);
                             a64_emit_constant(&buffer, 9, ~UINT64_C(15));
                             codegen_emit_u32(&buffer, 0x8a09018c);
                         }
-                        for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                        u32 stack_increment = indirect ? 8u : (u32)((value_type->layout.size + 7) & ~(u64)7);
+                        codegen_emit_u32(&buffer, 0x91000189 | (stack_increment << 10));
+                        codegen_canonical_a64_memory_operation_base(&buffer, 9, MACHINE_A64_VA_STACK_OFFSET, 8, true, false, 10);
+                        if (!codegen_canonical_a64_va_value(&buffer, &va_abi, (u32)value_type->layout.size, part_count, result_offset, false))
                         {
-                            u32 part_offset = floating ? va_abi.parts[part_index].value_offset : part_index * 8u;
-                            u32 part_size = floating ? va_abi.parts[part_index].size : 8u;
-                            if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_offset, part_size, false, false, 12) ||
-                                !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_offset, part_size, true, false))
-                            {
-                                result.error = CODEGEN_ERROR_CAPACITY;
-                                return result;
-                            }
+                            result.error = CODEGEN_ERROR_CAPACITY;
+                            return result;
                         }
-                        u32 stack_increment = (u32)((value_type->layout.size + 7) & ~(u64)7);
-                        codegen_emit_u32(&buffer, 0x9100018c | (stack_increment << 10));
-                        codegen_canonical_a64_memory_operation_base(&buffer, 12, MACHINE_A64_VA_STACK_OFFSET, 8, true, false, 10);
                         u32 end_offset = (u32)buffer.count;
                         u32 empty = 0x5400000a | (((overflow_offset - empty_patch) / 4) << 5);
                         memcpy(buffer.bytes + empty_patch, &empty, sizeof(empty));
@@ -19022,6 +19057,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         simulated_float_registers = 8;
                                     }
                                     argument_on_stack[argument_array_index] = true;
+                                    stack_part_count = codegen_canonical_a64_align_stack_pair(stack_part_count, type->layout.alignment > 8);
                                     argument_stack_offset[argument_array_index] = stack_part_count;
                                     stack_part_count += (u32)((type->layout.size + 7) / 8);
                                 }

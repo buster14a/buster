@@ -1,0 +1,12 @@
+{
+  "base": "a6d61049",
+  "compiler_sha256": "ceace0d55c8e66aa788c70a4c0356ced66fe05947d98350d6e972ec797b6f0d3",
+  "sources": {
+    "src/buster/lib/compiler/codegen/machine.c": "7a88906804ba40cc19faa2f319aedbe706d148add06903d8c7e0e3e9cbe1d368",
+    "src/buster/lib/compiler/codegen/machine_aarch64.c": "f97a1455b8e29c4f0213909c11c4938c0e9fe168c07ab92b83ea1edfc557bfb4",
+    "src/buster/lib/compiler/codegen/machine_x86_64.c": "68c300b4ac9147bec488d7a6c1ac5b8b95f152da5a1bd24f7dbadc9ab6758c1b",
+    "tests/basic_c_many_native_arguments.c": "1f22ed6487833255c76c059535035236234756e32e7acf98b5acdd2a22353129",
+    "tests/differential/many_native_arguments.h": "58e08776e94765b7af6c52efdacc248f0afaae55e3ac47996ce6088b2b97e865",
+    "tests/differential/many_native_arguments_host.c": "ac059c36fad80db6b25da216d2f9e43ea29324ab1a8f6d51b98e7d24dfd0375f"
+  }
+}
