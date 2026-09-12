@@ -1,6 +1,6 @@
 #pragma once
 
-// Private test seams for the production constexpr, binding, and aggregate-tag queries.
+// Private test seams for production constexpr, expression typing, binding, and aggregate-tag queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -13,4 +13,6 @@ BUSTER_F_DECL void c_test_parse_binding_unwind(CParseResult* result, u32 mark);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
+BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                     u32 start, u32 end, CTypeId* type_out);
 #endif
