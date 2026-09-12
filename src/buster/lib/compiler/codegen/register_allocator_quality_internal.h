@@ -2,6 +2,37 @@
 
 #include <buster/lib/base.h>
 
+// Shared weighted-cost storage and ordering used by QUALITY and its boundary
+// tests. Instruction weights and raw edit counts retain their separate types.
+// At most UINT32_MAX edits each weigh at most 4096, so exact traffic is
+// below 2^44. Widening preserves distinct benefits and their ordering; a
+// saturating u32 would collapse different profitable candidates into ties.
+typedef u64 MachineQualityTraffic;
+
+typedef struct MachineQualityInterval MachineQualityInterval;
+struct MachineQualityInterval
+{
+    MachineQualityTraffic weight;
+    u32 virtual_register;
+    u32 start;
+    u32 end;
+    // A candidate below the raw-count break-even, admitted on frequency
+    // alone; it may only take a caller-saved pin register, so it can
+    // never buy a prologue save with edits a cold loop may never run.
+    // Split probing honors the same restriction for the same reason.
+    u32 marginal;
+};
+
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_quality_traffic_add(MachineQualityTraffic* traffic, u32 weight)
+{
+    *traffic += weight;
+}
+
+BUSTER_F_DECL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root);
+// previous_region is UINT32_MAX for the first query, otherwise a valid index
+// returned by the preceding query. UINT32_MAX also reports exhaustion.
+BUSTER_F_DECL u32 machine_quality_region_next(MachineQualityTraffic const* traffic, u32 count, u32 previous_region);
+
 // Private QUALITY work census. The existing allocation-instrumented compiler
 // supplies these counters to its source-metrics file; ordinary compilers have
 // neither storage nor recorder calls. Counts are cumulative on the calling OS

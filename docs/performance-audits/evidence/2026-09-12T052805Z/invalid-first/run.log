@@ -1,0 +1,10 @@
+THROUGHPUT_PROGRESS round=1/2 pair=1/4 valid=1
+THROUGHPUT_PROGRESS round=1/2 pair=2/4 valid=1
+THROUGHPUT_PROGRESS round=1/2 pair=3/4 valid=1
+THROUGHPUT_PROGRESS round=1/2 pair=4/4 valid=1
+THROUGHPUT_PROGRESS round=2/2 pair=1/4 valid=1
+THROUGHPUT_PROGRESS round=2/2 pair=2/4 valid=1
+THROUGHPUT_PROGRESS round=2/2 pair=3/4 valid=1
+THROUGHPUT_PROGRESS round=2/2 pair=4/4 valid=1
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: incomplete or incompatible result bundle; no performance verdict

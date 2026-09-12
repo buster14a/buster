@@ -1,0 +1,40 @@
+{
+  "base": "d00ba87da23737a945a899f7304ac00b40a1ee04",
+  "local_implementation": "3a48f9b31aca815d19203c9552e0779747f623c3",
+  "published_implementation": "938ae95e01640af1e59bed63a68518ac66d0250e",
+  "implementation_tree": "32e30487d1de8abc5873e37749c664d8bfdd362e",
+  "release_configuration": {
+    "cc": "/usr/bin/clang 18.1.3",
+    "optimization": "-O3 -DNDEBUG",
+    "unity": true,
+    "tests": true,
+    "ci": false,
+    "allocation_instrumentation": false,
+    "debug_information": true,
+    "frame_pointers": true,
+    "sanitizers": false,
+    "fuzzing": false,
+    "libc": true
+  },
+  "release_binary_sha256": {
+    "base": "1e1eb92deaa4e42feb8a1c0e61afb4963ba6264b402f7ec259ad5e636508efcf",
+    "candidate": "d2998a9b0ee53d52505c654a02f76a601c3c2ef1a3308a0b988a4408881ffcee"
+  },
+  "diagnostic_configuration": {
+    "cc": "/usr/bin/clang 18.1.3",
+    "build_type": "Debug",
+    "ci": true,
+    "allocation_instrumentation": true,
+    "base_qualification": "d00ba87 plus preserved pre-widening private-helper/test seam; original u32 arithmetic, interval layout and sentinel behavior retained"
+  },
+  "diagnostic_binary_sha256": {
+    "base": "f4e2a4d6ac1b35c49133190c804203846a8fcc91ece20be739c811f8584124e0",
+    "candidate": "9fe34275be208cb2a67ca280e8c16f641e4f72fcacb55d01ecd0484426e314d4"
+  },
+  "frozen_input_preparation": "git archive d00ba87da23737a945a899f7304ac00b40a1ee04 src, extracted into issue298-frozen; generated directory copied from the original configured base build; no symlinks",
+  "frozen_tree_hash": "c403d95081fe450951ecf9a76dce1c4882d847354687dcd0cb03635ee5489f6b",
+  "frozen_generated_files": {
+    "generated/buster/lib/shaders/paths.h": "eea2b6a169f5cc3ed16bf54db491db97a563828004e6885466a04619cbcdbcdf"
+  },
+  "lsan_qualification": "Initial sanitizer run omitted ASAN_OPTIONS and failed under container /proc task access; rerun with detect_leaks=0 passed. ASan+UBSan active; no local LeakSanitizer pass."
+}

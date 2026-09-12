@@ -1,0 +1,20 @@
+{
+  "cwd": "/workspace/scratch/d28011d09620/issue298-frozen",
+  "argv": [
+    "/workspace/scratch/d28011d09620/issue298-compiler-allocation/ide",
+    "cc",
+    "-g0",
+    "-O0",
+    "-fregister-allocator=quality",
+    "-Isrc",
+    "-Igenerated",
+    "-DBUSTER_UNITY_BUILD=1",
+    "-DBUSTER_INCLUDE_TESTS=0",
+    "-DBUSTER_BENCH_ALLOCATIONS=0",
+    "-fsource-metrics=/workspace/scratch/d28011d09620/issue298-compiler-allocation/output.metrics",
+    "-c",
+    "src/buster/apps/ide/ide.c",
+    "-o",
+    "/workspace/scratch/d28011d09620/issue298-compiler-allocation/output.o"
+  ]
+}

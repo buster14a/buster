@@ -1,0 +1,14 @@
+[
+  "/workspace/scratch/d28011d09620/issue298-allocation/ide",
+  "cc",
+  "-g0",
+  "-O0",
+  "-fregister-allocator=quality",
+  "-fverify-codegen",
+  "-fno-machine-fallback",
+  "-fsource-metrics=/workspace/scratch/d28011d09620/issue298-allocation/output.metrics",
+  "-c",
+  "/workspace/scratch/d28011d09620/issue298-split-phase.c",
+  "-o",
+  "/workspace/scratch/d28011d09620/issue298-allocation/output.o"
+]

@@ -78,8 +78,8 @@ MachineQualityCensus machine_quality_census_snapshot(void)
 
 // Execution-frequency weight of one block: 4 to the power of its
 // frequency class (the loop-nesting depth the selector stamped), capped
-// so a pathological nest cannot overflow the traffic sums. Class 0 keeps
-// weight 1, so straight-line functions price exactly as they did when
+// at 4096. Weighted totals use u64: a u32 edit count cannot overflow them.
+// Class 0 keeps weight 1, so straight-line functions price exactly as they did when
 // every edit counted once. Every static refinement of unweighted counts
 // measured negative (2026-08-10l); the weighted form exists because the
 // blind spot was where edits execute, not what was counted.
@@ -92,23 +92,9 @@ BUSTER_GLOBAL_LOCAL u32 machine_quality_frequency_weight(u16 frequency_class)
     return 1u << shift;
 }
 
-typedef struct MachineQualityInterval MachineQualityInterval;
-struct MachineQualityInterval
-{
-    u32 virtual_register;
-    u32 start;
-    u32 end;
-    u32 weight;
-    // A candidate below the raw-count break-even, admitted on frequency
-    // alone; it may only take a caller-saved pin register, so it can
-    // never buy a prologue save with edits a cold loop may never run.
-    // Split probing honors the same restriction for the same reason.
-    u32 marginal;
-};
-
 // Sift-down over a max-heap keyed on weight, so the priority walk needs no
 // sort routine and no recursion.
-BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
+void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
 {
     for (;;)
     {
@@ -125,13 +111,37 @@ BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap,
         }
         if (largest == root)
         {
-            return;
+            break;
         }
         MachineQualityInterval swapped = heap[root];
         heap[root] = heap[largest];
         heap[largest] = swapped;
         root = largest;
     }
+}
+
+// Enumerate positive region costs in descending order, breaking ties by region
+// index. The caller retains the last returned index; UINT32_MAX starts a row.
+u32 machine_quality_region_next(MachineQualityTraffic const* traffic, u32 count, u32 previous_region)
+{
+    MachineQualityTraffic previous_traffic = previous_region == UINT32_MAX ? 0 : traffic[previous_region];
+    MachineQualityTraffic best_traffic = 0;
+    u32 best_region = UINT32_MAX;
+    for (u32 region_index = 0; region_index < count; region_index += 1)
+    {
+        MachineQualityTraffic region_traffic = traffic[region_index];
+        if (!region_traffic || (previous_region != UINT32_MAX &&
+            (region_traffic > previous_traffic || (region_traffic == previous_traffic && region_index <= previous_region))))
+        {
+            continue;
+        }
+        if (region_traffic > best_traffic)
+        {
+            best_traffic = region_traffic;
+            best_region = region_index;
+        }
+    }
+    return best_region;
 }
 
 // The merged loop region containing an instruction, or UINT32_MAX. The
@@ -361,7 +371,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             instruction_weights[block->first_instruction + offset] = block_weight;
         }
     }
-    u32* baseline_traffic = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+    MachineQualityTraffic* baseline_traffic = arena_allocate(scratch.arena, MachineQualityTraffic, register_count ? register_count : 1);
     u32* baseline_traffic_counts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
     for (u32 register_index = 0; register_index < register_count; register_index += 1)
     {
@@ -375,7 +385,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
         {
             u32 edit_weight = instruction_weights[machine_point_instruction(edit->point)];
-            baseline_traffic[edit->subject] += edit_weight;
+            machine_quality_traffic_add(baseline_traffic + edit->subject, edit_weight);
             baseline_traffic_counts[edit->subject] += 1;
             baseline_traffic_total += edit_weight;
         }
@@ -392,7 +402,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     }
     // Two traffic arrays and the inverse candidate map have now been cleared.
     // The durable pin array's initial clear is deliberately excluded here.
-    BUSTER_QUALITY_COUNT(initial_value_clear_bytes, (u64)register_count * 3 * sizeof(u32));
+    BUSTER_QUALITY_COUNT(initial_value_clear_bytes, (u64)register_count * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
     MachineQualityInterval* heap = arena_allocate(scratch.arena, MachineQualityInterval, MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     u32 heap_count = 0;
     for (u32 register_index = 0; register_index < register_count && heap_count < MACHINE_QUALITY_MAXIMUM_CANDIDATES; register_index += 1)
@@ -573,7 +583,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     u32* region_exit_offsets = 0;
     u32* region_exit_counts = 0;
     u32* region_exit_blocks = 0;
-    u32* candidate_region_traffic = 0;
+    MachineQualityTraffic* candidate_region_traffic = 0;
     if (merged_span_count)
     {
         u32* instruction_blocks = arena_allocate(scratch.arena, u32, function->instruction_count);
@@ -740,8 +750,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         // priority heap, which 2026-08-10l measured as wrong at every
         // weight.
         BUSTER_QUALITY_COUNT(candidate_region_cells, (u64)heap_count * merged_span_count);
-        BUSTER_QUALITY_COUNT(candidate_region_clear_bytes, (u64)heap_count * merged_span_count * sizeof(u32));
-        candidate_region_traffic = arena_allocate(scratch.arena, u32, (u64)heap_count * merged_span_count);
+        BUSTER_QUALITY_COUNT(candidate_region_clear_bytes, (u64)heap_count * merged_span_count * sizeof(MachineQualityTraffic));
+        candidate_region_traffic = arena_allocate(scratch.arena, MachineQualityTraffic, (u64)heap_count * merged_span_count);
         for (u64 cell_index = 0; cell_index < (u64)heap_count * merged_span_count; cell_index += 1)
         {
             candidate_region_traffic[cell_index] = 0;
@@ -763,7 +773,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             if (region_index != UINT32_MAX)
             {
                 BUSTER_QUALITY_COUNT(candidate_region_updates, 1);
-                candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index] += instruction_weights[edit_instruction];
+                machine_quality_traffic_add(candidate_region_traffic + (u64)candidate_slot * merged_span_count + region_index,
+                                            instruction_weights[edit_instruction]);
             }
         }
     }
@@ -776,8 +787,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         {
             nonzero += candidate_region_traffic[cell_index] != 0;
         }
-        // Density describes the stored u32 table, including current wraparound
-        // semantics (#298). It is not a claim about unbounded weighted benefit.
+        // Exact weighted sums cannot turn an occupied cell into zero.
         BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonzero);
         BUSTER_QUALITY_COUNT(region_table_zero_functions, nonzero == 0);
         BUSTER_QUALITY_COUNT(region_table_sparse_functions, nonzero > 0 && nonzero <= cells / 8);
@@ -961,33 +971,19 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             // caller-saved-only restriction here too, for the reason
             // candidacy imposed it.
             BUSTER_QUALITY_COUNT(split_candidates, 1);
-            u32 previous_traffic = UINT32_MAX;
             u32 previous_region = UINT32_MAX;
             while (!assigned)
             {
                 BUSTER_QUALITY_COUNT(region_selection_passes, 1);
                 BUSTER_QUALITY_COUNT(region_selection_cells, merged_span_count);
-                u32 best_region = UINT32_MAX;
-                u32 best_traffic = 0;
-                for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
-                {
-                    u32 traffic = candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index];
-                    if (!traffic || traffic > previous_traffic || (traffic == previous_traffic && region_index <= previous_region))
-                    {
-                        continue;
-                    }
-                    if (traffic > best_traffic)
-                    {
-                        best_traffic = traffic;
-                        best_region = region_index;
-                    }
-                }
+                MachineQualityTraffic const* traffic = candidate_region_traffic + (u64)candidate_slot * merged_span_count;
+                u32 best_region = machine_quality_region_next(traffic, merged_span_count, previous_region);
                 if (best_region == UINT32_MAX)
                 {
                     break;
                 }
+                MachineQualityTraffic best_traffic = traffic[best_region];
                 BUSTER_QUALITY_COUNT(selected_regions, 1);
-                previous_traffic = best_traffic;
                 previous_region = best_region;
                 u32 region_start = (u32)(loop_spans[best_region] >> 32);
                 u32 region_end = (u32)loop_spans[best_region];
@@ -1027,12 +1023,12 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
                 {
                     break;
                 }
-                u32 entry_weight = 0;
+                MachineQualityTraffic entry_weight = 0;
                 for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
                 {
                     entry_weight += instruction_weights[region_entry_rows[region_entry_offsets[best_region] + entry_index]];
                 }
-                u32 exit_weight = 0;
+                MachineQualityTraffic exit_weight = 0;
                 for (u32 successor_index = 0; successor_index < exit_count; successor_index += 1)
                 {
                     u32 store_row = function->blocks[region_exit_blocks[region_exit_offsets[best_region] + successor_index]].first_instruction;

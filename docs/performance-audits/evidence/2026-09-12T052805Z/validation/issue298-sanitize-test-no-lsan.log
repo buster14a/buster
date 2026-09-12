@@ -1,0 +1,21 @@
+RETAINED TAIL ONLY: last 20 lines of issue298-sanitize-test-no-lsan.log; full local log SHA256 f26ada21e9eca17d2249914e401bf8a349054fef3ee77defd387ef1078424f05
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=11 strict_successes=11 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=11 strict_successes=11 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=11 strict_successes=11 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=11 strict_successes=11 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=11 strict_successes=11 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=11 strict_successes=9 expected_rejections=2 failures=0
+warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]
+1 warning generated.
+14/14 frontend-to-Wasm over-aligned scalar checks passed
+245 independent Wasm local aggregate executions passed
+245 independent Wasm local aggregate executions passed
+3254/3254 scalar integer Wasm64 engine checks passed
+[1829637/1829637] Unit tests
+[47/47] Module tests
+[0/0] External tests

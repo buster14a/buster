@@ -1,0 +1,21 @@
+RETAINED TAIL ONLY: last 20 lines of issue298-sanitize-test.log; full local log SHA256 17196e78b8332d06074a9adaed799c03e3ef6172f1998aa472a48bd1eafaecb1
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=495 class=5 diag=9 iclass=ADC iform=ADC_GPR8i8_GPR8i8_APX source=ADC r16b, r17b
+ mismatch=0:98:213
+X86_SOURCE_REGISTER_FAILURE form=501 class=5 diag=9 iclass=ADC iform=ADC_GPRv_GPRv_APX source=ADC r16, r17
+ mismatch=0:98:213
+X86_SOURCE_REGISTER_FAILURE form=503 class=5 diag=9 iclass=ADC iform=ADC_GPRv_GPRv_APX source=ADC r16w, r17w
+ mismatch=0:98:102
+X86_SOURCE_REGISTER_FAILURE form=9003 class=1 diag=4 iclass=REP_XSTORE iform= source=REP_XSTORE
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9004 class=1 diag=4 iclass=REP_XCRYPTECB iform= source=REP_XCRYPTECB
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9005 class=1 diag=4 iclass=REP_XCRYPTCBC iform= source=REP_XCRYPTCBC
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9178 class=4 diag=5 iclass=FSETPM287_NOP iform= source=FSETPM287_NOP
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9179 class=4 diag=5 iclass=FENI8087_NOP iform= source=FENI8087_NOP
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9180 class=4 diag=5 iclass=FDISI8087_NOP iform= source=FDISI8087_NOP
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_CENSUS emitted=10607 register_only=4485 success=3285 syntax=124 policy=267 ambiguity=208 implicit=20 gap=581
