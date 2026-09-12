@@ -355,44 +355,19 @@ class EvidencePackTests(unittest.TestCase):
             with self.subTest(), self.assertRaisesRegex(ValueError, "differ"):
                 ci_pack_evidence.verify(archive, expected, folders)
 
-    def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
+    def test_timing_control_retains_the_historical_unpacked_layout(self):
         steps = self.native_steps()
-        self.assertEqual(list(steps)[-5:], ["Native result and reproduction", "Pack native logs",
-                                            "Retain native logs", "Record native packaging failure", "Retain unpacked native logs"])
-        pack, packed, unpacked = (steps[name] for name in (
-            "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
-        self.assertIn("id: pack\n", pack)
-        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", pack)
-        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome == 'success' }}", packed)
-        # Exactly one upload runs: the archive, or the original tree after a failed pack.
-        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome != 'success' }}", unpacked)
+        self.assertEqual(list(steps)[-2:], ["Native result and reproduction", "Retain native logs"])
+        unpacked = steps["Retain native logs"]
+        self.assertIn("if: ${{ !cancelled() }}", unpacked)
         artifact = "name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}\n"
-        for block in (packed, unpacked):
-            self.assertIn(artifact, block)
-            self.assertIn("retention-days: 7\n", block)
-        self.assertIn("path: ${{ runner.temp }}/native-ci-upload/\n", packed)
-        self.assertIn("compression-level: 0\n", packed)
-        self.assertIn("if-no-files-found: error\n", packed)
+        self.assertIn(artifact, unpacked)
+        self.assertIn("retention-days: 7\n", unpacked)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program\n", unpacked)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o\n", unpacked)
         self.assertEqual(ci_pack_evidence.GENERATED, frozenset(("program", "subject.o")))
-        failed_summary = steps["Record native packaging failure"]
-        self.assertIn("steps.pack.outcome != 'success'", failed_summary)
-        self.assertIn("BUSTER_CI_REQUIRED: modes differential pack", failed_summary)
-        self.assertIn("run: python3 tools/ci_summary.py", failed_summary)
-        outcomes = {"modes": {"outcome": "success"}, "differential": {"outcome": "success"},
-                    "pack": {"outcome": "failure"}}
-        self.assertEqual(ci_summary.assess(outcomes, ["modes", "differential", "pack"]), ["pack"])
-
-    @unittest.skipIf(os.name == "nt", "Native lanes run only on Unix")
-    def test_actual_workflow_command_packs_runner_evidence(self):
-        command = re.search(r"(?m)^        run: (.+)$", self.native_steps()["Pack native logs"]).group(1)
-        environment = dict(os.environ, RUNNER_TEMP=str(self.root))
-        result = subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=ROOT,
-                                env=environment, capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        files, _ = self.members()
-        self.assertEqual(set(files), {"buster-ci/" + name for name in self.KEEP})
+        self.assertNotIn("Pack native logs", steps)
+        self.assertNotIn("Retain unpacked native logs", steps)
 
 
 
