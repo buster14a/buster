@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "repository": "buster14a/buster",
+  "audited_main": "719ba64e3022a0ae1db078ea97cb951a70ac02a0",
+  "records": [
+    {
+      "destination": "salvage/fast-register-allocator/fast-ra-core.patch",
+      "branch": "audit/fast-ra-source-9834a42",
+      "commit": "27ecdf9d7d3a82b0d4f7caa2fcb87795ca32278c",
+      "source_path": ".github/fast-ra-core.patch",
+      "method": "blob",
+      "sha256": "5ee0e69fce52be0fc01d24cb93423c06722ff5839cd5d0a69cb12e40954d0be9",
+      "bytes": 14960,
+      "git_blob": "13935be8ad44a56fada69189ee65f4cc484d16e4",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/fast-register-allocator/fast-ra-tests.patch",
+      "branch": "audit/fast-ra-source-9834a42",
+      "commit": "27ecdf9d7d3a82b0d4f7caa2fcb87795ca32278c",
+      "source_path": ".github/fast-ra-tests.patch",
+      "method": "blob",
+      "sha256": "622d9fb99c09c73b1ea77fb44f228d4d90f5eabb2ec0ef5058aca3a185d9f6e7",
+      "bytes": 11739,
+      "git_blob": "fa28a455c461884b7c01e9eff2f108b6cf40eec6",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/fast-register-allocator/fast-ra-cfg-fixture.c",
+      "branch": "audit/fast-ra-source-9834a42",
+      "commit": "27ecdf9d7d3a82b0d4f7caa2fcb87795ca32278c",
+      "source_path": ".github/fast-ra-cfg-fixture.c",
+      "method": "blob",
+      "sha256": "8884591a2aecaf88deb5ec3b11341194105310f7c10156bf20ebfe650e48c3bb",
+      "bytes": 6312,
+      "git_blob": "29e977af72c7130db2c54c76eb96732ba1803c0e",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/fast-register-allocator/fast-ra-index.patch.zlib.b64",
+      "branch": "audit/fast-ra-source-9834a42",
+      "commit": "27ecdf9d7d3a82b0d4f7caa2fcb87795ca32278c",
+      "source_path": ".github/fast-ra-index.patch.zlib.b64",
+      "method": "blob",
+      "sha256": "702ec4f04501236104ff40fa44563cc12d61d5efe4c9f2850f661640e584001c",
+      "bytes": 9560,
+      "git_blob": "d6a323232be2ca94a430f3243371d5d5324f5247",
+      "status": "known-corrupt-encoded-data"
+    },
+    {
+      "destination": "salvage/canonical-complex-values/complex-core.patch.gz.b64",
+      "branch": "audit/canonical-ir-source-9834a42",
+      "commit": "bc69d63cf5c7db607bd3729a365ea89c9b6c5f0a",
+      "source_path": ".audit-transfer/complex-core.patch.gz.b64",
+      "method": "blob",
+      "sha256": "f3e4db2f2ac29535981a2ed2bafb4fc03e64ad8597866c72056ecf4d3d5a259d",
+      "bytes": 5311,
+      "git_blob": "c525953faa2e1c294bf8fdc23c726dfd737c9a36",
+      "status": "known-corrupt-encoded-data"
+    },
+    {
+      "destination": "salvage/canonical-complex-values/ir_complex_value_test.c",
+      "branch": "audit/canonical-ir-source-9834a42",
+      "commit": "bc69d63cf5c7db607bd3729a365ea89c9b6c5f0a",
+      "source_path": ".audit-transfer/ir_complex_value_test.c",
+      "method": "blob",
+      "sha256": "bf0d5b53a29fbd878c5f37cdca1cf5eb6130a5f784d943b6ca7eb845908141e0",
+      "bytes": 7249,
+      "git_blob": "9f93d78aa8fae1cc83d257c98acb98143f889ab4",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/canonical-complex-values/canonical-complex-values.patch",
+      "branch": "refactor/canonical-complex-values",
+      "commit": "82c6437d1b4a61767d94dfef6efbda53ee628535",
+      "source_path": "commit diff",
+      "method": "commit-patch",
+      "status": "historical-unvalidated",
+      "original_export_sha256": "88d47f11cee7a581c5076dc158ee6533979d0bbbe069f361315d6b584937e2e7",
+      "original_export_bytes": 22088,
+      "git_tree": "a14c33f0293d644cca5af3e259472c20209ddbfb"
+    },
+    {
+      "destination": "salvage/evex-conversion-oracles/implementation.patch",
+      "branch": "astra/a07-280-inspection",
+      "commit": "3138d13821195d40a48d1ffac4ab4b68e89a57e5",
+      "source_path": ".a07/implementation.patch",
+      "method": "blob",
+      "sha256": "3ffa1d3e9694cb6260255a96828b4d61387322eaaab0e73bb821c10a3b76e0ea",
+      "bytes": 19312,
+      "git_blob": "33dcbb85c000b6caecc4451f911a9966b377a7bf",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/evex-conversion-oracles/ambiguity.patch",
+      "branch": "astra/a07-280-inspection",
+      "commit": "3138d13821195d40a48d1ffac4ab4b68e89a57e5",
+      "source_path": ".a07/ambiguity.patch",
+      "method": "blob",
+      "sha256": "d3f84a7d37a26dcbfcc09ccb9b7d00873f23b98d91a8209e8bfca6a91cdf567f",
+      "bytes": 8789,
+      "git_blob": "49df56963b88a7c2eb2224762a2b39d29d788cb4",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/evex-conversion-oracles/census-final.patch",
+      "branch": "astra/a07-280-inspection",
+      "commit": "3138d13821195d40a48d1ffac4ab4b68e89a57e5",
+      "source_path": ".a07/census-final.patch",
+      "method": "blob",
+      "sha256": "7e8a5b2621eba1fb92a3484227fa9b5491d140bc252ec0cf7cec3bc83e8099d9",
+      "bytes": 7988,
+      "git_blob": "fa86a7dc66f918a0275094ccda5184a68581c272",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/evex-conversion-oracles/oracle.py",
+      "branch": "astra/a07-280-inspection",
+      "commit": "3138d13821195d40a48d1ffac4ab4b68e89a57e5",
+      "source_path": ".a07/oracle.py",
+      "method": "blob",
+      "sha256": "68f4d1b33199ca603abcfa6493163e6efa65478acb57a1479d62e3d394a7a94c",
+      "bytes": 8953,
+      "git_blob": "8f745f0b796b878fecbf1be5fd839420882232d2",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/evex-conversion-oracles/preserve-oracle-inputs.py",
+      "branch": "astra/a07-280-inspection",
+      "commit": "3138d13821195d40a48d1ffac4ab4b68e89a57e5",
+      "source_path": ".a07/preserve-oracle-inputs.py",
+      "method": "blob",
+      "sha256": "eef1dc3514d0cb6517edb19f3866e03d8e12fd0bad930b0d26038d36b972ad66",
+      "bytes": 4084,
+      "git_blob": "a157ee42d2fdd114c72500a2102f6662f49d744b",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/evex-conversion-oracles/refine-audit.py",
+      "branch": "astra/a07-280-inspection",
+      "commit": "3138d13821195d40a48d1ffac4ab4b68e89a57e5",
+      "source_path": ".a07/refine-audit.py",
+      "method": "blob",
+      "sha256": "1d5984abf60af748f9c29959e10c77b718e476da5dd5620e746340e26c7758ae",
+      "bytes": 3024,
+      "git_blob": "238e5bfb394bb6eed7a871cce384a1c0120316af",
+      "status": "historical-unvalidated"
+    },
+    {
+      "destination": "salvage/canonical-entry-layout/canonical-entry-layout.patch",
+      "branch": "audit/prepared-canonical-entry-layout-main88",
+      "commit": "e4bad175a2236c28cc2643f3ff5b3db429b94a59",
+      "source_path": "commit diff",
+      "method": "commit-patch",
+      "status": "historical-unvalidated",
+      "original_export_sha256": "b24706a130f7ae4ee1bf7f2027fc440c5a75065cf703a8ebf926284058b9740b",
+      "original_export_bytes": 22554,
+      "git_tree": "d228142e27031c601b8107bb6049a12f2960e484"
+    }
+  ]
+}
