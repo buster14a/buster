@@ -1,0 +1,25 @@
+name: Issue 70 source workspace
+on:
+  push:
+    branches: [codex/issue70-authoring]
+    paths: [.github/workflows/issue70-authoring.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d00ba87da23737a945a899f7304ac00b40a1ee04
+          persist-credentials: false
+      - name: Archive the pinned baseline
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-issue70-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue70-source
+          path: ${{ runner.temp }}/buster-issue70-source.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
