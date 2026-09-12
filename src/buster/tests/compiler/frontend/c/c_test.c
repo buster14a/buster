@@ -2,6 +2,7 @@
 #include <buster/lib/time.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
@@ -15266,6 +15267,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
     return result;
 }
 
+// Supplied hashes exercise collisions deterministically without changing the
+// production hash or adding a mutable override to parallel preprocessing.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    {
+        CSourceMetricsFileSet set = {0};
+        String8 first_path = S8("include/a.h");
+        String8 second_path = S8("include/b.h");
+        char8 copied_path[] = "include/a.h";
+        u32 first = c_test_source_metrics_file_row(arguments->arena, &set, first_path, 0);
+        set.rows[first].translated_bytes = 101;
+        set.rows[first].lex_count = 11;
+        u32 second = c_test_source_metrics_file_row(arguments->arena, &set, second_path, 1);
+        set.rows[second].translated_bytes = 23;
+        set.rows[second].lex_count = 7;
+        BUSTER_TEST(arguments, first == 0);
+        BUSTER_TEST(arguments, second == 1);
+        BUSTER_TEST(arguments, first != second);
+        BUSTER_TEST(arguments, set.count == 2);
+        BUSTER_TEST(arguments, set.rows[first].translated_bytes == 101);
+        BUSTER_TEST(arguments, set.rows[first].lex_count == 11);
+        BUSTER_TEST(arguments, set.rows[second].translated_bytes == 23);
+        BUSTER_TEST(arguments, set.rows[second].lex_count == 7);
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set,
+                                                               (String8){copied_path, sizeof(copied_path) - 1}, 1) == first);
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("include/a.hh"), 1) == 2);
+        u32 empty = c_test_source_metrics_file_row(arguments->arena, &set, (String8){0}, 1);
+        BUSTER_TEST(arguments, empty == 3);
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8(""), 0) == empty);
+        BUSTER_TEST(arguments, set.count == 4);
+        BUSTER_TEST(arguments, set.rows[first].translated_bytes == 101 && set.rows[first].lex_count == 11);
+    }
+    // Different hashes with the same initial bucket must also keep probing.
+    {
+        CSourceMetricsFileSet set = {0};
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("a.h"), 1) == 0);
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("b.h"), 257) == 1);
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("c.h"), 513) == 2);
+        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("b.h"), 257) == 1);
+        BUSTER_TEST(arguments, set.count == 3);
+    }
+    // More than the initial 128 rows forces both rehash and row relocation.
+    // UINT64_MAX starts at the last bucket at every capacity, forcing wrap.
+    enum { C_METRICS_COLLISION_PATH_COUNT = 600, C_METRICS_COLLISION_PATH_LENGTH = 7 };
+    char8 paths[C_METRICS_COLLISION_PATH_COUNT][C_METRICS_COLLISION_PATH_LENGTH];
+    for (u32 index = 0; index < C_METRICS_COLLISION_PATH_COUNT; index += 1)
+    {
+        memcpy(paths[index], "h/000.h", C_METRICS_COLLISION_PATH_LENGTH);
+        paths[index][2] = (char8)('0' + index / 100);
+        paths[index][3] = (char8)('0' + (index / 10) % 10);
+        paths[index][4] = (char8)('0' + index % 10);
+    }
+    for (u32 run = 0; run < 2; run += 1)
+    {
+        u64 hash = run ? 0 : UINT64_MAX;
+        CSourceMetricsFileSet set = {0};
+        for (u32 index = 0; index < C_METRICS_COLLISION_PATH_COUNT; index += 1)
+        {
+            u32 row = c_test_source_metrics_file_row(arguments->arena, &set,
+                                                       (String8){paths[index], C_METRICS_COLLISION_PATH_LENGTH}, hash);
+            BUSTER_TEST(arguments, row == index);
+            BUSTER_TEST(arguments, set.count == index + 1);
+            BUSTER_TEST(arguments, set.rows[row].lex_count == 0);
+            BUSTER_TEST(arguments, set.rows[row].translated_bytes == 0);
+            set.rows[row].lex_count = index + 1;
+            set.rows[row].translated_bytes = index + 101;
+        }
+        BUSTER_TEST(arguments, set.count == C_METRICS_COLLISION_PATH_COUNT);
+        BUSTER_TEST(arguments, set.capacity == 2048);
+        BUSTER_TEST(arguments, set.row_capacity == 1024);
+        u32 retained_count = set.count;
+        for (u32 remaining = C_METRICS_COLLISION_PATH_COUNT; remaining; remaining -= 1)
+        {
+            u32 index = remaining - 1;
+            char8 copy[C_METRICS_COLLISION_PATH_LENGTH];
+            memcpy(copy, paths[index], sizeof(copy));
+            u32 row = c_test_source_metrics_file_row(arguments->arena, &set, (String8){copy, sizeof(copy)}, hash);
+            BUSTER_TEST(arguments, row == index);
+            BUSTER_TEST(arguments, set.count == retained_count);
+            BUSTER_TEST(arguments, set.rows[row].lex_count == index + 1);
+            BUSTER_TEST(arguments, set.rows[row].translated_bytes == index + 101);
+            BUSTER_TEST(arguments, set.rows[row].path.pointer == paths[index]);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15287,6 +15376,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_position_index_tiles(arguments));
     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
+    c_test_result_add(&result, c_test_source_metrics_path_identity(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_typedef_fallback_lookup(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));

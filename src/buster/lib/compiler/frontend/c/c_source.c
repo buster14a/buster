@@ -58,6 +58,7 @@
 //   c_prewarm                                  serial table prewarm
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 
 // Locations are recorded as checkpoints instead of one entry per translated
 // byte: within a run the original offset and the column both advance one per
@@ -924,27 +925,9 @@ u64 c_source_metrics_code_bytes(CSourceMetrics metrics)
     return metrics.translated_bytes - metrics.comment_bytes - metrics.blank_bytes;
 }
 
-// Paths already lexed, so the unique aggregate counts a header once however
-// often it is included, plus one attribution row per distinct path so the
-// amplification the two aggregates state only as a ratio can be charged to
-// the files that cause it. Slots key on the path hash alone: two distinct paths
-// colliding on 64 bits would merge into one row, which is cheaper to accept
-// than slot-side path compares on counters that feed no decision.
-typedef struct CSourceMetricsFileSet CSourceMetricsFileSet;
-struct CSourceMetricsFileSet
-{
-    u64* hashes;
-    // Parallel to `hashes`: the row the occupied slot's path owns.
-    u32* slot_rows;
-    CSourceFileMetrics* rows;
-    u32 capacity;
-    u32 count;
-    u32 row_capacity;
-};
-
 // The row index for `path`, appending a fresh zero-count row the first time
 // the path is seen; a first sight is `rows[result].lex_count == 0`.
-BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path)
+BUSTER_C_INTERNAL u32 c_source_metrics_file_row_hashed(Arena* arena, CSourceMetricsFileSet* set, String8 path, u64 hash)
 {
     if (set->count * 2 >= set->capacity)
     {
@@ -971,12 +954,18 @@ BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFile
         set->capacity = capacity;
     }
     // Zero marks an empty slot, so no path may hash to it.
-    u64 hash = buster_hash_64((u8*)path.pointer, path.length) | 1;
+    hash |= 1;
     u32 slot = (u32)hash & (set->capacity - 1);
     bool found = false;
     while (set->hashes[slot] && !found)
     {
         found = set->hashes[slot] == hash;
+        if (found)
+        {
+            String8 stored_path = set->rows[set->slot_rows[slot]].path;
+            found = stored_path.length == path.length &&
+                    (!path.length || memcmp(stored_path.pointer, path.pointer, path.length) == 0);
+        }
         slot = found ? slot : (slot + 1) & (set->capacity - 1);
     }
     u32 result;
@@ -1006,6 +995,18 @@ BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFile
 
     return result;
 }
+
+BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path)
+{
+    return c_source_metrics_file_row_hashed(arena, set, path, buster_hash_64((u8*)path.pointer, path.length));
+}
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path, u64 hash)
+{
+    return c_source_metrics_file_row_hashed(arena, set, path, hash);
+}
+#endif
 
 // The cold tail of c_token_push: the item is 0xFFFF bytes or longer. A
 // terminated literal — the scan bounded by the item's extent reproduces the
