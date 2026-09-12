@@ -28,6 +28,10 @@ use `build.ps1` / `build/build.exe` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
 all three. Hardware counters currently have a Linux implementation only.
 
+`bench_throughput self-test --sanitize` builds and runs the same native suite
+with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction
+is also owned by `build.c`, including the Linux CI invocation.
+
 `bench_throughput self-test` runs both the statistical/hash tests and native
 integration tests, including fixed-seed corpus hashes, rejected sample paths,
 deliberately invalid result bundles and timed-out children. Their expected error
@@ -36,15 +40,48 @@ diagnostics are not compiler failures.
 A direct standalone build is useful when diagnosing the harness:
 
 ```sh
-clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/throughput.c -lm -o build/throughput
+clang -Isrc -DBUSTER_SINGLE_THREADED=1 -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/throughput.c tools/throughput/shared.c -lm -o build/throughput
 ```
 
-Omit `-lm` on Windows. The Windows implementation links Psapi through its
-source-level import pragma. No compiler is built inside a timed observation.
+On Windows, replace `-lm` with `-lws2_32` and add
+`-Wno-microsoft-enum-forward-reference`; Psapi uses its source-level import
+pragma. Compile `tests.c` in place of `throughput.c` for the native test runner. No compiler is built inside a timed observation.
 Do not build, test, profile or run another benchmark concurrently on the
 measurement host. Use a new output directory for every run; existing results
 are not silently overwritten. Comparison never downloads historical numbers
 from a different runner and never automatically updates a golden baseline.
+
+## Shared library boundary
+
+`build.c::bench_throughput_add` constructs both executables with `shared.c`,
+which links the existing arena, integer, string, OS, file, hash and time modules.
+It does not link compiler, target-detection, application-entry or UI modules.
+The desktop combination matrix runs the native integration suite on each host.
+
+Experiment arrays and frozen-tree entries have independent arena lifetimes;
+short-lived paths use scratch arenas. Paths and unsigned integers use bounded
+`String8` APIs. `os_path_absolute_lexical` supports not-yet-created outputs;
+`os_make_directory_attempt` preserves owner-only POSIX directory creation.
+Checked streaming reads distinguish EOF from failure. `file_copy` now uses the
+same recoverable transfers, and SHA-256 lives in the shared hash module with
+known-answer and chunk-boundary tests. `buster_hash_64` is unchanged.
+
+The harness retains corpus recipes, file/line census, sorted frozen-tree
+identity, statistical/replay rules, JSON/CSV/Markdown serialization and the
+cooperative dedicated-host lease. Report serialization still uses buffered
+stdio and its existing decimal formats (including `%.17g`), preserving schema
+bytes and close-time error detection. This is experiment output policy; common
+binary copying and hashing use shared file IO.
+
+`tp_process` still owns the measurement lifecycle: suspended Windows children
+and kill-on-close jobs; POSIX process groups, pre-exec counter attachment,
+blocking `wait4`, signal deadlines and descendant cleanup; affinity, per-child
+CPU/RSS and diagnostics. The ordinary spawn/wait API does not provide these
+contracts. Windows argv conversion now uses the shared UTF-16 command builder.
+Timestamp calls stay immediately before process creation and immediately after
+the native wait, with conversion through `timestamp_ns_between`. Path/argument
+allocation and report/hash work stay outside that interval. No change selects
+or rebuilds a different baseline/candidate executable.
 
 ## Workload contract
 

@@ -1,0 +1,30 @@
+{
+  "baseline": {
+    "elapsed_seconds": 1.420522766,
+    "child_wall_seconds": 0.41439681401243433,
+    "outside_plus_warmups_seconds": 1.015017639993372,
+    "user_seconds": 1.2255915000000002,
+    "system_seconds": 0.19233849999999997,
+    "maxrss_kib": 25742.0
+  },
+  "shared": {
+    "elapsed_seconds": 1.583223654,
+    "child_wall_seconds": 0.424190431,
+    "outside_plus_warmups_seconds": 1.1579376,
+    "user_seconds": 1.3580535,
+    "system_seconds": 0.2175075,
+    "maxrss_kib": 25760.0
+  },
+  "binaries": {
+    "baseline": "355d32a2b6b5f665a1d8bf752c18e9b295baec20f373a551f1e380820a36ea00",
+    "shared": "df126bfc268666d47bcf216d8cb7ca6d934079e31b3dae351cc6397252f5bacc",
+    "compiler": "ea397733cbf756d78388c8f143a4e7caade9f351f192a878564026eb0851b48f"
+  },
+  "platform": [
+    "Linux",
+    "localhost",
+    "6.18.35",
+    "#1 SMP Mon Aug 31 18:10:37 UTC 2026",
+    "x86_64"
+  ]
+}

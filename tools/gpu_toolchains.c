@@ -259,11 +259,11 @@ BUSTER_GLOBAL_LOCAL u32 gpu_tools_self_test(Arena* arena)
         S8("not SPIRV-Tools v2026.1\n")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported_versions); index += 1) { failures += !gpu_tools_spirv_version_supported(supported_versions[index]); }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported_versions); index += 1) { failures += gpu_tools_spirv_version_supported(unsupported_versions[index]); }
-    TpHash hash;
+    Sha256 hash;
     char digest[65];
-    tp_hash_init(&hash);
-    tp_hash_add(&hash, "abc", 3);
-    tp_hash_finish(&hash, digest);
+    sha256_init(&hash);
+    sha256_add(&hash, "abc", 3);
+    sha256_finish_hex(&hash, digest);
     failures += strcmp(digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0;
     // Use a non-core-dumping termination signal for the actual signal probe;
     // Linux core-pattern pipe handlers can ignore RLIMIT_CORE and outlive the

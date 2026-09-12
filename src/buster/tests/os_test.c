@@ -167,6 +167,78 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Recoverable file IO must distinguish errors from EOF, retain short
+    // reads, and report write errors instead of aborting a result-producing tool.
+    {
+        Arena* arena = arguments->arena;
+        String8 root = buster_test_temporary_path(arena, S8("shared-io space"), S8(""));
+        BUSTER_TEST(arguments, os_make_directory_attempt(root));
+        BUSTER_TEST(arguments, os_make_directory_attempt(root));
+        String8 path = string_format_z(arena, S8("{S8}/bytes"), root);
+        String8 absent = string_format_z(arena, S8("{S8}/absent/child"), root);
+        BUSTER_TEST(arguments, !os_make_directory_attempt(absent));
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){0}));
+        u8 original[257];
+        u8 copy[300];
+        for (u32 i = 0; i < sizeof(original); i += 1) original[i] = (u8)i;
+        u64 count = 99;
+        BUSTER_TEST(arguments, os_file_read_attempt(0, (ByteSlice){0}, &count) && count == 0);
+        BUSTER_TEST(arguments, os_file_write_attempt(0, (ByteSlice){0}));
+        BUSTER_TEST(arguments, !os_file_read_attempt(0, (ByteSlice){copy, 1}, &count) && count == 0);
+        BUSTER_TEST(arguments, !os_file_write_attempt(0, (ByteSlice){original, 1}));
+        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, file != 0);
+        if (file)
+        {
+            BUSTER_TEST(arguments, os_file_write_attempt(file, (ByteSlice){original, sizeof(original)}));
+            BUSTER_TEST(arguments, !os_file_read_attempt(file, (ByteSlice){copy, 1}, &count) && count == 0);
+            BUSTER_TEST(arguments, os_file_close(file));
+        }
+        file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        BUSTER_TEST(arguments, file != 0);
+        if (file)
+        {
+            BUSTER_TEST(arguments, !os_file_write_attempt(file, (ByteSlice){original, 1}));
+            BUSTER_TEST(arguments, os_file_read_attempt(file, (ByteSlice){copy, 13}, &count) && count == 13);
+            BUSTER_TEST(arguments, memcmp(copy, original, 13) == 0);
+            BUSTER_TEST(arguments, os_file_read_attempt(file, (ByteSlice){copy, sizeof(copy)}, &count) && count == sizeof(original) - 13);
+            BUSTER_TEST(arguments, memcmp(copy, original + 13, sizeof(original) - 13) == 0);
+            BUSTER_TEST(arguments, os_file_read_attempt(file, (ByteSlice){copy, sizeof(copy)}, &count) && count == 0);
+            BUSTER_TEST(arguments, os_file_close(file));
+        }
+#if BUSTER_LINUX
+        file = os_file_open(S8("/dev/full"), (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, file != 0);
+        if (file)
+        {
+            BUSTER_TEST(arguments, !os_file_write_attempt(file, (ByteSlice){original, sizeof(original)}));
+            BUSTER_TEST(arguments, os_file_close(file));
+        }
+#endif
+        // No path terminator is readable at length; missing outputs still
+        // resolve. Returned storage survives nested scratch use and aliasing.
+        char8 bounded[] = {'n', 'e', 'w'};
+        for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+        {
+            Arena* output = thread_context_selected()->arenas[index];
+            u64 position = output->position;
+            String8 absolute = os_path_absolute_lexical(output, (String8){bounded, sizeof(bounded)}, true);
+            String8 again = os_path_absolute_lexical(output, absolute, true);
+            memset(arena_allocate(output, u8, 256), 0x55, 256);
+            BUSTER_TEST(arguments, absolute.length > sizeof(bounded));
+            BUSTER_TEST(arguments, absolute.pointer && absolute.pointer[absolute.length] == 0);
+            BUSTER_TEST(arguments, string_ends_with_sequence(absolute, S8("new")));
+            BUSTER_STRING_TEST(arguments, absolute, again);
+            arena_set_position(output, position);
+        }
+        char8 invalid[] = {'a', 0, 'b'};
+        BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){invalid, sizeof(invalid)}, true).length);
+        BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){0, 1}, true).length);
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+#endif
+
     // Reservations start inaccessible, a committed interior page is writable,
     // and protecting it must not discard its contents. Do not conflate the
     // Windows allocation granularity with the commit/protection page size.

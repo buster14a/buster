@@ -36,7 +36,7 @@ u64 timestamp_ns_between(TimeDataType start, TimeDataType end)
     // Split the conversion so ticks * 1e9 cannot overflow 64 bits (a 10 MHz
     // counter would overflow after ~30 minutes); see os_now_microseconds.
     u64 ticks = end - start;
-    u64 frequency = os_state.frequency;
+    u64 frequency = os_performance_counter_frequency();
     u64 whole_seconds = ticks / frequency;
     u64 remainder_ticks = ticks % frequency;
     u64 ns = whole_seconds * (u64)(1000 * 1000 * 1000) + (remainder_ticks * (u64)(1000 * 1000 * 1000)) / frequency;
