@@ -76,22 +76,23 @@ heap/empty-instruction early return. This does not repair #313's prefix policy.
 
 `candidate_region_cells` is the allocated dense table population;
 `candidate_region_updates` counts weighted spill/reload additions to that table;
-`candidate_region_nonzero_cells` counts its final nonzero u32 cells. Density bins
+`candidate_region_nonzero_cells` counts its final nonzero u64 cells. Density bins
 `region_table_{zero,sparse,mixed,dense}_functions` partition constructed tables into
 zero, (0, 1/8], (1/8, 1/2], and (1/2, 1] occupancy. Integer thresholds are floor
 `cells/8` and `cells/2`, with no multiplication overflow. A diagnostic-only extra
-walk observes final occupancy. The u32 arithmetic remains precisely current
-#298 behavior: a wrapped-to-zero cell is zero here. Nonzero cells are **not** a
-mathematically unbounded benefit count or an exact first-touch count.
+walk observes final occupancy. Exact u64 traffic prevents the former #298
+wrapped-to-zero cells: the u32 edit-count bound and maximum weight of 4096 keep
+every sum below 2^44. Nonzero cells are **not** an exact first-touch count.
 
 ## Clears, copies and lazy work
 
-`candidate_region_clear_bytes` is table zeroing (4 bytes/cell).
+`candidate_region_clear_bytes` is table zeroing (8 bytes/cell).
 `initial_value_clear_bytes` covers baseline traffic, raw traffic and the candidate
-inverse-map initialization (three u32 arrays). It excludes the first durable pin
-array initialization, prepass allocations and other allocator/arena clearing.
+inverse-map initialization (one u64 and two u32 arrays, 16 bytes/value). It
+excludes the first durable pin array initialization, prepass allocations and
+other allocator/arena clearing.
 
-`heap_snapshot_bytes` counts the initial retained-heap copy;
+`heap_snapshot_bytes` counts the initial retained-heap copy (24 bytes/interval);
 `heap_restore_bytes` counts all actual attempt restores. `attempt_reset_bytes`
 counts stores to the pin IDs, copied span endpoints, assigned/excluded counts and
 pin depths for each entered attempt. It is reset/store traffic, **not exclusively

@@ -108,6 +108,15 @@
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents every shared record's producer, consumer, publication and invalidation.
   Explicit barrier/vector membership is not a latency or hazard model.
+- QUALITY placement accumulates exact u64 weighted traffic for values and loop
+  regions, including split-boundary costs. A u32 edit count and maximum weight
+  4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie
+  policy; regional probes order by descending traffic then increasing region
+  index. The first regional probe has no upper-cost sentinel. Raw edit counts,
+  marginal eligibility and the first-4096 candidate policy remain unchanged.
+  The private `register_allocator_quality_internal.h` helpers are shared with
+  bounded arithmetic/ordering tests. The 24-byte interval, 8-byte traffic cells
+  and corresponding diagnostic clear/copy accounting are checked together.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
