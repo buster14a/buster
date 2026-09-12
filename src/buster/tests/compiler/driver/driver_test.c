@@ -5164,9 +5164,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 expected_sequences[] = {
             S8("9"),              S8("2"),                S8("1"),           S8("empty_begin"),
             S8("empty_end"),
-            S8("99"),             S8("CLANG_ABSENT"),     S8("((21)+(21))"), S8("zero"),
-            S8("2*3"),            S8("((2)+(2))"),        S8("\"two words\""), S8("joined"),
-            S8("1+2+3"),          S8("1==1"),             S8("3 + 3"),
+            S8("99"),             S8("CLANG_ABSENT"),     S8("( ( 21 ) + ( 21 ) )"), S8("zero"),
+            S8("2 * 3"),          S8("( ( 2 ) + ( 2 ) )"), S8("\"two words\""), S8("joined"),
+            S8("1 + 2 + 3"),      S8("1 == 1"),           S8("3 + 3"),
             S8("empty_function_begin"), S8("empty_function_end"),
         };
         for (u32 sequence_index = 0; sequence_index < BUSTER_ARRAY_LENGTH(expected_sequences); sequence_index += 1)
@@ -5217,7 +5217,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult legacy_result = compiler_driver_execute_invocation(arguments->arena, legacy_invocation);
         BUSTER_TEST(arguments, legacy_result.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("ORDERED_ABSENT")) != BUSTER_STRING_NO_MATCH);
-        BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("((21)+(21))")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("( ( 21 ) + ( 21 ) )")) != BUSTER_STRING_NO_MATCH);
     }
     String8 warning_command_line[] = {
         S8("-fsyntax-only"),
