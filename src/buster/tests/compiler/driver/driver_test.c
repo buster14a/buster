@@ -3026,11 +3026,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
             main_parts[main_part_count++] = shape ? S8("extern long data_0; extern long read_0(void); int main(void) { long *volatile left; long *volatile right;\n") : S8("int main(void) { long *volatile left; long *volatile right;\n");
             for (u32 entry = 0; entry < count; entry += 1)
             {
+#if BUSTER_CPU_ARCH_AARCH64
+                // Materialize addresses separately from loads/stores so this
+                // copy-relocation fixture uses the supported page/add pairs,
+                // without requiring GOT or LDST64 low-page relocations.
+                main_parts[main_part_count++] = shape
+                    ? string_format(arena, S8("left = &alias_{u32}; right = &data_0; if (left != right || *left != {u32}) return 1; (*left)++; "
+                                             "if (read_0() != {u32}) return 2;\n"), entry, 7 + entry, 8 + entry)
+                    : string_format(arena, S8("left = &pair_{u32}; right = &data_{u32}; if (left != right || *right != 7) return 1; (*left)++; "
+                                             "if (read_{u32}() != 8) return 2;\n"), entry, entry, entry);
+#else
                 main_parts[main_part_count++] = shape
                     ? string_format(arena, S8("left = &alias_{u32}; right = &data_0; if (left != right || alias_{u32} != {u32}) return 1; alias_{u32}++; "
                                              "if (read_0() != {u32}) return 2;\n"), entry, entry, 7 + entry, entry, 8 + entry)
                     : string_format(arena, S8("left = &pair_{u32}; right = &data_{u32}; if (left != right || data_{u32} != 7) return 1; pair_{u32}++; "
                                              "if (read_{u32}() != 8) return 2;\n"), entry, entry, entry, entry, entry);
+#endif
             }
             main_parts[main_part_count++] = S8("return 0; }\n");
             String8 library_text = string_join_arena(arena, (SliceString8){.pointer = library_parts, .length = library_part_count}, false);
@@ -3056,10 +3067,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 }
                 else if (step == 1)
                 {
+#if BUSTER_CPU_ARCH_AARCH64
+                    command[command_count++] = S8("-fno-pic");
+                    command[command_count++] = S8("-fno-pie");
+#else
                     // PIE address-taking uses PC-relative relocations, including
                     // the volatile pointer comparison that prevents the host
                     // compiler from folding two extern names as unequal.
                     command[command_count++] = S8("-fPIE");
+#endif
                     command[command_count++] = S8("-c");
                     command[command_count++] = main_source;
                 }
@@ -3088,6 +3104,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 CompilerDriverResult linked = compiler_driver_execute_invocation(link_arena, invocation);
                 u64 ns = timestamp_ns_between(start, timestamp_take());
                 BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    string_print(S8("ELF_DATA_LINK_ERROR shape={u32} count={u32} diagnostic={S8}\n"), shape, count, linked.diagnostic);
+                }
                 prepared = linked.error == COMPILER_DRIVER_ERROR_NONE;
                 if (prepared)
                 {

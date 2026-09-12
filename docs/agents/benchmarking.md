@@ -483,8 +483,11 @@ arena growth, including writer work arrays and the image. Neither is RSS.
 Output size/hash, copy counts, slot sharing, sizing and version binding are
 checked outside the interval. Repeated dirty-arena runs must agree exactly.
 
-On native Linux, `BENCH_ELF_DSO` builds real shared libraries and PIE-compiled
-objects with the configured host compiler. Shape 0 has N data objects, 3N
+On native Linux, `BENCH_ELF_DSO` builds real shared libraries and native
+objects with the configured host compiler. x86-64 uses `-fPIE`; AArch64 uses
+`-fno-pic -fno-pie` and dereferences volatile pointers after address-taking
+to exercise supported page/add copy relocations without GOT or LDST64
+low-page relocations. Shape 0 has N data objects, 3N
 data exports, 2N data imports, N function imports and N unrelated globals.
 Shape 1 has one data object, N aliases, N+1 data imports and one function
 import. N is 4, 128, 256, 512, 1,024, 2,048 or 4,096. Construction and the
