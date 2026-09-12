@@ -5996,6 +5996,190 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, string_equal(parts.pointer[2], S8("")));
             BUSTER_TEST(arguments, string_equal(parts.pointer[3], S8("final")));
         }
+        // Keep the parser's existing treatment of empty and unmatched quotes,
+        // adjacent quoted/unquoted fragments, and non-separator whitespace.
+        {
+            typedef struct WindowsCommandLineCase WindowsCommandLineCase;
+            struct WindowsCommandLineCase
+            {
+                String8 input;
+                u64 count;
+                String8 expected[3];
+            };
+            WindowsCommandLineCase cases[] = {
+                {S8(""), 0, {{0}}},
+                {S8(" \t \t"), 0, {{0}}},
+                {S8("\"\""), 1, {S8("")}},
+                {S8("\"\" \"\" \"\""), 3, {S8(""), S8(""), S8("")}},
+                {S8("\"a\"\"b\""), 1, {S8("ab")}},
+                {S8("a\" b\"c d"), 2, {S8("a bc"), S8("d")}},
+                {S8("\"unterminated a b"), 1, {S8("unterminated a b")}},
+                {S8("a\r\nb c"), 2, {S8("a\r\nb"), S8("c")}},
+                {S8("\"\"a a\"\" \"\"\"\""), 3, {S8("a"), S8("a"), S8("")}},
+            };
+            u64 before_null = arena->position;
+            SliceString8 null_parts = slice_string_from_windows_string_list(arena, 0);
+            BUSTER_TEST(arguments, null_parts.length == 0 && null_parts.pointer == 0 && arena->position == before_null);
+            for (u64 case_i = 0; case_i < BUSTER_ARRAY_LENGTH(cases); case_i += 1)
+            {
+                WindowsCommandLineCase test_case = cases[case_i];
+                String16 command_line = string16_from_string8(arena, test_case.input, true);
+                SliceString8 parts = slice_string_from_windows_string_list(arena, command_line.pointer);
+                BUSTER_TEST(arguments, parts.length == test_case.count);
+                for (u64 i = 0; i < BUSTER_MIN(parts.length, test_case.count); i += 1)
+                {
+                    BUSTER_STRING_TEST(arguments, parts.pointer[i], test_case.expected[i]);
+                    BUSTER_TEST(arguments, parts.pointer[i].pointer[parts.pointer[i].length] == 0);
+                }
+            }
+        }
+        // A backslash run is literal unless followed by a quote. Before a
+        // quote, pairs decode to slashes and the odd slash escapes the quote;
+        // an even run toggles quoting. Check both initial quote states.
+        for (u64 quoted = 0; quoted < 2; quoted += 1)
+        {
+            for (u64 quote_after = 0; quote_after < 2; quote_after += 1)
+            {
+                for (u64 slash_count = 0; slash_count <= 65; slash_count += 1)
+                {
+                    char16 command_line[80];
+                    char8 expected[80];
+                    u64 input_length = 0;
+                    u64 expected_length = 0;
+                    if (quoted)
+                    {
+                        command_line[input_length++] = '"';
+                    }
+                    command_line[input_length++] = 'x';
+                    expected[expected_length++] = 'x';
+                    for (u64 i = 0; i < slash_count; i += 1)
+                    {
+                        command_line[input_length++] = '\\';
+                    }
+                    for (u64 i = 0; i < (quote_after ? slash_count / 2 : slash_count); i += 1)
+                    {
+                        expected[expected_length++] = '\\';
+                    }
+                    if (quote_after)
+                    {
+                        command_line[input_length++] = '"';
+                        if (slash_count & 1)
+                        {
+                            expected[expected_length++] = '"';
+                        }
+                    }
+                    command_line[input_length++] = ' ';
+                    command_line[input_length++] = 'y';
+                    command_line[input_length] = 0;
+                    bool space_is_quoted = (quoted != 0) != (quote_after && !(slash_count & 1));
+                    if (space_is_quoted)
+                    {
+                        expected[expected_length++] = ' ';
+                        expected[expected_length++] = 'y';
+                    }
+                    SliceString8 parts = slice_string_from_windows_string_list(arena, command_line);
+                    BUSTER_TEST(arguments, parts.length == (space_is_quoted ? 1u : 2u));
+                    if (parts.length)
+                    {
+                        BUSTER_STRING_TEST(arguments, parts.pointer[0], string_from_pointer_length(expected, expected_length));
+                    }
+                    if (!space_is_quoted && parts.length == 2)
+                    {
+                        BUSTER_STRING_TEST(arguments, parts.pointer[1], S8("y"));
+                    }
+                    for (u64 i = 0; i < parts.length; i += 1)
+                    {
+                        BUSTER_TEST(arguments, parts.pointer[i].pointer[parts.pointer[i].length] == 0);
+                    }
+                }
+            }
+        }
+        {
+            // UTF-8 output must survive reuse of the UTF-16 decode buffer,
+            // including surrogate pairs, replacement characters and empties.
+            char16 command_line[] = {'"', 0x00E9, ' ', 0xD83D, 0xDE00, '"', ' ', 0xD83D, 'A', ' ', 0xDE00, ' ', '"', '"', 0};
+            String8 expected[] = {S8("\xC3\xA9 \xF0\x9F\x98\x80"), S8("\xEF\xBF\xBD" "A"), S8("\xEF\xBF\xBD"), S8("")};
+            SliceString8 parts = slice_string_from_windows_string_list(arena, command_line);
+            BUSTER_TEST(arguments, parts.length == BUSTER_ARRAY_LENGTH(expected));
+            for (u64 i = 0; i < BUSTER_MIN(parts.length, BUSTER_ARRAY_LENGTH(expected)); i += 1)
+            {
+                BUSTER_STRING_TEST(arguments, parts.pointer[i], expected[i]);
+                BUSTER_TEST(arguments, parts.pointer[i].pointer[parts.pointer[i].length] == 0);
+            }
+        }
+        {
+            // CreateProcessW allows 32,767 UTF-16 units including the NUL.
+            // Geometric inputs reach that limit. A fresh, bounded arena
+            // includes descriptors, decode scratch and all UTF-8 output in
+            // both the retained and high-water measurements.
+            const u64 command_line_units = 32767;
+            const u64 counts[] = {4096, 8192, (command_line_units - 1) / 2};
+            bool report_storage = os_get_environment_variable(S8("BUSTER_WINDOWS_ARGV_STORAGE")).length != 0;
+            for (u64 shape = 0; shape < 3; shape += 1)
+            {
+                for (u64 case_i = 0; case_i < BUSTER_ARRAY_LENGTH(counts); case_i += 1)
+                {
+                    u64 input_length = 2 * counts[case_i];
+                    char16* command_line = arena_allocate(arena, char16, input_length + 1);
+                    for (u64 i = 0; i < input_length; i += 1)
+                    {
+                        // Many one-character arguments, consecutive empty quoted
+                        // arguments, and one maximally expanding BMP argument.
+                        if (shape == 2)
+                        {
+                            command_line[i] = 0x20AC;
+                        }
+                        else if (shape == 1)
+                        {
+                            command_line[i] = i % 3 == 2 ? ' ' : '"';
+                        }
+                        else
+                        {
+                            command_line[i] = (i & 1) ? ((i & 2) ? '\t' : ' ') : (char16)('a' + (i / 2) % 26);
+                        }
+                    }
+                    command_line[input_length] = 0;
+                    Arena* parse_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+                    BUSTER_TEST(arguments, parse_arena != 0);
+                    if (parse_arena)
+                    {
+                        u64 before = parse_arena->position;
+                        SliceString8 parts = slice_string_from_windows_string_list(parse_arena, command_line);
+                        u64 retained = parse_arena->position - before;
+                        u64 peak = arena_dirty_position(parse_arena) - before;
+                        // 24 bytes per input unit permits descriptors, UTF-16
+                        // scratch, worst-case UTF-8 and terminators/alignment.
+                        u64 bound = 24 * (input_length + 1);
+                        BUSTER_TEST(arguments, retained <= bound && peak <= bound);
+                        u64 expected_count = shape == 2 ? 1 : shape == 1 ? (input_length + 2) / 3 : counts[case_i];
+                        BUSTER_TEST(arguments, parts.length == expected_count);
+                        for (u64 i = 0; i < parts.length; i += 1)
+                        {
+                            String8 part = parts.pointer[i];
+                            BUSTER_TEST(arguments, part.pointer[part.length] == 0);
+                            if (shape == 2)
+                            {
+                                BUSTER_TEST(arguments, part.length == 3 * input_length);
+                                for (u64 byte_i = 0; byte_i + 2 < part.length; byte_i += 3)
+                                {
+                                    BUSTER_TEST(arguments, (u8)part.pointer[byte_i] == 0xE2 && (u8)part.pointer[byte_i + 1] == 0x82 && (u8)part.pointer[byte_i + 2] == 0xAC);
+                                }
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, shape == 1 ? part.length == 0 : part.length == 1 && part.pointer[0] == 'a' + i % 26);
+                            }
+                        }
+                        if (report_storage)
+                        {
+                            string_print(S8("WINDOWS_ARGV_STORAGE shape={u64} units={u64} arguments={u64} before={u64} retained={u64} peak={u64}\n"),
+                                         shape, input_length, parts.length, before, retained, peak);
+                        }
+                        BUSTER_TEST(arguments, arena_destroy(parse_arena, 1));
+                    }
+                }
+            }
+        }
     }
 
     {

@@ -1,0 +1,3 @@
+arguments=4096 utf16_units=8192 before=64 after=155730 peak_growth=155666 valid=1
+arguments=8192 utf16_units=16384 before=64 after=311378 peak_growth=311314 valid=1
+arguments=16383 utf16_units=32766 before=64 after=622636 peak_growth=622572 valid=1
