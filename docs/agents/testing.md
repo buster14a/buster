@@ -77,6 +77,12 @@
   root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
 
+- Mobile build-graph regressions run at the start of
+  `tests/mobile_ci_scripts_test.sh`. The Android and iOS fixture suites include
+  the production CMake graph with controlled targets and real Ninja
+  Multi-Config scheduling. They are host graph evidence; native mobile
+  compilation and device/simulator execution remain separate CI gates.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`

@@ -313,6 +313,23 @@ signing or device execution; those remain the regular Android mobile CI gates.
 Do not run two configurations' packaging concurrently in one build directory:
 the existing APK and staging paths are shared.
 
+## Incremental iOS test assets
+
+The iOS `ide` target stages active files under `tests/` through
+`cmake/IOSBundleAssets.cmake`. Its filtered, content-stable inventory makes
+fixture edits, additions, renames and removals update the configuration's app
+bundle without relinking the native executable. The owned `tests` subtree is
+rebuilt on a real input change, so deleted files cannot survive; preserved
+`.bbb` inputs are excluded and do not invalidate the graph. Debug and Release
+use separate stamps and bundles, and an unchanged build does not rewrite either.
+
+`python3 tests/ios_bundle_assets_test.py` exercises the production CMake graph
+with Ninja Multi-Config in paths containing spaces. It covers both configurations,
+stale-file removal, old-timestamp additions, dormant/empty inventories, native
+target stability, no-op builds and command failure propagation without requiring
+an Apple SDK. Actual iOS compilation, bundle validation and simulator execution
+remain in `ios/test_ci.sh` and the mobile CI lanes.
+
 The Clang/GCC build-driver binary now leaves the existing lane implementation
 available for opt-in `test_differential --jobs N`. The default remains one case
 worker; other build workflows never dispatch a lane gang. TCC still defines
