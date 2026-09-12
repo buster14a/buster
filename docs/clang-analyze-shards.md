@@ -26,18 +26,21 @@ owns the build tree and must not overlap a reader. For a split analyzer tree:
 `--results` must name a fresh directory with an existing parent. Without it,
 the driver creates a unique directory beside the database. Default limits are
 eight shards, at most two simultaneous workers (also bounded by host CPU count),
-and 600 seconds per TU. Each worker runs one analyzer at a time, keeps going
+and 600 seconds per TU. Available worker slots are refilled as shards finish. Each worker runs one
+analyzer at a time, keeps going
 after failures and reaps every child. `--timeout` changes the per-TU bound;
 `--jobs 1` uses the same worker path with serial scheduling. The standalone
 `--clang` override remains available for analyzer selection and test oracles.
 
-Independent execution uses the same database and options at every step:
+Independent execution uses the same database and options at every step.
+Bootstrap once, then invoke the built driver so parallel workers do not
+concurrently overwrite the bootstrap executable:
 
 ```sh
-./build.sh clang_analyze build/analyzer-tree --config Release --shards 8 --results build/analyze-manual --prepare
-./build.sh clang_analyze build/analyzer-tree --config Release --shards 8 --results build/analyze-manual --shard 3
+build/build clang_analyze build/analyzer-tree --config Release --shards 8 --results build/analyze-manual --prepare
+build/build clang_analyze build/analyzer-tree --config Release --shards 8 --results build/analyze-manual --shard 3
 # Run the other zero-based shard indices in separate processes, then:
-./build.sh clang_analyze build/analyzer-tree --config Release --shards 8 --results build/analyze-manual --aggregate
+build/build clang_analyze build/analyzer-tree --config Release --shards 8 --results build/analyze-manual --aggregate
 ```
 
 A single worker reproduces its own shard, not the complete gate. A second worker
@@ -90,7 +93,7 @@ job run these controls.
 
 The analyzer CI job bootstraps the PR base's build driver and the candidate on
 the same checkout, with the same Clang, then analyzes the **same split database**.
-`--baseline-driver` runs that reference first and retains `baseline.log`; its
+`--baseline-driver` runs that reference first and records metrics in `baseline.log` (diagnostics remain in the full CI log); its
 failure fails the comparison. On this change's base the reference is the
 monolithic, CPU-count-batched scheduler. On later revisions it measures whatever
 implementation that reference contains. A main/dispatch run uses its own revision
@@ -99,6 +102,13 @@ as reference. No historical issue timing is presented as a current measurement.
 `ANALYZE_BASELINE` and `ANALYZE_RUN` record complete wall microseconds and process
 limits. `peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
 actual analyzer overlap can be lower, particularly for empty or tiny shards.
+On Linux, both runs also sample the coordinator and its descendants every
+25 ms: `peak_live_processes` and `sampled_peak_tree_rss_bytes` report observed
+process concurrency and summed resident memory. Shared resident pages count in
+each process; sampling and process-exit races make this a lower bound on the
+actual peak, not a PSS or physical-memory measurement. Other hosts report zero
+samples for unavailable tree metrics.
+
 `ANALYZE_SHARD` and `ANALYZE_AGGREGATE` record the largest child high-water RSS
 from POSIX `getrusage`, in bytes. It is **not a sum of simultaneous process-tree
 RSS**. Windows reports zero for unavailable RSS. Compare wall time and the same

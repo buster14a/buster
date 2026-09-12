@@ -459,18 +459,24 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_aggregate(Arena* arena, ClangAnalyzeOptio
 
 BUSTER_GLOBAL_LOCAL SliceString8 clang_analyze_worker_command(Arena* arena, ClangAnalyzeOptions options, u64 shard)
 {
+    // The argument builder stores a contiguous array in this arena. Allocate
+    // all string payloads before starting it, never between append operations.
+    String8 self = os_path_absolute(arena, program_state->input.arguments.pointer[0], true);
+    String8 shards_text = string_format(arena, S8("{u64}"), options.shards);
+    String8 shard_text = string_format(arena, S8("{u64}"), shard);
+    String8 timeout_text = string_format(arena, S8("{u64}"), options.timeout);
     OsArgumentBuilder builder = os_argument_builder_start(arena);
-    os_argument_builder_append(&builder, os_path_absolute(arena, program_state->input.arguments.pointer[0], true));
+    os_argument_builder_append(&builder, self);
     os_argument_builder_append(&builder, S8("clang_analyze"));
     os_argument_builder_append(&builder, options.database);
     os_argument_builder_append(&builder, S8("--results"));
     os_argument_builder_append(&builder, options.results);
     os_argument_builder_append(&builder, S8("--shards"));
-    os_argument_builder_append(&builder, string_format(arena, S8("{u64}"), options.shards));
+    os_argument_builder_append(&builder, shards_text);
     os_argument_builder_append(&builder, S8("--shard"));
-    os_argument_builder_append(&builder, string_format(arena, S8("{u64}"), shard));
+    os_argument_builder_append(&builder, shard_text);
     os_argument_builder_append(&builder, S8("--timeout"));
-    os_argument_builder_append(&builder, string_format(arena, S8("{u64}"), options.timeout));
+    os_argument_builder_append(&builder, timeout_text);
     if (options.config.length)
     {
         os_argument_builder_append(&builder, S8("--config"));
@@ -487,6 +493,94 @@ BUSTER_GLOBAL_LOCAL SliceString8 clang_analyze_worker_command(Arena* arena, Clan
     }
     SliceString8 result = os_argument_builder_flush(&builder);
     return result;
+}
+
+typedef struct ClangAnalyzeResources ClangAnalyzeResources;
+struct ClangAnalyzeResources
+{
+    u64 samples;
+    u64 peak_processes;
+    u64 peak_tree_rss;
+};
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_sample_resources(ClangAnalyzeResources* resources)
+{
+#if BUSTER_LINUX
+    // Sample the coordinator and descendants, including the reference driver's
+    // original fan-out. Sum RSS (shared pages count in each process), not PSS.
+    // /proc races with ordinary child exit, so this is a sampled lower bound.
+    u32 pids[4096];
+    u64 count = 1;
+    u64 rss = 0;
+    u64 processes = 0;
+    pids[0] = (u32)getpid();
+    for (u64 i = 0; i < count; i += 1)
+    {
+        char path[128];
+        snprintf(path, sizeof(path), "/proc/%u/statm", pids[i]);
+        FILE* file = fopen(path, "r");
+        if (file)
+        {
+            unsigned long long size = 0;
+            unsigned long long resident = 0;
+            if (fscanf(file, "%llu %llu", &size, &resident) == 2 && resident)
+            {
+                rss += (u64)resident * os_get_page_size();
+                processes += 1;
+            }
+            fclose(file);
+        }
+        snprintf(path, sizeof(path), "/proc/%u/task/%u/children", pids[i], pids[i]);
+        file = fopen(path, "r");
+        if (file)
+        {
+            unsigned long child = 0;
+            while (count < BUSTER_ARRAY_LENGTH(pids) && fscanf(file, "%lu", &child) == 1)
+            {
+                bool seen = child > UINT32_MAX;
+                for (u64 previous = 0; !seen && previous < count; previous += 1)
+                {
+                    seen = pids[previous] == (u32)child;
+                }
+                if (!seen) pids[count++] = (u32)child;
+            }
+            fclose(file);
+        }
+    }
+    if (processes)
+    {
+        resources->samples += 1;
+        if (processes > resources->peak_processes) resources->peak_processes = processes;
+        if (rss > resources->peak_tree_rss) resources->peak_tree_rss = rss;
+    }
+#else
+    BUSTER_UNUSED(resources);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_finished(ProcessSpawnResult spawn)
+{
+    bool result = !spawn.handle;
+    if (spawn.handle)
+    {
+#if BUSTER_WINDOWS
+        result = WaitForSingleObject(spawn.handle, 0) != WAIT_TIMEOUT;
+#else
+        siginfo_t information = {0};
+        int status = waitid(P_PID, (id_t)(uintptr_t)spawn.handle, &information, WEXITED | WNOHANG | WNOWAIT);
+        result = information.si_pid != 0 || (status < 0 && errno != EINTR);
+#endif
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_sample_pause(void)
+{
+#if BUSTER_WINDOWS
+    Sleep(25);
+#else
+    poll(0, 0, 25);
+#endif
 }
 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_baseline(Arena* arena, ClangAnalyzeOptions options, ClangAnalyzePlan plan)
@@ -508,14 +602,20 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_baseline(Arena* arena, ClangAnalyzeOption
     }
     u64 start = os_now_microseconds();
     ProcessSpawnResult spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.use_process_environment = 1, .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
-    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 3600ull * 1000000);
+        (ProcessSpawnOptions){.use_process_environment = 1});
+    ClangAnalyzeResources resources = {0};
+    while (!clang_analyze_finished(spawn) && os_now_microseconds() - start < 3600ull * 1000000)
+    {
+        clang_analyze_sample_resources(&resources);
+        clang_analyze_sample_pause();
+    }
+    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 1);
     u64 elapsed = os_now_microseconds() - start;
     u64 rss = clang_analyze_child_peak_rss();
     String8 out = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
     String8 err = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length};
-    String8 metric = string_format(arena, S8("ANALYZE_BASELINE eligible={u64} elapsed_us={u64} process_limit={u32} peak_child_rss_bytes={u64} status={S8}\n"),
-        plan.count, elapsed, os_get_logical_thread_count(), rss, wait.result == PROCESS_RESULT_SUCCESS ? S8("pass") : S8("fail"));
+    String8 metric = string_format(arena, S8("ANALYZE_BASELINE eligible={u64} elapsed_us={u64} process_limit={u32} peak_child_rss_bytes={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} status={S8}\n"),
+        plan.count, elapsed, os_get_logical_thread_count(), rss, resources.samples, resources.peak_processes, resources.peak_tree_rss, wait.result == PROCESS_RESULT_SUCCESS ? S8("pass") : S8("fail"));
     String8 pieces[] = {metric, out, err};
     bool written = clang_analyze_write(arena, path_join(arena, options.results, S8("baseline.log")),
                                       string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), true));
@@ -545,42 +645,49 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             bool baseline = !options.baseline_driver.length || clang_analyze_baseline(arena, options, plan);
             u64 start = os_now_microseconds();
             u64 peak_pending = 0;
-            ProcessSpawnResult* spawns = arena_allocate(arena, ProcessSpawnResult, options.jobs);
-            for (u64 first = 0; first < options.shards; first += options.jobs)
+            u64 next_shard = 0;
+            u64 completed = 0;
+            u64 pending = 0;
+            ClangAnalyzeResources resources = {0};
+            ProcessSpawnResult* spawns = arena_allocate(arena, ProcessSpawnResult, options.shards);
+            bool* active = arena_allocate(arena, bool, options.shards);
+            memset(active, 0, options.shards * sizeof(*active));
+            while (completed < options.shards)
             {
-                u64 count = options.shards - first;
-                if (count > options.jobs)
+                while (next_shard < options.shards && pending < options.jobs)
                 {
-                    count = options.jobs;
+                    SliceString8 command = clang_analyze_worker_command(arena, options, next_shard);
+                    spawns[next_shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1});
+                    active[next_shard++] = true;
+                    pending += 1;
                 }
-                u64 pending = 0;
-                for (u64 i = 0; i < count; i += 1)
+                if (pending > peak_pending) peak_pending = pending;
+                clang_analyze_sample_resources(&resources);
+                for (u64 shard = 0; shard < next_shard; shard += 1)
                 {
-                    SliceString8 command = clang_analyze_worker_command(arena, options, first + i);
-                    spawns[i] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1});
-                    pending += spawns[i].handle != 0;
-                }
-                if (pending > peak_pending)
-                {
-                    peak_pending = pending;
-                }
-                for (u64 i = 0; i < count; i += 1)
-                {
-                    // Workers enforce each TU deadline themselves. Do not kill a
-                    // worker first and orphan its still-running analyzer child.
-                    ProcessWaitResult wait = os_process_wait_sync(arena, spawns[i]);
-                    if (wait.result != PROCESS_RESULT_SUCCESS)
+                    if (active[shard] && clang_analyze_finished(spawns[shard]))
                     {
-                        string_print(S8("error: analyzer worker failed: shard={u64}\n"), first + i);
-                        success = false;
+                        // No captured coordinator pipes: a finished worker can
+                        // be reaped immediately. Its own TU waits drain both streams.
+                        ProcessWaitResult wait = os_process_wait_sync(arena, spawns[shard]);
+                        if (wait.result != PROCESS_RESULT_SUCCESS)
+                        {
+                            string_print(S8("error: analyzer worker failed: shard={u64}\n"), shard);
+                            success = false;
+                        }
+                        active[shard] = false;
+                        pending -= 1;
+                        completed += 1;
                     }
                 }
+                if (pending) clang_analyze_sample_pause();
             }
             // Always aggregate, even when a worker failed or never launched.
             bool aggregate = clang_analyze_aggregate(arena, options, plan);
             success = success && aggregate && baseline;
-            string_print(S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} results={S8} status={S8}\n"),
-                         os_now_microseconds() - start, peak_pending, options.jobs, options.results, success ? S8("pass") : S8("fail"));
+            string_print(S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} results={S8} status={S8}\n"),
+                         os_now_microseconds() - start, peak_pending, options.jobs, resources.samples, resources.peak_processes, resources.peak_tree_rss,
+                         options.results, success ? S8("pass") : S8("fail"));
         }
     }
     return success;

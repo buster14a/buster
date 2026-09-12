@@ -562,8 +562,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
-        # predicate. Exercise all 625 existing shard outcomes with UEFI green,
-        # then independently reject each unavailable/unsuccessful UEFI result.
+        # predicate. Exercise all 625 existing shard outcomes with UEFI/analyzer
+        # green, then reject unavailable/unsuccessful UEFI and analyzer results.
         body = aggregate.split("        run: |\n", 1)[1]
         body = textwrap.dedent(body)
         with tempfile.TemporaryDirectory() as temporary:
