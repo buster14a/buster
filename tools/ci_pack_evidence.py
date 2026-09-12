@@ -19,6 +19,7 @@ import shutil
 import stat
 import sys
 import tarfile
+import tempfile
 
 ARCHIVE = "native-ci-logs.tar.gz"
 SUMMARIES = ("result.json", "summary.md")
@@ -35,20 +36,19 @@ def generated(relative):
 
 
 def plan(source):
-    """Return sorted (relative path, is empty directory) entries and the excluded count.
+    """Return sorted (relative path, is directory) entries and the excluded count.
 
     Paths stay plain strings: this walks tens of thousands of entries. Only
-    empty directories need their own members; files imply their parents.
+    directories retain their modes and mtimes, including generated-only ones.
     """
     entries = []
     excluded = 0
     pending = [(os.fspath(source), "")]
     while pending:
         directory, prefix = pending.pop()
-        empty = True
+        entries.append((prefix[:-1], True))
         with os.scandir(directory) as scan:
             for entry in scan:
-                empty = False
                 relative = prefix + entry.name
                 if entry.is_symlink():
                     raise ValueError(f"refusing symbolic link in evidence: {relative}")
@@ -60,8 +60,6 @@ def plan(source):
                     excluded += 1
                 else:
                     entries.append((relative, False))
-        if empty:
-            entries.append((prefix[:-1], True))
     entries.sort(key=lambda item: item[0].split("/"))
     return entries, excluded
 
@@ -86,22 +84,33 @@ def verify(archive, digests, directories):
 
 def pack(source, output):
     """Publish output/ARCHIVE plus summary copies; return (files packed, files excluded)."""
-    source = Path(source).resolve()
-    output = Path(output).resolve()
-    if not source.is_dir():
-        raise ValueError(f"missing evidence directory: {source}")
+    source = Path(source).absolute()
+    output = Path(output).absolute()
+    for path in (source, output):
+        if any(part.is_symlink() for part in (path, *path.parents)):
+            raise ValueError(f"refusing symbolic link in evidence path: {path}")
+    source = source.resolve()
+    output = output.resolve()
     if output == source or source in output.parents or output in source.parents:
         raise ValueError("the upload directory must be separate from the evidence tree")
     output.mkdir(parents=True, exist_ok=True)
     archive = output / ARCHIVE
-    partial = output / (ARCHIVE + ".partial")
     # Nothing from an earlier attempt may be uploaded beside a failed pack.
-    for name in (archive.name, partial.name) + SUMMARIES:
+    for name in (archive.name, ARCHIVE + ".partial") + SUMMARIES:
         (output / name).unlink(missing_ok=True)
+    if any(output.iterdir()):
+        raise ValueError("the upload directory contains unexpected entries")
+    if not source.is_dir():
+        raise ValueError(f"missing evidence directory: {source}")
     entries, excluded = plan(source)
+    retained = {relative for relative, directory in entries if not directory}
+    if not set(SUMMARIES) <= retained:
+        raise ValueError("missing evidence summaries: result.json and summary.md are required")
     root = os.fspath(source)
     digests = {}
     directories = set()
+    staging = Path(tempfile.mkdtemp(prefix=output.name + ".partial-", dir=output.parent))
+    partial = staging / ARCHIVE
     try:
         with tarfile.open(partial, "w:gz", compresslevel=6, format=tarfile.PAX_FORMAT) as bundle:
             for relative, directory in entries:
@@ -123,15 +132,20 @@ def pack(source, output):
                     info.size = len(data)
                     digests[info.name] = hashlib.sha256(data).digest()
                 info.mode = stat.S_IMODE(status.st_mode)
-                info.mtime = int(status.st_mtime)
+                info.mtime = status.st_mtime
                 bundle.addfile(info, None if data is None else io.BytesIO(data))
+                if relative in SUMMARIES and data is not None:
+                    # Publish the exact bytes included in the verified archive,
+                    # never a second read of a potentially changed summary.
+                    (staging / relative).write_bytes(data)
         verify(partial, digests, directories)
-        os.replace(partial, archive)
+        # Publish all three files together only after every write and close
+        # succeeds. Removing the empty destination also works on Windows.
+        output.rmdir()
+        os.replace(staging, output)
     finally:
-        partial.unlink(missing_ok=True)
-    for name in SUMMARIES:
-        if (source / name).is_file():
-            shutil.copyfile(source / name, output / name)
+        if staging.exists():
+            shutil.rmtree(staging)
     return len(digests), excluded
 
 

@@ -226,9 +226,16 @@ class EvidencePackTests(unittest.TestCase):
         script = self.source / "differential/case/reproduce.sh"
         script.write_bytes(b"#!/bin/sh\n")
         script.chmod(0o755)
+        directory = script.parent
+        directory.chmod(0o750)
+        stamp = 1700000000.125
+        os.utime(directory, (stamp, stamp))
         ci_pack_evidence.pack(self.source, self.output)
         with tarfile.open(self.output / ci_pack_evidence.ARCHIVE, "r:gz") as bundle:
             self.assertEqual(bundle.getmember("buster-ci/differential/case/reproduce.sh").mode, 0o755)
+            member = bundle.getmember("buster-ci/differential/case")
+            self.assertEqual(member.mode, 0o750)
+            self.assertEqual(member.mtime, stamp)
 
     def test_missing_input_overlapping_output_links_and_special_files_are_refused(self):
         with self.assertRaisesRegex(ValueError, "missing evidence"):
@@ -264,6 +271,59 @@ class EvidencePackTests(unittest.TestCase):
                 ci_pack_evidence.pack(self.source, self.output)
         self.assertEqual(list(self.output.iterdir()), [])
 
+    def test_summary_write_close_verify_and_publish_failures_leave_no_bundle(self):
+        original_write = Path.write_bytes
+        original_close = ci_pack_evidence.tarfile.TarFile.close
+
+        def fail_summary(path, data):
+            if path.name == "summary.md":
+                raise OSError("summary close failed")
+            return original_write(path, data)
+
+        def fail_close(bundle):
+            writing = bundle.mode == "w" and not bundle.closed
+            original_close(bundle)
+            if writing:
+                raise OSError("archive close failed")
+
+        failures = (
+            mock.patch.object(Path, "write_bytes", fail_summary),
+            mock.patch.object(ci_pack_evidence.tarfile.TarFile, "close", fail_close),
+            mock.patch.object(ci_pack_evidence, "verify", side_effect=ValueError("verify failed")),
+            mock.patch.object(ci_pack_evidence.os, "replace", side_effect=OSError("publish failed")),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure), failure, self.assertRaises((OSError, ValueError)):
+                ci_pack_evidence.pack(self.source, self.output)
+            self.assertFalse((self.output / ci_pack_evidence.ARCHIVE).exists())
+            self.assertEqual(list(self.root.glob("native-ci-upload.partial-*")), [])
+            for name, data in self.KEEP.items():
+                self.assertEqual((self.source / name).read_bytes(), data)
+
+    def test_missing_summary_and_missing_source_remove_stale_success(self):
+        ci_pack_evidence.pack(self.source, self.output)
+        (self.source / "summary.md").unlink()
+        with self.assertRaisesRegex(ValueError, "missing evidence summaries"):
+            ci_pack_evidence.pack(self.source, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+        for name in (ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES:
+            (self.output / name).write_bytes(b"stale")
+        with self.assertRaisesRegex(ValueError, "missing evidence directory"):
+            ci_pack_evidence.pack(self.root / "absent", self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_summary_copies_match_the_archived_snapshot(self):
+        original_verify = ci_pack_evidence.verify
+
+        def change_source_after_archive(*args):
+            original_verify(*args)
+            (self.source / "result.json").write_bytes(b"changed after archive verification")
+
+        with mock.patch.object(ci_pack_evidence, "verify", change_source_after_archive):
+            ci_pack_evidence.pack(self.source, self.output)
+        files, _ = self.members()
+        self.assertEqual((self.output / "result.json").read_bytes(), files["buster-ci/result.json"])
+
     def test_verification_rejects_changed_missing_and_extra_members(self):
         ci_pack_evidence.pack(self.source, self.output)
         archive = self.output / ci_pack_evidence.ARCHIVE
@@ -283,8 +343,8 @@ class EvidencePackTests(unittest.TestCase):
 
     def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
         steps = self.native_steps()
-        self.assertEqual(list(steps)[-4:], ["Native result and reproduction", "Pack native logs",
-                                            "Retain native logs", "Retain unpacked native logs"])
+        self.assertEqual(list(steps)[-5:], ["Native result and reproduction", "Pack native logs",
+                                            "Retain native logs", "Record native packaging failure", "Retain unpacked native logs"])
         pack, packed, unpacked = (steps[name] for name in (
             "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
         self.assertIn("id: pack\n", pack)
@@ -302,6 +362,13 @@ class EvidencePackTests(unittest.TestCase):
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program\n", unpacked)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o\n", unpacked)
         self.assertEqual(ci_pack_evidence.GENERATED, frozenset(("program", "subject.o")))
+        failed_summary = steps["Record native packaging failure"]
+        self.assertIn("steps.pack.outcome != 'success'", failed_summary)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential pack", failed_summary)
+        self.assertIn("run: python3 tools/ci_summary.py", failed_summary)
+        outcomes = {"modes": {"outcome": "success"}, "differential": {"outcome": "success"},
+                    "pack": {"outcome": "failure"}}
+        self.assertEqual(ci_summary.assess(outcomes, ["modes", "differential", "pack"]), ["pack"])
 
     @unittest.skipIf(os.name == "nt", "Native lanes run only on Unix")
     def test_actual_workflow_command_packs_runner_evidence(self):
