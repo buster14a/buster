@@ -1149,7 +1149,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_shape_valid(u64 cons
     bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
     bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
     bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
-    if ((read_write && !output) || (matching && (output || read_write)))
+    bool physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint);
+    u64 physical_bits = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK;
+    if ((read_write && !output) || (matching && (output || read_write)) ||
+        (physical && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != IR_INLINE_ASSEMBLY_CONSTRAINT_R) ||
+        (!physical && physical_bits))
     {
         return false;
     }

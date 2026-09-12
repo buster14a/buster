@@ -4848,12 +4848,32 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_register(String8 clobber, u
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_fixed_register(u64 constraint, u32* register_out)
+{
+    bool valid = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint) &&
+                 (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+    u32 physical_register = valid ? IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint) : UINT32_MAX;
+    valid = valid && physical_register < MACHINE_A64_REGISTER_COUNT &&
+            ((machine_aarch64_description.allocatable_mask >> physical_register) & 1u);
+    if (valid)
+    {
+        *register_out = physical_register;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_reference(IrInstructionExtra extra, String8 source, u64 start, u32 operand_count,
-                                                                u32* operand_out, u64* end_out)
+                                                                u32* operand_out, char8* modifier_out, u64* end_out)
 {
     bool valid = start + 1 < source.length;
     u64 cursor = start + 1;
     u32 operand = UINT32_MAX;
+    char8 modifier = 0;
+    if (valid && (source.pointer[cursor] == 'w' || source.pointer[cursor] == 'x'))
+    {
+        modifier = source.pointer[cursor++];
+        valid = cursor < source.length;
+    }
     if (valid && source.pointer[cursor] == '[')
     {
         u64 name_start = ++cursor;
@@ -4889,6 +4909,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_reference(IrInstructionExtr
     if (valid)
     {
         *operand_out = operand;
+        *modifier_out = modifier;
         *end_out = cursor;
     }
     return valid;
@@ -4917,19 +4938,30 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_source(MachineA64Selector* 
         else
         {
             u32 operand = UINT32_MAX;
+            char8 modifier = 0;
             u64 end = 0;
             valid = read + 1 < extra.literal.length && extra.literal.pointer[read + 1] != 'l' &&
-                    machine_a64_inline_assembly_reference(extra, extra.literal, read, instruction->operand_count, &operand, &end);
+                    machine_a64_inline_assembly_reference(extra, extra.literal, read, instruction->operand_count, &operand, &modifier, &end);
             if (valid)
             {
-                char8 prefix = sizes[operand] == 8 ? 'x' : 'w';
+                bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(
+                    instruction->immediates[operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+                char8 prefix = memory ? 'x' : modifier ? modifier : sizes[operand] == 8 ? 'x' : 'w';
                 u32 number = registers[operand];
+                if (memory)
+                {
+                    bytes[write++] = '[';
+                }
                 bytes[write++] = prefix;
                 if (number >= 10)
                 {
                     bytes[write++] = (char8)('0' + number / 10);
                 }
                 bytes[write++] = (char8)('0' + number % 10);
+                if (memory)
+                {
+                    bytes[write++] = ']';
+                }
                 read = end;
             }
         }
@@ -4966,6 +4998,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
     u8 sizes[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u8 operand_flags[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     bool reserved[31] = {0};
+    bool clobbered[31] = {0};
     bool used[31] = {0};
     u64 exact_clobbers = 0;
     u8 effects = 0;
@@ -4977,12 +5010,27 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         else if (machine_a64_inline_assembly_register(extra.clobbers[index], &clobber))
         {
             reserved[clobber] = true;
+            clobbered[clobber] = true;
             exact_clobbers |= UINT64_C(1) << clobber;
         }
         else if (!string_equal(extra.clobbers[index], S8("sp")) && !string_equal(extra.clobbers[index], S8("xzr")) &&
                  !string_equal(extra.clobbers[index], S8("wzr")))
         {
             selected = false;
+        }
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        u32 fixed_register = UINT32_MAX;
+        if (!(instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) &&
+            IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(instruction->immediates[index]))
+        {
+            selected = machine_a64_inline_assembly_fixed_register(instruction->immediates[index], &fixed_register) &&
+                       !clobbered[fixed_register];
+            if (selected)
+            {
+                reserved[fixed_register] = true;
+            }
         }
     }
     // A literal register in the template is outside the operand list, but it
@@ -5018,8 +5066,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         IrType* type = operand.value < function->value_count
                            ? ir_type_from_id(&selector->program->types, function->values[operand.value].canonical_type)
                            : 0;
-        selected = type && type->layout.resolved && type->layout.size && type->layout.size <= 8 &&
-                   (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+        u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint_class);
+        selected = type && type->layout.resolved && type->layout.size &&
+                   (memory || type->layout.size <= 8) &&
+                   (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_R || memory);
         if (selected && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH))
         {
             u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
@@ -5033,15 +5084,17 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         else if (selected)
         {
             static u8 const pool[] = {9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8};
+            u32 fixed_register = UINT32_MAX;
+            bool fixed = machine_a64_inline_assembly_fixed_register(constraint, &fixed_register);
             u32 pool_index = 0;
-            while (pool_index < BUSTER_ARRAY_LENGTH(pool) && (reserved[pool[pool_index]] || used[pool[pool_index]]))
+            while (!fixed && pool_index < BUSTER_ARRAY_LENGTH(pool) && (reserved[pool[pool_index]] || used[pool[pool_index]]))
             {
                 pool_index += 1;
             }
-            selected = pool_index < BUSTER_ARRAY_LENGTH(pool);
+            selected = fixed || pool_index < BUSTER_ARRAY_LENGTH(pool);
             if (selected)
             {
-                u32 candidate = pool[pool_index];
+                u32 candidate = fixed ? fixed_register : pool[pool_index];
                 registers[index] = candidate;
                 used[candidate] = true;
                 exact_clobbers |= UINT64_C(1) << candidate;
@@ -5050,15 +5103,17 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         }
         if (selected)
         {
-            sizes[index] = (u8)type->layout.size;
+            sizes[index] = (u8)(memory ? 8 : type->layout.size);
             operand_flags[index] = (u8)(((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) ? MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT : 0) |
                                         (!(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) ||
-                                                 (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE)
+                                                 (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) || memory
                                              ? MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT
                                              : 0) |
+                                        (memory ? MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY : 0) |
                                         ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER)
                                              ? MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER
                                              : 0));
+            effects |= memory ? MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY : 0;
         }
     }
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
@@ -5066,7 +5121,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         if (!(operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) continue;
         IrValueId source = instruction->operands[index];
         u32 source_register = UINT32_MAX;
-        if (instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE)
+        bool memory = (operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY) != 0;
+        if (memory)
+        {
+            source_register = machine_a64_synthesize_register(selector);
+            selected = machine_a64_select_place_address_offset(selector, source, source_register, 0);
+        }
+        else if (instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE)
         {
             source_register = machine_a64_synthesize_register(selector);
             MachineSelectionAddress address = machine_a64_address(selector, source);
@@ -5113,7 +5174,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
             MachineInlineAssemblyOperand* row =
                 (MachineInlineAssemblyOperand*)machine_stream_append(selector->arena, &selector->inline_assembly_operands);
             *row = (MachineInlineAssemblyOperand){.stack_slot = slots[index], .physical_register = (u8)registers[index],
-                                                  .byte_size = sizes[index], .constraint_class = IR_INLINE_ASSEMBLY_CONSTRAINT_R,
+                                                  .byte_size = sizes[index],
+                                                  .constraint_class = (u8)(instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK),
                                                   .flags = operand_flags[index]};
         }
         u32 descriptor_index = selector->inline_assemblies.total_count;
@@ -5125,7 +5187,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         machine_a64_select_row(selector, (MachineInstruction){.payload = descriptor_index, .opcode = MACHINE_A64_INLINE_ASSEMBLY});
         for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
         {
-            if (operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+            if ((operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY)) ==
+                MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
             {
                 u32 value = machine_a64_synthesize_register(selector);
                 u32 row = machine_a64_select_row(selector, (MachineInstruction){

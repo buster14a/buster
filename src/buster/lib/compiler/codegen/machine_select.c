@@ -71,6 +71,7 @@ bool machine_selection_assembly_identity_plan(IrProgram* program, IrFunction* fu
         u64 constraint = instruction->immediates[index];
         selected = operand.value < function->value_count &&
                    (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R &&
+                   !IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint) &&
                    !(constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK);
         IrType* type = selected ? ir_type_from_id(&program->types, function->values[operand.value].canonical_type) : 0;
         selected = selected && type && type->layout.resolved &&

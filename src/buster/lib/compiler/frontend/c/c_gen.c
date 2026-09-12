@@ -32526,7 +32526,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     }
     else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
     {
-        result = builder->target.cpu_arch == CPU_ARCH_X86_64;
+        result = builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
     }
     else
     {
@@ -32577,6 +32577,25 @@ BUSTER_C_INTERNAL CIrBoundRegisterName const c_ir_bound_register_names[] = {
     {S8_INITIALIZER("r11"), IR_INLINE_ASSEMBLY_CONSTRAINT_R11},
 };
 
+// Parse an AArch64 general-register name accepted by inline assembly. Operand
+// bindings apply the narrower allocator-safe subset at their call site;
+// clobbers may additionally name the target's reserved scratch registers.
+BUSTER_C_INTERNAL bool c_ir_aarch64_inline_assembly_register(String8 name, u32* register_out)
+{
+    bool valid = name.length >= 2 && (name.pointer[0] == 'x' || name.pointer[0] == 'w');
+    u64 number = 0;
+    if (valid)
+    {
+        String8 suffix = string_slice(name, 1, name.length);
+        valid = c_conditional_number(suffix, &number) && number <= 27;
+    }
+    if (valid)
+    {
+        *register_out = (u32)number;
+    }
+    return valid;
+}
+
 // The assembler label of a declaration, read from the declaration's own tokens.
 // A label on a function or a file-scope object renames the symbol and is read
 // by c_declaration_link_name; on a `register` local it names a machine register
@@ -32612,13 +32631,14 @@ BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, u3
 // GNU guarantees a local register variable only where the standard leaves the
 // register choice to the compiler: as an operand of an asm statement. The
 // binding therefore refines this operand's class rather than reserving the
-// register across the function, which is exactly what musl needs to place
-// syscall arguments four through six, for which x86-64 has no constraint
-// letter. Only a single unadorned identifier can carry a binding, so anything
-// else -- a cast, a member, an expression -- leaves the class alone.
+// register across the function. x86 keeps its named fixed classes; AArch64
+// retains a target-neutral physical index beside R. Only a single unadorned
+// identifier can carry a binding, so anything else -- a cast, a member, an
+// expression -- leaves the class alone.
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u64* constraint_out)
 {
-    if (state->operand_close != state->constraint_index + 3 || builder->target.cpu_arch != CPU_ARCH_X86_64)
+    if (state->operand_close != state->constraint_index + 3 ||
+        (builder->target.cpu_arch != CPU_ARCH_X86_64 && builder->target.cpu_arch != CPU_ARCH_AARCH64))
     {
         return false;
     }
@@ -32657,11 +32677,19 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
     }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_bound_register_names); index += 1)
     {
-        if (string_equal(c_ir_bound_register_names[index].name, label))
+        if (builder->target.cpu_arch == CPU_ARCH_X86_64 && string_equal(c_ir_bound_register_names[index].name, label))
         {
             *constraint_out = c_ir_bound_register_names[index].constraint;
             return true;
         }
+    }
+    u32 physical_register = UINT32_MAX;
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && c_ir_aarch64_inline_assembly_register(label, &physical_register) &&
+        (physical_register <= 15 || physical_register >= 19))
+    {
+        *constraint_out = IR_INLINE_ASSEMBLY_CONSTRAINT_R | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                          ((u64)physical_register << IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT);
+        return true;
     }
     builder->failure_message = string_format(builder->arena, S8("unsupported register '{S8}' bound to a local register variable"), label);
     builder->failure_token_index = identifier_index;
@@ -32922,7 +32950,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             builder->failure_message = S8("asm matching operands have incompatible width or class");
             return false;
         }
-        constraint = output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        constraint = output_constraint & (IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                                          IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK);
         constraint |= IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | ((u64)match_index << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT);
     }
     else
@@ -32947,7 +32976,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         constraint |= early_clobber ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
     }
     if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT ||
-        (matching && !c_ir_inline_assembly_constraint_class_supported(builder, constraint)))
+        !c_ir_inline_assembly_constraint_class_supported(builder, constraint))
     {
         builder->failure_message = S8("unsupported asm constraint for target");
         return false;
@@ -33007,7 +33036,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
             String8 suffix = clobber;
             suffix.pointer += 1;
             suffix.length -= 1;
-            return c_conditional_number(suffix, &number) && number <= 18;
+            return c_conditional_number(suffix, &number) && number <= 27;
         }
         return string_equal(clobber, S8("sp")) || string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
     }
@@ -33063,8 +33092,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(String8 clobber, u64 constraint)
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(CIntegerIrBuilder* builder, String8 clobber, u64 constraint)
 {
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
+    {
+        u32 physical_register = UINT32_MAX;
+        return c_ir_aarch64_inline_assembly_register(clobber, &physical_register) &&
+               physical_register == IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint);
+    }
     switch (constraint & 0xff)
     {
     case IR_INLINE_ASSEMBLY_CONSTRAINT_A:
@@ -33116,7 +33151,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_conflict(CIntegerIrBuilder*
     {
         for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
         {
-            if (c_ir_inline_assembly_clobber_matches_constraint(state->clobbers[clobber_index], state->constraints[operand_index]))
+            if (c_ir_inline_assembly_clobber_matches_constraint(builder, state->clobbers[clobber_index], state->constraints[operand_index]))
             {
                 builder->failure_message = S8("asm operand constraint conflicts with its clobber list");
                 return true;
@@ -33130,22 +33165,33 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBu
 {
     for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
     {
-        u64 constraint = state->constraints[operand_index] & 0xff;
-        if (!IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint))
+        u64 constraint = state->constraints[operand_index];
+        u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        bool physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint);
+        if (!physical && !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint_class))
         {
             continue;
         }
         for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
         {
-            u64 previous_constraint = state->constraints[previous_index] & 0xff;
-            if (previous_constraint == constraint)
+            u64 previous_constraint = state->constraints[previous_index];
+            u64 previous_class = previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+            bool previous_physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(previous_constraint);
+            bool same_register = physical && previous_physical
+                                     ? IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint) ==
+                                           IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(previous_constraint)
+                                     : !physical && !previous_physical && previous_class == constraint_class;
+            if (same_register)
             {
                 bool current_output = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
                 bool previous_output = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
                 bool current_read_write = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
                 bool previous_read_write = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+                bool current_early_clobber = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
+                bool previous_early_clobber = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
                 bool output_input_pair = current_output != previous_output &&
-                                         ((current_output && !current_read_write) || (previous_output && !previous_read_write));
+                                         ((current_output && !current_read_write && !current_early_clobber) ||
+                                          (previous_output && !previous_read_write && !previous_early_clobber));
                 if (!output_input_pair)
                 {
                     builder->failure_message = S8("asm fixed-register operands conflict without a supported matching constraint");
@@ -33587,7 +33633,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_special_literal_operands_valid(CInte
         bool preserves_rbx = output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B];
         for (u32 clobber_index = 0; clobber_index < state->clobber_count && !preserves_rbx; clobber_index += 1)
         {
-            preserves_rbx = c_ir_inline_assembly_clobber_matches_constraint(state->clobbers[clobber_index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+            preserves_rbx = c_ir_inline_assembly_clobber_matches_constraint(builder, state->clobbers[clobber_index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
         }
         if (!preserves_rbx)
         {

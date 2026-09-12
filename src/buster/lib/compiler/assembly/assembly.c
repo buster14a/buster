@@ -4009,10 +4009,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         }
         else
         {
-            if (!target_cpu_features_are_valid(target))
-            {
-                return false;
-            }
             if (assembly_aarch64_direct_simd_lookup(mnemonic, result))
             {
                 return true;
@@ -4024,6 +4020,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             if (assembly_aarch64_system_lookup(target, mnemonic, result))
             {
                 return true;
+            }
+            if (!target_cpu_features_are_valid(target))
+            {
+                return false;
             }
             u32 scalar_form_count = buster_aarch64_arm_m1_scalar_integer_form_count();
             u8 scalar_operand_count = 0;

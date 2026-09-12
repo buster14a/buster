@@ -757,6 +757,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenRelocationKindExpectation relocation_kinds[] = {
         {CODEGEN_MODULE_RELOCATION_X86_64_PC32, false, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_CALL26, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_ABSOLUTE32, false, true, false, false, false},
         {CODEGEN_MODULE_RELOCATION_ABSOLUTE64, false, true, false, false, false},
         {CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32, false, false, true, false, false},
