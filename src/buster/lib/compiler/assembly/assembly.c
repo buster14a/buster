@@ -1812,7 +1812,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_fixed_row(Target target, String
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
 {
-    if (result && buster_aarch64_arm_m1_fixed_target(target))
+    // These control, PC-relative and conditional-select forms are base A64;
+    // the generated table's historical M1 provenance must not target-gate
+    // inline assembly compiled for generic Linux, Darwin or Windows CPUs.
+    if (result && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target))
     {
         bool conditional = false;
         u64 condition = 0;
