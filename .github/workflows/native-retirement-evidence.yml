@@ -7,7 +7,7 @@ on:
     branches: [codex/36-failure-diagnostics]
 
 concurrency:
-  group: retirement-evidence-with-strict-${{ github.ref }}
+  group: retirement-evidence-with-strict-v2-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
       - name: Check out candidate implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 59b7167635cb549211263bf372f1796e7d3bf857
+          ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
           path: candidate
           persist-credentials: false
       - name: Check out archived direct source
@@ -65,7 +65,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
+          --compiler-revision eb1bef2f124c6a778a435ae1eda18ae489c489c5
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --manifest-only --out evidence/manifest
@@ -75,7 +75,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
+          --compiler-revision eb1bef2f124c6a778a435ae1eda18ae489c489c5
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 0 --shard-count 4
@@ -86,7 +86,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
+          --compiler-revision eb1bef2f124c6a778a435ae1eda18ae489c489c5
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 1 --shard-count 4
@@ -97,7 +97,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
+          --compiler-revision eb1bef2f124c6a778a435ae1eda18ae489c489c5
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 2 --shard-count 4
@@ -108,7 +108,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
+          --compiler-revision eb1bef2f124c6a778a435ae1eda18ae489c489c5
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 3 --shard-count 4
@@ -126,7 +126,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: native-retirement-59b7167-${{ github.run_id }}
+          name: native-retirement-eb1bef2-${{ github.run_id }}
           path: |
             candidate/evidence/
             candidate/build/CMakeCache.txt
@@ -146,9 +146,10 @@ jobs:
       - name: Check out exact implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 59b7167635cb549211263bf372f1796e7d3bf857
+          ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
           persist-credentials: false
       - name: Build and freeze hosted Clang compiler
+        id: strict_build
         run: |
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/strict-build"
@@ -161,21 +162,33 @@ jobs:
           sha256sum evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
           cp build/CMakeCache.txt build/compile_commands.json evidence/strict-binary/
       - name: Validate differential harness
+        id: strict_self_test
         run: '"$RUNNER_TEMP/strict-build" test_differential --self-test'
       - name: Execute every strict configuration with sanitizer enabled
+        id: strict_execute
         run: >-
           "$RUNNER_TEMP/strict-build" test_differential
           --ide "$PWD/evidence/strict-binary/ide" --cc clang
           --strict-mir --sanitize-oracle --out evidence/strict-differential
+      - name: Record strict outcome before packaging
+        if: ${{ !cancelled() }}
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_REQUIRED: strict_build strict_self_test strict_execute
+          BUSTER_CI_RUNNER: ubuntu-26.04
+          BUSTER_CI_REPRO: Check out eb1bef2f124c6a778a435ae1eda18ae489c489c5 and run build.c test_differential with --strict-mir --sanitize-oracle on an immutable Clang-built compiler.
+        run: python3 tools/ci_summary.py
       - name: Bundle and verify full strict evidence
         id: strict_bundle
         if: ${{ !cancelled() }}
-        run: python3 tools/ci_pack_evidence.py --source evidence --output "$RUNNER_TEMP/strict-upload"
+        run: |
+          cp "$RUNNER_TEMP/buster-ci/result.json" "$RUNNER_TEMP/buster-ci/summary.md" evidence/
+          python3 tools/ci_pack_evidence.py --source evidence --output "$RUNNER_TEMP/strict-upload"
       - name: Retain strict evidence
         if: ${{ !cancelled() && steps.strict_bundle.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: strict-retirement-59b7167-${{ github.run_id }}
+          name: strict-retirement-eb1bef2-${{ github.run_id }}
           path: ${{ runner.temp }}/strict-upload/
           retention-days: 7
           if-no-files-found: error
@@ -183,7 +196,7 @@ jobs:
         if: ${{ !cancelled() && steps.strict_bundle.outcome != 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: strict-retirement-59b7167-raw-${{ github.run_id }}
+          name: strict-retirement-eb1bef2-raw-${{ github.run_id }}
           path: evidence/
           retention-days: 7
           if-no-files-found: error
