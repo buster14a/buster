@@ -1163,10 +1163,7 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_spirv_llvm_ir(GpuPlanBuilder* builder, String8
     gpu_argument_append(&arguments, string_format(builder->arena, S8("-mtriple={S8}"), gpu_spirv_backend_triple(builder->options.target)));
     gpu_argument_append(&arguments, S8("-filetype=obj"));
     gpu_append_optimization(&arguments, builder->arena, builder->options.optimization_level);
-    if (builder->options.debug_info)
-    {
-        gpu_argument_append(&arguments, S8("-g"));
-    }
+    // llc consumes debug metadata already present in the IR; it has no -g option.
     for (u32 argument_index = 0; argument_index < builder->options.extra_argument_count; argument_index += 1)
     {
         gpu_argument_append(&arguments, builder->options.extra_arguments[argument_index]);
@@ -1416,10 +1413,7 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_nvptx(GpuPlanBuilder* builder, GpuSourceLangua
         }
         gpu_argument_append(&arguments, S8("-filetype=asm"));
         gpu_append_optimization(&arguments, builder->arena, builder->options.optimization_level);
-        if (builder->options.debug_info)
-        {
-            gpu_argument_append(&arguments, S8("-g"));
-        }
+        // llc consumes debug metadata already present in the IR; it has no -g option.
         for (u32 argument_index = 0; argument_index < builder->options.extra_argument_count; argument_index += 1)
         {
             gpu_argument_append(&arguments, builder->options.extra_arguments[argument_index]);
@@ -1491,10 +1485,7 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_amdgcn_llc(GpuPlanBuilder* builder, String8 in
     gpu_argument_append(&arguments, string_format(builder->arena, S8("-mcpu={S8}"), builder->options.target.architecture));
     gpu_argument_append(&arguments, assembly ? S8("-filetype=asm") : S8("-filetype=obj"));
     gpu_append_optimization(&arguments, builder->arena, builder->options.optimization_level);
-    if (builder->options.debug_info)
-    {
-        gpu_argument_append(&arguments, S8("-g"));
-    }
+    // llc consumes debug metadata already present in the IR; it has no -g option.
     for (u32 argument_index = 0; argument_index < builder->options.extra_argument_count; argument_index += 1)
     {
         gpu_argument_append(&arguments, builder->options.extra_arguments[argument_index]);

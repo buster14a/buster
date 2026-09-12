@@ -66,7 +66,8 @@ with `--gpu-arch=<sm_xx>` or the compatible `-march=<sm_xx>`/`-mcpu=<sm_xx>`
 spellings.
 
 CUDA source uses Clang's device-only CUDA path. OpenCL source uses Clang with
-an explicit NVPTX target. LLVM IR or bitcode uses `llc`. CUDA source is rejected
+an explicit NVPTX target. LLVM IR or bitcode uses `llc`. Debug information in LLVM IR is consumed from
+its existing metadata; the frontend-only `-g` flag is not passed to `llc`. CUDA source is rejected
 for the explicit 32-bit target because Clang's CUDA frontend is routed through
 the 64-bit CUDA device ABI; use NVPTX64, or supply OpenCL/LLVM IR for NVPTX32.
 
@@ -198,3 +199,9 @@ binary artifacts are checked for their expected container signature:
 Temporary files are removed after success or failure unless `--save-temps` is
 present. A missing executable is reported as a tool-not-found GPU driver error,
 not as a native compilation failure.
+
+Real ecosystem acceptance is a separate opt-in native harness:
+`./build.sh test_gpu_toolchains --profile amdgcn-llvm18 --out build/gpu-check-1`.
+See [GPU toolchain validation](gpu-toolchain-validation.md) for pinned fixtures,
+version profiles, independent consumers, evidence, CI and explicit unavailable
+lanes. Container signatures above are not semantic validation.
