@@ -46,6 +46,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
 #include <buster/lib/string.h>
+#include <stdio.h>
 
 // Shared executable-section padding for source alignment and generated
 // function entry alignment. Explicit source fill operands are data and never
@@ -12760,6 +12761,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
+        FILE* diagnostic = fopen("/tmp/buster-inline-assembly-diagnostic.txt", "a");
+        if (diagnostic)
+        {
+            fprintf(diagnostic, "metadata-failure: %.*s status=%u form=%u feature-length=%u operands=%u\n",
+                    (int)mnemonic.length, mnemonic.pointer, selection.status, selection.failure_form_id,
+                    selection.required_feature.length, operand_count);
+            fclose(diagnostic);
+        }
         BusterX86MetadataForm failure_form = {0};
         bool typed_decorator_authoritative = selection.failure_form_id != UINT32_MAX &&
                                              buster_x86_metadata_form(selection.failure_form_id, &failure_form) &&
@@ -13282,6 +13291,13 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             builder->result.diagnostic_count = diagnostic_count;
             builder->output_count = output_count;
             BusterX86MetadataEncodeStatus status = assembly_x86_metadata_instruction_parse(builder, statement, line, column, offset, target, syntax);
+            FILE* diagnostic = fopen("/tmp/buster-inline-assembly-diagnostic.txt", "a");
+            if (diagnostic)
+            {
+                fprintf(diagnostic, "metadata-parse: %.*s status=%u handwritten=%u authoritative=%u\n",
+                        (int)statement.length, statement.pointer, status, handwritten_succeeded, metadata_authoritative);
+                fclose(diagnostic);
+            }
             if (status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
             {
                 if (metadata_authoritative)
@@ -13836,6 +13852,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         builder->result.relocation_count > builder->relocation_capacity ||
         emitted.relocation_count > builder->relocation_capacity - builder->result.relocation_count)
     {
+        FILE* diagnostic = fopen("/tmp/buster-inline-assembly-diagnostic.txt", "a");
+        if (diagnostic)
+        {
+            fprintf(diagnostic, "metadata-emit: %.*s status=%u bytes=%u expected=%u form=%u\n",
+                    (int)instruction->metadata_mnemonic.length, instruction->metadata_mnemonic.pointer,
+                    emitted.status, emitted.byte_count, instruction->size, instruction->metadata_form_id);
+            fclose(diagnostic);
+        }
         BusterX86MetadataEncodeStatus status = emitted.status;
         if (status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
         {

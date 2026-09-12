@@ -4469,7 +4469,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     String8 resolved = {0};
     bool selected = codegen_inline_assembly_resolve_template(selector->arena, selector->program, selector->function, instruction, extra,
                                                               registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved, 0);
-    char8* instructions = selected ? arena_allocate(selector->arena, char8, resolved.length ? resolved.length : 1) : 0;
+    selected = selected && resolved.length != UINT64_MAX;
+    char8* instructions = selected ? arena_allocate(selector->arena, char8, resolved.length + 1) : 0;
     u64 instruction_length = 0;
     u64 line_start = 0;
     while (selected && line_start < resolved.length)
@@ -4750,6 +4751,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                                                      .block = UINT32_MAX, .kind = (u8)relocation.kind};
         }
     }
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("relocations"), extra.literal);
     if (selected)
     {
         u32 preserved_vector_count = ((preserved_vector_mask >> 6) & 1u) + ((preserved_vector_mask >> 7) & 1u);
@@ -4820,6 +4822,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                 }
             }
         }
+        if (!selected) machine_x64_inline_assembly_diagnostic(S8("outputs"), extra.literal);
         if (selected && simple_goto)
         {
             selected = assembly_target < instruction->target_count && instruction->targets[assembly_target].value < function->block_count;
