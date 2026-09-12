@@ -1817,11 +1817,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             scratch_end(temporary);
         }
     }
-    // The direct emitter already owns the baseline LDXP/STXP/STLXP semantics for
-    // sixteen-byte atomics. Keep the load/store-only fixture strict across
-    // every desktop AArch64 target and frontend, and pin the broader
-    // aggregate corpus at its one remaining compare-exchange fallback. A
-    // regression in either pair selector must not hide behind that later row.
+    // The direct emitter remains the baseline LDXP/STXP/STLXP oracle for
+    // sixteen-byte atomics. Keep loads, stores, every integer RMW, exchange,
+    // and compare-exchange strict across every desktop AArch64 target,
+    // allocator and frontend. The full aggregate and i128 corpora prevent a
+    // regression in any pair selector from hiding behind another wide row.
     String8 atomic_pair_targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(atomic_pair_targets); target += 1)
     {
@@ -1846,7 +1846,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
 
                 String8 census_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-aggregate-census"), S8(".o"));
                 String8 census_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
-                                            S8("-fverify-codegen"), S8("-o"), census_output, S8("tests/basic_c_atomic_aggregate.c")};
+                                            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), census_output,
+                                            S8("tests/basic_c_atomic_aggregate.c")};
                 CompilerDriverResult census = compiler_driver_execute_invocation(
                     temporary.arena,
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command)));
@@ -1854,16 +1855,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                                                            atomic_pair_targets[target], modes[mode], frontends[frontend], census.diagnostic);
                 BUSTER_TEST_RAW(arguments, census.error == COMPILER_DRIVER_ERROR_NONE && census.has_object, census_description);
                 BUSTER_TEST_RAW(arguments, census.codegen_statistics.function_count != 0 &&
-                                               census.codegen_statistics.fallback_function_count == 1 &&
-                                               census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1 &&
-                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_COMPARE_EXCHANGE] == 1 &&
-                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_LOAD] == 0 &&
-                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_STORE] == 0,
+                                               census.codegen_statistics.fallback_function_count == 0,
                                 census_description);
 
                 String8 int128_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-int128-census"), S8(".o"));
                 String8 int128_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
-                                            S8("-fverify-codegen"), S8("-o"), int128_output, S8("tests/basic_c_int128.c")};
+                                            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), int128_output,
+                                            S8("tests/basic_c_int128.c")};
                 CompilerDriverResult int128_census = compiler_driver_execute_invocation(
                     temporary.arena,
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(int128_command)));
@@ -1871,11 +1869,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                                                            atomic_pair_targets[target], modes[mode], frontends[frontend], int128_census.diagnostic);
                 BUSTER_TEST_RAW(arguments, int128_census.error == COMPILER_DRIVER_ERROR_NONE && int128_census.has_object, int128_description);
                 BUSTER_TEST_RAW(arguments, int128_census.codegen_statistics.function_count != 0 &&
-                                               int128_census.codegen_statistics.fallback_function_count == 1 &&
-                                               int128_census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1 &&
-                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_READ_MODIFY_WRITE] == 1 &&
-                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_LOAD] == 0 &&
-                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_STORE] == 0,
+                                               int128_census.codegen_statistics.fallback_function_count == 0,
                                 int128_description);
                 scratch_end(temporary);
             }

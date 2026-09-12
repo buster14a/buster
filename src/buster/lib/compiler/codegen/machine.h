@@ -612,9 +612,9 @@ typedef enum MachineOpcode
     // and stores are single ldar/stlr words over ordinary operands
     // (emitted at every memory order — stronger than relaxed asks for,
     // and what keeps the row count at one). Sixteen-byte aggregate/i128
-    // accesses keep their value image in a frame operand and expand to
-    // the baseline LDXP/STXP read-back or replacement loop. The remaining
-    // read-modify-write and compare-exchange loops are constrained bounded
+    // accesses keep their value image in frame operands and expand to the
+    // baseline LDXP/STXP read-back or replacement loops appended below.
+    // Narrow read-modify-write and compare-exchange use constrained bounded
     // sequences on the canonical X9-X13 register palette, declared through
     // fixed_register_mask exactly like VA_ARG.
     MACHINE_A64_ATOMIC_LOAD,  // def result, use address; payload = size
@@ -693,11 +693,14 @@ typedef enum MachineOpcode
     MACHINE_X64_VPERMT2B_K,
     MACHINE_X64_VCOMPRESSB_K,
     // Sixteen-byte AArch64 atomics append here so existing replay opcode
-    // identities remain stable. Both use address X10 plus a frame
-    // result/source; payload low byte = value size, bit 8 = acquire,
-    // bit 9 = release.
+    // identities remain stable. They use address X10 plus frame-backed
+    // value images; payload low byte = value size, bit 8 = acquire,
+    // bit 9 = release. RMW_PAIR additionally carries IrAtomicOperation
+    // in bits 23:16.
     MACHINE_A64_ATOMIC_LOAD_PAIR,
     MACHINE_A64_ATOMIC_STORE_PAIR,
+    MACHINE_A64_ATOMIC_RMW_PAIR,
+    MACHINE_A64_ATOMIC_CAS_PAIR,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1106,6 +1109,8 @@ typedef struct MachineFunction MachineFunction;
 #define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)
 #define MACHINE_A64_ATOMIC_PAIR_ACQUIRE 0x100u
 #define MACHINE_A64_ATOMIC_PAIR_RELEASE 0x200u
+#define MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT 16u
+#define MACHINE_A64_ATOMIC_PAIR_OPERATION_MASK 0xff0000u
 typedef struct MachineVaArgPart MachineVaArgPart;
 struct MachineVaArgPart
 {

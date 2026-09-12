@@ -157,12 +157,12 @@ skips; implementing a gap must replace its refusal expectation with strict
 success. Every target/allocator/frontend cohort emits a `MIR_COVERAGE` row
 with actual strict successes, validated expected rejections and failures.
 Object compilation is not target execution. Separate AArch64 vector,
-integer-pair and sixteen-byte atomic load/store tests, unsupported signature
-controls, Windows/UEFI large-frame tests, and native Windows ARM64
-unwind-boundary execution remain registered. The atomic lane is strict across
-all AArch64 desktop targets, allocators and frontend forms; its broader
-aggregate census retains exactly one compare-exchange fallback, while the
-i128 census advances to its one remaining read-modify-write fallback.
+integer-pair and sixteen-byte atomic tests, unsupported signature controls,
+Windows/UEFI large-frame tests, and native Windows ARM64 unwind-boundary
+execution remain registered. The atomic lane, full aggregate census and i128
+census are strict across all AArch64 desktop targets, allocators and frontend
+forms, covering pair loads/stores, exchange, arithmetic/bitwise RMW and
+compare-exchange with zero fallback.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 

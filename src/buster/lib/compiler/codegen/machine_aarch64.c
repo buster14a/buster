@@ -4222,6 +4222,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* sel
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
 
     bool selected = false;
     IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -4234,7 +4235,30 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64S
                                          (instruction->atomic_operation == IR_ATOMIC_EXCHANGE &&
                                           (value_type->kind == IR_TYPE_BOOLEAN || value_type->kind == IR_TYPE_POINTER)));
     u32 operand_register;
-    if (result_register != UINT32_MAX && kind_supported && (size == 1 || size == 2 || size == 4 || size == 8) &&
+    if (result_register == UINT32_MAX && value_type && value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128 && size == 16 &&
+        instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT && instruction->operand_count >= 2 &&
+        instruction->result.value < function->value_count && instruction->operands[1].value < function->value_count)
+    {
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        u32 operand_slot = selector->value_stack_slots[instruction->operands[1].value];
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = result_slot != UINT32_MAX && operand_slot != UINT32_MAX &&
+                   machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            u32 payload = (u32)instruction->atomic_operation << MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT |
+                          (machine_a64_memory_order_releases(instruction->memory_order) ? MACHINE_A64_ATOMIC_PAIR_RELEASE : 0) |
+                          (machine_a64_memory_order_acquires(instruction->memory_order) ? MACHINE_A64_ATOMIC_PAIR_ACQUIRE : 0) | 16u;
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, operand_slot)},
+                                                 .payload = payload,
+                                                 .opcode = MACHINE_A64_ATOMIC_RMW_PAIR,
+                                             });
+        }
+    }
+    else if (result_register != UINT32_MAX && kind_supported && (size == 1 || size == 2 || size == 4 || size == 8) &&
         instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT && instruction->operand_count >= 2 &&
         machine_a64_operand_register(selector, instruction->operands[1], &operand_register))
     {
@@ -4261,13 +4285,42 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64S
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_compare_exchange(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
 
     bool selected = false;
     IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
     u64 size = value_type && value_type->layout.resolved ? value_type->layout.size : 0;
     u32 expected_register;
     u32 desired_register;
-    if (result_register != UINT32_MAX && value_type && (value_type->kind == IR_TYPE_INTEGER || value_type->kind == IR_TYPE_POINTER) &&
+    if (result_register == UINT32_MAX && value_type && value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128 && size == 16 &&
+        instruction->operand_count >= 3 && instruction->result.value < function->value_count &&
+        instruction->operands[1].value < function->value_count && instruction->operands[2].value < function->value_count)
+    {
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        u32 expected_slot = selector->value_stack_slots[instruction->operands[1].value];
+        u32 desired_slot = selector->value_stack_slots[instruction->operands[2].value];
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = result_slot != UINT32_MAX && expected_slot != UINT32_MAX && desired_slot != UINT32_MAX &&
+                   machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            bool acquire = machine_a64_memory_order_acquires(instruction->memory_order) ||
+                           instruction->failure_memory_order == IR_MEMORY_ORDER_CONSUME ||
+                           instruction->failure_memory_order == IR_MEMORY_ORDER_ACQUIRE ||
+                           instruction->failure_memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+            u32 payload = (machine_a64_memory_order_releases(instruction->memory_order) ? MACHINE_A64_ATOMIC_PAIR_RELEASE : 0) |
+                          (acquire ? MACHINE_A64_ATOMIC_PAIR_ACQUIRE : 0) | 16u;
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, expected_slot),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, desired_slot)},
+                                                 .payload = payload,
+                                                 .opcode = MACHINE_A64_ATOMIC_CAS_PAIR,
+                                             });
+        }
+    }
+    else if (result_register != UINT32_MAX && value_type && (value_type->kind == IR_TYPE_INTEGER || value_type->kind == IR_TYPE_POINTER) &&
         (size == 1 || size == 2 || size == 4 || size == 8) && instruction->operand_count >= 3 &&
         machine_a64_operand_register(selector, instruction->operands[1], &expected_register) &&
         machine_a64_operand_register(selector, instruction->operands[2], &desired_register))
@@ -5335,7 +5388,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.value_virtual_registers[instruction->result.value] = register_index;
                 }
                 else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
-                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_CALL ||
                           instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                           instruction->opcode == IR_OPCODE_VA_ARG || instruction->opcode == IR_OPCODE_CAST ||
                           instruction->opcode == IR_OPCODE_CONSTANT_INTEGER ||
@@ -6102,6 +6156,23 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit(MachineA64Encoder* encoder, u32 word)
     }
     memcpy(encoder->bytes + encoder->count, &word, sizeof(word));
     encoder->count += 4;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_emit_exclusive_retry(MachineA64Encoder* encoder, u32 retry_offset)
+{
+    bool emitted = false;
+    s64 displacement = encoder ? (s64)retry_offset - (s64)encoder->count : 0;
+    if (encoder && !(displacement % 4) && displacement / 4 >= -INT64_C(0x40000) && displacement / 4 <= INT64_C(0x3ffff))
+    {
+        machine_a64_emit(encoder,
+                         UINT32_C(0x35000000) | (((u32)(displacement / 4) & UINT32_C(0x7ffff)) << 5) | MACHINE_A64_X13);
+        emitted = true;
+    }
+    else if (encoder)
+    {
+        encoder->error = true;
+    }
+    return emitted;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_mc(MachineA64Encoder* encoder, A64MCInst instruction)
@@ -7365,6 +7436,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // AND, and the exclusive pair replacement loop.
             capacity64 += 32 + 2u * (large_save_offset ? 16u : 4u);
             break;
+        case MACHINE_A64_ATOMIC_RMW_PAIR:
+            // Operand/result pair transfers, two arithmetic words, and the
+            // exclusive replacement loop.
+            capacity64 += 20 + 4u * (large_save_offset ? 16u : 4u);
+            break;
+        case MACHINE_A64_ATOMIC_CAS_PAIR:
+            // Expected/desired/result pair transfers, pair comparison,
+            // conditional replacement/read-back, and exclusive retry.
+            capacity64 += 28 + 6u * (large_save_offset ? 16u : 4u);
+            break;
         case MACHINE_A64_ATOMIC_RMW:
             // ld(a)xr, operation, st(l)xr, cbnz.
             capacity64 += 16;
@@ -7906,6 +7987,74 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? 0xc8208000u : 0xc8200000u) |
                                                (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) | MACHINE_A64_X11);
                 machine_a64_emit(&encoder, 0x35000000u | (0x7fffeu << 5) | MACHINE_A64_X13);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_RMW_PAIR:
+            {
+                u32 result_slot = machine_ref_payload(instruction->operands[1]);
+                u32 operand_slot = machine_ref_payload(instruction->operands[2]);
+                u32 result_offset = placement->stack_slot_offsets[result_slot];
+                u32 operand_offset = placement->stack_slot_offsets[operand_slot];
+                u32 atomic_address = operand_registers[0];
+                u32 operation =
+                    (instruction->payload & MACHINE_A64_ATOMIC_PAIR_OPERATION_MASK) >> MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT;
+                u32 retry_offset = encoder.count;
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_ACQUIRE) ? 0xc87f8000u : 0xc87f0000u) |
+                                               (MACHINE_A64_X14 << 10) | (atomic_address << 5) | MACHINE_A64_X9);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X11, machine_a64_frame_offset(frame_area, operand_offset), 8, false);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X12, machine_a64_frame_offset(frame_area, operand_offset - 8), 8, false);
+                if (operation != IR_ATOMIC_EXCHANGE)
+                {
+                    u32 low_word = operation == IR_ATOMIC_ADD           ? UINT32_C(0xab0b012b)
+                                   : operation == IR_ATOMIC_SUBTRACT    ? UINT32_C(0xeb0b012b)
+                                   : operation == IR_ATOMIC_BITWISE_AND ? UINT32_C(0x8a0b012b)
+                                   : operation == IR_ATOMIC_BITWISE_OR  ? UINT32_C(0xaa0b012b)
+                                                                         : UINT32_C(0xca0b012b);
+                    u32 high_word = operation == IR_ATOMIC_ADD           ? UINT32_C(0x9a0c01cc)
+                                    : operation == IR_ATOMIC_SUBTRACT    ? UINT32_C(0xda0c01cc)
+                                    : operation == IR_ATOMIC_BITWISE_AND ? UINT32_C(0x8a0c01cc)
+                                    : operation == IR_ATOMIC_BITWISE_OR  ? UINT32_C(0xaa0c01cc)
+                                                                          : UINT32_C(0xca0c01cc);
+                    machine_a64_emit(&encoder, low_word);
+                    machine_a64_emit(&encoder, high_word);
+                }
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? 0xc8208000u : 0xc8200000u) |
+                                               (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) |
+                                               MACHINE_A64_X11);
+                (void)machine_a64_emit_exclusive_retry(&encoder, retry_offset);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, machine_a64_frame_offset(frame_area, result_offset), 8, true);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X14, machine_a64_frame_offset(frame_area, result_offset - 8), 8, true);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_CAS_PAIR:
+            {
+                u32 result_slot = machine_ref_payload(instruction->operands[1]);
+                u32 expected_slot = machine_ref_payload(instruction->operands[2]);
+                u32 desired_slot = machine_ref_payload(instruction->operands[3]);
+                u32 result_offset = placement->stack_slot_offsets[result_slot];
+                u32 expected_offset = placement->stack_slot_offsets[expected_slot];
+                u32 desired_offset = placement->stack_slot_offsets[desired_slot];
+                u32 atomic_address = operand_registers[0];
+                u32 retry_offset = encoder.count;
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_ACQUIRE) ? 0xc87f8000u : 0xc87f0000u) |
+                                               (MACHINE_A64_X14 << 10) | (atomic_address << 5) | MACHINE_A64_X9);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X11, machine_a64_frame_offset(frame_area, expected_offset), 8, false);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X12, machine_a64_frame_offset(frame_area, expected_offset - 8), 8, false);
+                machine_a64_emit(&encoder, UINT32_C(0xeb0b013f));
+                machine_a64_emit(&encoder, UINT32_C(0xfa4c01c0));
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X11, machine_a64_frame_offset(frame_area, desired_offset), 8, false);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X12, machine_a64_frame_offset(frame_area, desired_offset - 8), 8, false);
+                // LDXP alone may tear on baseline AArch64. On a mismatch,
+                // validate the observed pair by writing it back through STXP;
+                // only a successful exclusive store can publish either result.
+                machine_a64_emit(&encoder, UINT32_C(0x9a89016b)); // csel x11, x11, x9, eq
+                machine_a64_emit(&encoder, UINT32_C(0x9a8e018c)); // csel x12, x12, x14, eq
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? 0xc8208000u : 0xc8200000u) |
+                                               (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) |
+                                               MACHINE_A64_X11);
+                (void)machine_a64_emit_exclusive_retry(&encoder, retry_offset);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, machine_a64_frame_offset(frame_area, result_offset), 8, true);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X14, machine_a64_frame_offset(frame_area, result_offset - 8), 8, true);
             }
             break;
             case MACHINE_A64_ATOMIC_LOAD:

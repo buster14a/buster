@@ -3927,7 +3927,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 267);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 269);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_VLOAD_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_VSTORE_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -4056,6 +4056,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_ATOMIC_STORE] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_LOAD_PAIR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_ATOMIC_STORE_PAIR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_ATOMIC_RMW_PAIR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_ATOMIC_CAS_PAIR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_ATOMIC_RMW] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_CAS] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_FENCE] = MACHINE_SCHEDULE_UNIT_BARRIER,
@@ -4303,7 +4305,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 94);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 96);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -4636,13 +4638,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     {
         a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
-    for (u16 opcode = MACHINE_A64_ATOMIC_LOAD_PAIR; opcode <= MACHINE_A64_ATOMIC_STORE_PAIR; opcode += 1)
+    for (u16 opcode = MACHINE_A64_ATOMIC_LOAD_PAIR; opcode <= MACHINE_A64_ATOMIC_CAS_PAIR; opcode += 1)
     {
         a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 56);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 3);
-    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 21);
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 23);
 
     MachineFunction function = machine_test_build_function(arguments->arena);
     BUSTER_TEST(arguments, function.instruction_count == 4);
@@ -5476,7 +5478,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    struct MachineAtomicNine value = { low, (unsigned char)high }; __c11_atomic_store(&cell, value, __ATOMIC_SEQ_CST);\n"
                                   "    struct MachineAtomicNine loaded = __c11_atomic_load(&cell, __ATOMIC_SEQ_CST); unsigned char* bytes = (unsigned char*)&cell;\n"
                                   "    unsigned long padding = 0; for (int index = 9; index < 16; index += 1) { padding |= bytes[index]; }\n"
-                                  "    return loaded.low ^ loaded.high ^ (padding << 8); }\n");
+                                  "    return loaded.low ^ loaded.high ^ (padding << 8); }\n"
+                                  "static _Atomic unsigned __int128 machine_atomic_wide;\n"
+                                  "unsigned __int128 atomic_wide_add(unsigned __int128 operand) {\n"
+                                  "    return __c11_atomic_fetch_add(&machine_atomic_wide, operand, __ATOMIC_ACQ_REL); }\n"
+                                  "int atomic_wide_cas(unsigned __int128 expected, unsigned __int128 desired) {\n"
+                                  "    return __c11_atomic_compare_exchange_strong(&machine_atomic_wide, &expected, desired,\n"
+                                  "                                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 = string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_base,
@@ -8534,6 +8542,104 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
                 BUSTER_TEST(arguments, saw_pair_load && saw_pair_store);
             }
+        }
+        // Wide RMW and compare-exchange keep every value image in frame
+        // slots and reserve only X10 as their explicit address. Pin both the
+        // selector payloads and the baseline pair-loop words independently
+        // from the broader strict driver corpus.
+        IrFunction* a64_atomic_wide_add = machine_test_ir_function_find(machine_a64_module, S8("atomic_wide_add"));
+        BUSTER_TEST(arguments, a64_atomic_wide_add != 0);
+        if (a64_atomic_wide_add)
+        {
+            MachineSelectResult atomic_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_atomic_wide_add, machine_a64_target);
+            u32 pair_rows = 0;
+            bool payload_matches = true;
+            for (u32 row_index = 0; atomic_selected.supported && row_index < atomic_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = atomic_selected.function.instructions + row_index;
+                if (row->opcode == MACHINE_A64_ATOMIC_RMW_PAIR)
+                {
+                    pair_rows += 1;
+                    payload_matches &= row->payload == (16u | MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE |
+                                                         ((u32)IR_ATOMIC_ADD << MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT));
+                }
+            }
+            BUSTER_TEST_RAW(arguments, atomic_selected.supported,
+                            string_format(arguments->arena, S8("a64 wide RMW select failed at opcode {u32}"),
+                                          (u32)atomic_selected.failed_opcode));
+            BUSTER_TEST(arguments, pair_rows == 1 && payload_matches);
+            BUSTER_TEST(arguments, machine_verify_function(&atomic_selected.function).error == MACHINE_VERIFY_NONE);
+            MachineStackPlacement atomic_placement = machine_stack_placement_build(arguments->arena, &atomic_selected.function);
+            MachineEncodeResult atomic_encoded = atomic_placement.valid
+                                                     ? machine_encode_aarch64(arguments->arena, &atomic_selected.function, &atomic_placement)
+                                                     : (MachineEncodeResult){0};
+            bool saw_load = false;
+            bool saw_add_low = false;
+            bool saw_add_high = false;
+            bool saw_store = false;
+            bool saw_retry = false;
+            for (u32 byte_offset = 0; atomic_encoded.valid && byte_offset + sizeof(u32) <= atomic_encoded.byte_count; byte_offset += sizeof(u32))
+            {
+                u32 word = 0;
+                memcpy(&word, atomic_encoded.bytes + byte_offset, sizeof(word));
+                saw_load |= word == UINT32_C(0xc87fb949);
+                saw_add_low |= word == UINT32_C(0xab0b012b);
+                saw_add_high |= word == UINT32_C(0x9a0c01cc);
+                saw_store |= word == UINT32_C(0xc82db14b);
+                saw_retry |= word == UINT32_C(0x35ffff4d);
+            }
+            BUSTER_TEST(arguments, atomic_placement.valid && atomic_encoded.valid && saw_load && saw_add_low && saw_add_high && saw_store && saw_retry);
+        }
+        IrFunction* a64_atomic_wide_cas = machine_test_ir_function_find(machine_a64_module, S8("atomic_wide_cas"));
+        BUSTER_TEST(arguments, a64_atomic_wide_cas != 0);
+        if (a64_atomic_wide_cas)
+        {
+            MachineSelectResult atomic_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_atomic_wide_cas, machine_a64_target);
+            u32 pair_rows = 0;
+            bool payload_matches = true;
+            for (u32 row_index = 0; atomic_selected.supported && row_index < atomic_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = atomic_selected.function.instructions + row_index;
+                if (row->opcode == MACHINE_A64_ATOMIC_CAS_PAIR)
+                {
+                    pair_rows += 1;
+                    payload_matches &= row->payload == (16u | MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE);
+                }
+            }
+            BUSTER_TEST_RAW(arguments, atomic_selected.supported,
+                            string_format(arguments->arena, S8("a64 wide CAS select failed at opcode {u32}"),
+                                          (u32)atomic_selected.failed_opcode));
+            BUSTER_TEST(arguments, pair_rows == 1 && payload_matches);
+            BUSTER_TEST(arguments, machine_verify_function(&atomic_selected.function).error == MACHINE_VERIFY_NONE);
+            MachineStackPlacement atomic_placement = machine_stack_placement_build(arguments->arena, &atomic_selected.function);
+            MachineEncodeResult atomic_encoded = atomic_placement.valid
+                                                     ? machine_encode_aarch64(arguments->arena, &atomic_selected.function, &atomic_placement)
+                                                     : (MachineEncodeResult){0};
+            bool saw_load = false;
+            bool saw_compare_low = false;
+            bool saw_compare_high = false;
+            bool saw_select_low = false;
+            bool saw_select_high = false;
+            bool saw_store = false;
+            bool saw_retry = false;
+            bool saw_clear = false;
+            for (u32 byte_offset = 0; atomic_encoded.valid && byte_offset + sizeof(u32) <= atomic_encoded.byte_count; byte_offset += sizeof(u32))
+            {
+                u32 word = 0;
+                memcpy(&word, atomic_encoded.bytes + byte_offset, sizeof(word));
+                saw_load |= word == UINT32_C(0xc87fb949);
+                saw_compare_low |= word == UINT32_C(0xeb0b013f);
+                saw_compare_high |= word == UINT32_C(0xfa4c01c0);
+                saw_select_low |= word == UINT32_C(0x9a89016b);
+                saw_select_high |= word == UINT32_C(0x9a8e018c);
+                saw_store |= word == UINT32_C(0xc82db14b);
+                saw_retry |= word == UINT32_C(0x35fffecd);
+                saw_clear |= word == UINT32_C(0xd5033f5f);
+            }
+            BUSTER_TEST(arguments, atomic_placement.valid && atomic_encoded.valid && saw_load && saw_compare_low && saw_compare_high &&
+                                       saw_select_low && saw_select_high && saw_store && saw_retry && !saw_clear);
         }
         // Every function in this module now uses the AArch64 machine path.
         CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
