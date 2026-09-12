@@ -160,7 +160,7 @@ jobs:
           mkdir -p evidence/strict-binary
           cp build/Release/ide evidence/strict-binary/ide
           chmod 555 evidence/strict-binary/ide
-          git rev-parse HEAD HEAD^{tree} > evidence/strict-binary/source.txt
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/strict-binary/source.txt
           sha256sum evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
           cp build/CMakeCache.txt build/compile_commands.json evidence/strict-binary/
       - name: Validate differential harness
