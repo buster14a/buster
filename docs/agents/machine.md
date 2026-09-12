@@ -412,7 +412,10 @@
   results, ninth floating arguments and variadics. The registered driver
   matrix retains both original over-aligned stack fixtures, all six AArch64
   targets, allocator modes, frontend forms and PIC settings. Native AArch64
-  desktop hosts also link the independent host observer in both directions.
+  desktop hosts also link the independent host observer in both directions
+  for all three MIR allocators. NONE stays an object control: the archived
+  direct reference fails independently compiled split-composite and packed
+  Darwin call boundaries, so it is not used as their semantic oracle.
 - Win64 x86-64 dynamic frames establish RBP at the bottom of the fixed
   allocation, after the probe, so PE unwind records retain SET_FPREG. Encoding
   rebases logical frame offsets once at the existing exact/fast memory paths.

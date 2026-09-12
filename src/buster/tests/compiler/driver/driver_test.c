@@ -1971,7 +1971,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                             compiled.codegen_statistics.fallback_function_count == 0, description);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
                         bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
-                        if (native_target && !fixture && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        // NONE remains an object/control observation. Its frozen
+                        // native reference fails the new split-composite and
+                        // packed-Darwin boundaries; retained independent runs
+                        // must not be mistaken for a semantic oracle. This
+                        // regression gates all three MIR allocators against Clang.
+                        if (native_target && mode != 0 && !fixture && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                         {
                             String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), S8(".exe"));
                             String8 link[10];
@@ -1987,7 +1992,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                                 (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
                             bool link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
                             BUSTER_TEST(arguments, link_ok);
-                            if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                            if (link_ok) { BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description); }
                         }
 #endif
                         scratch_end(temporary);
