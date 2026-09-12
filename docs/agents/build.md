@@ -88,6 +88,7 @@ shell, CMake, and utility subprocesses.
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`,
+`compiler_discovery_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
 `native_retirement_census`,
@@ -102,6 +103,24 @@ groups. It supports an independently pinned direct compiler, fixture/target
 filters and deterministic shards without removing unexecuted rows from its
 manifest. See the [census contract](../native-retirement-census.md) for retained
 evidence, strict failure accounting and its explicit object/per-function limits.
+
+`generate --cc gcc` and the GCC combination row share native discovery policy:
+macOS selects `gcc-15` from PATH (Homebrew GCC 15); other platforms select `gcc`.
+Set `BUSTER_GCC` to a name or executable path to choose another installed GCC.
+The driver probes the C preprocessor identity, rejecting Clang even though it
+defines `__GNUC__`, and prints the resolved executable, identity, target triple
+and complete version before any tree is removed or configured. A missing or
+unusable compiler fails; there is no fallback to Apple's unversioned shim.
+For this named GCC row, use `BUSTER_GCC` instead of a conflicting
+`-DCMAKE_C_COMPILER` passthrough override. Other `--cc` selections keep their
+existing behavior.
+
+`compiler_discovery_self_test` runs before both combination matrices. It checks
+platform/override selection and identity parsing, exercises the real Clang
+preprocessor, and launches negative `generate --cc gcc` children with Clang,
+a missing executable and a conflicting CMake override. Each must report the
+specific failure and preserve an existing configuration sentinel. macOS also reports the actual unversioned
+`gcc` identity, independently of the selected versioned GCC row.
 
 `musl_directory_self_test` checks complete, unique directory inventories through
 two capacity growths, opposite creation orders, manifest sorting and architecture

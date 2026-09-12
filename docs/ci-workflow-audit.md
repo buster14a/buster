@@ -140,8 +140,9 @@ measurement limits explicitly.
 
 ## Remaining scope
 
-A macOS `gcc` command still resolves to Apple's Clang shim; selecting real
-versioned Homebrew GCC would expand coverage and needs its own validated fix.
+The macOS unversioned `gcc` shim gap is tracked in #242 and addressed by the
+native driver's versioned GCC selection and identity checks; see the
+[compiler discovery policy and CI evidence](ci-github-actions.md#bootstrapping-and-prerequisites).
 Windows execution-mode coverage and cross-host PE emulation remain as defined
 by build.c/current CI. This change does not suppress those gaps, add expected
 failures, alter sanitizer flags, or claim newly executed coverage.
