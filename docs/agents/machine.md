@@ -183,6 +183,15 @@
   data-clean and instruction-invalidate walks cover aligned four-byte granules
   through the exclusive end, with DSB/ISB barriers. The direct AArch64 oracle
   uses the same alignment rule; an unaligned start must not skip a final line.
+- Sixteen-byte AArch64 atomic loads and stores select constrained pair rows.
+  A load uses LDXP/LDAXP, writes the observed halves back with STXP (STLXP for
+  sequential consistency), and retries until the read is single-copy atomic.
+  A store stages both halves, clears any promoted aggregate padding in the high
+  half, arms the monitor with LDXP or LDAXP, and retries STXP/STLXP until the
+  replacement lands whole. The rows
+  preserve the direct emitter's memory-order strengths on every desktop ABI.
+  Sixteen-byte exchange, arithmetic RMW and compare-exchange still fall back
+  to that direct oracle.
 - Windows/UEFI x86-64 variadic definitions home RCX/RDX/R8/R9 before any
   argument capture can reuse those registers. The caller-owned homes adjoin
   the overflow arguments; both homing and `LEA_INCOMING` include placement's

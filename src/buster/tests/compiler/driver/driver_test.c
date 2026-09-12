@@ -1788,7 +1788,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     // Keep complete AArch64 vector and integer-pair fixtures strict so a
     // later operation cannot silently restore per-function fallback.
     String8 aarch64_corpus[] = {S8("tests/basic_c_vector.c"), S8("tests/basic_c_vector_lane_edges.c"),
-                                 S8("tests/basic_c_x86_64_i128_binary.c"), S8("tests/basic_c_i128_shift_edges.c")};
+                                 S8("tests/basic_c_x86_64_i128_binary.c"), S8("tests/basic_c_i128_shift_edges.c"),
+                                 S8("tests/basic_c_aarch64_atomic_pair.c")};
     for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
         for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(aarch64_corpus); fixture += 1)
@@ -1814,6 +1815,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             }
 #endif
             scratch_end(temporary);
+        }
+    }
+    // The direct emitter already owns the baseline LDXP/STXP/STLXP semantics for
+    // sixteen-byte atomics. Keep the load/store-only fixture strict across
+    // every desktop AArch64 target and frontend, and pin the broader
+    // aggregate corpus at its one remaining compare-exchange fallback. A
+    // regression in either pair selector must not hide behind that later row.
+    String8 atomic_pair_targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(atomic_pair_targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 strict_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-pair"), S8(".o"));
+                String8 strict_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
+                                            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), strict_output,
+                                            S8("tests/basic_c_aarch64_atomic_pair.c")};
+                CompilerDriverResult strict = compiler_driver_execute_invocation(
+                    temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(strict_command)));
+                String8 description = string_format(arguments->arena, S8("a64 atomic pair {S8} {S8} {S8}: {S8}"),
+                                                    atomic_pair_targets[target], modes[mode], frontends[frontend], strict.diagnostic);
+                BUSTER_TEST_RAW(arguments, strict.error == COMPILER_DRIVER_ERROR_NONE && strict.has_object, description);
+                BUSTER_TEST_RAW(arguments, strict.codegen_statistics.function_count != 0 &&
+                                               strict.codegen_statistics.fallback_function_count == 0,
+                                description);
+
+                String8 census_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-aggregate-census"), S8(".o"));
+                String8 census_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
+                                            S8("-fverify-codegen"), S8("-o"), census_output, S8("tests/basic_c_atomic_aggregate.c")};
+                CompilerDriverResult census = compiler_driver_execute_invocation(
+                    temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command)));
+                String8 census_description = string_format(arguments->arena, S8("a64 atomic aggregate census {S8} {S8} {S8}: {S8}"),
+                                                           atomic_pair_targets[target], modes[mode], frontends[frontend], census.diagnostic);
+                BUSTER_TEST_RAW(arguments, census.error == COMPILER_DRIVER_ERROR_NONE && census.has_object, census_description);
+                BUSTER_TEST_RAW(arguments, census.codegen_statistics.function_count != 0 &&
+                                               census.codegen_statistics.fallback_function_count == 1 &&
+                                               census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1 &&
+                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_COMPARE_EXCHANGE] == 1 &&
+                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_LOAD] == 0 &&
+                                               census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_STORE] == 0,
+                                census_description);
+
+                String8 int128_output = buster_test_temporary_path(temporary.arena, S8("buster-a64-atomic-int128-census"), S8(".o"));
+                String8 int128_command[] = {S8("-c"), S8("-g0"), S8("-target"), atomic_pair_targets[target], modes[mode], frontends[frontend],
+                                            S8("-fverify-codegen"), S8("-o"), int128_output, S8("tests/basic_c_int128.c")};
+                CompilerDriverResult int128_census = compiler_driver_execute_invocation(
+                    temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(int128_command)));
+                String8 int128_description = string_format(arguments->arena, S8("a64 atomic int128 census {S8} {S8} {S8}: {S8}"),
+                                                           atomic_pair_targets[target], modes[mode], frontends[frontend], int128_census.diagnostic);
+                BUSTER_TEST_RAW(arguments, int128_census.error == COMPILER_DRIVER_ERROR_NONE && int128_census.has_object, int128_description);
+                BUSTER_TEST_RAW(arguments, int128_census.codegen_statistics.function_count != 0 &&
+                                               int128_census.codegen_statistics.fallback_function_count == 1 &&
+                                               int128_census.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1 &&
+                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_READ_MODIFY_WRITE] == 1 &&
+                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_LOAD] == 0 &&
+                                               int128_census.codegen_statistics.fallback_opcode_counts[IR_OPCODE_ATOMIC_STORE] == 0,
+                                int128_description);
+                scratch_end(temporary);
+            }
         }
     }
     // Count primitives are shared by every desktop AArch64 target. Keep both

@@ -17795,6 +17795,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 // loop — the load alone is not single-copy atomic,
                                 // so the pair writes itself back and retries until
                                 // the store-exclusive proves the read was whole.
+                                // Sequential consistency gives that successful
+                                // readback the release half through STLXP.
                                 // Both halves land in the slot, so a narrower
                                 // value's promoted padding reads back exactly what
                                 // the store side wrote.
@@ -17808,7 +17810,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 u32 pair_retry_offset = (u32)buffer.count;
                                 a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, instruction->memory_order != IR_MEMORY_ORDER_RELAXED);
-                                a64_emit_atomic_exclusive_store_pair(&buffer, 13, 9, 14, 10, false);
+                                a64_emit_atomic_exclusive_store_pair(&buffer, 13, 9, 14, 10,
+                                                                     instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL);
                                 a64_emit_exclusive_retry(&buffer, pair_retry_offset);
                                 c_a64_store(&emitter, 9, result_offset);
                                 c_a64_store_high(&emitter, 14, result_offset);

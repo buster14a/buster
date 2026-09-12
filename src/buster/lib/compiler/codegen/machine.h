@@ -608,12 +608,14 @@ typedef enum MachineOpcode
     // allocatable file; ordering between the row and its chunk loads and
     // store comes from the scheduler's float-state chain.
     MACHINE_A64_VARITH, // payload = (lane_log2 << 8) | operation
-    // AArch64 atomics, the canonical emitter's own shapes. Loads and
-    // stores are single ldar/stlr words over ordinary operands (emitted
-    // at every memory order — stronger than relaxed asks for, and what
-    // keeps the row count at one); the read-modify-write and
-    // compare-exchange loops are constrained bounded sequences on the
-    // canonical X9-X13 register palette, declared through
+    // AArch64 atomics, the canonical emitter's own shapes. Narrow loads
+    // and stores are single ldar/stlr words over ordinary operands
+    // (emitted at every memory order — stronger than relaxed asks for,
+    // and what keeps the row count at one). Sixteen-byte aggregate/i128
+    // accesses keep their value image in a frame operand and expand to
+    // the baseline LDXP/STXP read-back or replacement loop. The remaining
+    // read-modify-write and compare-exchange loops are constrained bounded
+    // sequences on the canonical X9-X13 register palette, declared through
     // fixed_register_mask exactly like VA_ARG.
     MACHINE_A64_ATOMIC_LOAD,  // def result, use address; payload = size
     MACHINE_A64_ATOMIC_STORE, // use address, use value; payload = size
@@ -690,6 +692,12 @@ typedef enum MachineOpcode
     MACHINE_X64_VCOMPRESS_STORE_PTR_K,
     MACHINE_X64_VPERMT2B_K,
     MACHINE_X64_VCOMPRESSB_K,
+    // Sixteen-byte AArch64 atomics append here so existing replay opcode
+    // identities remain stable. Both use address X10 plus a frame
+    // result/source; payload low byte = value size, bit 8 = acquire,
+    // bit 9 = release.
+    MACHINE_A64_ATOMIC_LOAD_PAIR,
+    MACHINE_A64_ATOMIC_STORE_PAIR,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1096,6 +1104,8 @@ typedef struct MachineFunction MachineFunction;
 #define MACHINE_A64_VA_GP_SAVE_BYTES 64u
 #define MACHINE_A64_VA_FP_SAVE_BYTES 128u
 #define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)
+#define MACHINE_A64_ATOMIC_PAIR_ACQUIRE 0x100u
+#define MACHINE_A64_ATOMIC_PAIR_RELEASE 0x200u
 typedef struct MachineVaArgPart MachineVaArgPart;
 struct MachineVaArgPart
 {

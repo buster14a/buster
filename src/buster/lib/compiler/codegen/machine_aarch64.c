@@ -4046,9 +4046,11 @@ BUSTER_GLOBAL_LOCAL void machine_a64_select_keep_low_bytes(MachineA64Selector* s
 // ldar-family word into the result. Every memory order takes the acquire
 // form — stronger than relaxed asks for, and what keeps the row count at
 // one. An aggregate result is slot-backed instead: the access width is the
-// place's promoted size (#731), not the loaded value's, ldar zero-extends
-// every sub-eight width, and the full-slot store leaves the value's
-// padding zero exactly like the canonical path.
+// place's promoted size (#731), not the loaded value's. Up to eight bytes,
+// ldar zero-extends and the full-slot store leaves padding zero. At sixteen
+// bytes, the pair row reads, writes back, and retries through LDXP/STXP so
+// the observed image is single-copy atomic on baseline AArch64. Sequential
+// loads use STLXP for the readback operation's release half.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_load(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -4073,13 +4075,35 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_load(MachineA64Selector* sele
         }
     }
     else if (result_register == UINT32_MAX && instruction->operand_count >= 1 && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-             instruction->result.value < function->value_count && instruction->operands[0].value < function->value_count &&
-             loaded_type && (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION))
+             instruction->result.value < function->value_count && instruction->operands[0].value < function->value_count && loaded_type)
     {
         u32 result_slot = selector->value_stack_slots[instruction->result.value];
         IrType* place_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
         u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
-        if (result_slot != UINT32_MAX && (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
+        bool aggregate_kind = loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION;
+        bool pair_kind = aggregate_kind || (loaded_type->kind == IR_TYPE_INTEGER && loaded_type->bit_width == 128);
+        if (result_slot != UINT32_MAX && atomic_width == 16 && size > 8 && size <= 16 && pair_kind)
+        {
+            u32 address_register = machine_a64_synthesize_register(selector);
+            selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+            if (selected)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot)},
+                                                     .payload = (u32)size |
+                                                                (instruction->memory_order != IR_MEMORY_ORDER_RELAXED
+                                                                     ? MACHINE_A64_ATOMIC_PAIR_ACQUIRE
+                                                                     : 0) |
+                                                                (instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL
+                                                                     ? MACHINE_A64_ATOMIC_PAIR_RELEASE
+                                                                     : 0),
+                                                     .opcode = MACHINE_A64_ATOMIC_LOAD_PAIR,
+                                                 });
+            }
+        }
+        else if (result_slot != UINT32_MAX && aggregate_kind &&
+                 (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
         {
             u32 address_register = machine_a64_synthesize_register(selector);
             selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
@@ -4105,9 +4129,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_load(MachineA64Selector* sele
 
 // Scalar atomic store mirrors the load: one stlr-family word at the
 // stored scalar's width. An aggregate value is slot-backed instead: the
-// integer image loads from the value slot, keeps only the value's real
-// bytes (the slot's tail may be residue while the promoted padding must
-// store as zero), and one stlr writes the place's promoted width (#731).
+// integer image keeps only the value's real bytes (the slot's tail may be
+// residue while promoted padding must store as zero). Up to eight bytes one
+// stlr writes the promoted width; a sixteen-byte image takes the exclusive
+// pair replacement loop used by the canonical emitter.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* selector, IrInstruction* instruction)
 {
     IrProgram* program = selector->program;
@@ -4143,7 +4168,29 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* sel
         u64 stored_size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
         u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
         bool aggregate_kind = stored_type && (stored_type->kind == IR_TYPE_STRUCT || stored_type->kind == IR_TYPE_UNION);
-        if (aggregate_kind && stored_size && stored_size <= 8 && (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
+        bool pair_kind = stored_type && (aggregate_kind || (stored_type->kind == IR_TYPE_INTEGER && stored_type->bit_width == 128));
+        if (pair_kind && atomic_width == 16 && stored_size > 8 && stored_size <= 16)
+        {
+            u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
+            u32 address_register = machine_a64_synthesize_register(selector);
+            selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+            if (selected)
+            {
+                bool acquire = instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                bool release = instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
+                               instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
+                               instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = (u32)stored_size | (acquire ? MACHINE_A64_ATOMIC_PAIR_ACQUIRE : 0) |
+                                                                (release ? MACHINE_A64_ATOMIC_PAIR_RELEASE : 0),
+                                                     .opcode = MACHINE_A64_ATOMIC_STORE_PAIR,
+                                                 });
+            }
+        }
+        else if (aggregate_kind && stored_size && stored_size <= 8 &&
+                 (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
         {
             u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
             u32 data_register = machine_a64_synthesize_register(selector);
@@ -7309,6 +7356,15 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // part possibly storing through the large-offset frame form.
             capacity64 += 72 + 2u * ((u64)MACHINE_VA_ARG_PART_LIMIT * 32 + 12);
             break;
+        case MACHINE_A64_ATOMIC_LOAD_PAIR:
+            // Exclusive pair read-back loop plus two result-slot stores.
+            capacity64 += 12 + 2u * (large_save_offset ? 16u : 4u);
+            break;
+        case MACHINE_A64_ATOMIC_STORE_PAIR:
+            // Two value-slot loads, a worst-case four-word high-half mask,
+            // AND, and the exclusive pair replacement loop.
+            capacity64 += 32 + 2u * (large_save_offset ? 16u : 4u);
+            break;
         case MACHINE_A64_ATOMIC_RMW:
             // ld(a)xr, operation, st(l)xr, cbnz.
             capacity64 += 16;
@@ -7809,6 +7865,47 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                                   : varith_operation == 8 ? 0x6e21dc00u | varith_double_bit
                                                           : 0x6e21fc00u | varith_double_bit;
                 machine_a64_emit(&encoder, varith_word);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_LOAD_PAIR:
+            {
+                u32 result_slot = machine_ref_payload(instruction->operands[1]);
+                u32 result_offset = placement->stack_slot_offsets[result_slot];
+                u32 atomic_address = operand_registers[0];
+                // LDXP alone is not a single-copy atomic load on baseline
+                // AArch64. Write the same pair back and retry until STXP
+                // proves that the observed image was indivisible; SC uses
+                // STLXP so the successful readback also has release order.
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_ACQUIRE) ? 0xc87f8000u : 0xc87f0000u) |
+                                               (MACHINE_A64_X14 << 10) | (atomic_address << 5) | MACHINE_A64_X9);
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? 0xc8208000u : 0xc8200000u) |
+                                               (MACHINE_A64_X13 << 16) | (MACHINE_A64_X14 << 10) | (atomic_address << 5) |
+                                               MACHINE_A64_X9);
+                machine_a64_emit(&encoder, 0x35000000u | (0x7fffeu << 5) | MACHINE_A64_X13);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, machine_a64_frame_offset(frame_area, result_offset), 8, true);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X14, machine_a64_frame_offset(frame_area, result_offset - 8), 8, true);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_STORE_PAIR:
+            {
+                u32 source_slot = machine_ref_payload(instruction->operands[1]);
+                u32 source_offset = placement->stack_slot_offsets[source_slot];
+                u32 atomic_address = operand_registers[0];
+                u32 stored_size = instruction->payload & 0xffu;
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X11, machine_a64_frame_offset(frame_area, source_offset), 8, false);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X12, machine_a64_frame_offset(frame_area, source_offset - 8), 8, false);
+                if (stored_size < 16)
+                {
+                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X13, ((u64)1 << ((stored_size - 8) * 8)) - 1);
+                    machine_a64_emit(&encoder, 0x8a000000u | (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 5) | MACHINE_A64_X12);
+                }
+                // Arm the exclusive monitor with a discarded pair load,
+                // then retry the staged replacement until it lands whole.
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_ACQUIRE) ? 0xc87f8000u : 0xc87f0000u) |
+                                               (MACHINE_A64_X14 << 10) | (atomic_address << 5) | MACHINE_A64_X9);
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? 0xc8208000u : 0xc8200000u) |
+                                               (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) | MACHINE_A64_X11);
+                machine_a64_emit(&encoder, 0x35000000u | (0x7fffeu << 5) | MACHINE_A64_X13);
             }
             break;
             case MACHINE_A64_ATOMIC_LOAD:
