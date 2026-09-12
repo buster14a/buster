@@ -3381,6 +3381,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_hints(UnitTestArguments* 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_test_patch_aarch64_calls(CodegenModule* module)
+{
+    bool patched = !module->relocation_count || (module->relocations && module->entries && module->code.pointer);
+    for (u32 index = 0; patched && index < module->relocation_count; index += 1)
+    {
+        CodegenModuleRelocation* relocation = module->relocations + index;
+        bool found = false;
+        if (codegen_module_relocation_valid(relocation) && relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
+            relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 && !relocation->addend && !relocation->label_address &&
+            !(relocation->offset & 3) && relocation->offset <= module->code.length && module->code.length - relocation->offset >= 4)
+        {
+            for (u32 entry = 0; !found && entry < module->entry_count; entry += 1)
+            {
+                CodegenModuleEntry* target = module->entries + entry;
+                if (target->symbol.value == relocation->symbol.value && !(target->offset & 3) &&
+                    target->offset <= module->code.length && module->code.length - target->offset >= 4)
+                {
+                    u32 instruction = 0;
+                    u32 encoded = 0;
+                    memcpy(&instruction, module->code.pointer + relocation->offset, sizeof(instruction));
+                    s64 displacement = (s64)target->offset - (s64)relocation->offset;
+                    found = a64_pc_relative_patch(A64_OPCODE_BL, instruction, displacement, &encoded);
+                    if (found)
+                    {
+                        memcpy(module->code.pointer + relocation->offset, &encoded, sizeof(encoded));
+                    }
+                }
+            }
+        }
+        patched = found;
+    }
+    return patched;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_aarch64_call_relocations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 words[] = {UINT32_C(0x94000000), UINT32_C(0x94000000)};
+    CodegenModuleEntry entries[] = {{.symbol = {.value = 1}, .offset = 4}, {.symbol = {.value = 2}, .offset = 0}};
+    CodegenModuleRelocation relocations[] = {
+        {.symbol = {.value = 1}, .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26, .aarch64 = true},
+        {.symbol = {.value = 2}, .offset = 4, .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26, .aarch64 = true},
+    };
+    CodegenModule module = {.code = {.pointer = (u8*)words, .length = sizeof(words)}, .entries = entries, .entry_count = 2,
+                            .relocations = relocations, .relocation_count = 2};
+    BUSTER_TEST(arguments, machine_test_patch_aarch64_calls(&module));
+    BUSTER_TEST(arguments, words[0] == UINT32_C(0x94000001) && words[1] == UINT32_C(0x97ffffff));
+    for (u32 invalid = 0; invalid < 15; invalid += 1)
+    {
+        u32 instruction = UINT32_C(0x94000000);
+        CodegenModuleEntry entry = entries[0];
+        CodegenModuleRelocation relocation = relocations[0];
+        CodegenModule rejected = {.code = {.pointer = (u8*)&instruction, .length = sizeof(instruction)},
+                                  .entries = &entry, .entry_count = 1, .relocations = &relocation, .relocation_count = 1};
+        entry.offset = 0;
+        switch (invalid)
+        {
+            case 0: relocation.symbol.value = 3; break;
+            case 1: relocation.offset = 1; break;
+            case 2: relocation.offset = 4; break;
+            case 3: entry.offset = 1; break;
+            case 4: entry.offset = 4; break;
+            case 5: relocation.addend = 4; break;
+            case 6: relocation.source = CODEGEN_MODULE_RELOCATION_DATA; break;
+            case 7: relocation.kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32; relocation.aarch64 = false; break;
+            case 8: relocation.aarch64 = false; break;
+            case 9: instruction = UINT32_C(0x14000000); break;
+            case 10: relocation.label_address = true; break;
+            case 11: rejected.relocations = 0; break;
+            case 12: rejected.entries = 0; break;
+            case 13: rejected.code.pointer = 0; break;
+            case 14: rejected.code.length = 3; break;
+        }
+        u32 before = instruction;
+        BUSTER_TEST(arguments, !machine_test_patch_aarch64_calls(&rejected));
+        BUSTER_TEST(arguments, instruction == before);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3513,13 +3593,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArgument
                         (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
                     BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
                     BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                    // Public AAPCS64 list helpers call other local functions.
+                    // Resolve their checked BL relocations on every test host;
+                    // unresolved or invalid rows must never reach JIT execution.
+                    bool patched = generated.error == CODEGEN_ERROR_NONE && (target.cpu_arch == CPU_ARCH_AARCH64
+                        ? machine_test_patch_aarch64_calls(&generated) : generated.relocation_count == 0);
+                    BUSTER_TEST(arguments, patched);
 #if (BUSTER_CPU_ARCH_X86_64 || (BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS)) && !BUSTER_SANITIZE
                     bool native_abi = BUSTER_WINDOWS ? windows : !windows;
                     bool native_arch = BUSTER_CPU_ARCH_X86_64 ? target.cpu_arch == CPU_ARCH_X86_64
                                                               : target.cpu_arch == CPU_ARCH_AARCH64 && BUSTER_LINUX;
-                    if (native_abi && native_arch && generated.error == CODEGEN_ERROR_NONE)
+                    if (native_abi && native_arch && generated.error == CODEGEN_ERROR_NONE && patched)
                     {
-                        BUSTER_TEST(arguments, generated.relocation_count == 0);
                         CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
                         BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
                         if (executable.address)
@@ -4736,6 +4821,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult variadic_result = machine_test_native_variadic(arguments);
     result.test_count += variadic_result.test_count;
     result.succeeded_test_count += variadic_result.succeeded_test_count;
+    UnitTestResult call_relocations = machine_test_aarch64_call_relocations(arguments);
+    result.test_count += call_relocations.test_count;
+    result.succeeded_test_count += call_relocations.succeeded_test_count;
     UnitTestResult query_result = machine_test_cpu_queries(arguments);
     result.test_count += query_result.test_count;
     result.succeeded_test_count += query_result.succeeded_test_count;
