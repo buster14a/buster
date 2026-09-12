@@ -325,6 +325,30 @@ test_ios_true_timeout_after_early_launcher_exit() (
     assert_count 1 'simctl shutdown FAKE-UDID' "$log"
 )
 
+test_ios_native_tools_ready() (
+    set -euo pipefail
+    local state="$test_root/ios-native-readiness"
+    local timeout_bin=timeout status
+    mkdir -p "$state"
+    if ! command -v "$timeout_bin" >/dev/null 2>&1; then timeout_bin=gtimeout; fi
+    # The fake boot never starts CoreSimulator. Give the real service its own
+    # startup gate before timing a native invalid-device rejection; keep the
+    # launcher's 30-second shutdown deadline and required native exit intact.
+    echo "Waiting up to 180s for native CoreSimulator runtime discovery"
+    if "$timeout_bin" --kill-after=5s 180s /usr/bin/xcrun simctl list runtimes >"$state/runtimes.log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$state/runtimes.log"
+    printf 'BUSTER_IOS_NATIVE_READINESS status=%s deadline_seconds=180\n' "$status" | tee "$state/status.log"
+    if [[ $status -ne 0 ]]; then
+        echo "error: native CoreSimulator runtime discovery failed before the lifecycle test" >&2
+        exit 1
+    fi
+    assert_file_contains 'iOS ' "$state/runtimes.log"
+)
+
 test_ios_lifecycle_evidence() (
     set -euo pipefail
     local case_name=$1
@@ -428,6 +452,7 @@ done
 if [[ $(uname -s) == Darwin ]]; then
     # Real macOS tools reject an empty app and an invalid device ID. These
     # bounded rejections exercise native evidence without touching any device.
+    test_ios_native_tools_ready
     test_ios_lifecycle_evidence native-macos
 fi
 
