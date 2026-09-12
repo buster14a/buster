@@ -7669,6 +7669,8 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encode
     }
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_frame_offset(u32 frame_area, u32 placement_offset);
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_emit_inline_assembly_outputs(MachineA64Encoder* encoder, MachineFunction* function,
                                                                   MachineStackPlacement* placement, u32 frame_area,
                                                                   MachineInlineAssembly const* assembly)
