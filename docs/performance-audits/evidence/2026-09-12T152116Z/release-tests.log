@@ -1,0 +1,217 @@
+okMETAMORPHIC target=linux-x64 allocator=none pairs=12 executed=12 unexecuted=0 failed=0
+METAMORPHIC target=linux-x64 allocator=mir-stack pairs=12 executed=12 unexecuted=0 failed=0
+METAMORPHIC target=linux-x64 allocator=fast pairs=12 executed=12 unexecuted=0 failed=0
+METAMORPHIC target=linux-x64 allocator=quality pairs=12 executed=12 unexecuted=0 failed=0
+A64_MEMORY_CENSUS rows=559 source_rows=559 seed_rows=559 representative_ok=480 representative_range=56 representative_reserved=23 representative_target_mismatch=0 representative_other=0 generated_words=5814 legal_candidates=4820 exercised_rows=535
+A64_DIRECT_SIMD_COVERAGE rows=390 executable=390 transform=263 bindings=658 spellings=392 covered=390 remaining=0 covered_transform=263 covered_no_transform=127 uncovered_transform=0 uncovered_no_transform=0
+X86_SOURCE_REACHABILITY form=9842 canonical=1 direct=1 operands=2 source=1 match=1 diag=9 direct_bytes=3:72 source_bytes=3:72 mismatch=4294967295:0:0 class=0
+X86_SOURCE_REACHABILITY form=6939 canonical=1 direct=1 operands=4 source=1 match=1 diag=9 direct_bytes=6:98 source_bytes=6:98 mismatch=4294967295:0:0 class=0
+X86_SOURCE_REACHABILITY form=567 canonical=1 direct=1 operands=3 source=1 match=1 diag=9 direct_bytes=6:98 source_bytes=6:98 mismatch=4294967295:0:0 class=0
+X86_SOURCE_DECORATOR form=6938 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_DECORATOR form=6967 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=7
+X86_SOURCE_DECORATOR form=6939 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_DECORATOR form=6939 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_DECORATOR form=6939 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_DECORATOR form=6939 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_DECORATOR form=561 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_DECORATOR form=779 direct=1 intel=1 att=1 intel_class=0 att_class=0 bytes=6
+X86_SOURCE_MEMORY_SKELETON form=3239 success=1 diag=9 source=VBROADCASTSS ymm0, dword ptr [rax]
+
+X86_SOURCE_MEMORY_SKELETON form=6460 success=1 diag=9 source=VPSLLD ymm0, ymm0, dword ptr [rax]
+
+X86_SOURCE_MEMORY_SKELETON form=7725 success=1 diag=9 source=VPSRLD zmm0, zmm0, dword ptr [rax]
+
+X86_SOURCE_MEMORY_SKELETON form=3777 success=1 diag=9 source=VCVTBF42HF8 xmm0, qword ptr [rax]
+
+X86_SOURCE_IMMEDIATE_SKELETON form=9247 success=1 diag=9 source=ADD cl, 0x7f
+ direct_bytes=3:128 source_bytes=3:128 match=1
+X86_SOURCE_IMMEDIATE_SKELETON form=9247 success=1 diag=9 source=ADD cl, -0x80
+ direct_bytes=3:128 source_bytes=3:128 match=1
+X86_SOURCE_IMMEDIATE_SKELETON form=10018 success=1 diag=9 source=MOV rcx, 0x1122334455667788
+ direct_bytes=10:72 source_bytes=10:72 match=1
+X86_SOURCE_IMMEDIATE_SKELETON form=552 success=1 diag=9 source=ADD ax, word ptr [rax], 0x5
+ direct_bytes=7:98 source_bytes=7:98 match=1
+X86_SOURCE_IMMEDIATE_SKELETON form=552 success=1 diag=9 source=ADD ax, word ptr [rax], -0x80
+ direct_bytes=7:98 source_bytes=7:98 match=1
+X86_SOURCE_IMMEDIATE_SKELETON form=7740 success=1 diag=9 source=VPTERNLOGD zmm16, zmm17, zmm18, 0x7
+ direct_bytes=7:98 source_bytes=7:98 match=1
+X86_SOURCE_RELATIVE_LOCAL syntax=2 form=9805 success=1
+X86_SOURCE_RELATIVE_LOCAL syntax=1 form=9805 success=1
+X86_SOURCE_RELATIVE_ADDEND syntax=2 form=10249 success=1
+X86_SOURCE_RELATIVE_ADDEND syntax=1 form=10249 success=1
+X86_SOURCE_RELATIVE_NEAR_LOCAL syntax=2 form=10063 success=1
+X86_SOURCE_RELATIVE_NEAR_LOCAL syntax=1 form=10063 success=1
+X86_SOURCE_RELATIVE_NEAR_ADDEND syntax=2 form=10060 success=1
+X86_SOURCE_RELATIVE_NEAR_ADDEND syntax=1 form=10060 success=1
+X86_SOURCE_ABSOLUTE syntax=2 form=2931 success=1
+X86_SOURCE_ABSOLUTE syntax=1 form=2931 success=1
+X86_SOURCE_ATT_MEMORY form=9845 selected=9845 select_status=19 status=19 reloc=0 direct=1 source=1 match=1 bytes=5 direct_first=72 source_first=72
+X86_SOURCE_ATT_MEMORY form=6460 selected=6460 select_status=19 status=19 reloc=0 direct=1 source=1 match=1 bytes=7 direct_first=98 source_first=98
+X86_SOURCE_ATT_MEMORY form=6940 selected=6940 select_status=19 status=19 reloc=0 direct=1 source=1 match=1 bytes=6 direct_first=98 source_first=98
+X86_SOURCE_ATT_MEMORY form=5584 selected=5584 select_status=19 status=19 reloc=0 direct=1 source=1 match=1 bytes=6 direct_first=98 source_first=98
+X86_SOURCE_ATT_MEMORY form=9845 selected=9845 select_status=19 status=19 reloc=0 direct=1 source=1 match=1 bytes=4 direct_first=100 source_first=100
+X86_COMPLETION_LEDGER digest=7081672348952696532 forms=11013 normalized=10607 emitted=10607 blocked=406 operands=32813 dup_form=0 dup_hash=0 zero_hash=0 emitted_blocker=0
+X86_COMPLETION_OPERAND kind=0 total=0 visible=0
+X86_COMPLETION_OPERAND kind=1 total=24461 visible=22643
+X86_COMPLETION_OPERAND kind=2 total=5412 visible=5170
+X86_COMPLETION_OPERAND kind=3 total=2243 visible=2043
+X86_COMPLETION_OPERAND kind=4 total=84 visible=84
+X86_COMPLETION_OPERAND kind=5 total=1 visible=1
+X86_COMPLETION_OPERAND kind=6 total=246 visible=4
+X86_COMPLETION_OPERAND kind=7 total=244 visible=0
+X86_COMPLETION_OPERAND kind=8 total=9 visible=9
+X86_COMPLETION_OPERAND kind=9 total=113 visible=6
+X86_COMPLETION_VISIBLE count=0 rows=412
+X86_COMPLETION_VISIBLE count=1 rows=858
+X86_COMPLETION_VISIBLE count=2 rows=3420
+X86_COMPLETION_VISIBLE count=3 rows=3375
+X86_COMPLETION_VISIBLE count=4 rows=2603
+X86_COMPLETION_VISIBLE count=5 rows=345
+X86_COMPLETION_COHORT cohort=0 field=10609,10,80,5377,10416,3276,2216,87,87 decorator=4061,3527,1145,345,345 apx=2473,2450,1622,806,640,75 amx=49,10,4,2
+X86_COMPLETION_COHORT cohort=1 field=10275,10,80,5213,10042,3244,2159,46,46 decorator=4056,3524,1145,325,325 apx=2465,2442,1614,806,640,69 amx=49,10,4,2
+X86_COMPLETION_COHORT cohort=2 field=10275,10,80,5213,10042,3244,2159,46,46 decorator=4056,3524,1145,325,325 apx=2465,2442,1614,806,640,69 amx=49,10,4,2
+X86_COMPLETION_COHORT cohort=3 field=334,0,0,164,374,32,57,41,41 decorator=5,3,0,20,20 apx=8,8,8,0,0,6 amx=0,0,0,0
+X86_COMPLETION_FAMILY family=0 all=1929,1784,145 normalized=1784,1784,0
+X86_COMPLETION_FAMILY family=1 all=202,197,5 normalized=197,197,0
+X86_COMPLETION_FAMILY family=2 all=5,5,0 normalized=5,5,0
+X86_COMPLETION_FAMILY family=3 all=1698,1644,54 normalized=1644,1644,0
+X86_COMPLETION_FAMILY family=4 all=196,176,20 normalized=176,176,0
+X86_COMPLETION_FAMILY family=5 all=6812,6728,84 normalized=6728,6728,0
+X86_COMPLETION_FAMILY family=6 all=49,49,0 normalized=49,49,0
+X86_COMPLETION_FAMILY family=7 all=122,24,98 normalized=24,24,0
+X86_COMPLETION_BLOCKER blocker=0 count=10607
+X86_COMPLETION_BLOCKER blocker=1 count=270
+X86_COMPLETION_BLOCKER blocker=2 count=108
+X86_COMPLETION_BLOCKER blocker=3 count=1
+X86_COMPLETION_BLOCKER blocker=4 count=0
+X86_COMPLETION_BLOCKER blocker=5 count=0
+X86_COMPLETION_BLOCKER blocker=6 count=0
+X86_COMPLETION_BLOCKER blocker=7 count=0
+X86_COMPLETION_BLOCKER blocker=8 count=0
+X86_COMPLETION_BLOCKER blocker=9 count=0
+X86_COMPLETION_BLOCKER blocker=10 count=0
+X86_COMPLETION_BLOCKER blocker=11 count=0
+X86_COMPLETION_BLOCKER blocker=12 count=27
+X86_COMPLETION_INVARIANTS duplicate_form=0 duplicate_hash=0 zero_hash=0 emitted_blocker=0
+X86_SOURCE_REGISTER_FAILURE form=6 class=2 diag=6 iclass=BSRMOVF iform=BSRMOVF_BSR0_ZMMu64_ZMMu64 source=BSRMOVF zmm16, zmm17
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=8 class=2 diag=6 iclass=BSRMOVH iform=BSRMOVH_BSR0_ZMMu64 source=BSRMOVH bsr0, zmm16
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=10 class=2 diag=6 iclass=BSRMOVH iform=BSRMOVH_ZMMu64_BSR0 source=BSRMOVH zmm16, bsr0
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=20 class=3 diag=5 iclass=TOP2BF16PS iform=TOP2BF16PS_TMMf32_ZMMbf16_ZMMbf16 source=TOP2BF16PS tmm0, zmm0, zmm0
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=21 class=3 diag=5 iclass=TOP4BSSD iform=TOP4BSSD_TMMu32_ZMMi8_ZMMi8 source=TOP4BSSD tmm0, zmm0, zmm0
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=22 class=3 diag=5 iclass=TOP4BSUD iform=TOP4BSUD_TMMu32_ZMMi8_ZMMu8 source=TOP4BSUD tmm0, zmm0, zmm0
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=495 class=5 diag=9 iclass=ADC iform=ADC_GPR8i8_GPR8i8_APX source=ADC r16b, r17b
+ mismatch=0:98:213
+X86_SOURCE_REGISTER_FAILURE form=501 class=5 diag=9 iclass=ADC iform=ADC_GPRv_GPRv_APX source=ADC r16, r17
+ mismatch=0:98:213
+X86_SOURCE_REGISTER_FAILURE form=503 class=5 diag=9 iclass=ADC iform=ADC_GPRv_GPRv_APX source=ADC r16w, r17w
+ mismatch=0:98:102
+X86_SOURCE_REGISTER_FAILURE form=9003 class=1 diag=4 iclass=REP_XSTORE iform= source=REP_XSTORE
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9004 class=1 diag=4 iclass=REP_XCRYPTECB iform= source=REP_XCRYPTECB
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9005 class=1 diag=4 iclass=REP_XCRYPTCBC iform= source=REP_XCRYPTCBC
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9178 class=4 diag=5 iclass=FSETPM287_NOP iform= source=FSETPM287_NOP
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9179 class=4 diag=5 iclass=FENI8087_NOP iform= source=FENI8087_NOP
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_FAILURE form=9180 class=4 diag=5 iclass=FDISI8087_NOP iform= source=FDISI8087_NOP
+ mismatch=4294967295:0:0
+X86_SOURCE_REGISTER_CENSUS emitted=10607 register_only=4485 success=3285 syntax=124 policy=267 ambiguity=208 implicit=20 gap=581
+MACHINE_ALIAS_RANGE architecture=0 mixed=0 before_spill_reload=295 after_spill_reload=207
+MACHINE_ALIAS_RANGE architecture=0 mixed=1 before_spill_reload=294 after_spill_reload=206
+MACHINE_ALIAS_RANGE architecture=1 mixed=0 before_spill_reload=155 after_spill_reload=65
+MACHINE_ALIAS_RANGE architecture=1 mixed=1 before_spill_reload=155 after_spill_reload=65
+CODEVIEW_SCOPE_ALLOCATION functions=256 scopes=768 bytes=144672
+CODEVIEW_SCOPE_ALLOCATION functions=1024 scopes=3072 bytes=576288
+1504 frontend-to-Wasm integer checks passed
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=14 strict_successes=14 expected_rejections=0 failures=0
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+/usr/bin/ld: warning: /dev/shm/buster-issue104-tmp/buster-tests-5-1-88960778390049/buster-sseup-5.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]
+1 warning generated.
+14/14 frontend-to-Wasm over-aligned scalar checks passed
+245 independent Wasm local aggregate executions passed
+245 independent Wasm local aggregate executions passed
+3254/3254 scalar integer Wasm64 engine checks passed
+memory operand ok
+Error creating a process: "No such file or directory" => qemu-aarch64 --version
+Error creating a process: "No such file or directory" => wine --version
+weak reference bound to the library
+weak reference bound to the library
+weak reference bound to the library
+weak reference bound to the library
+[2280610/2280610] Unit tests
+[47/47] Module tests
+[0/0] External tests

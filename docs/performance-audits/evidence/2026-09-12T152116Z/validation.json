@@ -1,0 +1,26 @@
+{
+  "baseline_commit": "fd0ba8ff8175952d12bbdb367adef13effcc4865",
+  "production_and_test_blobs": {
+    "src/buster/lib/compiler/frontend/c/c_source.c": "21ed7d5cedafc0eb5fe2c088c19f20d98cdd4db5",
+    "src/buster/lib/compiler/frontend/c/c_source_internal.h": "adda34f4edeab4309357c51990cd0447f0419ca9",
+    "src/buster/tests/compiler/frontend/c/c_test.c": "bf81dc89ba00e1d18c3908dc7d4172fe49464fa0"
+  },
+  "binaries": {
+    "/dev/shm/buster-issue104-release/Release/ide": "9f1a815518968fba865c234f4e9b179587d7e85b6d03217b73953bda87cfaef0",
+    "/dev/shm/buster-issue104-sanitize/Debug/ide": "889ba8927a364d62293af2aca8ae4049c9c54959bcad4eb88799615b5a46ce87"
+  },
+  "self_host_binaries": {
+    "ide-stage2-none": {
+      "sha256": "9390712098e8dc1eb189a2972ce2c1b297b7b36cc587eeacce43d15bd21edc31",
+      "bytes": 47392352
+    },
+    "ide-stage2": {
+      "sha256": "f454cc17fe922258307f8a00bbda67ce16287e49d81d533a36ef8fe9dddf86cd",
+      "bytes": 38391752
+    },
+    "ide-stage1": {
+      "sha256": "f454cc17fe922258307f8a00bbda67ce16287e49d81d533a36ef8fe9dddf86cd",
+      "bytes": 38391752
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "initial-release-target": {
+    "sha256": "09250107e97f176c36a3ec0756ed54cb1bcee06cdc6605d29d8fd9ff59e63a12",
+    "bytes": 382414
+  },
+  "initial-sanitizer-target": {
+    "sha256": "eaed2ce0c5ead2c789774203211c5ad8a2026efb7e5adc04b746f47636d51440",
+    "bytes": 453087
+  },
+  "release-disk-full": {
+    "sha256": "1fa2e4f45bee656d153f08044cf24677b8d7d95021414a4897d8606b19a69e42",
+    "bytes": 219283
+  }
+}

@@ -11,8 +11,8 @@
 //   c_space_local .. c_space_retoken           spelling spaces: append-only
 //                                              storage token spellings point
 //                                              into
-//   c_source_map_append, c_lex_token_location  location checkpoints (see
-//                                              CTranslatedSource below)
+//   c_source_map_append, c_source_map_sort,    location checkpoints (see
+//   c_lex_token_location                       CTranslatedSource below)
 //   c_identifier_start ..                      character classes and the
 //   c_literal_plain_run_end                    prewarmed run tables
 //   c_translate_source                         phase-1/2 translation with
@@ -58,6 +58,7 @@
 //   c_prewarm                                  serial table prewarm
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 
 // Locations are recorded as checkpoints instead of one entry per translated
@@ -232,8 +233,8 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
 
 // The source map under construction: append-only while preprocessing runs
 // (nothing queries it until the result is assembled), sorted once at the
-// end. Only #line splits append out of order, so the finalize sort is a
-// nearly-linear insertion pass.
+// end. #line splits may append below any number of previously emitted
+// regions; finalization must preserve ties without depending on displacement.
 typedef struct CSourceMap CSourceMap;
 typedef struct CSourceRegionNames CSourceRegionNames;
 struct CSourceRegionNames
@@ -268,6 +269,59 @@ BUSTER_C_INTERNAL void c_source_map_append(CSourceMap* map, IrSourceRegion regio
     }
     map->regions[map->count++] = region;
 }
+
+// Stable LSD radix sorting bounds finalization independently of append order.
+// The ordered path only reads keys. Unordered maps use one temporary row
+// buffer; four byte passes finish in the original array before scratch rewind.
+BUSTER_C_INTERNAL void c_source_map_sort(Arena* arena, IrSourceRegion* regions, u32 count)
+{
+    u32 ordered = 1;
+    while (ordered < count && regions[ordered - 1].start <= regions[ordered].start)
+    {
+        ordered += 1;
+    }
+    if (ordered < count)
+    {
+        TemporalArena temporary = arena_begin_temporal(arena);
+        IrSourceRegion* source = regions;
+        IrSourceRegion* destination = arena_allocate(arena, IrSourceRegion, count);
+        enum { C_SOURCE_MAP_RADIX_BITS = 8, C_SOURCE_MAP_RADIX_BUCKETS = 1 << C_SOURCE_MAP_RADIX_BITS };
+        for (u32 byte_index = 0; byte_index < sizeof(regions->start); byte_index += 1)
+        {
+            u32 offsets[C_SOURCE_MAP_RADIX_BUCKETS] = {0};
+            u32 shift = byte_index * C_SOURCE_MAP_RADIX_BITS;
+            for (u32 index = 0; index < count; index += 1)
+            {
+                u32 bucket = (source[index].start >> shift) & (C_SOURCE_MAP_RADIX_BUCKETS - 1);
+                offsets[bucket] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < C_SOURCE_MAP_RADIX_BUCKETS; bucket += 1)
+            {
+                u32 population = offsets[bucket];
+                offsets[bucket] = offset;
+                offset += population;
+            }
+            // Forward scatter retains append order among equal start keys.
+            for (u32 index = 0; index < count; index += 1)
+            {
+                u32 bucket = (source[index].start >> shift) & (C_SOURCE_MAP_RADIX_BUCKETS - 1);
+                destination[offsets[bucket]++] = source[index];
+            }
+            IrSourceRegion* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        scratch_end(temporary);
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+void c_test_source_map_sort(Arena* arena, IrSourceRegion* regions, u32 count)
+{
+    c_source_map_sort(arena, regions, count);
+}
+#endif
 
 // TEXT origins temporarily index these names. Finalization registers physical
 // source IDs only for token-bearing or diagnosed regions, preserving the
@@ -8591,20 +8645,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.detail->preprocessed.spelling_bytes = space->used;
     result.detail->lexed_files = metrics_files.rows;
     result.detail->lexed_file_count = metrics_files.count;
-    // The map was append-only while the stream was built; sort it once so
-    // recovery can binary-search. Only #line splits append out of order, so
-    // the insertion pass is effectively linear.
-    for (u32 entry_index = 1; entry_index < map.count; entry_index += 1)
-    {
-        IrSourceRegion region = map.regions[entry_index];
-        u32 probe = entry_index;
-        while (probe && map.regions[probe - 1].start > region.start)
-        {
-            map.regions[probe] = map.regions[probe - 1];
-            probe -= 1;
-        }
-        map.regions[probe] = region;
-    }
+    // Origin recovery and publication both require the stable key order.
+    c_source_map_sort(arena, map.regions, map.count);
     c_source_map_finish_origins(arena, &map, &file_table, &result);
     result.files = file_table.files;
     result.file_count = file_table.count;
