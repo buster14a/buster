@@ -1,5 +1,5 @@
 // The native build driver. build.sh/build.ps1 bootstrap this file with tcc
-// into build/build; from then on it owns every workflow — CMake generation,
+// into an immutable, verified cache entry; from then on it owns every workflow — CMake generation,
 // Ninja builds, the self-hosting fixed point, the combination matrix, the
 // diagnostics summaries, and the metadata importers that write the
 // generated assembly tables. Policy lives here, not in shell or CMake
@@ -1115,6 +1115,13 @@ BUSTER_GLOBAL_LOCAL String8 build_relative_path(Arena* arena, String8 build_dire
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 build_running_driver(Arena* arena)
+{
+    String8 input = program_state->input.arguments.length ? program_state->input.arguments.pointer[0] : S8("build/build");
+    String8 result = os_path_absolute(arena, input, true);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool path_exists(Arena* arena, String8 path)
 {
     String8 path_z = string_duplicate_arena(arena, path, true);
@@ -1381,6 +1388,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 link_libc = cmake_flag(arena, S8("BUSTER_LINK_LIBC"), generate.link_libc);
     String8 check_optional_warnings = cmake_flag(arena, S8("BUSTER_CHECK_OPTIONAL_WARNINGS"), generate.check_optional_warnings);
     String8 developer_targets = cmake_flag(arena, S8("BUSTER_DEVELOPER_TARGETS"), generate.developer_targets);
+    String8 build_driver = cmake_string(arena, S8("BUSTER_BUILD_DRIVER"), build_running_driver(arena));
     // State the production default on every generation so a prior cached ON
     // cannot survive the policy change. User passthrough arguments remain
     // later and therefore retain their explicit override semantics.
@@ -1420,6 +1428,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, link_libc);
     os_argument_builder_append(b, check_optional_warnings);
     os_argument_builder_append(b, developer_targets);
+    os_argument_builder_append(b, build_driver);
 
     if (generate_cc_contains(generate, cc_command, S8("zig")))
     {
@@ -9218,7 +9227,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_cjson requires an external cJSON v1.7.19 checkout path\n"));
-        string_print(S8("usage: ./build/build test_cjson [--config Debug|Release] /path/to/cjson\n"));
+        string_print(S8("usage: ./build.sh test_cjson [--config Debug|Release] /path/to/cjson\n"));
         return PROCESS_RESULT_FAILED;
     }
 
@@ -9747,7 +9756,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_stb requires an external nothings/stb checkout path\n"));
-        string_print(S8("usage: ./build/build test_stb [--config Debug|Release] /path/to/stb\n"));
+        string_print(S8("usage: ./build.sh test_stb [--config Debug|Release] /path/to/stb\n"));
         goto stb_action_done;
     }
 
@@ -10334,7 +10343,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_zlib_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_zlib requires an external pinned zlib checkout path\n"));
-        string_print(S8("usage: ./build/build test_zlib [--config Debug|Release] /path/to/zlib\n"));
+        string_print(S8("usage: ./build.sh test_zlib [--config Debug|Release] /path/to/zlib\n"));
         return PROCESS_RESULT_FAILED;
     }
     String8 source_directory = os_path_absolute(arena, options.source_directory, true);
@@ -10987,7 +10996,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
     if (!options.source_directory.length || !options.compatibility_directory.length)
     {
         string_print(S8("error: test_lua requires the official Lua v5.4.8 src/ path and its pinned Git test checkout\n"));
-        string_print(S8("usage: ./build/build test_lua [--config Debug|Release] /path/to/lua-5.4.8/src /path/to/lua-v5.4.8\n"));
+        string_print(S8("usage: ./build.sh test_lua [--config Debug|Release] /path/to/lua-5.4.8/src /path/to/lua-v5.4.8\n"));
         return PROCESS_RESULT_FAILED;
     }
     String8 source_directory = os_path_absolute(arena, options.source_directory, true);
@@ -11566,7 +11575,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_yyjson_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_yyjson requires an external yyjson v{S8} checkout path\n"), S8(YYJSON_COMPATIBILITY_TAG));
-        string_print(S8("usage: ./build/build test_yyjson [--config Debug|Release] /path/to/yyjson-v{S8}\n"), S8(YYJSON_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build.sh test_yyjson [--config Debug|Release] /path/to/yyjson-v{S8}\n"), S8(YYJSON_COMPATIBILITY_TAG));
         return PROCESS_RESULT_FAILED;
     }
 
@@ -12423,7 +12432,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_lz4 requires an external lz4 {S8} checkout path\n"), S8(LZ4_COMPATIBILITY_TAG));
-        string_print(S8("usage: ./build/build test_lz4 [--config Debug|Release] /path/to/lz4-{S8}\n"), S8(LZ4_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build.sh test_lz4 [--config Debug|Release] /path/to/lz4-{S8}\n"), S8(LZ4_COMPATIBILITY_TAG));
         return PROCESS_RESULT_FAILED;
     }
     String8 source_directory = os_path_absolute(arena, options.source_directory, true);
@@ -13298,7 +13307,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sqlite_action(Arena* arena, void* data)
     if (!options.amalgamation_directory.length || !options.source_directory.length)
     {
         string_print(S8("error: test_sqlite requires the official SQLite {S8} amalgamation and source distributions\n"), S8(SQLITE_COMPATIBILITY_VERSION));
-        string_print(S8("usage: ./build/build test_sqlite [--config Debug|Release] /path/to/sqlite-amalgamation-{S8} /path/to/sqlite-src-{S8}\n"),
+        string_print(S8("usage: ./build.sh test_sqlite [--config Debug|Release] /path/to/sqlite-amalgamation-{S8} /path/to/sqlite-src-{S8}\n"),
                      S8(SQLITE_COMPATIBILITY_NUMBER), S8(SQLITE_COMPATIBILITY_NUMBER));
         return PROCESS_RESULT_FAILED;
     }
@@ -14500,7 +14509,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
     if (!source_directory.length)
     {
         string_print(S8("error: test_sbase requires an external sbase checkout path\n"));
-        string_print(S8("usage: ./build/build test_sbase [--config Debug|Release] /path/to/sbase\n"));
+        string_print(S8("usage: ./build.sh test_sbase [--config Debug|Release] /path/to/sbase\n"));
         return PROCESS_RESULT_FAILED;
     }
     source_directory = os_path_absolute(arena, source_directory, true);
@@ -15225,7 +15234,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_doom_action(Arena* arena, void* data)
     if (!options.source_directory.length || !options.iwad_path.length)
     {
         string_print(S8("error: test_doom requires an external doomgeneric checkout and a WAD file\n"));
-        string_print(S8("usage: ./build/build test_doom [--config Debug|Release] /path/to/doomgeneric /path/to/DOOM1.WAD\n"));
+        string_print(S8("usage: ./build.sh test_doom [--config Debug|Release] /path/to/doomgeneric /path/to/DOOM1.WAD\n"));
         string_print(S8("       the WAD is game data and is deliberately not part of this repository; the shareware\n"));
         string_print(S8("       DOOM1.WAD is what the fixture's input script was written against\n"));
         return PROCESS_RESULT_FAILED;
@@ -16413,7 +16422,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_quickjs requires an external QuickJS {S8} checkout path\n"), S8(QUICKJS_COMPATIBILITY_VERSION));
-        string_print(S8("usage: ./build/build test_quickjs [--config Debug|Release] /path/to/quickjs [/path/to/test262]\n"));
+        string_print(S8("usage: ./build.sh test_quickjs [--config Debug|Release] /path/to/quickjs [/path/to/test262]\n"));
         return PROCESS_RESULT_FAILED;
     }
     String8 source_directory = os_path_absolute(arena, options.source_directory, true);
@@ -19736,7 +19745,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_musl requires an external musl {S8} checkout path\n"), S8(MUSL_COMPATIBILITY_TAG));
-        string_print(S8("usage: ./build/build test_musl [--config Debug|Release] /path/to/musl-{S8} [/path/to/libc-test]\n"),
+        string_print(S8("usage: ./build.sh test_musl [--config Debug|Release] /path/to/musl-{S8} [/path/to/libc-test]\n"),
                      S8(MUSL_COMPATIBILITY_TAG));
         return PROCESS_RESULT_FAILED;
     }
@@ -20822,7 +20831,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_cpython requires an external CPython {S8} checkout path\n"), S8(CPYTHON_COMPATIBILITY_TAG));
-        string_print(S8("usage: ./build/build test_cpython [--config Debug|Release] /path/to/cpython-{S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build.sh test_cpython [--config Debug|Release] /path/to/cpython-{S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG));
         string_print(S8("fetch: tools/fetch_cpython.sh /path/to/cpython-{S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG));
         return PROCESS_RESULT_FAILED;
     }
@@ -22764,13 +22773,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         String8 superbuild_directory_z = string_duplicate_arena(arena, superbuild_directory, true);
         String8 superbuild_absolute_directory = os_path_absolute(arena, superbuild_directory_z, true);
         String8 manifest_path = path_join(arena, superbuild_absolute_directory, S8("matrix.cmake"));
-        String8 build_driver = path_join(arena, source_directory,
-#if BUSTER_WINDOWS
-                                         S8("build/build.exe")
-#else
-                                         S8("build/build")
-#endif
-        );
+        String8 build_driver = build_running_driver(arena);
         String8 provenance_record_path = {0};
         if (fanout && fanout_requested)
         {
@@ -34221,10 +34224,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
         String8 baseline = os_path_absolute(arena, arguments.pointer[0], true);
         String8 current = os_path_absolute(arena, S8("."), true);
 #if BUSTER_WINDOWS
-        String8 driver = os_path_absolute(arena, S8("build/build.exe"), true);
+        String8 driver = build_running_driver(arena);
         String8 binary_leaf = S8("build/throughput-ci-compiler/Release/ide.exe");
 #else
-        String8 driver = os_path_absolute(arena, S8("build/build"), true);
+        String8 driver = build_running_driver(arena);
         String8 binary_leaf = S8("build/throughput-ci-compiler/Release/ide");
 #endif
         if (baseline.length && current.length && driver.length && !string_equal(baseline, current))

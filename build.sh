@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p build
 if [[ ${1-} == "test_all_combinations_ci" ]]; then
     if [[ "$(uname -s)" = "Linux" || "$(uname -s)" = "Darwin" ]]; then
         set -x
@@ -10,5 +9,8 @@ if [[ ${1-} == "test_all_combinations_ci" ]]; then
         zig version
     fi
 fi
-tcc -Isrc -Wall -Werror -Wno-unused-function -g build.c -o build/build
-build/build "$@"
+
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=tools/bootstrap_driver.sh
+source "$repository_root/tools/bootstrap_driver.sh"
+buster_bootstrap_driver "$repository_root" "$@"

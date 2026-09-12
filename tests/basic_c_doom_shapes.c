@@ -2,7 +2,7 @@
 // to reject or, worse, lower to something that ran wrong.
 //
 // Every one of these was found by compiling upstream DoomGeneric unmodified
-// (see `./build/build test_doom` and the harness notes in AGENTS.md); the file
+// (see `./build.sh test_doom` and the harness notes in AGENTS.md); the file
 // and the construct that found it are named on each case. The program returns
 // zero when every shape behaves, and the number of the first shape that did
 // not otherwise, so a failure names the construct instead of a hash.

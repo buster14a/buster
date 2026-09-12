@@ -1,4 +1,4 @@
-// Native process oracle for build/build clang_analyze --self-test. Never part of
+// Native process oracle for ./build.sh clang_analyze --self-test. Never part of
 // the application or its compile database. Modes exercise real child outcomes.
 #include <stdio.h>
 #include <string.h>

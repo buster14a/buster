@@ -7,40 +7,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Invoke-Native {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-
-        [string[]]$ArgumentList = @()
-    )
-
-    & $FilePath @ArgumentList
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-}
-
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BuildDirectory = Join-Path $RepoRoot "build"
-$BootstrapPath = Join-Path $BuildDirectory "build.exe"
-
+. (Join-Path $RepoRoot "tools/bootstrap_driver.ps1")
 Push-Location $RepoRoot
 try {
-    New-Item -ItemType Directory -Path $BuildDirectory -Force | Out-Null
-
-    Invoke-Native "tcc" @(
-        "-Isrc"
-        "-Wall"
-        "-Werror"
-        "-g"
-        "-lws2_32",
-        "build.c"
-        "-o"
-        $BootstrapPath
-    )
-
-    Invoke-Native $BootstrapPath $RemainingArguments
+    Invoke-BusterBootstrapDriver -RepoRoot $RepoRoot -RemainingArguments $RemainingArguments
 }
 finally {
     Pop-Location

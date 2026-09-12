@@ -9,7 +9,7 @@ checkout; upstream sources are never copied into or patched in this repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_zlib --config Release /path/to/zlib-v1.3.1
+./build.sh test_zlib --config Release /path/to/zlib-v1.3.1
 ```
 
 The checkout must be commit
