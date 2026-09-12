@@ -21,7 +21,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     String8 input = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-input"), S8(".c"));
     String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-output"), S8(".bin"));
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
-    String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-nostdlib")};
+    String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-O0")};
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     OsFileTestStep failures[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}};
@@ -37,7 +37,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
                 os_file_test_begin(output, &failures[failure], 1);
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(scratch.arena, invocation);
                 BUSTER_TEST(arguments, os_file_test_end() == 1);
-                BUSTER_TEST(arguments, compiled.error == (action == 3 ? COMPILER_DRIVER_ERROR_LINK : COMPILER_DRIVER_ERROR_FILE_WRITE));
+                BUSTER_TEST_RAW(arguments, compiled.error == (action == 3 ? COMPILER_DRIVER_ERROR_LINK : COMPILER_DRIVER_ERROR_FILE_WRITE),
+                    string_format(scratch.arena, S8("write failure action={u32} mode={u32}: {S8}"), action, mode, compiled.diagnostic));
                 BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
                 if (compiled.diagnostic_count == 1)
                 {
