@@ -94,8 +94,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 compiler_driver_test_elf_section_addr
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_token_identity(UnitTestArguments* arguments, CPreprocessResult expected,
-                                                                                   String8 text)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_preprocess_token_identity(UnitTestArguments* arguments,
+                                                                                                      CPreprocessResult expected, String8 text)
 {
     UnitTestResult result = {0};
     CLexResult actual = c_lex(arguments->arena, text);
@@ -179,6 +179,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                 BUSTER_TEST(arguments, string_first_sequence(stdout_text, required[required_index]) != BUSTER_STRING_NO_MATCH);
             }
             UnitTestResult identity = compiler_driver_test_preprocess_token_identity(arguments, expected, stdout_text);
+            if (!unit_test_succeeded(identity))
+            {
+                arguments->show(arguments, S8("PREPROCESS_BOUNDARY_STDOUT_BEGIN\n{S8}PREPROCESS_BOUNDARY_STDOUT_END\n"), stdout_text);
+            }
             result.test_count += identity.test_count;
             result.succeeded_test_count += identity.succeeded_test_count;
 
