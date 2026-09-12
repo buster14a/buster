@@ -2426,7 +2426,10 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             // byte subtract yields every length in the window, and the kind
             // and punctuator vectors ride the same starts mask.
             u64 start_mask = token_starts & emitted;
-            u64 end_mask = ((boundary >> 1) | ((u64)1 << (bound - 1))) & token_span & emitted;
+            // `emitted` is a contiguous low-bit mask. Its highest bit marks
+            // the final lane without a variable shift at the 64-byte edge.
+            u64 final_lane = emitted & ~(emitted >> 1);
+            u64 end_mask = ((boundary >> 1) | final_lane) & token_span & emitted;
             u32 count = (u32)__builtin_popcountll(start_mask);
             BUSTER_CHECK(count == (u32)__builtin_popcountll(end_mask));
 

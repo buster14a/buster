@@ -103,8 +103,10 @@ monolithic, CPU-count-batched scheduler. On later revisions it measures whatever
 implementation that reference contains. A main/dispatch run uses its own revision
 as reference. No historical issue timing is presented as a current measurement.
 
-`ANALYZE_BASELINE` and `ANALYZE_RUN` record complete wall microseconds and process
-limits. `peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
+`ANALYZE_BASELINE` and `ANALYZE_RUN` record complete wall microseconds. The
+baseline reports host logical CPU capacity, not an inferred limit for an
+arbitrary reference driver; the candidate records its configured worker limit.
+`peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
 actual analyzer overlap can be lower, particularly for empty or tiny shards.
 On Linux, both runs also sample the coordinator and its descendants every
 25 ms: `peak_live_processes` and `sampled_peak_tree_rss_bytes` report observed
@@ -119,6 +121,8 @@ RSS**. Windows reports zero for unavailable RSS. Compare wall time and the same
 eligible TU count alongside these memory/concurrency limits; no platform-wide
 speedup follows from a single hosted-runner sample. CI retains the revision,
 Clang version, database, CMake cache, manifest, shard reports and logs.
+The initial complete comparison and its measurement limits are recorded in
+[the CI performance audit](performance-audits/2026-09-12T192036Z.md).
 
 ## Split-analysis contracts
 
@@ -133,3 +137,6 @@ are published together, index arrays exist for counted nonempty ranges, local
 rows and symbol rows share allocation, and metadata helpers retain value
 storage. These checks document the existing validated-input contracts rather
 than suppressing analyzer reports.
+The lexer's final emitted lane comes from the existing contiguous low-bit mask
+using a fixed one-bit shift. This keeps the end-of-window computation defined
+without relying on the analyzer carrying a range proof for a variable shift.

@@ -658,7 +658,9 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_baseline(Arena* arena, ClangAnalyzeOption
     u64 rss = clang_analyze_child_peak_rss();
     String8 out = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
     String8 err = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length};
-    String8 metric = string_format(arena, S8("ANALYZE_BASELINE eligible={u64} elapsed_us={u64} process_limit={u32} peak_child_rss_bytes={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} status={S8}\n"),
+    // A later reference may itself use shard workers. Host CPU capacity is
+    // known here; the external driver's actual scheduling limit is not.
+    String8 metric = string_format(arena, S8("ANALYZE_BASELINE eligible={u64} elapsed_us={u64} host_logical_cpus={u32} peak_child_rss_bytes={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} status={S8}\n"),
         plan.count, elapsed, os_get_logical_thread_count(), rss, resources.samples, resources.peak_processes, resources.peak_tree_rss, wait.result == PROCESS_RESULT_SUCCESS ? S8("pass") : S8("fail"));
     String8 pieces[] = {metric, out, err};
     bool written = clang_analyze_write(arena, path_join(arena, options.results, S8("baseline.log")),
