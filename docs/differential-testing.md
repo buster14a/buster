@@ -38,9 +38,10 @@ HFA overflow and independent GP/FP exhaustion. By-value calls pass a separate
 an independent original list. The consumer checks distinct caller/callee storage;
 no check relies on reusing the consumed by-value list. These relations use the
 existing scalar and at-most-sixteen-byte aggregate subset; larger HFAs, indirect
-aggregate reads and vector/HVA reads are not claimed. The existing native configuration matrix
-runs them on Linux AArch64; other hosts do not count the guarded relations as
-executed. QEMU cross-compiler checks are separate emulator evidence.
+aggregate reads and vector/HVA reads are not claimed. The existing native
+configuration matrix runs them on Linux AArch64; other hosts do not count the
+guarded relations as executed. QEMU cross-compiler checks are separate emulator
+evidence.
 
 The native aggregate case covers Windows indirect arguments in both call
 directions, including 3/5/7-byte values, 12/16/24/32-byte values, aligned
@@ -65,12 +66,10 @@ contain `main`; with it, Buster compiles only the subject translation unit and
 the host compiler links it to the fixed caller/observer translation unit.
 This also accepts saved C cases from `tools/differential_c_harness.py`.
 `--host` and `--reject` cannot be combined. The original subject's directory
-remains on the include path during reduction. `--host` and `--reject` cannot
-be combined. The original subject's directory remains on the include path
-during reduction. `--generated N`, `--seed N`, `--timeout N`, and `--minimize N`
-are validated bounded integers; zero reduction trials disables automatic reduction.
-`--no-verify` exists for testing older compiler binaries that lack the verification
-flag, and is recorded explicitly.
+remains on the include path during reduction. `--generated N`, `--seed N`,
+`--timeout N`, and `--minimize N` are validated bounded integers; zero reduction
+trials disables automatic reduction. `--no-verify` exists for testing older
+compiler binaries that lack the verification flag, and is recorded explicitly.
 
 ## Configuration authority
 
@@ -149,7 +148,7 @@ that share their low 32 bits but must remain distinct in a 64-bit comparison.
 The machine unit tests additionally require zero fallback in all four modes.
 
 The clear-cache fixture checks empty and short unaligned ranges, both argument
-side effects, and values kept live across the cache operation. AArch64 machine
+side effects, and values kept live across the operation. AArch64 machine
 tests also compare the emitted sequence with the independent Clang assembly
 fixture, including both loop targets and barriers. These checks do not assume
 that a hardware cache failure is observable on every host.
@@ -181,6 +180,7 @@ selected/rescheduled function or placement is fatal instead of being hidden by c
 fallback. Ordinary compilation retains its existing fast paths.
 
 Successful native compilation prints:
+
 ```text
 CODEGEN_VERIFY version=1 ir=1 mir=2 scheduled=0 allocator=fast
 ```
