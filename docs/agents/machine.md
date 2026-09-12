@@ -575,45 +575,36 @@
   objects, mixed-lane HVAs, copied cursors and GP/FP exhaustion. Wider vectors,
   quad-precision floats and platform acceptance gates are separate from this
   supported read subset. Windows/Darwin pointer-list conventions are unchanged.
-- Empty inline assembly with no operands or targets accepts an empty clobber
-  list or any combination of `memory` and `cc` on x86-64 and AArch64. Both
-  selectors consume `machine_selection_is_compiler_barrier` and emit their
-  existing zero-byte compiler-barrier row. Its static metadata conservatively
-  imposes a scheduler/memory barrier and defines condition codes even when the
-  source omits either clobber; it is not a hardware memory fence. Other
-  templates and physical register clobbers remain outside this #70 slice,
-  apart from the operand transport, literal branches/hints and fixed CPU-query
-  forms below. The strict driver corpus
-  covers the accepted forms; selector tests also require explicit rejection of
-  each unsupported class on both targets and in both frontend forms.
-- Empty generic `r` operands select zero-byte `ASM_IDENTITY` rows with a real
-  tied definition/use pair. Scalar integer, boolean and pointer inputs,
-  read/write outputs, and numeric/named matching inputs transport 1/2/4/8-byte
-  values through allocation. Every input is captured before outputs are
-  stored, so swaps and overlapping places preserve simultaneous asm semantics.
-  Pure outputs require one matching input; fixed registers, memory/vector
-  constraints and more than 16 operands remain outside this subset. The strict fixture checks ties, swaps, input side effects,
-  pointers and adjacent byte/halfword/word/doubleword sentinels in both forms.
-- Literal AArch64 `b %lN` / `b %l[name]` and x86 `jmp %lN` /
-  `jmp %l[name]` asm-goto, plus empty-template fallthrough, reuse the same
-  generic-register transport before an ordinary `B`/`JMP` terminator. The shared canonical resolver accounts for read/write
-  operands in GNU numeric label positions. Selection keeps only the executed
-  MIR edge and that destination's canonical argument copies through the
-  shared `machine_selection_finish_canonical_edges`; it also remaps AArch64
-  edges through blocks split by wide division. This prevents unreachable asm
-  destinations from assigning other joins during allocation. The strict
-  six-target corpus requires zero fallbacks for these forms; MIR tests
-  inspect the actual branch/edge pair on both architectures and runtime checks
-  cover named/numeric labels, swapped outputs, fallthrough, joins, loops and
-  a branch after an i128 divide splits the source block.
-- Operand-free literal `nop` and x86 `pause` / AArch64 `yield` select distinct
-  MIR rows and emit their architectural instructions. They accept the same
-  `memory`/`cc` clobber contract as empty barriers, retain scheduling/memory
-  effects, and expose no physical-register clobbers. x86 emission uses checked
-  instruction metadata; PAUSE preserves the direct emitter's baseline policy.
-  This also keeps `_mm_pause` and `__builtin_ia32_pause` in the machine path.
-  Selector tests check instruction bytes at MIR row offsets, and the strict
-  six-target driver corpus covers both frontend forms and every MIR allocator.
+- Inline assembly is a closed MIR transaction. A fixed-width hot row indexes
+  compact side tables containing the resolved template bytes, operand records,
+  exact physical clobbers, semantic effects and relocations. Selectors stage
+  all inputs into private frame images before the row and publish outputs only
+  after it, preserving simultaneous numeric/named ties, read/write operands,
+  multiple outputs and early-clobber separation. The encoder alone transfers
+  those images to and from the selected physical GPR, vector or x87 registers;
+  it never calls the canonical emitter. General rows are conservative allocator
+  barriers, while their side records retain the exact clobber facts checked by
+  the verifier and consumed by emission.
+- Empty operand-free assembly and literal `nop`, x86 `pause`, or AArch64
+  `yield` use four target-local effect rows rather than the general transaction:
+  side effect only, memory barrier, flags definition, or both. The template may
+  therefore emit zero bytes without losing `memory` or condition-code effects,
+  and an effect omitted by the source is not manufactured. These rows are
+  scheduling barriers but are not hardware memory fences.
+- x86-64 general transactions admit the frontend's scalar GPR/fixed-register,
+  memory, SSE and x87 classes. AArch64 transactions admit its scalar GPR class,
+  including fixed registers named by constraints or template text. Explicit
+  register, `memory`, `cc`/NZCV and x87-stack clobbers remain visible at the
+  transaction. Shared assembler output is copied into the native code stream;
+  its symbol relocations are translated into ordinary module relocations after
+  row and branch relaxation has fixed final offsets.
+- Supported AArch64 `b %lN` / `b %l[name]` and x86 `jmp %lN` /
+  `jmp %l[name]` asm-goto forms end the transaction with an ordinary MIR
+  `B`/`JMP` terminator. Empty-template fallthrough retains the corresponding
+  fallthrough edge. The shared canonical edge pass keeps exactly the executed
+  successor and its edge copies after target block expansion, so allocation,
+  reachability, block ordering and verification see genuine CFG rather than an
+  emitter escape hatch.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and
