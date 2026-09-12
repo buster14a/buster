@@ -4945,8 +4945,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_source(MachineA64Selector* 
                                   (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_DEFAULT});
         if (encoded.diagnostic_count)
         {
-            string_print(S8("ISSUE70_A64_ASSEMBLER source='{S8}' diagnostics={u32}\n"),
-                         (String8){.pointer = bytes, .length = write}, encoded.diagnostic_count);
+            string_print(S8("ISSUE70_A64_ASSEMBLER source='{S8}' diagnostics={u32} kind={u32} message='{S8}' line={u32} column={u32}\n"),
+                         (String8){.pointer = bytes, .length = write}, encoded.diagnostic_count,
+                         (u32)encoded.diagnostics[0].kind, encoded.diagnostics[0].message,
+                         encoded.diagnostics[0].line, encoded.diagnostics[0].column);
         }
         valid = encoded.diagnostic_count == 0;
     }
