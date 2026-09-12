@@ -74,6 +74,33 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_version(GpuTools* settings, String8 tool, Str
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool gpu_tools_spirv_version_supported(String8 banner)
+{
+    // Preserve the original consumer and explicitly admit Ubuntu 26.04's
+    // consumer. A token boundary keeps 2026.10 and untested suffixes out.
+    String8 versions[] = {S8("SPIRV-Tools v2025.1"), S8("SPIRV-Tools v2026.1")};
+    bool supported = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(versions); index += 1)
+    {
+        String8 version = versions[index];
+        if (string_starts_with_sequence(banner, version))
+        {
+            supported |= banner.length == version.length || banner.pointer[version.length] == ' ' ||
+                banner.pointer[version.length] == '\n' || banner.pointer[version.length] == '\r';
+        }
+    }
+    return supported;
+}
+
+BUSTER_GLOBAL_LOCAL bool gpu_tools_spirv_version(GpuTools* settings)
+{
+    DObservation result = GPU_TOOLS_RUN(settings, S8("version"), settings->spirv_val, S8("--version"));
+    bool ok = d_success(result) && (gpu_tools_spirv_version_supported(result.output) || gpu_tools_spirv_version_supported(result.error));
+    ok &= gpu_tools_hash(settings, settings->spirv_val, (String8){0});
+    if (!ok) { string_print(S8("GPU_VERSION_FAIL {S8}: expected SPIRV-Tools v2025.1 or v2026.1\n"), settings->spirv_val); }
+    return ok;
+}
+
 // Require a normal nonzero exit with a diagnostic, never spawn errors, signals
 // or timeouts. The preceding positive consumption must also have succeeded.
 BUSTER_GLOBAL_LOCAL bool gpu_tools_rejected(DObservation observation)
@@ -95,7 +122,7 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_profile(GpuTools* settings, u32 profile)
     if (profile == 0 || profile == 4)
     {
         ok &= gpu_tools_version(settings, settings->dxc, S8("b106a961"));
-        if (profile == 0) { ok &= gpu_tools_version(settings, settings->spirv_val, S8("SPIRV-Tools v2025.1")); }
+        if (profile == 0) { ok &= gpu_tools_spirv_version(settings); }
         else
         {
             // dxv has no version switch. DXC reports the companion libdxil
@@ -225,6 +252,13 @@ BUSTER_GLOBAL_LOCAL u32 gpu_tools_self_test(Arena* arena)
     result.kind = D_SIGNAL; failures += gpu_tools_rejected(result);
     result.kind = D_EXIT; result.sanitizer = true; failures += gpu_tools_rejected(result);
     result.sanitizer = false; result.error = (String8){0}; failures += gpu_tools_rejected(result);
+    String8 supported_versions[] = {S8("SPIRV-Tools v2025.1 unknown hash\n"), S8("SPIRV-Tools v2026.1 unknown hash\n"),
+        S8("SPIRV-Tools v2026.1"), S8("SPIRV-Tools v2026.1\r\nTargets:\n"), S8("SPIRV-Tools v2025.1\n")};
+    String8 unsupported_versions[] = {S8(""), S8("SPIRV-Tools v2025.10\n"), S8("SPIRV-Tools v2026.10\n"),
+        S8("SPIRV-Tools v2026.1-dev\n"), S8("SPIRV-Tools v2026.2\n"), S8("SPIRV-Tools v2027.1\n"),
+        S8("not SPIRV-Tools v2026.1\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported_versions); index += 1) { failures += !gpu_tools_spirv_version_supported(supported_versions[index]); }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported_versions); index += 1) { failures += gpu_tools_spirv_version_supported(unsupported_versions[index]); }
     TpHash hash;
     char digest[65];
     tp_hash_init(&hash);

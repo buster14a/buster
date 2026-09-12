@@ -1,54 +1,50 @@
-# Reviewed Forgejo action references
+# Approved GitHub action references
 
-All `uses` values in `.forgejo/workflows/` name an explicit HTTPS origin and
-a reviewed, full lowercase commit SHA. Mutable branches/tags and arbitrary
-new revisions fail `.forgejo/scripts/check_action_pins.py`. Local actions and
-container action references require a separate policy decision before use.
+`tools/check_action_pins.py` checks every `.yml` and `.yaml` workflow under
+`.github/workflows/`. Each `uses` value must name an approved GitHub action
+path and a full lowercase commit SHA. Mutable branches/tags, unlisted paths
+and unapproved revisions fail. Local and container actions require a separate
+policy decision before use.
 
-The checker runs before the canonical gate, each matrix job and privacy-broker
-dispatch. GitHub workflow lint runs the same policy and its offline regression
-suite, so the policy remains checked during the GitHub migration. Checkout
-necessarily precedes repository-local checks; the literal pin at that trust
-boundary must itself be reviewed in the PR. This policy cannot prevent a PR
-author from changing the checker together with a workflow.
+The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
+actionlint. The checker now lives under `tools/` because the Forgejo workflows
+and their script directory were removed. Its allowlist preserves the existing
+GitHub workflow revisions; this migration does not update any action source.
 
-## Current approval
+| Action path | Approved commit | Existing release annotation |
+|---|---|---|
+| `actions/checkout` | `11bd71901bbe5b1630ceea73d27597364c9af683` | v4.2.2 |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | v4.6.2 |
+| `actions/cache/restore` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4.3.0 |
+| `actions/cache/save` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4.3.0 |
 
-`https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262`
-was already used by the privacy broker. On 2026-09-09, the upstream `v4` tag
-resolved to that exact commit (`backport fixes to releases-v4 (#2524)`). The
-repository was fetched from the named origin and its commit, `action.yml`,
-package metadata and checkout/authentication source paths were inspected.
-The action uses Node 20, accepts the server URL from the environment, and
-retains the `persist-credentials` input. All three invocations explicitly set
-that input to false. This pins the version in current use, without changing
-checkout inputs, job conditions, matrices or broker credentials.
-
-Source: [reviewed action revision](https://data.forgejo.org/actions/checkout/src/commit/11d5960a326750d5838078e36cf38b85af677262).
-The source review is scoped to checkout compatibility and the existing trust
-boundary; it is not a comprehensive audit of the bundled action dependencies.
-Native Forgejo runner execution is reported separately from offline checks.
+Checkout necessarily precedes repository-local checks; its literal pin must
+itself be reviewed in the PR. This policy cannot prevent a PR author from
+changing the checker together with a workflow.
 
 ## Updating an action
 
 1. Resolve the desired tag at its existing origin. Fetch the full commit and
-   inspect the source and bundled entry point changes from the current pin,
+   inspect source and bundled entry point changes from the current pin,
    including runtime requirements, authentication handling and post-job cleanup.
-2. Update the workflow literals and `APPROVED` in the checker together. Record
-   the origin, full commit, tag/date and relevant compatibility changes here.
-3. Run `python3 .forgejo/scripts/check_action_pins.py` and
-   `python3 tests/action_pins_test.py`. The checker must reject the old mutable
-   reference and any unreviewed SHA. Run the existing workflow/helper checks.
-4. Validate the exact submitted revision on the affected native Forgejo matrix
-   and, when enabled, the privacy broker before claiming those paths pass.
+2. Update workflow literals and `APPROVED` in the checker together. Record
+   the action path, full commit, tag/date and compatibility changes here.
+3. Run `python3 tools/check_action_pins.py`, `python3 tests/action_pins_test.py`
+   and `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml`.
+   Mutable references and unapproved SHAs must still fail.
+4. Validate the submitted revision on the affected GitHub jobs before claiming
+   those paths pass.
 
 ## Deliberately restricted workflow syntax
 
 The checker uses only Python's standard library. It scans block-style mappings,
 plain mapping keys and single-line action values, optionally quoted or followed
-by a comment. Flow sequences are limited to simple lists of plain scalars
-such as branch names or runner labels. It rejects flow mappings, YAML tags,
-explicit/quoted keys, mapping anchors/aliases/merges and multiline or expression-based action values. It
-skips literal/folded script blocks. It is not a general YAML parser; adding a
-different syntax requires a reviewed scanner change and regression. General
-GitHub workflow validation continues to use actionlint independently.
+by a comment. It supports simple scalar lists, quoted path-list entries and
+empty mappings such as `permissions: {}`. GitHub expressions are treated as
+scalar content for structural checks, but cannot select an action reference.
+
+Nonempty flow mappings, nested flow collections, YAML tags, explicit/quoted
+mapping keys, mapping anchors/aliases/merges and multiline action references
+are rejected. Literal/folded script blocks are skipped. It is not a general
+YAML parser; adding syntax requires a reviewed scanner change and regression.
+General GitHub workflow validation continues to use actionlint independently.

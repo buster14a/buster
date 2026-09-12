@@ -56,7 +56,7 @@ assert_count() {
 
 test_mobile_workflow_uses_batch_invocations() (
     set -euo pipefail
-    local workflow="$repo_root/.forgejo/workflows/ci.yml"
+    local workflow="$repo_root/.github/workflows/ci.yml"
     assert_count 1 'bash ./android/start_emulator_ci.sh start' "$workflow"
     assert_count 1 'bash ./android/start_emulator_ci.sh stop' "$workflow"
     assert_count 1 './android/test_ci.sh --all' "$workflow"
