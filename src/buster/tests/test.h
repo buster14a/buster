@@ -35,7 +35,9 @@ struct BatchTestResult
 // A prerequisite is an assertion whose failure makes the dependent test body
 // unsafe or meaningless. Use it as the condition of an if statement; the false
 // branch records the original expression once and skips the guarded body.
-#define BUSTER_REQUIRE(args, boolean) buster_test_require_arguments((args), &(result), (boolean), __LINE__, BUSTER_FUNCTION, S8(__FILE__), S8(#boolean))
+#define BUSTER_REQUIRE(args, boolean)                                                                                                                         \
+    ((boolean) ? (buster_test_require_arguments((args), &(result), true, __LINE__, BUSTER_FUNCTION, S8(__FILE__), S8(#boolean)), true)                        \
+               : (buster_test_require_arguments((args), &(result), false, __LINE__, BUSTER_FUNCTION, S8(__FILE__), S8(#boolean)), false))
 
 #define BUSTER_STRING_TEST(args, a, b)                                                                                                                         \
     do                                                                                                                                                         \
