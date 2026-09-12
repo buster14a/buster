@@ -2775,6 +2775,9 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             }
             u32 x87_top_count = 0;
             u32 x87_below_count = 0;
+            u8 expected_preserved_vector_mask = 0;
+            u8 x87_top_flags = 0;
+            u8 x87_below_flags = 0;
             for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
             {
                 MachineInlineAssemblyOperand* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
@@ -2804,6 +2807,13 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                 }
                 x87_top_count += x87_top;
                 x87_below_count += x87_below;
+                x87_top_flags |= x87_top ? operand->flags : 0;
+                x87_below_flags |= x87_below ? operand->flags : 0;
+                if (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows() &&
+                    vector && operand->physical_register >= MACHINE_X64_ZMM6 && operand->physical_register <= MACHINE_X64_ZMM7)
+                {
+                    expected_preserved_vector_mask |= (u8)(1u << (operand->physical_register - MACHINE_X64_ZMM0));
+                }
                 for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
                 {
                     MachineInlineAssemblyOperand* previous = function->inline_assembly_operands + assembly->first_operand + previous_index;
@@ -2820,8 +2830,19 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     valid = valid && !early_conflict;
                 }
             }
-            valid = valid && x87_top_count <= 1 && x87_below_count <= 1 &&
-                    (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) || x87_top_count == 1);
+            u32 preserved_vector_count = ((assembly->preserved_vector_mask >> 6) & 1u) + ((assembly->preserved_vector_mask >> 7) & 1u);
+            valid = valid && x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
+                    (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) ||
+                     (x87_top_count == 1 && x87_below_count == 0 &&
+                      (x87_top_flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) &&
+                    (!(x87_below_flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) ||
+                     instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY) &&
+                    (assembly->preserved_vector_mask & ~0xc0u) == 0 &&
+                    assembly->preserved_vector_mask == expected_preserved_vector_mask &&
+                    (!preserved_vector_count ||
+                     (assembly->preserved_vector_slot < function->stack_slot_count &&
+                      function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u));
             for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
             {
                 MachineInlineAssemblyRelocation* relocation =

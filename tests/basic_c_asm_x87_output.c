@@ -69,6 +69,19 @@ static long double asm_x87_output_fabsl(long double x)
     return x;
 }
 
+// An input-only stack operand remains live in ST(0) after the template.  The
+// closed MIR transaction must discard it even though there is no C output to
+// publish; repeating the row past the architectural stack depth makes a leak
+// observable in the output checks that follow.
+static void asm_x87_input_only_balance(void)
+{
+    for (int index = 0; index < 16; index += 1)
+    {
+        long double value = (long double)index - 8.25L;
+        __asm__("fabs" : : "t"(value));
+    }
+}
+
 // The two-position shape: a read-write output in ST(0), an input in ST(1) the
 // template reads and does not pop, and a status word read back out of AX.
 static long double asm_x87_output_fmodl(long double x, long double y)
@@ -118,6 +131,8 @@ int main(void)
 {
     int guard = 0x2b2b;
     int quotient = 0;
+
+    asm_x87_input_only_balance();
 
     check(same(asm_x87_output_sqrtl(4.0L), 2.0L));
     check(same(asm_x87_output_sqrtl(2.25L), 1.5L));
