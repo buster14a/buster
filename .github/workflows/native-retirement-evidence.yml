@@ -2,9 +2,11 @@ name: Native retirement evidence
 
 on:
   push:
-    branches: [codex/36-census-evidence-de594a5]
+    branches:
+      - codex/36-census-evidence-de594a5
   pull_request:
-    branches: [codex/36-failure-diagnostics]
+    branches:
+      - codex/36-failure-diagnostics
 
 concurrency:
   group: retirement-evidence-with-strict-v2-${{ github.ref }}
