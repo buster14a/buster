@@ -70,7 +70,8 @@ CpuModel cpu_detect_model_aarch64(void)
     {
         String8 midr_el1_string = (String8)BUSTER_ARRAY_TO_SLICE(buffer);
         midr_el1_string.length = BUSTER_AARCH64_BUFFER_LENGTH;
-        file_size = os_file_read(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string), BUSTER_AARCH64_BUFFER_LENGTH);
+        OsFileReadResult read = os_file_read_exact(fd, BUSTER_SLICE_TO_BYTE_SLICE(midr_el1_string));
+        file_size = read.status == OS_FILE_READ_OK ? read.transferred : 0;
         buffer[file_size] = 0;
         os_file_close(fd);
     }

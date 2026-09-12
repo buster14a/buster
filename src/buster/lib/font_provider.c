@@ -79,7 +79,8 @@ BUSTER_GLOBAL_LOCAL bool font_path_is_usable(String8 path)
             OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
             if (file)
             {
-                result = os_file_get_size(file) != 0;
+                FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1});
+                result = stats.valid && stats.size != 0;
                 os_file_close(file);
             }
         }
