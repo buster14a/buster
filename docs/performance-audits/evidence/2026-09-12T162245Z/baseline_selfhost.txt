@@ -1,0 +1,7 @@
+SELF_HOST fixed_point bytes=38404448 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+Self-host stage 1 took 3.429091 seconds (3429091000 nanoseconds)
+Self-host stage 2 took 12.481499 seconds (12481499000 nanoseconds)
+Self-host stage 2 benchmark took 0.082073 seconds (82073000 nanoseconds)
+Self-host machine stage took 17.055695 seconds (17055695000 nanoseconds)
+Self-host machine stage benchmark took 0.121776 seconds (121776000 nanoseconds)
+Self-host canonical stage took 15.825557 seconds (15825557000 nanoseconds)

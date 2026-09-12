@@ -6,6 +6,8 @@
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/lib/hash.h>
+#include <buster/lib/time.h>
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
 {
@@ -3107,6 +3109,193 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
 }
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
+// Generated DSOs and real native objects complement the synthetic linker
+// replay. Library construction is outside the timed driver/link interval.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool benchmark = os_get_environment_variable(S8("BUSTER_ELF_DATA_BENCH")).length != 0;
+    String8 saved_directory = os_get_environment_variable(S8("BUSTER_ELF_DATA_OUTPUT"));
+    u32 counts[] = {4, 128, 256, 512, 1024, 2048, 4096};
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        for (u32 population = 0; population < (benchmark ? BUSTER_ARRAY_LENGTH(counts) : 1u); population += 1)
+        {
+            u32 count = counts[population];
+            TemporalArena fixture = scratch_begin(&arguments->arena, 1);
+            Arena* arena = fixture.arena;
+            String8 root = saved_directory.length ? string_duplicate_arena(arena, saved_directory, true)
+                                                   : buster_test_temporary_path(arena, S8("buster-elf-data"), S8(""));
+            os_make_directory(root);
+            String8 directory = string_format_z(arena, S8("{S8}/shape-{u32}-count-{u32}"), root, shape, count);
+            os_make_directory(directory);
+            String8 library_source = string_format_z(arena, S8("{S8}/library.c"), directory);
+            String8 main_source = string_format_z(arena, S8("{S8}/main.c"), directory);
+            String8 library_path = string_format_z(arena, S8("{S8}/libdataprobe.so"), directory);
+            String8 object_path = string_format_z(arena, S8("{S8}/main.o"), directory);
+            String8 buster_path = string_format_z(arena, S8("{S8}/buster"), directory);
+            String8 reference_path = string_format_z(arena, S8("{S8}/reference"), directory);
+            String8* library_parts = arena_allocate(arena, String8, count + 2);
+            String8* main_parts = arena_allocate(arena, String8, (u64)count * 2 + 2);
+            u32 library_part_count = 0;
+            u32 main_part_count = 0;
+            if (shape) library_parts[library_part_count++] = S8("long data_0 = 7; long read_0(void) { return data_0; }\n");
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+                if (shape)
+                {
+                    library_parts[library_part_count++] = string_format(arena,
+                        S8("extern long alias_{u32} __attribute__((alias(\"data_0\")));\n"), entry);
+                    main_parts[main_part_count++] = string_format(arena, S8("extern long alias_{u32};\n"), entry);
+                }
+                else
+                {
+                    library_parts[library_part_count++] = string_format(arena,
+                        S8("long data_{u32} = 7; extern long pair_{u32} __attribute__((alias(\"data_{u32}\"))); "
+                           "extern long alias_{u32} __attribute__((alias(\"data_{u32}\"))); "
+                           "long read_{u32}(void) {{ return data_{u32}; }\n"), entry, entry, entry, entry, entry, entry, entry);
+                    main_parts[main_part_count++] = string_format(arena,
+                        S8("extern long data_{u32}, pair_{u32}; extern long read_{u32}(void); long global_{u32};\n"), entry, entry, entry, entry);
+                }
+            }
+            main_parts[main_part_count++] = shape ? S8("extern long data_0; extern long read_0(void); int main(void) { long *volatile left; long *volatile right;\n") : S8("int main(void) { long *volatile left; long *volatile right;\n");
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+#if BUSTER_CPU_ARCH_AARCH64
+                // Materialize addresses separately from loads/stores so this
+                // copy-relocation fixture uses the supported page/add pairs,
+                // without requiring GOT or LDST64 low-page relocations.
+                main_parts[main_part_count++] = shape
+                    ? string_format(arena, S8("left = &alias_{u32}; right = &data_0; if (left != right || *left != {u32}) return 1; (*left)++; "
+                                             "if (read_0() != {u32}) return 2;\n"), entry, 7 + entry, 8 + entry)
+                    : string_format(arena, S8("left = &pair_{u32}; right = &data_{u32}; if (left != right || *right != 7) return 1; (*left)++; "
+                                             "if (read_{u32}() != 8) return 2;\n"), entry, entry, entry);
+#else
+                main_parts[main_part_count++] = shape
+                    ? string_format(arena, S8("left = &alias_{u32}; right = &data_0; if (left != right || alias_{u32} != {u32}) return 1; alias_{u32}++; "
+                                             "if (read_0() != {u32}) return 2;\n"), entry, entry, 7 + entry, entry, 8 + entry)
+                    : string_format(arena, S8("left = &pair_{u32}; right = &data_{u32}; if (left != right || data_{u32} != 7) return 1; pair_{u32}++; "
+                                             "if (read_{u32}() != 8) return 2;\n"), entry, entry, entry, entry, entry);
+#endif
+            }
+            main_parts[main_part_count++] = S8("return 0; }\n");
+            String8 library_text = string_join_arena(arena, (SliceString8){.pointer = library_parts, .length = library_part_count}, false);
+            String8 main_text = string_join_arena(arena, (SliceString8){.pointer = main_parts, .length = main_part_count}, false);
+            bool prepared = file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(library_text)) &&
+                            file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(main_text));
+            BUSTER_TEST(arguments, prepared);
+            ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .use_process_environment = true};
+            for (u32 step = 0; prepared && step < 3; step += 1)
+            {
+                String8 command[16] = {0};
+                u64 command_count = 0;
+                command[command_count++] = S8(BUSTER_HOST_C_COMPILER);
+                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) command[command_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                command[command_count++] = S8("-g0");
+                command[command_count++] = S8("-O0");
+                if (step == 0)
+                {
+                    command[command_count++] = S8("-fPIC");
+                    command[command_count++] = S8("-shared");
+                    command[command_count++] = library_source;
+                }
+                else if (step == 1)
+                {
+#if BUSTER_CPU_ARCH_AARCH64
+                    command[command_count++] = S8("-fno-pic");
+                    command[command_count++] = S8("-fno-pie");
+#else
+                    // PIE address-taking uses PC-relative relocations, including
+                    // the volatile pointer comparison that prevents the host
+                    // compiler from folding two extern names as unequal.
+                    command[command_count++] = S8("-fPIE");
+#endif
+                    command[command_count++] = S8("-c");
+                    command[command_count++] = main_source;
+                }
+                else
+                {
+#if BUSTER_CPU_ARCH_AARCH64
+                    // Read the reference's alias addresses directly from the
+                    // DSO, independently of system COPY-slot allocation.
+                    command[command_count++] = S8("-fPIC");
+                    command[command_count++] = S8("-pie");
+                    command[command_count++] = main_source;
+#else
+                    command[command_count++] = S8("-no-pie");
+                    command[command_count++] = object_path;
+#endif
+                    command[command_count++] = S8("-L");
+                    command[command_count++] = directory;
+                    command[command_count++] = S8("-ldataprobe");
+                }
+                command[command_count++] = S8("-o");
+                command[command_count++] = step == 0 ? library_path : step == 1 ? object_path : reference_path;
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = command_count},
+                    (SliceString8){0}, (SliceString8){0}, capture);
+                prepared = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST(arguments, prepared);
+            }
+            Arena* link_arena = arena_create((ArenaCreation){0});
+            u64 first_hash = 0;
+            for (u32 iteration = 0; prepared && iteration < (benchmark ? 8u : 1u); iteration += 1)
+            {
+                String8 command[] = {S8("-g0"), S8("-L"), directory, S8("-ldataprobe"), object_path, S8("-o"), buster_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(link_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                TimeDataType start = timestamp_take();
+                CompilerDriverResult linked = compiler_driver_execute_invocation(link_arena, invocation);
+                u64 ns = timestamp_ns_between(start, timestamp_take());
+                BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    string_print(S8("ELF_DATA_LINK_ERROR shape={u32} count={u32} diagnostic={S8}\n"), shape, count, linked.diagnostic);
+                }
+                prepared = linked.error == COMPILER_DRIVER_ERROR_NONE;
+                if (prepared)
+                {
+                    FileMapRead image = file_map_read(link_arena, buster_path, (FileReadOptions){0});
+                    u64 hash = buster_hash_64(image.bytes.pointer, image.bytes.length);
+                    if (!iteration) first_hash = hash;
+                    BUSTER_TEST(arguments, image.bytes.length && hash == first_hash);
+                    file_map_unmap(image);
+                    if (benchmark && iteration)
+                    {
+                        string_print(S8("BENCH_ELF_DSO shape={u32} count={u32} iteration={u32} ns={u64} retained={u64} hash={u64} directory={S8}\n"),
+                            shape, count, iteration, ns, link_arena->position - arena_minimum_position, hash, directory);
+                    }
+                }
+                arena_reset_to_start(link_arena);
+            }
+            arena_destroy(link_arena, 1);
+            for (u32 variant = 0; prepared && variant < 2; variant += 1)
+            {
+                String8 command[] = {variant ? reference_path : buster_path};
+                String8 keys[] = {S8("LD_LIBRARY_PATH")};
+                String8 values[] = {directory};
+                ProcessSpawnOptions run = capture;
+                run.use_process_environment = false;
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), run);
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+                    BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+                    if (wait.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice error = wait.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("ELF_DATA_RUN_ERROR shape={u32} count={u32} reference={u32} status={u32:x} stderr={S8}\n"),
+                            shape, count, variant, wait.platform_status, (String8){.pointer = (char8*)error.pointer, .length = error.length});
+                    }
+                }
+            }
+            scratch_end(fixture);
+        }
+    }
+    return result;
+}
+
 // Real object/archive and shared-library boundaries: execute the linked
 // artifacts so valid-looking section tables cannot hide placement or startup
 // errors. The host compiler builds only the reference and the shared library.
@@ -3719,109 +3908,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
 
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = compiler_driver_test_include_population(arguments);
-    UnitTestResult archives = compiler_driver_archive_tests(arguments);
-    result.test_count += archives.test_count;
-    result.succeeded_test_count += archives.succeeded_test_count;
-    UnitTestResult fast = compiler_driver_test_fast(arguments);
-    result.test_count += fast.test_count;
-    result.succeeded_test_count += fast.succeeded_test_count;
-    UnitTestResult validation_values = compiler_driver_test_validation_values(arguments);
-    result.test_count += validation_values.test_count;
-    result.succeeded_test_count += validation_values.succeeded_test_count;
-    UnitTestResult pic_policy = compiler_driver_test_pic_argument_policy(arguments);
-    result.test_count += pic_policy.test_count;
-    result.succeeded_test_count += pic_policy.succeeded_test_count;
+    UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
-    UnitTestResult mach_unwind = compiler_driver_test_mach_unwind_link(arguments);
-    result.test_count += mach_unwind.test_count;
-    result.succeeded_test_count += mach_unwind.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
 #endif
-    UnitTestResult bootstrap = compiler_driver_test_bootstrap_trace(arguments);
-    result.test_count += bootstrap.test_count;
-    result.succeeded_test_count += bootstrap.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bootstrap_trace);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
-    UnitTestResult parameter_alignment = compiler_driver_test_parameter_alignment(arguments);
-    result.test_count += parameter_alignment.test_count;
-    result.succeeded_test_count += parameter_alignment.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_alignment);
 #endif
-    UnitTestResult vla_row_address = compiler_driver_test_vla_row_address(arguments);
-    result.test_count += vla_row_address.test_count;
-    result.succeeded_test_count += vla_row_address.succeeded_test_count;
-    UnitTestResult dynamic_stack = compiler_driver_test_x64_dynamic_stack(arguments);
-    result.test_count += dynamic_stack.test_count;
-    result.succeeded_test_count += dynamic_stack.succeeded_test_count;
-    UnitTestResult i128_divide = compiler_driver_test_native_i128_divide(arguments);
-    result.test_count += i128_divide.test_count;
-    result.succeeded_test_count += i128_divide.succeeded_test_count;
-    UnitTestResult i128_block_parameters = compiler_driver_test_i128_block_parameters(arguments);
-    result.test_count += i128_block_parameters.test_count;
-    result.succeeded_test_count += i128_block_parameters.succeeded_test_count;
-    UnitTestResult float_to_f128 = compiler_driver_test_aarch64_float_to_f128(arguments);
-    result.test_count += float_to_f128.test_count;
-    result.succeeded_test_count += float_to_f128.succeeded_test_count;
-    UnitTestResult i128_to_float = compiler_driver_test_aarch64_i128_to_float(arguments);
-    result.test_count += i128_to_float.test_count;
-    result.succeeded_test_count += i128_to_float.succeeded_test_count;
-    UnitTestResult wasm_integers = compiler_driver_test_wasm_integers(arguments);
-    result.test_count += wasm_integers.test_count;
-    result.succeeded_test_count += wasm_integers.succeeded_test_count;
-    UnitTestResult float_to_i128 = compiler_driver_test_aarch64_float_to_i128(arguments);
-    result.test_count += float_to_i128.test_count;
-    result.succeeded_test_count += float_to_i128.succeeded_test_count;
-    UnitTestResult native_tls = compiler_driver_test_native_tls(arguments);
-    result.test_count += native_tls.test_count;
-    result.succeeded_test_count += native_tls.succeeded_test_count;
-    UnitTestResult complement = compiler_driver_test_x86_64_i128_complement(arguments);
-    result.test_count += complement.test_count;
-    result.succeeded_test_count += complement.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_row_address);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_dynamic_stack);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_i128_divide);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x86_64_i128_complement);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
-    UnitTestResult contention = compiler_driver_test_atomic_pair_contention(arguments);
-    result.test_count += contention.test_count;
-    result.succeeded_test_count += contention.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_atomic_pair_contention);
 #endif
-    UnitTestResult fallback = compiler_driver_test_machine_fallback(arguments);
-    UnitTestResult many_arguments = compiler_driver_test_many_native_arguments(arguments);
-    result.test_count += many_arguments.test_count;
-    result.succeeded_test_count += many_arguments.succeeded_test_count;
-    UnitTestResult dynamic_calls = compiler_driver_test_aarch64_dynamic_calls(arguments);
-    result.test_count += dynamic_calls.test_count;
-    result.succeeded_test_count += dynamic_calls.succeeded_test_count;
-    UnitTestResult platform_variadic = compiler_driver_test_aarch64_platform_variadic(arguments);
-    result.test_count += platform_variadic.test_count;
-    result.succeeded_test_count += platform_variadic.succeeded_test_count;
-    result.test_count += fallback.test_count;
-    result.succeeded_test_count += fallback.succeeded_test_count;
-    UnitTestResult frame_vectors = compiler_driver_test_native_frame_vectors(arguments);
-    result.succeeded_test_count += frame_vectors.succeeded_test_count;
-    result.test_count += frame_vectors.test_count;
-    UnitTestResult sysv_sseup = compiler_driver_test_sysv_sseup(arguments);
-    result.test_count += sysv_sseup.test_count;
-    result.succeeded_test_count += sysv_sseup.succeeded_test_count;
-    UnitTestResult sysv_aligned_calls = compiler_driver_test_sysv_aligned_calls(arguments);
-    result.test_count += sysv_aligned_calls.test_count;
-    result.succeeded_test_count += sysv_aligned_calls.succeeded_test_count;
-    UnitTestResult windows_large_frame = compiler_driver_test_windows_large_frame(arguments);
-    result.test_count += windows_large_frame.test_count;
-    result.succeeded_test_count += windows_large_frame.succeeded_test_count;
-    UnitTestResult windows_arm64_unwind = compiler_driver_test_windows_arm64_unwind(arguments);
-    result.test_count += windows_arm64_unwind.test_count;
-    result.succeeded_test_count += windows_arm64_unwind.succeeded_test_count;
-    UnitTestResult dwarf5 = compiler_driver_test_dwarf5_objects(arguments);
-    result.test_count += dwarf5.test_count;
-    result.succeeded_test_count += dwarf5.succeeded_test_count;
-    UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
-    result.test_count += codeview_limit.test_count;
-    result.succeeded_test_count += codeview_limit.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_machine_fallback);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_many_native_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dwarf5_objects);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
-    UnitTestResult elf_boundaries = compiler_driver_test_elf_link_boundaries(arguments);
-    result.succeeded_test_count += elf_boundaries.succeeded_test_count;
-    result.test_count += elf_boundaries.test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);
 #endif
 
-    UnitTestResult batches = compiler_driver_test_unit_batches(arguments);
-    result.test_count += batches.test_count;
-    result.succeeded_test_count += batches.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
+
+    TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read
@@ -3869,6 +4000,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 
     // Feed the emitted bitcode to an independent LLVM consumer. A header or
     // same-writer comparison cannot detect i1 true being serialized as false.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("llvm_integer_output"), false);
     String8 llvm_integer_output = buster_test_temporary_path(arguments->arena, S8("buster-llvm-integer-constants"), S8(".bc"));
     String8 llvm_integer_command[] = {
         S8("-emit-llvm"), S8("-c"), S8("-o"), llvm_integer_output, S8("tests/basic_c_llvm_integer_constants.c"),
@@ -3918,6 +4051,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_FREESTANDING,
     };
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("wasm64_output"), false);
     String8 wasm64_output = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasm64"), S8(".wasm"));
     String8 wasm64_command_line[] = {
         S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_output, S8("tests/basic_c_wasm64.c"),
@@ -3939,6 +4074,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Keep over-aligned C types in the ordinary driver suite. When Node is
     // available, validate AND execute the emitted memory64 module; a header
     // check alone cannot detect an illegal memory-argument alignment hint.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("wasm64_alignment_output"), false);
     String8 wasm64_alignment_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-alignment"), S8(".wasm"));
     String8 wasm64_alignment_command[] = {
         S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_alignment_output,
@@ -4007,6 +4144,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 
     // Each scalar opcode is checked independently by a separate engine.
     // In particular, the wrong i64.ge_u byte can make the entire module invalid.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("wasm64_integer_output"), false);
     String8 wasm64_integer_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-integer-opcodes"), S8(".wasm"));
     String8 wasm64_integer_command[] = {
         S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_integer_output,
@@ -4834,6 +4973,95 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, preprocessor_error.error == COMPILER_DRIVER_ERROR_TOKENIZE);
     BUSTER_TEST(arguments, preprocessor_error.tokenizer_error_count == 1);
     BUSTER_TEST(arguments, string_first_sequence(preprocessor_error.diagnostic, S8("expanded driver error")) != BUSTER_STRING_NO_MATCH);
+    // Source UTF-8 errors fail preprocessing, syntax checks and object output.
+    // Keep raw bytes in generated files so host compiler decoding cannot alter
+    // the regression. Includes must name the physical header, not its caller.
+    {
+        String8 malformed[] = {
+            S8("\x80"), S8("\xFF"), S8("\xC0\xAF"), S8("\xED\xA0\x80"), S8("\xF4\x90\x80\x80"), S8("\xE2\x82"),
+        };
+        String8 operations[] = {S8("-E"), S8("-fsyntax-only"), S8("-c")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+        {
+            for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+            {
+                TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+                Arena* utf8_arena = utf8_temporary.arena;
+                String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8"), S8(".c"));
+                String8 output = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8"), S8(".o"));
+                String8 source = string_format(utf8_arena, S8("// heading\r\nint pre\\\r\nfix{S8};\n"), malformed[index]);
+                BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+                String8 sentinel = S8("existing output must survive a source error");
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                String8 utf8_command_line[] = {operations[operation], S8("-std=gnu23"), S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+                BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+                BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+                if (refused.diagnostic_count)
+                {
+                    BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("c.invalid-utf8"));
+                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.offset == 25);
+                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.line == 3);
+                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.column == 4);
+                }
+                BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
+                    string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), input)) != BUSTER_STRING_NO_MATCH);
+                ByteSlice retained = file_read(utf8_arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), sentinel);
+                scratch_end(utf8_temporary);
+            }
+        }
+        String8 contexts[] = {
+            S8("#if 0\nint \xFF;\n#endif\n"),
+            S8("#define unused \xFF\n"),
+            S8("#define unused 1.\xFF\n"),
+            S8("#define Q(x) #x\nchar* value = Q(\xFF);\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(contexts); index += 1)
+        {
+            TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+            Arena* utf8_arena = utf8_temporary.arena;
+            String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-context"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(contexts[index])));
+            String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+            BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("invalid UTF-8 sequence")) != BUSTER_STRING_NO_MATCH);
+            scratch_end(utf8_temporary);
+        }
+        TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* utf8_arena = utf8_temporary.arena;
+        String8 header = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-header"), S8(".h"));
+        String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-include"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("// heading\r\nint pre\\\r\nfix\xFF;\n"))));
+        // Both files share a directory. Windows' temporary root is relative;
+        // including that whole path would repeat it relative to the input.
+        u64 header_name_offset = 0;
+        for (u64 index = 0; index < header.length; index += 1)
+        {
+            if (header.pointer[index] == '/' || header.pointer[index] == '\\') header_name_offset = index + 1;
+        }
+        String8 header_name = {header.pointer + header_name_offset, header.length - header_name_offset};
+        String8 source = string_format(utf8_arena, S8("#include \"{S8}\"\n"), header_name);
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+        BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+        BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+        if (refused.diagnostic_count)
+        {
+            BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("c.invalid-utf8"));
+        }
+        BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
+            string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), header)) != BUSTER_STRING_NO_MATCH);
+        scratch_end(utf8_temporary);
+    }
     String8 warning_multi_command_line[] = {
         S8("-fsyntax-only"),
         S8("tests/basic_c_preprocessor_warning.c"),
@@ -4907,6 +5135,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, assembly_multi.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(assembly_multi.output, S8("main:\n")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(assembly_multi.output, S8("add_values:\n")) != BUSTER_STRING_NO_MATCH);
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("assembly_output_path"), false);
     String8 assembly_output_path = buster_test_temporary_path(arguments->arena, S8("buster-c-assembly"), S8(".s"));
     String8 assembly_file_command_line[] = {
         S8("-S"),
@@ -4923,6 +5153,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("retired_buster_path"), false);
     String8 retired_buster_path = buster_test_temporary_path(arguments->arena, S8("retired-buster-input"), S8(".bbb"));
     BUSTER_TEST(arguments, file_write(retired_buster_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("retired language input\n"))));
     String8 retired_buster_command_line[] = {
@@ -5516,10 +5748,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     scratch_end(c_object_temporary);
 #endif
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
-    UnitTestResult allocation_lifetimes = compiler_driver_allocation_lifetimes(arguments);
-    result.test_count += allocation_lifetimes.test_count;
-    result.succeeded_test_count += allocation_lifetimes.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_allocation_lifetimes);
 
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_executable_path"), false);
     String8 c_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-driver"),
 #if BUSTER_WINDOWS
                                                            S8(".exe"));
@@ -5564,6 +5796,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_static_local_executable_path"), false);
     String8 c_static_local_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-local"),
 #if BUSTER_WINDOWS
                                                                          S8(".exe"));
@@ -5704,6 +5938,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_static_aggregate_executable_path"), false);
     String8 c_static_aggregate_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-aggregate-member"),
 #if BUSTER_WINDOWS
                                                                               S8(".exe"));
@@ -5737,6 +5973,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_static_aggregate_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_auto_type_executable_path"), false);
     String8 c_auto_type_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-auto-type"),
 #if BUSTER_WINDOWS
                                                                       S8(".exe"));
@@ -5769,6 +6007,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_auto_type_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_cleanup_executable_path"), false);
     String8 c_cleanup_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cleanup"),
 #if BUSTER_WINDOWS
                                                                     S8(".exe"));
@@ -5800,6 +6040,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_cleanup_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_case_range_executable_path"), false);
     String8 c_case_range_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-case-range"),
 #if BUSTER_WINDOWS
                                                                        S8(".exe"));
@@ -5838,6 +6080,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Only running the program says whether the dispatch immediates and the
     // controlling value speak the same type, so the fixture returns a
     // per-shape code rather than being inspected as IR.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_switch_case_label_executable_path"), false);
     String8 c_switch_case_label_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-switch-case-label"),
 #if BUSTER_WINDOWS
                                                                               S8(".exe"));
@@ -5876,6 +6120,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // relocates against another unit -- are checked by the link succeeding and
     // by the run finding the pointers, so this fixture is compiled from two
     // sources and executed rather than inspected.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_doom_shapes_executable_path"), false);
     String8 c_doom_shapes_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-doom-shapes"),
 #if BUSTER_WINDOWS
                                                                         S8(".exe"));
@@ -5911,6 +6157,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Compiling the wide-argument unit for every target only says the code
     // buffer held it. Running it on the host says the caller and the callee
     // agree on where each of those arguments went.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_wide_argument_executable_path"), false);
     String8 c_wide_argument_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-wide-argument"),
 #if BUSTER_WINDOWS
                                                                           S8(".exe"));
@@ -6002,6 +6250,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // rather than a reference: the host model decides how many of them one
     // vector takes, and running it is what says the caller and the callee
     // counted the same way. It exits 1, 2 or 3 to name which shape disagreed.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_wide_vector_executable_path"), false);
     String8 c_wide_vector_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-wide-vector-argument"),
 #if BUSTER_WINDOWS
                                                                         S8(".exe"));
@@ -6039,6 +6289,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // the fixture was written for -- the wine block below runs it at three
     // models -- but every convention has an answer here worth pinning, and the
     // exit code names which family disagreed.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_narrow_abi_executable_path"), false);
     String8 c_narrow_abi_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-win64-narrow-abi"),
 #if BUSTER_WINDOWS
                                                                       S8(".exe"));
@@ -6073,6 +6325,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // sizeof over an inline aggregate definition must be rejected, never
     // folded from the expression-type prediction's int guess (see the
     // fixture's header); the assertion is only that no object is produced.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_sizeof_anonymous_path"), false);
     String8 c_sizeof_anonymous_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous"), S8(""));
     String8 c_sizeof_anonymous_command_line[] = {
         S8("-o"),
@@ -6231,6 +6485,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(c_wide_model_temporary);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_infinite_loop_executable_path"), false);
     String8 c_infinite_loop_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-infinite-loop"),
 #if BUSTER_WINDOWS
                                                                           S8(".exe"));
@@ -6263,6 +6519,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_infinite_loop_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_artifact_executable_path"), false);
     String8 c_artifact_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-frontend-artifacts"),
 #if BUSTER_WINDOWS
                                                                      S8(".exe"));
@@ -6501,6 +6759,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #if BUSTER_LINUX
     // -g must produce loadable executables that carry DWARF line and info
     // sections resolvable back to source lines.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_debug_path"), false);
     String8 c_debug_path = buster_test_temporary_path(arguments->arena, S8("buster-c-debug"), S8(""));
     String8 c_debug_command_line[] = {
         S8("-g"),
@@ -6540,6 +6800,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("string_concat_path"), false);
     String8 string_concat_path = buster_test_temporary_path(arguments->arena, S8("buster-c-string-concat"),
 #if BUSTER_WINDOWS
                                                             S8(".exe"));
@@ -6575,6 +6837,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // fixture's expectations are byte comparisons against what Clang and GCC
     // produce for the same source; it returns the number of the case that
     // disagreed.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("stringify_spacing_path"), false);
     String8 stringify_spacing_path = buster_test_temporary_path(arguments->arena, S8("buster-c-stringify-spacing"),
 #if BUSTER_WINDOWS
                                                                 S8(".exe"));
@@ -6606,6 +6870,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, stringify_spacing_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("nullptr_path"), false);
     String8 nullptr_path = buster_test_temporary_path(arguments->arena, S8("buster-c-nullptr"),
 #if BUSTER_WINDOWS
                                                       S8(".exe"));
@@ -6674,6 +6940,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(constexpr_temporary);
     }
 #if BUSTER_LINUX
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_dynamic_library_path"), false);
     String8 c_dynamic_library_path = buster_test_temporary_path(arguments->arena, S8("buster-c-dynamic-library"), S8(""));
     String8 c_dynamic_library_command_line[] = {
         S8("-o"),
@@ -6708,6 +6976,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // reads the failed link as the library not existing; a driver that
     // "succeeds" poisons LIBS for the rest of the configure run, and every
     // runtime probe after it exits 127 loading libsocket.so.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_missing_library_path"), false);
     String8 c_missing_library_path = buster_test_temporary_path(arguments->arena, S8("buster-c-missing-library"), S8(""));
     String8 c_missing_library_command_line[] = {
         S8("-o"),
@@ -6724,9 +6994,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // a .dynsym entry the loader faults on.  This is the AC_CHECK_FUNC shape
     // -- `char fdwalk(); return fdwalk();` -- that made CPython's configure
     // find fdwalk, fork1, plock, rtpspawn and _getpty on Linux.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_undefined_reference_source_path"), false);
     String8 c_undefined_reference_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-undefined-reference"), S8(".c"));
     BUSTER_TEST(arguments, file_write(c_undefined_reference_source_path,
                                       BUSTER_SLICE_TO_BYTE_SLICE(S8("char buster_no_such_function();\nint main(void) { return buster_no_such_function(); }\n"))));
+    // The source pathname above remains live through parsing this invocation.
     String8 c_undefined_reference_path = buster_test_temporary_path(arguments->arena, S8("buster-c-undefined-reference"), S8(""));
     String8 c_undefined_reference_command_line[] = {
         S8("-o"),
@@ -6747,6 +7020,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A hosted dynamic link must also resolve an imported function used as a
     // data initializer.  This is the relocation shape cJSON uses for its
     // global allocator hooks (R_X86_64_64 -> the generated PLT entry).
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_function_pointer_path"), false);
     String8 c_function_pointer_path = buster_test_temporary_path(arguments->arena, S8("buster-c-function-pointer"), S8(""));
     String8 c_function_pointer_command_line[] = {
         S8("-o"), c_function_pointer_path, S8("tests/basic_c_function_pointer.c"),
@@ -6854,6 +7129,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // The <float.h> predefine vocabulary, pinned as static initializers and
     // compared against literal spellings so a predefine folding to the wrong
     // bits fails at run time rather than compiling quietly.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_limits_path"), false);
     String8 c_float_limits_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-limits"),
 #if BUSTER_WINDOWS
                                                              S8(".exe"));
@@ -6887,6 +7164,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // `__typeof__` over a member read through a cast base -- CPython's
     // Py_SETREF writes `_Py_TYPEOF(((propertyobject *) new)->prop_name)` --
     // with the swap's answers checked.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_typeof_cast_member_path"), false);
     String8 c_typeof_cast_member_path = buster_test_temporary_path(arguments->arena, S8("buster-c-typeof-cast-member"),
 #if BUSTER_WINDOWS
                                                                    S8(".exe"));
@@ -6921,6 +7200,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // `Py_TYPE(self)->tp_free(self)`, how CPython frees every object -- with
     // the answers checked so a callee read off the wrong base returns the
     // wrong number rather than compiling quietly.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_call_member_call_path"), false);
     String8 c_call_member_call_path = buster_test_temporary_path(arguments->arena, S8("buster-c-call-member-call"),
 #if BUSTER_WINDOWS
                                                                  S8(".exe"));
@@ -6954,6 +7235,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // C11 6.7.6.3p8: a parameter declared with function type adjusts to a
     // pointer to that function, in both spellings.  CPython's pegen passes
     // its grammar rules as `RES_TYPE (func)(Parser *)`.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_function_type_parameter_path"), false);
     String8 c_function_type_parameter_path = buster_test_temporary_path(arguments->arena, S8("buster-c-function-type-parameter"),
 #if BUSTER_WINDOWS
                                                                         S8(".exe"));
@@ -6990,6 +7273,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // closes.  Sizes are asserted in every direction, so a resolver that
     // aliases tags by name across scopes fails at run time rather than
     // linking a wrong layout silently.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_block_scope_tag_path"), false);
     String8 c_block_scope_tag_path = buster_test_temporary_path(arguments->arena, S8("buster-c-block-scope-tag"),
 #if BUSTER_WINDOWS
                                                                 S8(".exe"));
@@ -7025,6 +7310,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // declarator after the list, sizes asserted so a parse that skips the
     // list without applying it fails too.  clang's xmmintrin.h wraps its
     // unaligned loads in exactly this shape inside every intrinsic body.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_local_suffix_attribute_path"), false);
     String8 c_local_suffix_attribute_path = buster_test_temporary_path(arguments->arena, S8("buster-c-local-suffix-attribute"),
 #if BUSTER_WINDOWS
                                                                        S8(".exe"));
@@ -7060,6 +7347,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // are placed with no paste at all.  A real paste of `,` against the
     // first argument token refused every non-empty call, which is how
     // CPython's Parser/pegen.c stopped compiling.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_comma_paste_path"), false);
     String8 c_comma_paste_path = buster_test_temporary_path(arguments->arena, S8("buster-c-variadic-comma-paste"),
 #if BUSTER_WINDOWS
                                                             S8(".exe"));
@@ -7090,6 +7379,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_comma_paste_spawn).result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_atomic_path"), false);
     String8 c_atomic_path = buster_test_temporary_path(arguments->arena, S8("buster-c-atomic"),
 #if BUSTER_WINDOWS
                                                        S8(".exe"));
@@ -7203,6 +7494,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     scratch_end(c_stdatomic_temporary);
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_generic_path"), false);
     String8 c_generic_path = buster_test_temporary_path(arguments->arena, S8("buster-c-generic"),
 #if BUSTER_WINDOWS
                                                         S8(".exe"));
@@ -7233,6 +7526,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_generic_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_alignas_path"), false);
     String8 c_alignas_path = buster_test_temporary_path(arguments->arena, S8("buster-c-alignas"),
 #if BUSTER_WINDOWS
                                                         S8(".exe"));
@@ -7263,6 +7558,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_alignas_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_declarator_list_path"), false);
     String8 c_declarator_list_path = buster_test_temporary_path(arguments->arena, S8("buster-c-declarator-list"),
 #if BUSTER_WINDOWS
                                                                 S8(".exe"));
@@ -7294,6 +7591,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_declarator_list_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vla_path"), false);
     String8 c_vla_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vla"),
 #if BUSTER_WINDOWS
                                                     S8(".exe"));
@@ -7349,6 +7648,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(c_vla_windows_temporary);
     }
 #endif
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_aggregate_path"), false);
     String8 c_aggregate_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aggregate"),
 #if BUSTER_WINDOWS
                                                           S8(".exe"));
@@ -7388,6 +7689,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_aggregate_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_labels_path"), false);
     String8 c_labels_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels"),
 #if BUSTER_WINDOWS
                                                        S8(".exe"));
@@ -7421,6 +7724,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A zeroed label-table slot must remain a non-label value.  The runtime
     // dispatch therefore traps on the selector-0 path instead of treating a
     // sibling label as an over-approximation of the overwritten element.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_invalid_labels_path"), false);
     String8 c_invalid_labels_path = buster_test_temporary_path(arguments->arena, S8("buster-c-invalid-labels"),
 #if BUSTER_WINDOWS
                                                                 S8(".exe"));
@@ -7450,6 +7755,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // CPython.  The fixture keeps the valid dot and arrow spellings beside
     // the missing one, so a diagnostic that reached past the missing name
     // changes the count here rather than passing.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_sizeof_missing_member_path"), false);
     String8 c_sizeof_missing_member_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-missing-member"), S8(".o"));
     String8 c_sizeof_missing_member_command_line[] = {
         S8("-c"),
@@ -7469,6 +7776,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // required, which autoconf's AC_CHECK_TYPE compiles and requires to
     // fail.  The fixture keeps the one-pair type form and a many-pair
     // expression form beside the refused shape.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_sizeof_paren_type_path"), false);
     String8 c_sizeof_paren_type_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-paren-type"), S8(".o"));
     String8 c_sizeof_paren_type_command_line[] = {
         S8("-c"),
@@ -7494,6 +7803,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // legal, so a diagnostic that reached too far fails this test rather than
     // passing it.  One report is issued per aggregate, so the two rejected
     // definitions are two diagnostics and the first is the one reported.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_invalid_bit_field_width_path"), false);
     String8 c_invalid_bit_field_width_path = buster_test_temporary_path(arguments->arena, S8("buster-c-invalid-bit-field-width"),
 #if BUSTER_WINDOWS
                                                                         S8(".exe"));
@@ -7514,6 +7825,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                            c_invalid_bit_field_width.analysis_diagnostic_count == 2 && !c_invalid_bit_field_width.has_object);
     BUSTER_TEST(arguments, string_starts_with_sequence(c_invalid_bit_field_width.diagnostic,
                                                        S8("tests/basic_c_invalid_bit_field_width.c:17:9: named bit-field 'b' has zero width")));
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_labels_aarch64_path"), false);
     String8 c_labels_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-aarch64"), S8(".o"));
     String8 c_labels_aarch64_command_line[] = {
         S8("-c"),
@@ -7646,6 +7959,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, long_label_sequence);
         BUSTER_TEST(arguments, arena_destroy(long_label_arena, 1));
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_labels_object_path"), false);
     String8 c_labels_object_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-object"), S8(".o"));
     String8 c_labels_object_command_line[] = {
         S8("-c"),
@@ -7705,6 +8020,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, restored_before_fallthrough);
 #endif
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("invalid_asm_jump_path"), false);
     String8 invalid_asm_jump_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-jump"), S8(".o"));
     String8 invalid_asm_jump_command_line[] = {
         S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), invalid_asm_jump_path, S8("tests/basic_c_invalid_asm_goto.c"),
@@ -7881,6 +8198,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #if (BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64) || BUSTER_MACOS
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_thread_local_path"), false);
     String8 c_thread_local_path = buster_test_temporary_path(arguments->arena, S8("buster-c-thread-local"), S8(""));
     String8 c_thread_local_command_line[] = {
         S8("-o"),
@@ -7936,6 +8255,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_thread_local_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_thread_local_aarch64_path"), false);
     String8 c_thread_local_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-thread-local-aarch64"), S8(""));
     String8 c_thread_local_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_thread_local_aarch64_path, S8("tests/basic_c_thread_local.c"),
@@ -8042,6 +8363,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, found_tlv_relocation);
         }
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_abi_path"), false);
     String8 c_float_abi_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-abi"), S8(""));
     String8 c_float_abi_command_line[] = {
         S8("-o"),
@@ -8072,6 +8395,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // both sides compile with the compiler under test and exchange every
     // supported ABI shape in both directions; any mismatch faults the
     // process, so a clean exit is the whole contract.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_abi_path"), false);
     String8 c_abi_path = buster_test_temporary_path(arguments->arena, S8("buster-c-abi"),
 #if BUSTER_WINDOWS
                                                     S8(".exe"));
@@ -8479,6 +8804,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_path"), false);
     String8 c_vector_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector"),
 #if BUSTER_WINDOWS
                                                        S8(".exe"));
@@ -8494,6 +8821,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_command_line)));
     BUSTER_TEST(arguments, c_vector.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, target_native.cpu_arch != CPU_ARCH_X86_64 || c_vector.codegen_statistics.native_vector_operation_count > 0);
+    // Keep c_vector and its path through the CPU-model comparisons below.
     String8 c_vector_baseline_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-baseline"), S8(".o"));
     String8 c_vector_baseline_command_line[] = {
         S8("-c"), S8("--target=x86_64-linux"), S8("-o"), c_vector_baseline_path, S8("tests/basic_c_vector.c"),
@@ -8574,6 +8902,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // through the aggregate slot walks rather than the scalar conversion
     // path, so the fixture runs the full lane checks natively and must
     // still produce objects for every cross target.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_initializer_path"), false);
     String8 c_vector_initializer_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-initializer"),
 #if BUSTER_WINDOWS
                                                                    S8(".exe"));
@@ -8623,6 +8953,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // declaration order) lowers with the composite type, and one never
     // completed lowers as an import — the two-file link resolves it against
     // the companion definition unit.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_extern_incomplete_path"), false);
     String8 c_extern_incomplete_path = buster_test_temporary_path(arguments->arena, S8("buster-c-extern-incomplete-array"),
 #if BUSTER_WINDOWS
                                                                   S8(".exe"));
@@ -8661,6 +8993,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // calls still works, and one nothing in its unit calls is dropped before
     // it reaches the object. The link itself succeeds either way -- the
     // missing definitions become dynamic imports -- so the run is the gate.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_static_array_parameter_path"), false);
     String8 c_static_array_parameter_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-array-parameter"),
 #if BUSTER_WINDOWS
                                                                        S8(".exe"));
@@ -8748,6 +9082,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // compiles its body out where the vocabulary is unavailable; that is what
     // lets the cross-target loop below cover it on a host whose sysroot has
     // nobody else's libc in it.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_simd_path"), false);
     String8 c_simd_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd"),
 #if BUSTER_WINDOWS
                                                      S8(".exe"));
@@ -8782,6 +9118,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // through the builtins; baseline has none of them and must emit no SIMD
     // instruction at all. Without the statistic a fixture that quietly guarded
     // itself out everywhere would still pass and cover nothing.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_simd_avx512_path"), false);
     String8 c_simd_avx512_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd-avx512"), S8(".o"));
     String8 c_simd_avx512_command_line[] = {
         S8("-c"), S8("--target=x86_64-linux"), S8("-march=znver5"), S8("-o"), c_simd_avx512_path, S8("tests/basic_c_simd.c"),
@@ -8792,6 +9130,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_simd_avx512.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, c_simd_avx512.codegen_statistics.simd_operation_count > 0);
     BUSTER_TEST(arguments, arena_destroy(c_simd_target_arena, 1));
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_simd_baseline_path"), false);
     String8 c_simd_baseline_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd-baseline"), S8(".o"));
     String8 c_simd_baseline_command_line[] = {
         S8("-c"), S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-o"), c_simd_baseline_path, S8("tests/basic_c_simd.c"),
@@ -9121,6 +9461,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
 #endif
 
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_conversions_path"), false);
     String8 c_conversions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conversions"), S8(""));
     String8 c_conversions_command_line[] = {
         S8("-o"),
@@ -9150,6 +9492,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Lazily evaluated operands are only observable at run time -- the wrong
     // lowering still selects the right value -- so this fixture has to run,
     // not merely compile.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_conditional_operand_path"), false);
     String8 c_conditional_operand_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conditional-operand"), S8(""));
     String8 c_conditional_operand_command_line[] = {
         S8("-o"),
@@ -9179,6 +9523,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A conditional assignment yields the assigned member's type.  Keep the
     // cJSON_SetBoolValue shape inline with its comparison so type prediction
     // cannot retain the pointer type of the object operand.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_conditional_assignment_path"), false);
     String8 c_conditional_assignment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conditional-assignment"), S8(""));
     String8 c_conditional_assignment_command_line[] = {
         S8("-o"),
@@ -9209,6 +9555,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A qualified typedef'd enum keeps the same declaration identity across
     // a function prototype and definition.  Unity relies on this exact
     // redeclaration shape for UnityPrintNumberByStyle.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_enum_prototype_path"), false);
     String8 c_enum_prototype_path = buster_test_temporary_path(arguments->arena, S8("buster-c-enum-prototype"), S8(""));
     String8 c_enum_prototype_command_line[] = {
         S8("-o"),
@@ -9239,6 +9587,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // the field assignment and the value read as a call argument here: the
     // original lowering loaded the whole array and then asked field access to
     // treat that ARRAY value as a POINTER.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_array_arrow_path"), false);
     String8 c_array_arrow_path = buster_test_temporary_path(arguments->arena, S8("buster-c-array-arrow"), S8(""));
     String8 c_array_arrow_command_line[] = {
         S8("-o"),
@@ -9268,6 +9618,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Explicit casts apply the same array-to-pointer decay as ordinary
     // expressions.  Exercise both pointer and integer destinations so the
     // cast lowering cannot retain the source ARRAY type.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_array_cast_path"), false);
     String8 c_array_cast_path = buster_test_temporary_path(arguments->arena, S8("buster-c-array-cast"), S8(""));
     String8 c_array_cast_command_line[] = {
         S8("-o"),
@@ -9297,6 +9649,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Prefix updates over a dereferenced pointer are full expressions, not
     // the identifier-only assignment fast path.  Exercise both directions
     // at runtime so the produced place and its updated value are observable.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_prefix_increment_path"), false);
     String8 c_prefix_increment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-prefix-increment"), S8(""));
     String8 c_prefix_increment_command_line[] = {
         S8("-o"),
@@ -9328,6 +9682,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // expression: indirect calls through (*fp)(...), nested subscript
     // postfix updates, comma-heavy pointer updates, gzgetc's conditional and
     // character-literal macro, and glibc's __extension__ statement expression.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_zlib_regressions_path"), false);
     String8 c_zlib_regressions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-zlib-regressions"), S8(""));
     String8 c_zlib_regressions_command_line[] = {
         S8("-o"),
@@ -9353,6 +9709,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // failures to these small runtime shapes: address-of an array/aggregate
     // PLACE, a postfix update through a parenthesized pointer-arithmetic
     // index, and a comma expression retained inside a conditional arm.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_stb_regressions_path"), false);
     String8 c_stb_regressions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-stb-regressions"), S8(""));
     String8 c_stb_regressions_command_line[] = {
         S8("-o"),
@@ -9378,6 +9736,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Hosted math headers spell NAN and the classification helpers through
     // compiler builtins.  Keep the quiet-NaN value and finite isinf result
     // observable at runtime so these are not merely accepted identifiers.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_builtin_math_path"), false);
     String8 c_builtin_math_path = buster_test_temporary_path(arguments->arena, S8("buster-c-builtin-math"), S8(""));
     String8 c_builtin_math_command_line[] = {
         S8("-o"),
@@ -11434,6 +11794,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
         S8("tests/basic_c_integer_literals.c"),
+        S8("tests/basic_c_utf8_identifiers.c"),
         S8("tests/basic_c_local_enum_declarator.c"),
         S8("tests/basic_c_attribute_short_spelling.c"),
         S8("tests/basic_c_atomic_specifier.c"),
@@ -11453,6 +11814,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
         S8("buster-c-integer-literals"),
+        S8("buster-c-utf8-identifiers"),
         S8("buster-c-local-enum-declarator"),
         S8("buster-c-attribute-short-spelling"),
         S8("buster-c-atomic-specifier"),
@@ -11469,6 +11831,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-macro-empty-paste"),
         S8("buster-c-preprocessor-short-circuit"),
     };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) == BUSTER_ARRAY_LENGTH(c_quickjs_regression_names));
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
         for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
@@ -11781,6 +12144,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_literal_path"), false);
     String8 c_float_literal_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-literal"), S8(""));
     String8 c_float_literal_command_line[] = {
         S8("-o"),
@@ -11812,6 +12177,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // digits into an f64, so a large or small decimal exponent landed ulps
     // away from the value the identical literal produced inside a function
     // body, and a subnormal flushed to zero.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_static_float_literal_path"), false);
     String8 c_static_float_literal_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-float-literal"), S8(""));
     String8 c_static_float_literal_command_line[] = {
         S8("-o"),
@@ -11840,6 +12207,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
     // A void cast around an assignment must still execute its store.  This is
     // the exact loop-update shape used by cJSON_Utils.c.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_void_assignment_path"), false);
     String8 c_void_assignment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-void-assignment"), S8(""));
     String8 c_void_assignment_command_line[] = {
         S8("-o"),
@@ -12117,6 +12486,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // so only running the program reads the bytes the object writer emitted.
     // The fixture reads its images both directly and through pointers, which
     // separates a wrong stored image from a wrong constant fold.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_negative_constant_widening_path"), false);
     String8 c_negative_constant_widening_path = buster_test_temporary_path(arguments->arena, S8("buster-c-negative-constant-widening"), S8(""));
     String8 c_negative_constant_widening_command_line[] = {
         S8("-o"),
@@ -12149,6 +12520,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Windows runner that is the Win64 positional register assignment, the
     // shadow space below the outgoing stack arguments, and the callee-saved
     // file the allocator binds across the calls inside it.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_call_abi_path"), false);
     String8 c_call_abi_path = buster_test_temporary_path(arguments->arena, S8("buster-c-call-abi"), S8(""));
     String8 c_call_abi_command_line[] = {
         S8("-o"),
@@ -12182,6 +12555,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // a wrong answer here is a wrong register or stack slot, which is exactly
     // what the Darwin AArch64 and Win64 variadic rules would produce if the
     // call site were lowered as a variadic tail rather than named arguments.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_unprototyped_path"), false);
     String8 c_unprototyped_path = buster_test_temporary_path(arguments->arena, S8("buster-c-unprototyped-call"), S8(""));
     String8 c_unprototyped_command_line[] = {
         S8("-o"),
@@ -12225,6 +12600,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_conversions_cross.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, c_conversions_cross.has_object);
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_abi_aarch64_path"), false);
     String8 c_float_abi_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-abi-aarch64"), S8(""));
     String8 c_float_abi_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_float_abi_aarch64_path, S8("tests/basic_c_float_abi.c"),
@@ -12259,6 +12636,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // unwind data establishes, but a different shape — so this block names
     // the canonical emitter explicitly and the machine modes are covered by
     // their own block below.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_abi_windows_path"), false);
     String8 c_float_abi_windows_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-abi-windows"), S8(".obj"));
     String8 c_float_abi_windows_command_line[] = {
         S8("-c"),
@@ -14128,6 +14507,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #else
     BUSTER_UNUSED(arguments);
 #endif
+    buster_test_arena_end(arguments, driver_fixture, true);
     return result;
 }
 #endif

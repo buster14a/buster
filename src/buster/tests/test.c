@@ -3,7 +3,8 @@
 // row here in registration order, its sources to CMakeLists.txt, and its
 // includes below (AGENTS.md). library_tests runs the table, prints the
 // TEST_MODULE_TIMING lines the test_timing_summary diagnostic consumes,
-// and honors BUSTER_TEST_JOBS. A descriptor marked table_audit runs only
+// and honors BUSTER_TEST_JOBS. Arena scopes publish TEST_ARENA_V1 and
+// TEST_ARENA_TOP_V1 counters with diagnostics copied before rewind. A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
 // generated tables and repository source.
@@ -185,6 +186,100 @@ BUSTER_GLOBAL_LOCAL bool buster_test_table_audits_enabled(void)
 {
     String8 value = os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS"));
     return !value.length || !string_equal(value, S8("0"));
+}
+
+// Scope-local peaks include temporary allocations discarded inside the body.
+// Saving/restoring the parent's peak makes nested scopes independent of older
+// fixtures while preserving the module maximum. Arena zeroing state is untouched.
+TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module)
+{
+    TestArenaScope result = {.name = name, .index = module ? 0 : arguments->memory_fixture_index++, .module = module};
+    ThreadContext* context = thread_context_selected();
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
+    {
+        Arena* observed = slot ? (context ? context->arenas[slot - 1] : 0) : arena;
+        if (observed && (!slot || observed != arena))
+        {
+            result.marks[slot] = (TestArenaMark){.arena = observed, .start = observed->position, .previous_high_water = observed->test_high_water};
+            observed->test_high_water = observed->position;
+        }
+    }
+    if (module)
+    {
+        arguments->memory_fixture_index = 0;
+        arguments->memory_top_retained_fixture = S8("none");
+        arguments->memory_top_peak_fixture = S8("none");
+        arguments->memory_top_retained_bytes = 0;
+        arguments->memory_top_peak_bytes = 0;
+    }
+    return result;
+}
+
+void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, bool rewind)
+{
+    u64 ends[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
+    u64 peaks[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
+    // Capture every arena before formatting, which itself uses scratch memory.
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(scope.marks); slot += 1)
+    {
+        TestArenaMark mark = scope.marks[slot];
+        if (mark.arena)
+        {
+            ends[slot] = mark.arena->position;
+            peaks[slot] = BUSTER_MAX(mark.arena->test_high_water, ends[slot]);
+            BUSTER_VALIDATE(ends[slot] >= mark.start);
+        }
+    }
+    if (rewind)
+    {
+        arena_set_position(scope.marks[0].arena, scope.marks[0].start);
+    }
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(scope.marks); slot += 1)
+    {
+        TestArenaMark mark = scope.marks[slot];
+        if (!mark.arena) continue;
+        u64 retained = ends[slot] - mark.start;
+        u64 peak = peaks[slot] - mark.start;
+        // The top fixture rows describe primary-arena ownership. Scratch rows
+        // remain separately addressable by arena_slot in the full report.
+        if (!slot && !scope.module && retained > arguments->memory_top_retained_bytes)
+        {
+            arguments->memory_top_retained_fixture = scope.name;
+            arguments->memory_top_retained_bytes = retained;
+        }
+        if (!slot && !scope.module && peak > arguments->memory_top_peak_bytes)
+        {
+            arguments->memory_top_peak_fixture = scope.name;
+            arguments->memory_top_peak_bytes = peak;
+        }
+        if (arguments->memory_report)
+        {
+            // Parallel show copies bytes to its separate output arena. No
+            // published record points into reclaimed fixture storage.
+            arguments->show(arguments,
+                S8("TEST_ARENA_V1 kind={S8} module={S8} fixture={S8} index={u64} arena_slot={u32} start={u64} end={u64} retained_bytes={u64} high_water={u64} peak_bytes={u64} after={u64} live_bytes={u64} rewind={u32}\n"),
+                scope.module ? S8("module") : S8("fixture"), arguments->memory_module, scope.name, scope.index, slot,
+                mark.start, ends[slot], retained, peaks[slot], peak, mark.arena->position,
+                mark.arena->position - mark.start, (u32)(!slot && rewind));
+        }
+    }
+    if (arguments->memory_report && scope.module)
+    {
+        arguments->show(arguments,
+            S8("TEST_ARENA_TOP_V1 module={S8} fixtures={u64} retained_fixture={S8} retained_bytes={u64} peak_fixture={S8} peak_bytes={u64}\n"),
+            arguments->memory_module, arguments->memory_fixture_index, arguments->memory_top_retained_fixture,
+            arguments->memory_top_retained_bytes, arguments->memory_top_peak_fixture, arguments->memory_top_peak_bytes);
+    }
+    // Exclude reporting's scratch allocations from enclosing observations.
+    // dirty_position still records every discarded byte for correct zeroing.
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(scope.marks); slot += 1)
+    {
+        TestArenaMark mark = scope.marks[slot];
+        if (mark.arena)
+        {
+            mark.arena->test_high_water = BUSTER_MAX(mark.previous_high_water, peaks[slot]);
+        }
+    }
 }
 
 typedef struct TestTimingRecord TestTimingRecord;
@@ -395,6 +490,8 @@ struct TestParallelState
     u64* eligible_indices;
     TestParallelRecord* records;
     u64 eligible_count;
+    bool memory_report;
+    u8 reserved[7];
 };
 
 typedef struct TestParallelArguments TestParallelArguments;
@@ -418,6 +515,71 @@ BUSTER_GLOBAL_LOCAL void test_parallel_show(UnitTestArguments* arguments, String
     BUSTER_UNUSED(text);
 }
 
+// Harness regression: keep accounting out of the registered assertion totals.
+// Failure output is deliberately buffered, rewound, overwritten, then inspected.
+BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+    BUSTER_CHECK(arena != 0 && output != 0);
+    TestParallelArguments arguments = {
+        .base = {.arena = arena, .show = &test_parallel_show, .memory_module = S8("arena_self_test"), .memory_report = true},
+        .output_arena = output,
+    };
+    UnitTestResult result = {0};
+    TestArenaScope outer = buster_test_arena_begin(&arguments.base, arena, S8("outer"), true);
+    char8* live = arena_allocate(arena, char8, 3);
+    memcpy(live, "abc", 3);
+    TestArenaScope inner = buster_test_arena_begin(&arguments.base, arena, S8("inner"), false);
+    memset(arena_allocate(arena, u8, 131077), 0x5a, 131077);
+    arena_set_position(arena, inner.marks[0].start);
+    memset(arena_allocate(arena, u8, 9), 0xa5, 9);
+    buster_test_arena_end(&arguments.base, inner, true);
+    bool passed = arena->position == 67 && arena->test_high_water == 131144 && memcmp(live, "abc", 3) == 0;
+    u8* zeroed = arena_allocate_zeroed(arena, u8, 9);
+    for (u32 index = 0; index < 9; index += 1)
+    {
+        passed = passed && zeroed[index] == 0;
+    }
+    arena_set_position(arena, inner.marks[0].start);
+    buster_test_arena_end(&arguments.base, outer, true);
+
+    TestArenaScope decommitted = buster_test_arena_begin(&arguments.base, arena, S8("decommitted"), false);
+    memset(arena_allocate(arena, u8, 196608), 0x5a, 196608);
+    passed = arena_set_position_and_decommit(arena, decommitted.marks[0].start) && passed;
+    buster_test_arena_end(&arguments.base, decommitted, true);
+
+    TestArenaScope retained = buster_test_arena_begin(&arguments.base, arena, S8("retained"), false);
+    arena_allocate_bytes(arena, 17, 1);
+    buster_test_arena_end(&arguments.base, retained, false);
+    passed = passed && arena->position == 81;
+    arena_set_position(arena, retained.marks[0].start);
+    TestArenaScope empty = buster_test_arena_begin(&arguments.base, arena, S8("empty"), false);
+    buster_test_arena_end(&arguments.base, empty, true);
+
+    TestArenaScope failed = buster_test_arena_begin(&arguments.base, arena, S8("failed"), false);
+    String8 diagnostic = string_format(arena, S8("fixture diagnostic survives rewind"));
+    BUSTER_TEST_RAW(&arguments.base, false, diagnostic);
+    buster_test_arena_end(&arguments.base, failed, true);
+    memset(arena_allocate(arena, u8, 256), 0xa5, 256);
+    passed = passed && result.test_count == 1 && result.succeeded_test_count == 0;
+    String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
+    passed = passed && string_first_sequence(text, S8("fixture diagnostic survives rewind failed at")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("start=67 end=76 retained_bytes=9 high_water=131144 peak_bytes=131077 after=67 live_bytes=0 rewind=1")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("start=64 end=67 retained_bytes=3 high_water=131144 peak_bytes=131080 after=64 live_bytes=0 rewind=1")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("start=64 end=64 retained_bytes=0 high_water=196672 peak_bytes=196608 after=64 live_bytes=0 rewind=1")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("start=64 end=81 retained_bytes=17 high_water=81 peak_bytes=17 after=81 live_bytes=17 rewind=0")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1")) != BUSTER_STRING_NO_MATCH;
+    arguments.base.memory_report = false;
+    TestArenaScope quiet = buster_test_arena_begin(&arguments.base, arena, S8("quiet"), false);
+    arena_allocate_bytes(arena, 13, 1);
+    buster_test_arena_end(&arguments.base, quiet, true);
+    passed = passed && arena_buffer_size(output) == text.length;
+    passed = arena_destroy(arena, 1) && passed;
+    passed = arena_destroy(output, 1) && passed;
+    return passed;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult test_parallel_call(TestDescriptorParallelKind kind, UnitTestArguments* arguments)
 {
     switch (kind)
@@ -438,23 +600,20 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
     {
         u64 descriptor_index = state->eligible_indices[work_index];
         TestDescriptor descriptor = state->descriptors[descriptor_index];
-        // Match the test harness's bounded working reservation. It is a
-        // lazy/no-reserve mapping; only the initial 64 KiB is committed per
-        // active lane, so the bound costs address space and not memory.
-        // 512 MiB because a module arena is never rewound between the cases
-        // inside it: compiler_driver_tests hands this same arena to every
-        // fixture invocation, so each one's IR, machine IR, and object bytes
-        // stay resident for the whole module. It reached 265,250,192 of the
-        // previous 268,435,456-byte reservation before its last fixture —
-        // 98,8% — which made the next fixture case to be added anywhere in
-        // the module the one that aborted in arena_allocate_bytes.
+        // Lazy reservation shared with the serial runner. Fixture marks bound
+        // logical retention; this is capacity, not an RSS measurement or budget.
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512), .initial_size = BUSTER_KB(64)});
         Arena* output_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64)});
         BUSTER_CHECK(arena != 0 && output_arena != 0);
-        TestParallelArguments arguments = {.base = {.arena = arena, .show = &test_parallel_show}, .output_arena = output_arena};
+        TestParallelArguments arguments = {
+            .base = {.arena = arena, .show = &test_parallel_show, .memory_module = descriptor.name, .memory_report = state->memory_report},
+            .output_arena = output_arena,
+        };
+        TestArenaScope module_scope = buster_test_arena_begin(&arguments.base, arena, S8("body"), true);
         TimeDataType start = timestamp_take();
         UnitTestResult result = test_parallel_call(descriptor.parallel_kind, &arguments.base);
         TimeDataType end = timestamp_take();
+        buster_test_arena_end(&arguments.base, module_scope, true);
         TestParallelRecord* record = &state->records[descriptor_index];
         record->timing = (TestTimingRecord){.index = descriptor_index, .module = descriptor.name, .duration_ns = timestamp_ns_between(start, end), .result = result};
         record->output_pointer = (char8*)arena_buffer_start(output_arena);
@@ -780,12 +939,14 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
             break;
         }
 
-        u64 arena_position = arguments->arena->position;
+        arguments->memory_module = descriptor.name;
+        arguments->memory_fixture_index = 0;
+        TestArenaScope module_scope = buster_test_arena_begin(arguments, arguments->arena, S8("body"), true);
         if (timing_enabled)
         {
             TestTimingRecord timing = test_timing_run_descriptor(arguments, descriptor, descriptor_index_base + i);
             consume_unit_tests(&result, timing.result);
-            arena_set_position(arguments->arena, arena_position);
+            buster_test_arena_end(arguments, module_scope, true);
             test_timing_report(arguments, timing);
             *timing_record_count += 1;
         }
@@ -793,7 +954,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
         {
             UnitTestResult unit_test_result = descriptor.function(arguments);
             consume_unit_tests(&result, unit_test_result);
-            arena_set_position(arguments->arena, arena_position);
+            buster_test_arena_end(arguments, module_scope, true);
         }
 
         if (buster_test_temporary_root_failed)
@@ -844,6 +1005,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         .eligible_indices = eligible_indices,
         .records = records,
         .eligible_count = eligible_count,
+        .memory_report = arguments->memory_report,
     };
 
     // The initial lane is one contiguous, side-effect-free group. Run the
@@ -991,8 +1153,10 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
+    BUSTER_VALIDATE(test_arena_self_test());
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
+    arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));
     if (timing_enabled)
     {
         BUSTER_CHECK(test_timing_self_test(arguments));

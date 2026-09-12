@@ -40,6 +40,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_PREPROCESSOR_WARNING] = S8_INITIALIZER("c.preprocessor-warning"),
         [C_DIAGNOSTIC_TOKEN_TOO_LONG] = S8_INITIALIZER("c.token-too-long"),
         [C_DIAGNOSTIC_INVALID_INTEGER_LITERAL] = S8_INITIALIZER("c.invalid-integer-literal"),
+        [C_DIAGNOSTIC_INVALID_UTF8] = S8_INITIALIZER("c.invalid-utf8"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");

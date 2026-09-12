@@ -2935,6 +2935,193 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
     return result;
 }
 
+// Independent oracle: reconstruct the scalar and compare its minimum encoding
+// width/range, rather than reproducing the production leader/second-byte table.
+BUSTER_GLOBAL_LOCAL bool c_test_utf8_scalar_valid(String8 bytes)
+{
+    u32 width = 0;
+    u32 leader = (u8)bytes.pointer[0];
+    for (u32 bit = 0x80; bit && (leader & bit); bit >>= 1)
+    {
+        width += 1;
+    }
+    bool valid = width >= 2 && width <= 4 && width == bytes.length;
+    if (valid)
+    {
+        u32 scalar = leader & ((1u << (7 - width)) - 1);
+        for (u32 index = 1; index < width; index += 1)
+        {
+            u32 continuation = (u8)bytes.pointer[index];
+            valid = valid && continuation >= 128 && continuation <= 191;
+            scalar = scalar * 64 + (continuation & 63);
+        }
+        u32 minimum[] = {0, 0, 128, 2048, 65536};
+        valid = valid && scalar >= minimum[width] && scalar <= 0x10FFFF && !(scalar >= 0xD800 && scalar <= 0xDFFF);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_utf8_lex_expect(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                               u64 error_offset, u32 line, u32 column)
+{
+    UnitTestResult result = {0};
+    u64 position = arguments->arena->position;
+    CLexResult lex = c_lex(arguments->arena, source);
+    bool invalid = error_offset != BUSTER_STRING_NO_MATCH;
+    BUSTER_TEST(arguments, lex.diagnostic_count == (u64)invalid);
+    if (invalid && lex.diagnostic_count)
+    {
+        CDiagnostic diagnostic = lex.diagnostics[0];
+        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_UTF8);
+        BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+        BUSTER_TEST(arguments, diagnostic.location.offset == error_offset);
+        BUSTER_TEST(arguments, diagnostic.location.line == line);
+        BUSTER_TEST(arguments, diagnostic.location.column == column);
+        BUSTER_STRING_TEST(arguments, diagnostic.message, S8("invalid UTF-8 sequence in C source token"));
+    }
+    BUSTER_TEST(arguments, c_test_lex_paths_agree(arguments->arena, source));
+    arena_set_position(arguments->arena, position);
+    c_test_result_add(outer_result, result);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_utf8(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 valid[] = {
+        S8("\xC2\x80"), S8("\xDF\xBF"), S8("\xE0\xA0\x80"), S8("\xED\x9F\xBF"),
+        S8("\xEE\x80\x80"), S8("\xEF\xBF\xBF"), S8("\xF0\x90\x80\x80"), S8("\xF4\x8F\xBF\xBF"),
+        S8("\xC3\xA9"), S8("\xCE\xB1"), S8("\xE4\xB8\xAD"),
+    };
+    String8 invalid[] = {
+        S8("\x80"), S8("\xBF"), S8("\xC0\xAF"), S8("\xC1\xBF"), S8("\xF5\x80\x80\x80"), S8("\xFF"),
+        S8("\xE0\x9F\xBF"), S8("\xED\xA0\x80"), S8("\xED\xBF\xBF"), S8("\xF0\x8F\xBF\xBF"), S8("\xF4\x90\x80\x80"),
+        S8("\xC2"), S8("\xE2"), S8("\xE2\x82"), S8("\xF0"), S8("\xF0\x90"), S8("\xF0\x90\x80"),
+        S8("\xC2" "x"), S8("\xE2\x82" "x"), S8("\xF0\x90\x80" "x"),
+    };
+    // Physical guard immediately follows the bounded slice; no terminator or
+    // readable continuation byte can conceal an out-of-bounds tail read.
+    u64 page_size = os_get_page_size();
+    char8* pages = (char8*)os_reserve(0, page_size * 2, (ProtectionFlags){0},
+                                     (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+    BUSTER_TEST(arguments, pages != 0);
+    bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+    BUSTER_TEST(arguments, committed);
+    if (committed)
+    {
+        for (u32 accepted = 0; accepted < 2; accepted += 1)
+        {
+            String8* cases = accepted ? valid : invalid;
+            u64 count = accepted ? BUSTER_ARRAY_LENGTH(valid) : BUSTER_ARRAY_LENGTH(invalid);
+            for (u64 index = 0; index < count; index += 1)
+            {
+                String8 bytes = cases[index];
+                for (u64 pad = 0; pad < 128; pad += 1)
+                {
+                    // Non-ASCII initials and high bytes deep in identifiers
+                    // or preprocessing numbers, at every sequence/window split.
+                    for (u32 word_prefix = 0; word_prefix < 3; word_prefix += 1)
+                    {
+                        u64 length = pad + bytes.length;
+                        char8* source = pages + page_size - length;
+                        memset(source, word_prefix ? 'a' : ' ', pad);
+                        if (word_prefix == 2 && pad) source[0] = '1';
+                        memcpy(source + pad, bytes.pointer, bytes.length);
+                        c_test_utf8_lex_expect(arguments, &result, (String8){source, length},
+                                               accepted ? BUSTER_STRING_NO_MATCH : pad, 1, (u32)pad + 1);
+                    }
+                }
+            }
+        }
+    }
+    if (pages)
+    {
+        BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2));
+    }
+
+    // Every leader/second-byte pair; later continuation positions independently
+    // span the full byte alphabet below. This oracle does not use utf8_decode.
+    for (u32 leader = 128; leader < 256; leader += 1)
+    {
+        for (u32 second = 0; second < 256; second += 1)
+        {
+            char8 bytes[] = {(char8)leader, (char8)second, 0x80, 0x80};
+            String8 source = {bytes, leader < 0xE0 ? 2 : leader < 0xF0 ? 3 : 4};
+            bool accepted = c_test_utf8_scalar_valid(source);
+            CLexResult lex = c_lex(arena, source);
+            BUSTER_TEST(arguments, (lex.diagnostic_count == 0) == accepted);
+            if (!accepted && lex.diagnostic_count)
+            {
+                BUSTER_TEST(arguments, lex.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_UTF8);
+                BUSTER_TEST(arguments, lex.diagnostics[0].location.offset == 0);
+            }
+            arena_set_position(arena, position);
+        }
+    }
+    for (u32 width = 3; width <= 4; width += 1)
+    {
+        for (u32 lane = 2; lane < width; lane += 1)
+        {
+            for (u32 byte = 0; byte < 256; byte += 1)
+            {
+                char8 bytes[] = {width == 3 ? 0xE1 : 0xF1, 0x80, 0x80, 0x80};
+                bytes[lane] = (char8)byte;
+                String8 source = {bytes, width};
+                CLexResult lex = c_lex(arena, source);
+                BUSTER_TEST(arguments, (lex.diagnostic_count == 0) == c_test_utf8_scalar_valid(source));
+                BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+                arena_set_position(arena, position);
+            }
+        }
+    }
+
+    String8 prefixes[] = {S8("int "), S8("int ascii"), S8("1."), S8("#define "), S8("#define M "),
+                          S8("#if 0\n"), S8("#define Q(x) #x\nQ("), S8("#include <")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
+    {
+        String8 prefix = prefixes[index];
+        for (u64 pad = 0; pad < 64; pad += 1)
+        {
+            char8 source[128];
+            memset(source, ' ', pad);
+            memcpy(source + pad, prefix.pointer, prefix.length);
+            source[pad + prefix.length] = 0xFF;
+            c_test_utf8_lex_expect(arguments, &result, (String8){source, pad + prefix.length + 1}, pad + prefix.length,
+                                   index == 5 || index == 6 ? 2 : 1, index == 5 ? 1 : index == 6 ? 3 : (u32)(pad + prefix.length + 1));
+        }
+    }
+    // Comments and all literal token forms deliberately retain their existing
+    // byte policy; high bytes elsewhere in the window cannot reclassify them.
+    String8 byte_contexts[] = {S8("/*\xFF*/ x"), S8("//\xFF\nx"), S8("\"\xFF\" x"), S8("'\xFF' x"),
+                              S8("u8\"\xFF\" x"), S8("u\"\xFF\" x"), S8("U\"\xFF\" x"), S8("L'\xFF' x")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(byte_contexts); index += 1)
+    {
+        for (u64 pad = 0; pad < 128; pad += 1)
+        {
+            char8 source[160];
+            memset(source, ' ', pad);
+            memcpy(source + pad, byte_contexts[index].pointer, byte_contexts[index].length);
+            c_test_utf8_lex_expect(arguments, &result, (String8){source, pad + byte_contexts[index].length}, BUSTER_STRING_NO_MATCH, 0, 0);
+        }
+    }
+    c_test_utf8_lex_expect(arguments, &result, S8("// heading\r\nint pre\\\r\nfix\xFF;"), 25, 3, 4);
+    c_test_utf8_lex_expect(arguments, &result, S8("int a\xED\\\r\n\xA0\x80;"), 5, 1, 6);
+    c_test_utf8_lex_expect(arguments, &result, S8("int a\xF0\\\n\x90\\\r\n\x80;"), 5, 1, 6);
+    c_test_utf8_lex_expect(arguments, &result, S8("int caf\xC3\\\r\n\xA9;"), BUSTER_STRING_NO_MATCH, 0, 0);
+    c_test_utf8_lex_expect(arguments, &result, S8("int \xC3\xA9\xFF\x80;"), 6, 1, 7);
+
+    CPreprocessResult preprocess;
+    CParseResult parse;
+    CIRLowerResult lower = c_test_lower_source(arena,
+        S8("int caf\xC3\xA9 = 7; int \xCE\xB1(void) { return caf\xC3\xA9; }"), S8("utf8-valid.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program != 0);
+    arena_set_position(arena, position);
+    return result;
+}
+
 // Every construct the compaction emitter models with masks and every shape it
 // escapes on, each slid across the 64-byte window boundary by a growing space
 // prefix so no construct is only ever seen window-aligned.
@@ -15897,134 +16084,135 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    c_test_result_add(&result, c_test_parser_body_frame_storage(arguments));
-    c_test_result_add(&result, c_test_parser_diagnostic_storage(arguments));
-    c_test_result_add(&result, c_test_constexpr_leaf_storage(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
+    BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
-    c_test_result_add(&result, c_test_vla_row_places(arguments));
-    c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
-    c_test_result_add(&result, c_test_scope_interval_index(arguments));
-    c_test_result_add(&result, c_test_initializer_relocation_orders(arguments));
-    c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
-    c_test_result_add(&result, c_test_preprocessor_short_circuit(arguments));
-    c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
-    c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));
-    c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
-    c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
-    c_test_result_add(&result, c_test_pp_class_masks(arguments));
-    c_test_result_add(&result, c_test_string_literal_decode_differential(arguments));
-    c_test_result_add(&result, c_test_position_index_tiles(arguments));
-    c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
-    c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
-    c_test_result_add(&result, c_test_source_metrics_path_identity(arguments));
-    c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
-    c_test_result_add(&result, c_test_typedef_fallback_lookup(arguments));
-    c_test_result_add(&result, c_test_frontend_global_types(arguments));
-    c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
-    c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));
-    c_test_result_add(&result, c_test_sizeof_function_type_name(arguments));
-    c_test_result_add(&result, c_test_void_object_refusals(arguments));
-    c_test_result_add(&result, c_test_declarator_ellipsis_depth(arguments));
-    c_test_result_add(&result, c_test_unprototyped_call_arguments(arguments));
-    c_test_result_add(&result, c_test_call_arity_diagnostics(arguments));
-    c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
-    c_test_result_add(&result, c_test_frontend_control_flow(arguments));
-    c_test_result_add(&result, c_test_direct_ssa(arguments));
-    c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
-    c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
-    c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
-    c_test_result_add(&result, c_test_typeof_conditional_type(arguments));
-    c_test_result_add(&result, c_test_typeof_expression_frames(arguments));
-    c_test_result_add(&result, c_test_conditional_void_expression(arguments));
-    c_test_result_add(&result, c_test_conditional_comma_assignment(arguments));
-    c_test_result_add(&result, c_test_pointer_width_integer_conversion(arguments));
-    c_test_result_add(&result, c_test_statement_expression_control_call(arguments));
-    c_test_result_add(&result, c_test_statement_expression_nested_call(arguments));
-    c_test_result_add(&result, c_test_statement_expression_control_value(arguments));
-    c_test_result_add(&result, c_test_statement_expression_declaration_scope(arguments));
-    c_test_result_add(&result, c_test_global_identifier_updates(arguments));
-    c_test_result_add(&result, c_test_parenthesized_address_assignment_expression(arguments));
-    c_test_result_add(&result, c_test_nested_offsetof_pointer_prediction(arguments));
-    c_test_result_add(&result, c_test_casted_dereference_update(arguments));
-    c_test_result_add(&result, c_test_parenthesized_function_declarations(arguments));
-    c_test_result_add(&result, c_test_parenthesized_address_place_assignment(arguments));
-    c_test_result_add(&result, c_test_va_list_identity_and_places(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
+    BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
+    BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
+    BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
+    BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_utf8);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
+    BUSTER_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
+    BUSTER_TEST_FIXTURE(arguments, c_test_pp_class_masks);
+    BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
+    BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
+    BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
+    BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
+    BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
+    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
+    BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
+    BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
+    BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
+    BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
+    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
+    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
+    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
+    BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
+    BUSTER_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
+    BUSTER_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
+    BUSTER_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
 
-    c_test_result_add(&result, c_test_frontend_vectors(arguments));
-    c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
-    c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
-    c_test_result_add(&result, c_test_pasted_keyword_body_walk(arguments));
-    c_test_result_add(&result, c_test_source_map_order(arguments));
-    c_test_result_add(&result, c_test_source_map_locations(arguments));
-    c_test_result_add(&result, c_test_macro_task_batches(arguments));
-    c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
-    c_test_result_add(&result, c_test_local_static_aggregates(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vectors);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
+    BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
+    BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
+    BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
+    BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
 
-    c_test_result_add(&result, c_test_wide_float_function_signatures(arguments));
-    c_test_result_add(&result, c_test_wide_float_signature_calls(arguments));
-    c_test_result_add(&result, c_test_wide_float_cleanup_signature_calls(arguments));
-    c_test_result_add(&result, c_test_wide_float_local_transport(arguments));
-    c_test_result_add(&result, c_test_wide_float_global_initializers(arguments));
-    c_test_result_add(&result, c_test_aggregate_constant_bytes(arguments));
-    c_test_result_add(&result, c_test_wide_float_global_rejections(arguments));
-    c_test_result_add(&result, c_test_wide_float_android_rejection(arguments));
-    c_test_result_add(&result, c_test_wide_float_global_boundaries(arguments));
-    c_test_result_add(&result, c_test_wide_float_global_braces(arguments));
-    c_test_result_add(&result, c_test_wide_float_global_folding(arguments));
-    c_test_result_add(&result, c_test_float_integer_constants(arguments));
-    c_test_result_add(&result, c_test_integer_spelling_consistency(arguments));
-    c_test_result_add(&result, c_test_constant_entity_lookup(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_android_rejection);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
+    BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
-    c_test_result_add(&result, c_test_static_range_designators(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
 
-    c_test_result_add(&result, c_test_member_search_scratch(arguments));
-    c_test_result_add(&result, c_test_u64_initializer_slots(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
+    BUSTER_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
 
-    c_test_result_add(&result, c_test_parse_storage_growth(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
 
-    c_test_result_add(&result, c_test_fresh_binding_publication(arguments));
-    c_test_result_add(&result, c_test_aggregate_lookup_growth(arguments));
-    c_test_result_add(&result, c_test_aggregate_lookup_identity(arguments));
-    c_test_result_add(&result, c_test_aggregate_lookup_frontend(arguments));
-    c_test_result_add(&result, c_test_type_parse_rollback_growth(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 
-    c_test_result_add(&result, c_test_aggregate_corrections(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
 
-    c_test_result_add(&result, c_test_brace_designators(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_brace_designators);
 
-    c_test_result_add(&result, c_test_c23_attribute_positions(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
 
-    c_test_result_add(&result, c_test_c23_attribute_noreturn(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
 
-    c_test_result_add(&result, c_test_c23_empty_initializers(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
 
-    c_test_result_add(&result, c_test_initializer_separators(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_separators);
 
-    c_test_result_add(&result, c_test_ambiguous_promoted_ir(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
 
-    c_test_result_add(&result, c_test_ambiguous_promoted_parse(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
 
-    c_test_result_add(&result, c_test_invalid_union_initializer(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
 
-    c_test_result_add(&result, c_test_deferred_assert_positive(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_positive);
 
-    c_test_result_add(&result, c_test_deferred_assert_false(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
 
-    c_test_result_add(&result, c_test_deferred_assert_nonconstant(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
 
-    c_test_result_add(&result, c_test_local_tls(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
 
-    c_test_result_add(&result, c_test_invalid_local_static_initializer(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
 
-    c_test_result_add(&result, c_test_invalid_designators(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_designators);
 
-    c_test_result_add(&result, c_test_invalid_root_designators(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_root_designators);
 
-    c_test_result_add(&result, c_test_unnamed_initializer_places(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
 
-    c_test_result_add(&result, c_test_static_compound_literal(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_static_compound_literal);
 
-    c_test_result_add(&result, c_test_invalid_block_tls(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
 
     {
         TemporalArena artifact_temporary = scratch_begin(0, 0);
@@ -16568,12 +16756,12 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, arena_destroy(array_bound_arena, 1));
     }
-    c_test_result_add(&result, c_test_repeated_incomplete_arrays(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
 
-    c_test_result_add(&result, c_test_packed_and_aligned_layout(arguments));
-    c_test_result_add(&result, c_test_parameter_local_alignment(arguments));
-    c_test_result_add(&result, c_test_qualified_parameter_values(arguments));
-    c_test_result_add(&result, c_test_qualified_compound_values(arguments));
+    BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
+    BUSTER_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
+    BUSTER_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
 
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"

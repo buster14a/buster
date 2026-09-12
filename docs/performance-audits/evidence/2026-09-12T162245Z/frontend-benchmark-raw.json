@@ -1,0 +1,262 @@
+[
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2391259",
+    "median_ns": "2708753",
+    "throughput_mb_s": "7",
+    "pair": -1,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2377640",
+    "median_ns": "2588109",
+    "throughput_mb_s": "8",
+    "pair": -1,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2402385",
+    "median_ns": "2595115",
+    "throughput_mb_s": "8",
+    "pair": 0,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2374713",
+    "median_ns": "2545397",
+    "throughput_mb_s": "8",
+    "pair": 0,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2417389",
+    "median_ns": "2622310",
+    "throughput_mb_s": "8",
+    "pair": 1,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2432042",
+    "median_ns": "2675428",
+    "throughput_mb_s": "7",
+    "pair": 1,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2414645",
+    "median_ns": "2600599",
+    "throughput_mb_s": "8",
+    "pair": 2,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2418541",
+    "median_ns": "2756164",
+    "throughput_mb_s": "7",
+    "pair": 2,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2490157",
+    "median_ns": "2697955",
+    "throughput_mb_s": "7",
+    "pair": 3,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2410164",
+    "median_ns": "2634646",
+    "throughput_mb_s": "7",
+    "pair": 3,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2385324",
+    "median_ns": "2624615",
+    "throughput_mb_s": "8",
+    "pair": 4,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2461483",
+    "median_ns": "2699744",
+    "throughput_mb_s": "7",
+    "pair": 4,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2385689",
+    "median_ns": "2601061",
+    "throughput_mb_s": "8",
+    "pair": 5,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2396573",
+    "median_ns": "2605581",
+    "throughput_mb_s": "8",
+    "pair": 5,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2424750",
+    "median_ns": "2696152",
+    "throughput_mb_s": "7",
+    "pair": 6,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2507439",
+    "median_ns": "2721903",
+    "throughput_mb_s": "7",
+    "pair": 6,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2404724",
+    "median_ns": "2553443",
+    "throughput_mb_s": "8",
+    "pair": 7,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2375847",
+    "median_ns": "2487008",
+    "throughput_mb_s": "8",
+    "pair": 7,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2373435",
+    "median_ns": "2454621",
+    "throughput_mb_s": "8",
+    "pair": 8,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2377090",
+    "median_ns": "2629739",
+    "throughput_mb_s": "8",
+    "pair": 8,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2392347",
+    "median_ns": "2561311",
+    "throughput_mb_s": "8",
+    "pair": 9,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2412373",
+    "median_ns": "2630910",
+    "throughput_mb_s": "7",
+    "pair": 9,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2421416",
+    "median_ns": "2699720",
+    "throughput_mb_s": "7",
+    "pair": 10,
+    "variant": "candidate"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2406433",
+    "median_ns": "2546446",
+    "throughput_mb_s": "8",
+    "pair": 10,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2380489",
+    "median_ns": "2529981",
+    "throughput_mb_s": "8",
+    "pair": 11,
+    "variant": "baseline"
+  },
+  {
+    "path": "tests/basic_c_operations.c",
+    "iterations": "30",
+    "bytes": "21042",
+    "min_ns": "2525054",
+    "median_ns": "2708560",
+    "throughput_mb_s": "7",
+    "pair": 11,
+    "variant": "candidate"
+  }
+]

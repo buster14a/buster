@@ -1,0 +1,562 @@
+diff --git a/docs/agents/frontend/foundations.md b/docs/agents/frontend/foundations.md
+index 06248c9..b27bf7c 100644
+--- a/docs/agents/frontend/foundations.md
++++ b/docs/agents/frontend/foundations.md
+@@ -187,6 +187,23 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
+ - Invalid user input must produce structured C diagnostics and a failed driver
+   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
+   never ordinary syntax or semantic errors.
++- Identifier and preprocessing-number spellings require well-formed UTF-8:
++  shortest encodings of Unicode scalar values, with no surrogate or value above
++  U+10FFFF. This validates encoding without adding Unicode identifier-category
++  or normalization restrictions. `c_lex_validate_word_utf8` reports one
++  `C_DIAGNOSTIC_INVALID_UTF8` per affected word, at the first byte of its first
++  malformed sequence (including a truncated leader). Translation checkpoints
++  retain its original file, byte offset, line and byte column across CRLF and
++  splices, including splices inside a sequence. Lexing precedes preprocessing,
++  so discarded branches, unused macro bodies and stringized arguments are checked.
++  The compact lexer reuses its high-byte mask to escape at the whole word's
++  start; ASCII words retain batch emission. Comments, quoted header names and
++  literal payloads retain their existing byte/literal-conversion policies;
++  angle-header words use the ordinary token encoding rule. This contract does
++  not change shared `utf8_decode` or OS path/argument handling. The independent
++  validity oracle, guard-page/window differential cases and driver failures are
++  registered in the frontend/driver suites; `basic_c_utf8_identifiers.c` checks
++  valid source through every native allocator (GitHub #253).
+ - Arena ownership is part of the API contract. Returned source, syntax,
+   semantic, and IR structures may reference earlier-stage storage; callers must
+   retain the translation-unit arena until every downstream consumer finishes.
+diff --git a/src/buster/lib/compiler/driver/driver_diagnostic.c b/src/buster/lib/compiler/driver/driver_diagnostic.c
+index f3cdd41..38f5f04 100644
+--- a/src/buster/lib/compiler/driver/driver_diagnostic.c
++++ b/src/buster/lib/compiler/driver/driver_diagnostic.c
+@@ -40,6 +40,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
+         [C_DIAGNOSTIC_PREPROCESSOR_WARNING] = S8_INITIALIZER("c.preprocessor-warning"),
+         [C_DIAGNOSTIC_TOKEN_TOO_LONG] = S8_INITIALIZER("c.token-too-long"),
+         [C_DIAGNOSTIC_INVALID_INTEGER_LITERAL] = S8_INITIALIZER("c.invalid-integer-literal"),
++        [C_DIAGNOSTIC_INVALID_UTF8] = S8_INITIALIZER("c.invalid-utf8"),
+     };
+     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
+     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");
+diff --git a/src/buster/lib/compiler/frontend/c/c.h b/src/buster/lib/compiler/frontend/c/c.h
+index 615d2c1..8e5167e 100644
+--- a/src/buster/lib/compiler/frontend/c/c.h
++++ b/src/buster/lib/compiler/frontend/c/c.h
+@@ -252,6 +252,7 @@ typedef enum CDiagnosticKind
+     // oversized escape, so the token is diagnosed and its length clamped.
+     C_DIAGNOSTIC_TOKEN_TOO_LONG,
+     C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
++    C_DIAGNOSTIC_INVALID_UTF8,
+     C_DIAGNOSTIC_KIND_COUNT,
+ } CDiagnosticKind;
+
+diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
+index 0167b50..8581ce4 100644
+--- a/src/buster/lib/compiler/frontend/c/c_source.c
++++ b/src/buster/lib/compiler/frontend/c/c_source.c
+@@ -20,6 +20,7 @@
+ //                                              kept in differential agreement
+ //   c_source_metrics_add,                      the SOURCE table counters and
+ //   c_source_metrics_file_row                  the per-file attribution rows
++//   c_lex_validate_word_utf8                   bounded word encoding checks
+ //   c_lex_scan_one, c_lex_scalar               the scalar lexer
+ //   c_lex_compact_tables_build,                the SIMD lexer (Validark
+ //   c_lex_compact                              method, AGENTS.md): one
+@@ -339,9 +340,9 @@ BUSTER_C_INTERNAL bool c_identifier_continue(char8 character)
+     return c_identifier_start(character) || c_ascii_digit(character);
+ }
+
+-// One byte per character value: nonzero when the character continues an
+-// identifier. Built from c_identifier_continue at first use so the two can
+-// never drift; the lexer's identifier run scan ANDs eight entries per step
++// One byte per character value: nonzero for an ASCII identifier continuation.
++// High bytes stop the fast run for bounded UTF-8 validation in the lexer;
++// the identifier run scan ANDs eight entries per step
+ // instead of branching per byte. c_prewarm() fills it ahead of any gang.
+ BUSTER_C_INTERNAL u8 c_identifier_continue_table[256];
+ BUSTER_C_INTERNAL bool c_identifier_continue_table_built;
+@@ -351,7 +352,7 @@ BUSTER_C_INTERNAL void c_identifier_continue_table_build(void)
+     BUSTER_CHECK_SERIAL_INITIALIZATION();
+     for (u32 character = 0; character < 256; character += 1)
+     {
+-        c_identifier_continue_table[character] = c_identifier_continue((char8)character) ? 1 : 0;
++        c_identifier_continue_table[character] = character < 0x80 && c_identifier_continue((char8)character) ? 1 : 0;
+     }
+     c_identifier_continue_table_built = true;
+ }
+@@ -1382,13 +1383,45 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_block_comment_stop_find(String8 source,
+
+ #endif
+
++// Only identifier/pp-number spellings use this source-input contract. Comments
++// and literal payloads retain their byte policy; OS utf8_decode is unrelated.
++// Report the first byte of the first ill-formed sequence, including a truncated
++// leader at the end of this bounded token. Translation checkpoints recover its
++// physical position even when a CRLF splice occurs inside the sequence.
++BUSTER_C_INTERNAL void c_lex_validate_word_utf8(CLexState* state, u64 offset, u64 end)
++{
++    const u8* bytes = (const u8*)state->translated.source.pointer;
++    while (offset < end)
++    {
++        u8 leader = bytes[offset];
++        u32 length = leader < 0x80 ? 1 : leader >= 0xC2 && leader <= 0xDF ? 2 :
++                     leader >= 0xE0 && leader <= 0xEF ? 3 : leader >= 0xF0 && leader <= 0xF4 ? 4 : 0;
++        bool valid = length && length <= end - offset;
++        for (u32 index = 1; valid && index < length; index += 1)
++        {
++            valid = (bytes[offset + index] & 0xC0) == 0x80;
++        }
++        if (valid && length >= 3)
++        {
++            u8 second = bytes[offset + 1];
++            valid = (leader != 0xE0 || second >= 0xA0) && (leader != 0xED || second < 0xA0) &&
++                    (leader != 0xF0 || second >= 0x90) && (leader != 0xF4 || second < 0x90);
++        }
++        if (!valid)
++        {
++            c_diagnostic_push(state->result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count,
++                              offset, C_DIAGNOSTIC_INVALID_UTF8, S8("invalid UTF-8 sequence in C source token"));
++            break;
++        }
++        offset += length;
++    }
++}
++
+ // One item of the scalar lexer: a whitespace byte, a newline, a comment, or a
+-// token, starting at `offset` and returning the offset just past it.  The
+-// compaction emitter escapes to this for every shape its masks do not model,
+-// so the two paths agree on the hard cases by construction rather than by
+-// duplicated reasoning.  Long comment and literal bodies fast-forward in
+-// 64-byte strides when the caller is the window pipeline (state->simd_scan);
+-// the reference path keeps the byte loops so the gate compares the two.
++// token, starting at `offset` and returning the offset just past it. The
++// compaction emitter escapes here for shapes its masks do not model. Long
++// comment/literal bodies fast-forward in 64-byte strides for state->simd_scan;
++// the reference keeps byte loops so the differential gate compares the two.
+ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
+ {
+     CLexResult* result = state->result;
+@@ -1535,7 +1568,16 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
+     if (c_identifier_start(character))
+     {
+         u64 start = offset;
+-        offset = c_identifier_run_end(translated.source, offset + 1);
++        offset = c_identifier_run_end(translated.source, offset + (character < 0x80));
++        if (BUSTER_UNLIKELY(offset < translated.source.length && translated.source.pointer[offset] >= 0x80))
++        {
++            u64 first_high = offset;
++            while (offset < translated.source.length && c_identifier_continue(translated.source.pointer[offset]))
++            {
++                offset += 1;
++            }
++            c_lex_validate_word_utf8(state, first_high, offset);
++        }
+         c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
+         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
+         {
+@@ -1547,6 +1589,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
+     if (c_ascii_digit(character) || (character == '.' && offset + 1 < translated.source.length && c_ascii_digit(translated.source.pointer[offset + 1])))
+     {
+         u64 start = offset++;
++        u8 high_bytes = 0;
+         while (offset < translated.source.length)
+         {
+             character = translated.source.pointer[offset];
+@@ -1557,8 +1600,13 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
+             {
+                 break;
+             }
++            high_bytes |= (u8)character;
+             offset += 1;
+         }
++        if (BUSTER_UNLIKELY(high_bytes & 0x80))
++        {
++            c_lex_validate_word_utf8(state, start, offset);
++        }
+         c_token_push(result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
+         {
+@@ -1904,9 +1952,8 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
+         u64 star_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('*'));
+         u64 colon_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8(':'));
+         u64 repeated = (u64)_mm512_cmpeq_epi8_mask(chunk0, chunk1);
+-        // c_identifier_start admits `$` and every byte above ASCII, so those
+-        // join the identifier class rather than the invalid one -- the table
+-        // carries the ASCII half and the sign mask the rest.
++        // High bytes still join word extents, but their whole token escapes
++        // below for UTF-8 validation before it can reach the batch emitter.
+         u64 word = high_byte | (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WORD));
+         u64 white = (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WHITE));
+
+@@ -2205,12 +2252,25 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
+         // punctuator byte is C_TOKEN_INVALID, whose diagnostic the scalar path
+         // formats.
+         u64 unclassified = available & ~word & ~white & ~line_feed & ~punctuator_byte;
+-        if (unclassified)
++        // ASCII windows retain the existing uncommon-byte branch. High bytes
++        // reuse the sign mask and escape at their whole word's start; only
++        // resolved words before a deferred item matter. Comments and literals
++        // keep their byte semantics.
++        if (BUSTER_UNLIKELY(unclassified | high_byte))
+         {
+-            u64 candidate = (u64)__builtin_ctzll(unclassified);
+-            if (candidate < trigger_at)
++            if (unclassified)
++            {
++                u64 candidate = (u64)__builtin_ctzll(unclassified);
++                trigger_at = BUSTER_MIN(trigger_at, candidate);
++            }
++            u64 word_high = high_byte & ~comment_span & ~literal_span & c_lex_mask_below(defer_at);
++            if (word_high)
+             {
+-                trigger_at = candidate;
++                u64 first_high = (u64)__builtin_ctzll(word_high);
++                u64 owners = (identifier_starts | number_starts) & c_lex_mask_below(first_high + 1);
++                BUSTER_CHECK(owners);
++                u64 candidate = (u64)(63 - __builtin_clzll(owners));
++                trigger_at = BUSTER_MIN(trigger_at, candidate);
+             }
+         }
+
+diff --git a/src/buster/tests/compiler/driver/driver_test.c b/src/buster/tests/compiler/driver/driver_test.c
+index e4cd5ab..dfded35 100644
+--- a/src/buster/tests/compiler/driver/driver_test.c
++++ b/src/buster/tests/compiler/driver/driver_test.c
+@@ -4543,6 +4543,82 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+     BUSTER_TEST(arguments, preprocessor_error.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+     BUSTER_TEST(arguments, preprocessor_error.tokenizer_error_count == 1);
+     BUSTER_TEST(arguments, string_first_sequence(preprocessor_error.diagnostic, S8("expanded driver error")) != BUSTER_STRING_NO_MATCH);
++    // Source UTF-8 errors fail preprocessing, syntax checks and object output.
++    // Keep raw bytes in generated files so host compiler decoding cannot alter
++    // the regression. Includes must name the physical header, not its caller.
++    {
++        String8 malformed[] = {
++            S8("\x80"), S8("\xFF"), S8("\xC0\xAF"), S8("\xED\xA0\x80"), S8("\xF4\x90\x80\x80"), S8("\xE2\x82"),
++        };
++        String8 operations[] = {S8("-E"), S8("-fsyntax-only"), S8("-c")};
++        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
++        {
++            for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
++            {
++                TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
++                Arena* utf8_arena = utf8_temporary.arena;
++                String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8"), S8(".c"));
++                String8 output = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8"), S8(".o"));
++                String8 source = string_format(utf8_arena, S8("// heading\r\nint pre\\\r\nfix{S8};\n"), malformed[index]);
++                BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
++                String8 sentinel = S8("existing output must survive a source error");
++                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
++                String8 utf8_command_line[] = {operations[operation], S8("-std=gnu23"), S8("-o"), output, input};
++                CompilerDriverResult refused = compiler_driver_execute_invocation(
++                    utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
++                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
++                BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
++                BUSTER_TEST(arguments, refused.diagnostic_count == 1);
++                if (refused.diagnostic_count)
++                {
++                    BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("c.invalid-utf8"));
++                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.offset == 25);
++                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.line == 3);
++                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.column == 4);
++                }
++                BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
++                    string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), input)) != BUSTER_STRING_NO_MATCH);
++                ByteSlice retained = file_read(utf8_arena, output, (FileReadOptions){0});
++                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), sentinel);
++                scratch_end(utf8_temporary);
++            }
++        }
++        String8 contexts[] = {
++            S8("#if 0\nint \xFF;\n#endif\n"),
++            S8("#define unused \xFF\n"),
++            S8("#define unused 1.\xFF\n"),
++            S8("#define Q(x) #x\nchar* value = Q(\xFF);\n"),
++        };
++        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(contexts); index += 1)
++        {
++            TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
++            Arena* utf8_arena = utf8_temporary.arena;
++            String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-context"), S8(".c"));
++            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(contexts[index])));
++            String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
++            CompilerDriverResult refused = compiler_driver_execute_invocation(
++                utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
++            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
++            BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
++            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("invalid UTF-8 sequence")) != BUSTER_STRING_NO_MATCH);
++            scratch_end(utf8_temporary);
++        }
++        TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
++        Arena* utf8_arena = utf8_temporary.arena;
++        String8 header = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-header"), S8(".h"));
++        String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-include"), S8(".c"));
++        BUSTER_TEST(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("// heading\r\nint pre\\\r\nfix\xFF;\n"))));
++        String8 source = string_format(utf8_arena, S8("#include \"{S8}\"\n"), header);
++        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
++        String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
++        CompilerDriverResult refused = compiler_driver_execute_invocation(
++            utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
++        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
++        BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
++        BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
++            string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), header)) != BUSTER_STRING_NO_MATCH);
++        scratch_end(utf8_temporary);
++    }
+     String8 warning_multi_command_line[] = {
+         S8("-fsyntax-only"),
+         S8("tests/basic_c_preprocessor_warning.c"),
+@@ -11143,6 +11219,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+     String8 c_quickjs_regression_paths[] = {
+         S8("tests/basic_c_aggregate_attribute.c"),
+         S8("tests/basic_c_integer_literals.c"),
++        S8("tests/basic_c_utf8_identifiers.c"),
+         S8("tests/basic_c_local_enum_declarator.c"),
+         S8("tests/basic_c_attribute_short_spelling.c"),
+         S8("tests/basic_c_atomic_specifier.c"),
+@@ -11162,6 +11239,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+     String8 c_quickjs_regression_names[] = {
+         S8("buster-c-aggregate-attribute"),
+         S8("buster-c-integer-literals"),
++        S8("buster-c-utf8-identifiers"),
+         S8("buster-c-local-enum-declarator"),
+         S8("buster-c-attribute-short-spelling"),
+         S8("buster-c-atomic-specifier"),
+@@ -11178,6 +11256,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+         S8("buster-c-macro-empty-paste"),
+         S8("buster-c-preprocessor-short-circuit"),
+     };
++    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) == BUSTER_ARRAY_LENGTH(c_quickjs_regression_names));
+     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
+     {
+         for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+diff --git a/src/buster/tests/compiler/frontend/c/c_test.c b/src/buster/tests/compiler/frontend/c/c_test.c
+index f3ecafa..bd7501e 100644
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -2934,6 +2934,193 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
+     return result;
+ }
+
++// Independent oracle: reconstruct the scalar and compare its minimum encoding
++// width/range, rather than reproducing the production leader/second-byte table.
++BUSTER_GLOBAL_LOCAL bool c_test_utf8_scalar_valid(String8 bytes)
++{
++    u32 width = 0;
++    u32 leader = (u8)bytes.pointer[0];
++    for (u32 bit = 0x80; bit && (leader & bit); bit >>= 1)
++    {
++        width += 1;
++    }
++    bool valid = width >= 2 && width <= 4 && width == bytes.length;
++    if (valid)
++    {
++        u32 scalar = leader & ((1u << (7 - width)) - 1);
++        for (u32 index = 1; index < width; index += 1)
++        {
++            u32 continuation = (u8)bytes.pointer[index];
++            valid = valid && continuation >= 128 && continuation <= 191;
++            scalar = scalar * 64 + (continuation & 63);
++        }
++        u32 minimum[] = {0, 0, 128, 2048, 65536};
++        valid = valid && scalar >= minimum[width] && scalar <= 0x10FFFF && !(scalar >= 0xD800 && scalar <= 0xDFFF);
++    }
++    return valid;
++}
++
++BUSTER_GLOBAL_LOCAL void c_test_utf8_lex_expect(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
++                                               u64 error_offset, u32 line, u32 column)
++{
++    UnitTestResult result = {0};
++    u64 position = arguments->arena->position;
++    CLexResult lex = c_lex(arguments->arena, source);
++    bool invalid = error_offset != BUSTER_STRING_NO_MATCH;
++    BUSTER_TEST(arguments, lex.diagnostic_count == (u64)invalid);
++    if (invalid && lex.diagnostic_count)
++    {
++        CDiagnostic diagnostic = lex.diagnostics[0];
++        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_UTF8);
++        BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
++        BUSTER_TEST(arguments, diagnostic.location.offset == error_offset);
++        BUSTER_TEST(arguments, diagnostic.location.line == line);
++        BUSTER_TEST(arguments, diagnostic.location.column == column);
++        BUSTER_STRING_TEST(arguments, diagnostic.message, S8("invalid UTF-8 sequence in C source token"));
++    }
++    BUSTER_TEST(arguments, c_test_lex_paths_agree(arguments->arena, source));
++    arena_set_position(arguments->arena, position);
++    c_test_result_add(outer_result, result);
++}
++
++BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_utf8(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    Arena* arena = arguments->arena;
++    u64 position = arena->position;
++    String8 valid[] = {
++        S8("\xC2\x80"), S8("\xDF\xBF"), S8("\xE0\xA0\x80"), S8("\xED\x9F\xBF"),
++        S8("\xEE\x80\x80"), S8("\xEF\xBF\xBF"), S8("\xF0\x90\x80\x80"), S8("\xF4\x8F\xBF\xBF"),
++        S8("\xC3\xA9"), S8("\xCE\xB1"), S8("\xE4\xB8\xAD"),
++    };
++    String8 invalid[] = {
++        S8("\x80"), S8("\xBF"), S8("\xC0\xAF"), S8("\xC1\xBF"), S8("\xF5\x80\x80\x80"), S8("\xFF"),
++        S8("\xE0\x9F\xBF"), S8("\xED\xA0\x80"), S8("\xED\xBF\xBF"), S8("\xF0\x8F\xBF\xBF"), S8("\xF4\x90\x80\x80"),
++        S8("\xC2"), S8("\xE2"), S8("\xE2\x82"), S8("\xF0"), S8("\xF0\x90"), S8("\xF0\x90\x80"),
++        S8("\xC2" "x"), S8("\xE2\x82" "x"), S8("\xF0\x90\x80" "x"),
++    };
++    // Physical guard immediately follows the bounded slice; no terminator or
++    // readable continuation byte can conceal an out-of-bounds tail read.
++    u64 page_size = os_get_page_size();
++    char8* pages = (char8*)os_reserve(0, page_size * 2, (ProtectionFlags){0},
++                                     (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
++    BUSTER_TEST(arguments, pages != 0);
++    bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
++    BUSTER_TEST(arguments, committed);
++    if (committed)
++    {
++        for (u32 accepted = 0; accepted < 2; accepted += 1)
++        {
++            String8* cases = accepted ? valid : invalid;
++            u64 count = accepted ? BUSTER_ARRAY_LENGTH(valid) : BUSTER_ARRAY_LENGTH(invalid);
++            for (u64 index = 0; index < count; index += 1)
++            {
++                String8 bytes = cases[index];
++                for (u64 pad = 0; pad < 128; pad += 1)
++                {
++                    // Non-ASCII initials and high bytes deep in identifiers
++                    // or preprocessing numbers, at every sequence/window split.
++                    for (u32 word_prefix = 0; word_prefix < 3; word_prefix += 1)
++                    {
++                        u64 length = pad + bytes.length;
++                        char8* source = pages + page_size - length;
++                        memset(source, word_prefix ? 'a' : ' ', pad);
++                        if (word_prefix == 2 && pad) source[0] = '1';
++                        memcpy(source + pad, bytes.pointer, bytes.length);
++                        c_test_utf8_lex_expect(arguments, &result, (String8){source, length},
++                                               accepted ? BUSTER_STRING_NO_MATCH : pad, 1, (u32)pad + 1);
++                    }
++                }
++            }
++        }
++    }
++    if (pages)
++    {
++        BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2));
++    }
++
++    // Every leader/second-byte pair; later continuation positions independently
++    // span the full byte alphabet below. This oracle does not use utf8_decode.
++    for (u32 leader = 128; leader < 256; leader += 1)
++    {
++        for (u32 second = 0; second < 256; second += 1)
++        {
++            char8 bytes[] = {(char8)leader, (char8)second, 0x80, 0x80};
++            String8 source = {bytes, leader < 0xE0 ? 2 : leader < 0xF0 ? 3 : 4};
++            bool accepted = c_test_utf8_scalar_valid(source);
++            CLexResult lex = c_lex(arena, source);
++            BUSTER_TEST(arguments, (lex.diagnostic_count == 0) == accepted);
++            if (!accepted && lex.diagnostic_count)
++            {
++                BUSTER_TEST(arguments, lex.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_UTF8);
++                BUSTER_TEST(arguments, lex.diagnostics[0].location.offset == 0);
++            }
++            arena_set_position(arena, position);
++        }
++    }
++    for (u32 width = 3; width <= 4; width += 1)
++    {
++        for (u32 lane = 2; lane < width; lane += 1)
++        {
++            for (u32 byte = 0; byte < 256; byte += 1)
++            {
++                char8 bytes[] = {width == 3 ? 0xE1 : 0xF1, 0x80, 0x80, 0x80};
++                bytes[lane] = (char8)byte;
++                String8 source = {bytes, width};
++                CLexResult lex = c_lex(arena, source);
++                BUSTER_TEST(arguments, (lex.diagnostic_count == 0) == c_test_utf8_scalar_valid(source));
++                BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
++                arena_set_position(arena, position);
++            }
++        }
++    }
++
++    String8 prefixes[] = {S8("int "), S8("int ascii"), S8("1."), S8("#define "), S8("#define M "),
++                          S8("#if 0\n"), S8("#define Q(x) #x\nQ("), S8("#include <")};
++    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
++    {
++        String8 prefix = prefixes[index];
++        for (u64 pad = 0; pad < 64; pad += 1)
++        {
++            char8 source[128];
++            memset(source, ' ', pad);
++            memcpy(source + pad, prefix.pointer, prefix.length);
++            source[pad + prefix.length] = 0xFF;
++            c_test_utf8_lex_expect(arguments, &result, (String8){source, pad + prefix.length + 1}, pad + prefix.length,
++                                   index == 5 || index == 6 ? 2 : 1, index == 5 ? 1 : index == 6 ? 3 : (u32)(pad + prefix.length + 1));
++        }
++    }
++    // Comments and all literal token forms deliberately retain their existing
++    // byte policy; high bytes elsewhere in the window cannot reclassify them.
++    String8 byte_contexts[] = {S8("/*\xFF*/ x"), S8("//\xFF\nx"), S8("\"\xFF\" x"), S8("'\xFF' x"),
++                              S8("u8\"\xFF\" x"), S8("u\"\xFF\" x"), S8("U\"\xFF\" x"), S8("L'\xFF' x")};
++    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(byte_contexts); index += 1)
++    {
++        for (u64 pad = 0; pad < 128; pad += 1)
++        {
++            char8 source[160];
++            memset(source, ' ', pad);
++            memcpy(source + pad, byte_contexts[index].pointer, byte_contexts[index].length);
++            c_test_utf8_lex_expect(arguments, &result, (String8){source, pad + byte_contexts[index].length}, BUSTER_STRING_NO_MATCH, 0, 0);
++        }
++    }
++    c_test_utf8_lex_expect(arguments, &result, S8("// heading\r\nint pre\\\r\nfix\xFF;"), 25, 3, 4);
++    c_test_utf8_lex_expect(arguments, &result, S8("int a\xED\\\r\n\xA0\x80;"), 5, 1, 6);
++    c_test_utf8_lex_expect(arguments, &result, S8("int a\xF0\\\n\x90\\\r\n\x80;"), 5, 1, 6);
++    c_test_utf8_lex_expect(arguments, &result, S8("int caf\xC3\\\r\n\xA9;"), BUSTER_STRING_NO_MATCH, 0, 0);
++    c_test_utf8_lex_expect(arguments, &result, S8("int \xC3\xA9\xFF\x80;"), 6, 1, 7);
++
++    CPreprocessResult preprocess;
++    CParseResult parse;
++    CIRLowerResult lower = c_test_lower_source(arena,
++        S8("int caf\xC3\xA9 = 7; int \xCE\xB1(void) { return caf\xC3\xA9; }"), S8("utf8-valid.c"), target_native, &preprocess, &parse);
++    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
++    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
++    BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program != 0);
++    arena_set_position(arena, position);
++    return result;
++}
++
+ // Every construct the compaction emitter models with masks and every shape it
+ // escapes on, each slid across the 64-byte window boundary by a growing space
+ // prefix so no construct is only ever seen window-aligned.
+@@ -15720,6 +15907,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+     c_test_result_add(&result, c_test_preprocessor_short_circuit(arguments));
+     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
+     c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));
++    c_test_result_add(&result, c_test_source_utf8(arguments));
+     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
+     c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
+     c_test_result_add(&result, c_test_pp_class_masks(arguments));
+diff --git a/tests/basic_c_utf8_identifiers.c b/tests/basic_c_utf8_identifiers.c
+new file mode 100644
+index 0000000..af57b0d
+--- /dev/null
++++ b/tests/basic_c_utf8_identifiers.c
+@@ -0,0 +1,19 @@
++// UTF-8 source identifiers survive macros, scopes, calls and symbol lookup.
++// Ordinary literals retain byte values, including non-UTF-8 escaped bytes.
++#define café 7
++#define CONCAT(a, b) a##b
++
++int π = 11;
++
++static int función(int 日本語)
++{
++    int naïve = 日本語 + café;
++    return naïve + π;
++}
++
++int main(void)
++{
++    const unsigned char bytes[] = "\xFF\x80";
++    int CONCAT(caf, é_local) = función(3);
++    return café_local != 21 || bytes[0] != 255 || bytes[1] != 128;
++}

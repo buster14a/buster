@@ -1,0 +1,47 @@
+{
+  "base": {
+    "peak_rss_kib": {
+      "min": 619808.0,
+      "median": 619844.0,
+      "max": 620084.0
+    },
+    "wall_seconds": {
+      "min": 32.48722720099613,
+      "median": 34.55583493098675,
+      "max": 34.59572184800345
+    },
+    "user_seconds": {
+      "min": 24.856073,
+      "median": 26.216635,
+      "max": 26.619735
+    },
+    "system_seconds": {
+      "min": 6.906166,
+      "median": 7.035438,
+      "max": 8.177787
+    }
+  },
+  "candidate": {
+    "peak_rss_kib": {
+      "min": 601556.0,
+      "median": 601696.0,
+      "max": 601740.0
+    },
+    "wall_seconds": {
+      "min": 32.47261045599589,
+      "median": 34.348358164003,
+      "max": 34.41765917900193
+    },
+    "user_seconds": {
+      "min": 24.817357,
+      "median": 25.932468,
+      "max": 26.75905
+    },
+    "system_seconds": {
+      "min": 7.127404,
+      "median": 7.262626,
+      "max": 7.425695
+    }
+  },
+  "rss_change_percent": -2.9278334548692886
+}
