@@ -10147,25 +10147,63 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .thread_local_index = thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
                                 };
                             }
-                            buffer.count += encoded.byte_count;
-                            descriptor->prolog_size = machine_prologue_cursor;
-                            descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
-                            machine_function_emitted = true;
-                            if (label_address_relocation_count)
+                            bool machine_inline_relocations_valid =
+                                result.relocation_count <= relocation_capacity &&
+                                encoded.inline_assembly_relocation_count <= relocation_capacity - result.relocation_count;
+                            for (u32 relocation_index = 0;
+                                 relocation_index < encoded.inline_assembly_relocation_count && machine_inline_relocations_valid;
+                                 relocation_index += 1)
                             {
-                                machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
-                                memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                                MachineInlineAssemblyRelocation relocation = encoded.inline_assembly_relocations[relocation_index];
+                                CodegenModuleRelocationKind kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
+                                machine_inline_relocations_valid = !relocation.is_block &&
+                                    codegen_global_assembly_relocation_kind((AssemblyRelocationKind)relocation.kind, &kind);
+                                s64 addend = relocation.addend;
+                                if (machine_inline_relocations_valid && kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32)
+                                {
+                                    machine_inline_relocations_valid = addend <= INT64_MAX - 4;
+                                    addend += 4;
+                                }
+                                IrSymbolId symbol = machine_inline_relocations_valid
+                                                        ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA)
+                                                        : IR_SYMBOL_ID_INVALID;
+                                machine_inline_relocations_valid = machine_inline_relocations_valid &&
+                                    symbol.value != IR_ID_UNDERLYING_INVALID;
+                                if (machine_inline_relocations_valid)
+                                {
+                                    result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                        .addend = addend,
+                                        .symbol = symbol,
+                                        .offset = (u32)buffer.count + relocation.offset,
+                                        .source = CODEGEN_MODULE_RELOCATION_CODE,
+                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+                                        .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
+                                        .kind = (u8)kind,
+                                    };
+                                }
                             }
-                            machine_stack_frame_size = placement.frame_size;
-                            result.statistics.allocator_reload_count += placement.reload_count;
-                            result.statistics.allocator_spill_count += placement.spill_count;
-                            result.statistics.allocator_copy_count += placement.copy_count;
-                            result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
-                            result.statistics.allocator_boundary_reload_count += placement.boundary_reload_count;
-                            result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
-                            result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
-                            result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
-                            result.statistics.allocator_split_register_count += placement.split_register_count;
+                            if (machine_inline_relocations_valid)
+                            {
+                                buffer.count += encoded.byte_count;
+                                descriptor->prolog_size = machine_prologue_cursor;
+                                descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
+                                machine_function_emitted = true;
+                                if (label_address_relocation_count)
+                                {
+                                    machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
+                                    memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                                }
+                                machine_stack_frame_size = placement.frame_size;
+                                result.statistics.allocator_reload_count += placement.reload_count;
+                                result.statistics.allocator_spill_count += placement.spill_count;
+                                result.statistics.allocator_copy_count += placement.copy_count;
+                                result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
+                                result.statistics.allocator_boundary_reload_count += placement.boundary_reload_count;
+                                result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
+                                result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
+                                result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
+                                result.statistics.allocator_split_register_count += placement.split_register_count;
+                            }
                         }
                     }
                 }
