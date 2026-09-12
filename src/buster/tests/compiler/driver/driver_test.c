@@ -3081,8 +3081,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 }
                 else
                 {
+#if BUSTER_CPU_ARCH_AARCH64
+                    // Read the reference's alias addresses directly from the
+                    // DSO, independently of system COPY-slot allocation.
+                    command[command_count++] = S8("-fPIC");
+                    command[command_count++] = S8("-pie");
+                    command[command_count++] = main_source;
+#else
                     command[command_count++] = S8("-no-pie");
                     command[command_count++] = object_path;
+#endif
                     command[command_count++] = S8("-L");
                     command[command_count++] = directory;
                     command[command_count++] = S8("-ldataprobe");
@@ -3135,7 +3143,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), run);
                 BUSTER_TEST(arguments, spawn.handle != 0);
-                if (spawn.handle) BUSTER_TEST(arguments, os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+                    BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+                    if (wait.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice error = wait.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("ELF_DATA_RUN_ERROR shape={u32} count={u32} reference={u32} status={u32:x} stderr={S8}\n"),
+                            shape, count, variant, wait.platform_status, (String8){.pointer = (char8*)error.pointer, .length = error.length});
+                    }
+                }
             }
             scratch_end(fixture);
         }
