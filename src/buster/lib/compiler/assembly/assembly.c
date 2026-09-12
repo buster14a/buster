@@ -12,9 +12,9 @@
 // selection and encoding go through the generated metadata
 // (assembly_x86_metadata_select_source_form, x86_64_metadata.h), with the
 // assembly_x86_instruction_size/encode paths covering the legacy subset
-// and every prefix family up to EVEX/APX; AArch64 parsing walks the
-// generated syntax templates and semantic tables (aarch64_syntax.h,
-// aarch64_*_semantics.h) and encodes through aarch64_encoding.h.
+// and every prefix family up to EVEX/APX; AArch64 parsing uses the generated
+// syntax/semantic tables and compact architectural front doors such as the
+// scalar GPR memory family, all encoded through aarch64_encoding.h.
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_space .. assembly_symbol_intern       builder plumbing, labels,
@@ -40,6 +40,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
@@ -474,6 +475,7 @@ typedef enum AssemblyEncodingKind
     ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS,
     ASSEMBLY_ENCODING_AARCH64_M1_GPR,
     ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
+    ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY,
     ASSEMBLY_ENCODING_AARCH64_CONTROL,
     ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS,
     ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER,
@@ -514,6 +516,7 @@ struct AssemblyInstruction
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
     u32 aarch64_scalar_integer_form_index;
+    u32 aarch64_scalar_memory_form_id;
     u32 aarch64_control_row_index;
     u32 aarch64_direct_simd_row_index;
     u8 aarch64_direct_simd_registers[4];
@@ -738,6 +741,34 @@ BUSTER_GLOBAL_LOCAL bool assembly_word_equal(String8 left, String8 right)
         }
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_memory_mnemonic(String8 mnemonic, u8* size, bool* store)
+{
+    static const struct
+    {
+        String8 mnemonic;
+        u8 size;
+        bool store;
+    } forms[] = {
+        {S8_INITIALIZER("ldr"), 0, false},
+        {S8_INITIALIZER("str"), 0, true},
+        {S8_INITIALIZER("ldrb"), 1, false},
+        {S8_INITIALIZER("strb"), 1, true},
+        {S8_INITIALIZER("ldrh"), 2, false},
+        {S8_INITIALIZER("strh"), 2, true},
+    };
+    bool found = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(forms) && !found; index += 1)
+    {
+        if (assembly_word_equal(mnemonic, forms[index].mnemonic))
+        {
+            if (size) *size = forms[index].size;
+            if (store) *store = forms[index].store;
+            found = true;
+        }
+    }
+    return found;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_gpr_register_parse(String8 text, AssemblyRegister* result)
@@ -4001,6 +4032,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         else if (assembly_word_equal(mnemonic, S8("bl")))
         {
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_AARCH64_BL, .operand_count = 1};
+        }
+        else if (assembly_aarch64_scalar_memory_mnemonic(mnemonic, 0, 0))
+        {
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY};
         }
         else if (assembly_word_equal(mnemonic, S8("mov")))
         {
@@ -7918,6 +7954,92 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_constant(AssemblyBuilder* build
     return !expression.has_unsigned_addend || expression.unsigned_addend <= UINT64_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_memory_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
+                                                                           String8 operands_text,
+                                                                           AssemblyInstruction* instruction)
+{
+    u8 memory_size = 0;
+    bool store = false;
+    bool valid = builder && instruction && assembly_aarch64_scalar_memory_mnemonic(mnemonic, &memory_size, &store);
+    String8 operands[2] = {0};
+    u32 operand_count = 0;
+    u64 cursor = 0;
+    while (valid && cursor < operands_text.length)
+    {
+        valid = operand_count < BUSTER_ARRAY_LENGTH(operands) &&
+                assembly_operand_split_next(operands_text, &cursor, operands + operand_count) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        operand_count += valid;
+    }
+    valid = valid && operand_count == BUSTER_ARRAY_LENGTH(operands);
+
+    AssemblyRegister data = {0};
+    if (valid)
+    {
+        valid = assembly_aarch64_gpr_register_parse(operands[0], &data) && !data.stack_pointer;
+        if (valid && !memory_size)
+        {
+            memory_size = data.width == 32 ? 4 : data.width == 64 ? 8 : 0;
+            valid = memory_size != 0;
+        }
+        else if (valid)
+        {
+            valid = data.width == 32;
+        }
+    }
+
+    String8 memory_text = valid ? assembly_trim(operands[1]) : (String8){0};
+    valid = valid && memory_text.length >= 3 && memory_text.pointer[0] == '[' &&
+            memory_text.pointer[memory_text.length - 1] == ']';
+    String8 memory_operands[2] = {0};
+    u32 memory_operand_count = 0;
+    cursor = 0;
+    String8 memory_contents = valid ? assembly_trim(string_slice(memory_text, 1, memory_text.length - 1)) : (String8){0};
+    while (valid && cursor < memory_contents.length)
+    {
+        valid = memory_operand_count < BUSTER_ARRAY_LENGTH(memory_operands) &&
+                assembly_operand_split_next(memory_contents, &cursor, memory_operands + memory_operand_count) ==
+                    ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        memory_operand_count += valid;
+    }
+    valid = valid && memory_operand_count >= 1 && memory_operand_count <= 2;
+
+    AssemblyRegister base = {0};
+    if (valid)
+    {
+        valid = assembly_aarch64_gpr_register_parse(memory_operands[0], &base) && base.width == 64 &&
+                (base.index != 31 || base.stack_pointer);
+    }
+    u64 offset = 0;
+    if (valid && memory_operand_count == 2)
+    {
+        String8 offset_text = assembly_trim(memory_operands[1]);
+        valid = offset_text.length && offset_text.pointer[0] == '#' &&
+                assembly_aarch64_scalar_constant(builder, offset_text, &offset) && !(offset % memory_size) &&
+                offset / memory_size <= UINT32_C(0xfff);
+    }
+    if (valid)
+    {
+        instruction->aarch64_scalar_memory_form_id =
+            store ? memory_size == 1   ? BUSTER_AARCH64_GENERATED_FORM_STRBBUI
+                    : memory_size == 2 ? BUSTER_AARCH64_GENERATED_FORM_STRHHUI
+                    : memory_size == 4 ? BUSTER_AARCH64_GENERATED_FORM_STRWUI
+                                       : BUSTER_AARCH64_GENERATED_FORM_STRXUI
+                  : memory_size == 1   ? BUSTER_AARCH64_GENERATED_FORM_LDRBBUI
+                    : memory_size == 2 ? BUSTER_AARCH64_GENERATED_FORM_LDRHHUI
+                    : memory_size == 4 ? BUSTER_AARCH64_GENERATED_FORM_LDRWUI
+                                       : BUSTER_AARCH64_GENERATED_FORM_LDRXUI;
+        instruction->operands[0] = (AssemblyOperand){.reg = data, .kind = ASSEMBLY_OPERAND_REGISTER};
+        instruction->operands[1] = (AssemblyOperand){
+            .memory = {.displacement = {.addend = (s64)offset, .unsigned_addend = offset, .has_unsigned_addend = true},
+                       .base = base, .width = (u16)(memory_size * 8u), .has_base = true, .width_explicit = true},
+            .kind = ASSEMBLY_OPERAND_MEMORY,
+        };
+        instruction->operand_count = 2;
+        instruction->size = 4;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_modifier(String8 text, A64ScalarIntModifier* result)
 {
     text = assembly_trim(text);
@@ -10030,6 +10152,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                 (u32)operands.length, S8("invalid AArch64 system instruction operands"));
+            return;
+        }
+        builder->instructions[builder->instruction_count++] = instruction;
+        return;
+    }
+    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY)
+    {
+        if (!assembly_aarch64_scalar_memory_instruction_parse(builder, mnemonic, operands, &instruction))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid AArch64 scalar memory operands"));
             return;
         }
         builder->instructions[builder->instruction_count++] = instruction;
@@ -13969,6 +14102,23 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_FIXED_WORD)
         {
             assembly_emit_u32(builder, instruction->fixed_word);
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY)
+        {
+            AssemblyRegister data = instruction->operands[0].reg;
+            AssemblyMemory memory = instruction->operands[1].memory;
+            u32 field_values[3] = {data.index, memory.base.index,
+                                   (u32)(memory.displacement.unsigned_addend / (memory.width / 8u))};
+            u32 word = 0;
+            if (!a64_generated_production_raw_encode(instruction->aarch64_scalar_memory_form_id, field_values,
+                                                      BUSTER_ARRAY_LENGTH(field_values), &word))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 scalar memory instruction could not be encoded"));
+                return;
+            }
+            assembly_emit_u32(builder, word);
             continue;
         }
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS)

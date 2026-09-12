@@ -5391,6 +5391,46 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_jump.relocation_count == 1 && aarch64_jump.relocations[0].offset == 0 &&
                                aarch64_jump.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_JUMP26);
 
+    AssemblyEncodeResult aarch64_scalar_memory = assembly_encode(
+        arguments->arena,
+        S8("str w10, [x9]\n"
+           "ldr w11, [x12, #4]\n"
+           "str x13, [sp, #16]\n"
+           "LDRB w14, [x15, #3]\n"
+           "strh w16, [x17, #6]\n"
+           "ldr x18, [x19, #24]\n"
+           "strb w20, [x21, #2]\n"
+           "ldrh w22, [x23, #4]\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    // Independent llvm-mc 22.1.8 encodings for all scalar widths, both
+    // directions, SP bases, zero offsets, and scaled unsigned offsets.
+    static u8 const expected_aarch64_scalar_memory[] = {
+        0x2a, 0x01, 0x00, 0xb9, 0x8b, 0x05, 0x40, 0xb9,
+        0xed, 0x0b, 0x00, 0xf9, 0xee, 0x0d, 0x40, 0x39,
+        0x30, 0x0e, 0x00, 0x79, 0x72, 0x0e, 0x40, 0xf9,
+        0xb4, 0x0a, 0x00, 0x39, 0xf6, 0x0a, 0x40, 0x79,
+    };
+    BUSTER_TEST(arguments, aarch64_scalar_memory.diagnostic_count == 0 &&
+                               aarch64_scalar_memory.bytes.length == sizeof(expected_aarch64_scalar_memory) &&
+                               memcmp(aarch64_scalar_memory.bytes.pointer, expected_aarch64_scalar_memory,
+                                      sizeof(expected_aarch64_scalar_memory)) == 0);
+    AssemblyEncodeResult aarch64_scalar_memory_invalid = assembly_encode(
+        arguments->arena,
+        S8("ldr w0, [w1]\n"
+           "str sp, [x1]\n"
+           "ldrb x0, [x1]\n"
+           "strh w0, [x1, #1]\n"
+           "ldr x0, [xzr]\n"
+           "ldr x0, [x1, #32768]\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_scalar_memory_invalid.diagnostic_count == 6 &&
+                               aarch64_scalar_memory_invalid.bytes.length == 0);
+    for (u32 diagnostic_index = 0; diagnostic_index < aarch64_scalar_memory_invalid.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments,
+                    aarch64_scalar_memory_invalid.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     AssemblyEncodeResult invalid = assembly_encode(arguments->arena, S8("same:\n same: nop\n ret x0\n unknown\n"),
                                                     (AssemblyEncodeOptions){
                                                         .target = aarch64_target,

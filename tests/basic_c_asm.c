@@ -238,17 +238,17 @@ static int explicit_register_clobber_live_values(int left, int right)
 }
 
 #if defined(__aarch64__) || defined(_M_ARM64)
-static long fixed_bound_input(long input)
+static long long fixed_bound_input(long long input)
 {
-    register long fixed __asm__("x8") = input;
-    long output;
+    register long long fixed __asm__("x8") = input;
+    long long output;
     __asm__ volatile("mov %0, x8" : "=r"(output) : "r"(fixed));
     return output;
 }
 
-static long fixed_bound_callee_saved_output(long input)
+static long long fixed_bound_callee_saved_output(long long input)
 {
-    register long output __asm__("x19");
+    register long long output __asm__("x19");
     __asm__ volatile("mov x19, %1" : "=r"(output) : "0"(input));
     return output;
 }
