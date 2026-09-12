@@ -25,6 +25,10 @@ jobs:
           python3 - <<'PY'
           import base64, hashlib, os, pathlib, zlib
           payload = pathlib.Path(os.environ['RUNNER_TEMP'], 'issue36-payload.txt').read_text()
+          repairs = [('B6+ufbzmTgX3HBoNhrVzZL5Ws', 'B6+ufbzmTgX3PBoNhrVzZL5Ws'), ('Syjm4Js5sWyfzqD6HwiTqTG/', 'Syjm4Js5sWyfzVzqD6HwiTqTG/'), ('55a7xNGvTaPZvfRCEzpHbp7q/j', '55a7xNGvTaPZ/RCEzpHbp7q/j')]
+          for old, new in repairs:
+              assert payload.count(old) == 1
+              payload = payload.replace(old, new)
           patch = zlib.decompress(base64.b64decode(payload, validate=True))
           assert hashlib.sha256(patch).hexdigest() == '98aa183217e1e7a55c8063bfd8716248671d37a0222db1468f73b11191d85e90'
           pathlib.Path(os.environ['RUNNER_TEMP'], 'issue36.patch').write_bytes(patch)
@@ -101,7 +105,7 @@ jobs:
           clang -c tests/aarch64_atomic_update_pair_oracle.s -o "$RUNNER_TEMP/atomic-oracle.o"
           objdump -dr "$RUNNER_TEMP/atomic-oracle.o"
       - name: Strict sanitizer full suite
-        if: ${{ !cancelled() && steps.publish.outcome != 'failure' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
