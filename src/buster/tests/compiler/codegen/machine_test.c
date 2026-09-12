@@ -5214,7 +5214,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 285);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 287);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -5284,6 +5284,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_X64_MOVQ_FROM_XMM] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_LOAD_XMM0_FRAME128] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_STORE_XMM0_FRAME128] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_LOAD_XMM_FRAME128] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_STORE_XMM_FRAME128] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_LOAD_INCOMING] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_VA_SAVE] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_VA_ARG] = MACHINE_SCHEDULE_UNIT_BARRIER,
@@ -5607,7 +5609,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 112);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 114);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.

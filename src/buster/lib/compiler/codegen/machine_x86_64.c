@@ -59,7 +59,7 @@ struct MachineX64ValueShape
     // callees exist that read the widened register directly. Zero when a
     // plain move suffices.
     u16 scalar_extend_opcode;
-    // A frame-backed sixteen-byte integer result returns whole in XMM0.
+    // A frame-backed sixteen-byte value occupies one whole XMM ABI register.
     bool xmm128;
     // The unrounded size of an indirect result. byte_size is rounded up to
     // whole eightbytes for the value's own slot; the store through the
@@ -618,12 +618,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
         .aggregate = true,
         .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
+        .xmm128 = abi.part_count == 1 && abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && abi.parts[0].size == 16,
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
     {
-        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT;
+        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT || built.xmm128;
         if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
-            abi.parts[part_index].size > 8)
+            (abi.parts[part_index].size > 8 && !built.xmm128))
         {
             return false;
         }
@@ -990,9 +991,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_metadata(MachineX64Selector* selecto
         IrAbiPart* part = abi.parts + part_index;
         MachineVaArgPart* output = value.parts + part_index;
         output->value_offset = part->value_offset;
-        output->size = (u8)BUSTER_MIN(part->size, 8u);
+        output->size = (u8)(part->abi_class == IR_ABI_CLASS_VECTOR && part->size == 16 ? 16u : BUSTER_MIN(part->size, 8u));
         output->is_memory = part->abi_class == IR_ABI_CLASS_MEMORY;
-        if (part->abi_class == IR_ABI_CLASS_FLOAT)
+        if (part->abi_class == IR_ABI_CLASS_FLOAT || part->abi_class == IR_ABI_CLASS_VECTOR)
         {
             output->is_float = 1;
             // The va_list fp_offset already includes the 48-byte GP save
@@ -5314,6 +5315,18 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                 }
                 continue;
             }
+            if (shape->xmm128)
+            {
+                if (float_pass)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_ZMM0 + next_float),
+                                     machine_ref_make(MACHINE_REF_STACK_SLOT, plan->argument_slots[argument_index])},
+                        .opcode = MACHINE_X64_LOAD_XMM_FRAME128,
+                    });
+                }
+                continue;
+            }
             if (shape->aggregate)
             {
                 for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
@@ -7109,6 +7122,24 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                   .opcode = MACHINE_X64_VMOV_RR,
                                                               });
                         machine_x64_define(&selector, vector_argument_register, vector_capture_row);
+                        continue;
+                    }
+                    if (shape->xmm128)
+                    {
+                        if (float_pass)
+                        {
+                            u32 slot = selector.value_stack_slots[argument_value];
+                            if (slot == UINT32_MAX)
+                            {
+                                machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
+                                break;
+                            }
+                            machine_x64_select_row(&selector, (MachineInstruction){
+                                .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_ZMM0 + next_float),
+                                             machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                .opcode = MACHINE_X64_STORE_XMM_FRAME128,
+                            });
+                        }
                         continue;
                     }
                     if (shape->aggregate)
@@ -13715,6 +13746,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, operand_registers[1], 64, 64, 0);
                         (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), operand_registers[0], 0, 64, 128, 0);
                     }
+                    break; case MACHINE_X64_LOAD_XMM_FRAME128:
+                    case MACHINE_X64_STORE_XMM_FRAME128:
+                    {
+                        u32 slot = machine_ref_payload(instruction->operands[1]);
+                        s64 displacement = -(s64)(s32)placement->stack_slot_offsets[slot];
+                        (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVDQU"), operand_registers[0] - MACHINE_X64_ZMM0,
+                            MACHINE_X64_RBP, displacement, instruction->opcode == MACHINE_X64_STORE_XMM_FRAME128, 128, 0);
+                    }
                     break; case MACHINE_X64_LOAD_XMM0_FRAME128:
                     case MACHINE_X64_STORE_XMM0_FRAME128:
                     {
@@ -13753,8 +13792,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             u32 xmm = float_index;
                             u32 save_displacement = save_offset - 48u - float_index * 16u;
-                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm, MACHINE_X64_RBP,
-                                    -(s64)(s32)save_displacement, true, 64, 0);
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,
+                                    -(s64)(s32)save_displacement, true, 128, 0);
                         }
                     }
                     break; case MACHINE_X64_VA_ARG:
@@ -13816,19 +13855,20 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 // cursor into the save-area base.
                                 (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R11, MACHINE_X64_R8, 64, 0);
                                 (void)machine_x64_emit_metadata_registers(&encoder, S8("ADD"), MACHINE_X64_R11, offset_register, 64, 0);
-                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_R11, part->save_offset,
-                                        part->size >= 8 ? 8 : part->size, 0);
-                                if (metadata->result_is_frame)
+                                for (u32 copied = 0; copied < part->size; copied += 8u)
                                 {
-                                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - part->value_offset,
-                                            part->size >= 8 ? 8 : part->size, 0);
-                                }
-                                else
-                                {
-                                    // Scalar VA_ARG values are one part and the
-                                    // constrained result register is RCX.
-                                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), result_register, MACHINE_X64_R10,
-                                            part->size >= 8 ? 64 : 32, 0);
+                                    u32 chunk = BUSTER_MIN((u32)part->size - copied, 8u);
+                                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_R11,
+                                        part->save_offset + copied, chunk, 0);
+                                    if (metadata->result_is_frame)
+                                    {
+                                        (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10,
+                                            result_offset - part->value_offset - copied, chunk, 0);
+                                    }
+                                    else
+                                    {
+                                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), result_register, MACHINE_X64_R10, 64, 0);
+                                    }
                                 }
                             }
                             if (integer_parts)

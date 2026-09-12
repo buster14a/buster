@@ -19,6 +19,13 @@ runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
 not a shell command containing flags. On Windows specify the `.exe` path.
 
+Desktop SysV x86-64 hosts additionally run `sysv-sseup`: an independently
+compiled observer checks sixteen-byte vector wrappers, nested wrappers, union
+class merging, stack/register exhaustion, copied variadic lists and calls in
+both directions. Every MIR leg is strict; NONE is a separately checked direct
+oracle. This case checks actual payloads against the host compiler, so matching
+Buster outputs cannot conceal a shared ABI-classification defect.
+
 The native variadic case also exercises ELF AArch64's independent integer
 and floating-point argument files. Its ten-float call exhausts the floating
 registers, and its mixed named parameters check the anonymous integer cursor.

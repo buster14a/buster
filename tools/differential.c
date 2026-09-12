@@ -879,6 +879,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                             {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
                             {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
                             {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                            {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true},
+#endif
                             {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
                             {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
                         };
