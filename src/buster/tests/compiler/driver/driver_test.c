@@ -3,6 +3,7 @@
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
+#include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -1210,14 +1211,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
     return result;
 }
 
-// Drive a nonstandard-suffix assembly unit through parsing, assembly, object
-// serialization and object reading. This reaches the native target resolver,
-// unlike an assembly_unit_encode-only test.
+// Exercise the complete native-language boundary, then drive a nonstandard-
+// suffix assembly unit through parsing, assembly, object serialization and
+// object reading. This reaches the native target resolver, unlike an
+// assembly_unit_encode-only test.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
+    CompilerDriverLanguage native_languages[] = {
+        COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
+        COMPILER_DRIVER_LANGUAGE_C,
+        COMPILER_DRIVER_LANGUAGE_ASSEMBLY,
+    };
+    CompilerDriverLanguage gpu_languages[] = {
+        COMPILER_DRIVER_LANGUAGE_OPENCL,
+        COMPILER_DRIVER_LANGUAGE_CUDA,
+        COMPILER_DRIVER_LANGUAGE_HIP,
+        COMPILER_DRIVER_LANGUAGE_METAL,
+        COMPILER_DRIVER_LANGUAGE_HLSL,
+        COMPILER_DRIVER_LANGUAGE_LLVM_IR,
+        COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY,
+        COMPILER_DRIVER_LANGUAGE_METAL_AIR,
+    };
+    for (u32 language_index = 0; language_index < BUSTER_ARRAY_LENGTH(native_languages); language_index += 1)
+    {
+        BUSTER_TEST(arguments, compiler_driver_language_is_native(native_languages[language_index]));
+    }
+    for (u32 language_index = 0; language_index < BUSTER_ARRAY_LENGTH(gpu_languages); language_index += 1)
+    {
+        BUSTER_TEST(arguments, !compiler_driver_language_is_native(gpu_languages[language_index]));
+    }
+    BUSTER_TEST(arguments, !compiler_driver_language_is_native(COMPILER_DRIVER_LANGUAGE_COUNT));
+    BUSTER_TEST(arguments, !compiler_driver_language_is_native((CompilerDriverLanguage)(COMPILER_DRIVER_LANGUAGE_COUNT + 1)));
+
     String8 invalid_input = S8("unused.input");
     String8 gpu_option_arguments[] = {S8("--gpu-entry"), S8("main"), invalid_input};
     CompilerDriverInvocation gpu_option =
