@@ -23,6 +23,9 @@ struct FileMapRead
 BUSTER_F_DECL ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options);
 BUSTER_F_DECL FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options);
 BUSTER_F_DECL void file_map_unmap(FileMapRead map);
+// Completion includes close. On error a prefix may remain at the destination;
+// atomic replacement and crash durability are separate contracts.
+BUSTER_F_DECL OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPermissions permissions);
 BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
 typedef struct CopyFileArguments CopyFileArguments;

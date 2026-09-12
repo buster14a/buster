@@ -2951,7 +2951,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
     command[5] = string_format(arena, S8("-fbootstrap-trace={S8}/trace"), missing);
     CompilerDriverResult unwritable = compiler_driver_execute_invocation(arena,
         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-    BUSTER_TEST(arguments, unwritable.error == COMPILER_DRIVER_ERROR_FILE_READ && !unwritable.has_object);
+    BUSTER_TEST(arguments, unwritable.error == COMPILER_DRIVER_ERROR_FILE_WRITE && !unwritable.has_object);
     // Rejected MIR may contain missing storage. Diagnostic serialization must
     // retain the verifier failure without following a null virtual-register
     // table. Before this guard the trace writer crashed after verification.
