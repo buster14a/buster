@@ -53,12 +53,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$EVIDENCE_TAG" \
-            --target 38f150f7affdf458a9b394961709d659cc738bf3 \
-            --title "Native-retirement evidence for eb1bef2" \
-            --notes-file docs/performance-audits/evidence/2026-09-12-retirement/RELEASE.md \
-            --prerelease
-          gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/release-assets"/*
+          if ! gh release view "$EVIDENCE_TAG" >/dev/null 2>&1; then
+            gh release create "$EVIDENCE_TAG" \
+              --target 38f150f7affdf458a9b394961709d659cc738bf3 \
+              --title "Native-retirement evidence for eb1bef2" \
+              --notes-file docs/performance-audits/evidence/2026-09-12-retirement/RELEASE.md \
+              --prerelease
+          fi
+          for asset in "$RUNNER_TEMP/release-assets"/*; do
+            name=$(basename "$asset")
+            remote=$(gh api "repos/${{ github.repository }}/releases/tags/$EVIDENCE_TAG" \
+              --jq ".assets[] | select(.name == \"$name\") | [.size,.digest] | @tsv")
+            if [[ -n "$remote" ]]; then
+              read -r remote_size remote_digest <<< "$remote"
+              local_size=$(stat -c %s "$asset")
+              local_digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
+              [[ "$remote_size" == "$local_size" && "$remote_digest" == "$local_digest" ]]
+            else
+              gh release upload "$EVIDENCE_TAG" "$asset"
+            fi
+          done
 
   census_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
