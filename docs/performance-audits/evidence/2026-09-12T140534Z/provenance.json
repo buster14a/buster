@@ -1,0 +1,229 @@
+{
+  "base_commit": "719ba64e3022a0ae1db078ea97cb951a70ac02a0",
+  "patch_commit": "f0e9fd0cb8d0546363bf6ee717ac66236d5d8d5e",
+  "patch_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "binaries": {
+    "baseline": {
+      "path": "/workspace/scratch/a000979b7cc0/baseline-ide",
+      "sha256": "b749fcb6b521343323652a5888bdb60f13be04fc938b605d447d8897cb4fb0c4"
+    },
+    "patch": {
+      "path": "/workspace/scratch/a000979b7cc0/buster/build/Release/ide",
+      "sha256": "090e8c493552fce5e11753ed3641bc805ae3583a71e4be44e314ad548e65138a"
+    }
+  },
+  "inputs": [
+    {
+      "shape": "comma",
+      "depth": 64,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/comma-64.c",
+      "bytes": 294,
+      "sha256": "a512b7a45a42e595f7243b6a35ea6a1b539637bceae3325eb66181fdec942aa3"
+    },
+    {
+      "shape": "comma",
+      "depth": 256,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/comma-256.c",
+      "bytes": 1062,
+      "sha256": "307657c3df1ce4eec29bd0b50e1eff4e0a0fc4304f834cda5df7a2f207d645c2"
+    },
+    {
+      "shape": "comma",
+      "depth": 1024,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/comma-1024.c",
+      "bytes": 4134,
+      "sha256": "ba22e4cc07809e1f4a12138f25c094510fbb025710ab5501418aba5de4fde9c2"
+    },
+    {
+      "shape": "comma",
+      "depth": 4096,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/comma-4096.c",
+      "bytes": 16422,
+      "sha256": "a961d77307025a553fc3196b470f97be25054bf8839313bf99720bdc802eda59"
+    },
+    {
+      "shape": "comma",
+      "depth": 16384,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/comma-16384.c",
+      "bytes": 65574,
+      "sha256": "5239964f7b5556d4d3c8ec0805c8da7577e19ff08d601f010a028ec231390775"
+    },
+    {
+      "shape": "mixed",
+      "depth": 64,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/mixed-64.c",
+      "bytes": 550,
+      "sha256": "d318f4effcd6d330cf122f5652602a3094f00c0e88f7119cf798ca2440e5a024"
+    },
+    {
+      "shape": "mixed",
+      "depth": 256,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/mixed-256.c",
+      "bytes": 2086,
+      "sha256": "316ffc4beabbae0467e750855e381fd9800f518c6fb1c07c9fda40965007ceec"
+    },
+    {
+      "shape": "mixed",
+      "depth": 1024,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/mixed-1024.c",
+      "bytes": 8230,
+      "sha256": "5e3f55fbe3a727f7a9ea954857eee30d5a5354b66fe4638867c52ce721076f18"
+    },
+    {
+      "shape": "mixed",
+      "depth": 4096,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/mixed-4096.c",
+      "bytes": 32806,
+      "sha256": "57d7c4cce1e3aefcce27eb076385c813a59d52b38d76e6841403330defc70262"
+    },
+    {
+      "shape": "mixed",
+      "depth": 16384,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/mixed-16384.c",
+      "bytes": 131110,
+      "sha256": "36a9806537f75fdaa2baaa23f98c2429670f8b291c7950c565c2ce5309a8cbc9"
+    },
+    {
+      "shape": "operations",
+      "depth": 0,
+      "path": "/workspace/scratch/a000979b7cc0/buster/tests/basic_c_operations.c",
+      "bytes": 21042,
+      "sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111"
+    },
+    {
+      "shape": "parentheses",
+      "depth": 64,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/parentheses-64.c",
+      "bytes": 166,
+      "sha256": "0feca729120d3e436190b42d423139c1a92592d8280a442b51e57c849466f836"
+    },
+    {
+      "shape": "parentheses",
+      "depth": 256,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/parentheses-256.c",
+      "bytes": 550,
+      "sha256": "85e57573df97c141397e88f5ba9f70b74dd6c11ff1563b7b68851662e77845e3"
+    },
+    {
+      "shape": "parentheses",
+      "depth": 1024,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/parentheses-1024.c",
+      "bytes": 2086,
+      "sha256": "6f16c136b688cef1c95d8e92914b211fdf8bb7b0aacf1c46685565ffd5939e55"
+    },
+    {
+      "shape": "parentheses",
+      "depth": 4096,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/parentheses-4096.c",
+      "bytes": 8230,
+      "sha256": "6970d327e7dd257e39035591397832a74809fa6e1dc2ffed5bdf464336245cf0"
+    },
+    {
+      "shape": "parentheses",
+      "depth": 16384,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/parentheses-16384.c",
+      "bytes": 32806,
+      "sha256": "b17c3178dd278391377b7ea311d769f1e33ba855dd00564958da5751a869c191"
+    },
+    {
+      "shape": "postfix",
+      "depth": 64,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/postfix-64.c",
+      "bytes": 339,
+      "sha256": "95dfbdc5bc43c1c7e997822e9757a20e0bb4bcd5bee9dfc80621bf4676123b85"
+    },
+    {
+      "shape": "postfix",
+      "depth": 256,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/postfix-256.c",
+      "bytes": 1107,
+      "sha256": "f56abeb4cc9721278ef8e84409dc018f163834d72360de825454ab7b41f3eb42"
+    },
+    {
+      "shape": "postfix",
+      "depth": 1024,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/postfix-1024.c",
+      "bytes": 4179,
+      "sha256": "7bab8290b4cd140ca8886e95c137cf2de9bcbf8bb1d28f90a8e36e181a18c12e"
+    },
+    {
+      "shape": "postfix",
+      "depth": 4096,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/postfix-4096.c",
+      "bytes": 16467,
+      "sha256": "143810c42e53634097bc7125973ff80b26660398b09e896ab37d963b06d8b286"
+    },
+    {
+      "shape": "postfix",
+      "depth": 16384,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/postfix-16384.c",
+      "bytes": 65619,
+      "sha256": "2bdb597f8350d8f38020c5616534a0090a0b617981d8ab9052268c08c9bb9757"
+    },
+    {
+      "shape": "prefix",
+      "depth": 64,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/prefix-64.c",
+      "bytes": 230,
+      "sha256": "ed7cdc6a75570e518ad781847c8d73ff836aeaff5d00b1dfe9170e68917ea371"
+    },
+    {
+      "shape": "prefix",
+      "depth": 256,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/prefix-256.c",
+      "bytes": 806,
+      "sha256": "6d29524cce3735c65509a8cf989465485e8ede02d23a5dd679b237f32488ba6a"
+    },
+    {
+      "shape": "prefix",
+      "depth": 1024,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/prefix-1024.c",
+      "bytes": 3110,
+      "sha256": "2125ded15d7f320d067874d5adab9807b8449ad3ac1f86fbc4aa8df90a058c14"
+    },
+    {
+      "shape": "prefix",
+      "depth": 4096,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/prefix-4096.c",
+      "bytes": 12326,
+      "sha256": "edc11aa18a7cdf845f2e301020168985ec10bb869fbd6911f1f9ddcbd8a3c34a"
+    },
+    {
+      "shape": "prefix",
+      "depth": 16384,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-inputs/prefix-16384.c",
+      "bytes": 49190,
+      "sha256": "76b81ae6017c0e4d1ae55185890d595d8695a947b8fb3b9fb752c69238aacdad"
+    },
+    {
+      "shape": "tiny",
+      "depth": 0,
+      "path": "/workspace/scratch/a000979b7cc0/typeof-paired/tiny.c",
+      "bytes": 12,
+      "sha256": "6aa2354f2244633beac4de6fb8dc25680dfb23d1953a6bc098e4856ba296ec53"
+    }
+  ],
+  "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/bin\n",
+  "uname": [
+    "Linux",
+    "localhost",
+    "6.18.35",
+    "#1 SMP Mon Aug 31 18:10:37 UTC 2026",
+    "x86_64"
+  ],
+  "cpuinfo": "model name\t: INTEL(R) XEON(R) PLATINUM 8573C",
+  "build_configuration": {
+    "compiler": "Clang 18.1.3",
+    "configuration": "Release",
+    "optimization": "-O3 -DNDEBUG",
+    "unity": true,
+    "tests": true,
+    "sanitize": false,
+    "fuzz": false,
+    "lto": false,
+    "debug_info": true,
+    "frame_pointers": true,
+    "architecture": "-march=native",
+    "allocation_instrumentation": false
+  }
+}

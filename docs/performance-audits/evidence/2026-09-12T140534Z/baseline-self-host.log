@@ -1,0 +1,227 @@
+MACHINE_INFO arch=x86_64 cpu="INTEL(R) XEON(R) PLATINUM 8573C" model=emeraldrapids cores=9 ram_mib=22039
+[1/2] Building C object CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o
+[2/2] Linking C executable Release/ide
+TARGET cpu=emeraldrapids features=adx,aes,avx,avx-vnni,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cldemote,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,movbe,movdir64b,pclmul,popcnt,rdrand,rdseed,rtm,serialize,sha,smap,sse2,sse3,sse4.1,sse4.2,ssse3,tsxldtrk,vaes,vpclmulqdq,waitpkg,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                321                      354
+bytes on disk                 30.377.133               30.410.885
+physical lines                   377.357                  378.494
+
+bytes scanned                 30.375.093               30.408.839
+  code                        24.132.438   79.4 %      24.151.109   79.4 %
+  comment                      1.709.469    5.6 %       1.722.136    5.7 %
+  whitespace                   4.533.186   14.9 %       4.535.594   14.9 %
+  literals, within code       13.178.177   43.4 %      13.178.398   43.3 %
+
+lines scanned                    376.337                  377.471
+  code, the sLOC                 338.023   89.8 %         338.850   89.8 %
+  comment                         28.775    7.6 %          29.035    7.7 %
+  blank                           11.275    3.0 %          11.337    3.0 %
+  both, counted twice              1.736    0.5 %           1.751    0.5 %
+
+comments                          24.130                   24.197
+tokens                         2.972.285                2.975.455
+spliced-away lines                 1.020    0.3 %           1.023    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.312.003  111.3 %
+  their spelling bytes        24.557.007  101.7 %
+  bytes retained              33.224.020  109.3 %
+  macro expansions               122.942
+  #define directives               3.322
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            13         5.304  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.746  re-read in total
+IR_FRONTEND_SSA functions=4361 locals=38252 reads=141785 writes=61780 parameters_created=394906 parameters_removed=366787 temporaries=9746 fallback_locals=1893
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1276544 changes=92543
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1276544 changes=9249
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2577814 changes=132588
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=87176 changes=0
+IR_FAST functions=4628 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2047200 retained_bound=15055296 compact_ns=0 instructions_before=1276544 instructions_after=1134511
+IR_LOCAL_PROMOTION candidates=25618 promoted=8 loads_removed=14 stores_removed=10 parameters_inserted=12 parameters_removed=10 uninitialized=0 barriers=8 instructions_before=1276576 instructions_after=1276544 values_before=1104773 values_after=1104753
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=4 block_visits=28 parameter_visits=14 incoming_visits=28
+CODEGEN cpu=emeraldrapids vector_bits=512 functions=4628 instructions=1134511 values=962720 stack_value_bytes=5103376 stack_frame_bytes=5103376 max_stack_frame_bytes=643912 code_bytes=18624597 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=104 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1548429 exact_successes=1548429 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=77209
+CODEGEN_ALLOCATOR reloads=171540 spills=207902 boundary_spills=89659 boundary_reloads=26153 boundary_copies=85 copies=148006 rematerializations=59211 pins=0 splits=0 scheduled=0 schedule_kept=0
+TARGET cpu=emeraldrapids features=adx,aes,avx,avx-vnni,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cldemote,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,movbe,movdir64b,pclmul,popcnt,rdrand,rdseed,rtm,serialize,sha,smap,sse2,sse3,sse4.1,sse4.2,ssse3,tsxldtrk,vaes,vpclmulqdq,waitpkg,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                320                      353
+bytes on disk                 30.346.187               30.379.939
+physical lines                   376.407                  377.544
+
+bytes scanned                 30.344.149               30.377.895
+  code                        24.112.202   79.5 %      24.130.873   79.4 %
+  comment                      1.702.214    5.6 %       1.714.881    5.6 %
+  whitespace                   4.529.733   14.9 %       4.532.141   14.9 %
+  literals, within code       13.178.177   43.4 %      13.178.398   43.4 %
+
+lines scanned                    375.388                  376.522
+  code, the sLOC                 337.294   89.9 %         338.121   89.8 %
+  comment                         28.589    7.6 %          28.849    7.7 %
+  blank                           11.168    3.0 %          11.230    3.0 %
+  both, counted twice              1.663    0.4 %           1.678    0.4 %
+
+comments                          24.015                   24.082
+tokens                         2.969.183                2.972.353
+spliced-away lines                 1.019    0.3 %           1.022    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.312.003  111.4 %
+  their spelling bytes        24.557.007  101.8 %
+  bytes retained              33.193.075  109.3 %
+  macro expansions               122.940
+  #define directives               3.321
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            13         5.304  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.746  re-read in total
+IR_FRONTEND_SSA functions=4361 locals=38252 reads=141785 writes=61780 parameters_created=394906 parameters_removed=366787 temporaries=9746 fallback_locals=1893
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1276544 changes=92543
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1276544 changes=9249
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2577814 changes=132588
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=87176 changes=0
+IR_FAST functions=4628 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2047200 retained_bound=15055296 compact_ns=0 instructions_before=1276544 instructions_after=1134511
+IR_LOCAL_PROMOTION candidates=25618 promoted=8 loads_removed=14 stores_removed=10 parameters_inserted=12 parameters_removed=10 uninitialized=0 barriers=8 instructions_before=1276576 instructions_after=1276544 values_before=1104773 values_after=1104753
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=4 block_visits=28 parameter_visits=14 incoming_visits=28
+CODEGEN cpu=emeraldrapids vector_bits=512 functions=4628 instructions=1134511 values=962720 stack_value_bytes=5103376 stack_frame_bytes=5103376 max_stack_frame_bytes=643912 code_bytes=18624597 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=104 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1548429 exact_successes=1548429 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=77209
+CODEGEN_ALLOCATOR reloads=171540 spills=207902 boundary_spills=89659 boundary_reloads=26153 boundary_copies=85 copies=148006 rematerializations=59211 pins=0 splits=0 scheduled=0 schedule_kept=0
+SELF_HOST fixed_point bytes=38167160 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+SELF_HOST stage 1 throughput
+  workload:      30.408.839 bytes | 377.471 LOC | 338.850 SLOC | 3.312.003 tokens
+  elapsed:       10.195247 seconds
+  bandwidth:     2.983 MB/s | 37.024 LOC/s | 33.236 SLOC/s
+SELF_HOST stage 2 throughput
+  workload:      30.377.895 bytes | 376.522 LOC | 338.121 SLOC | 3.312.003 tokens
+  elapsed:       47.203938 seconds
+  bandwidth:     0.644 MB/s | 7.976 LOC/s | 7.163 SLOC/s
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=34228860 median_ns=42876381 throughput_mb_s=0
+TARGET cpu=emeraldrapids features=adx,aes,avx,avx-vnni,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cldemote,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,movbe,movdir64b,pclmul,popcnt,rdrand,rdseed,rtm,serialize,sha,smap,sse2,sse3,sse4.1,sse4.2,ssse3,tsxldtrk,vaes,vpclmulqdq,waitpkg,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                320                      353
+bytes on disk                 30.346.187               30.379.939
+physical lines                   376.407                  377.544
+
+bytes scanned                 30.344.149               30.377.895
+  code                        24.112.202   79.5 %      24.130.873   79.4 %
+  comment                      1.702.214    5.6 %       1.714.881    5.6 %
+  whitespace                   4.529.733   14.9 %       4.532.141   14.9 %
+  literals, within code       13.178.177   43.4 %      13.178.398   43.4 %
+
+lines scanned                    375.388                  376.522
+  code, the sLOC                 337.294   89.9 %         338.121   89.8 %
+  comment                         28.589    7.6 %          28.849    7.7 %
+  blank                           11.168    3.0 %          11.230    3.0 %
+  both, counted twice              1.663    0.4 %           1.678    0.4 %
+
+comments                          24.015                   24.082
+tokens                         2.969.183                2.972.353
+spliced-away lines                 1.019    0.3 %           1.022    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.312.003  111.4 %
+  their spelling bytes        24.557.007  101.8 %
+  bytes retained              33.193.075  109.3 %
+  macro expansions               122.940
+  #define directives               3.321
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            13         5.304  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.746  re-read in total
+IR_FRONTEND_SSA functions=4361 locals=38252 reads=141785 writes=61780 parameters_created=394906 parameters_removed=366787 temporaries=9746 fallback_locals=1893
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1276544 changes=92543
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1276544 changes=9249
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2577814 changes=132588
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=87176 changes=0
+IR_FAST functions=4628 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2047200 retained_bound=15055296 compact_ns=0 instructions_before=1276544 instructions_after=1134511
+IR_LOCAL_PROMOTION candidates=25618 promoted=8 loads_removed=14 stores_removed=10 parameters_inserted=12 parameters_removed=10 uninitialized=0 barriers=8 instructions_before=1276576 instructions_after=1276544 values_before=1104773 values_after=1104753
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=4 block_visits=28 parameter_visits=14 incoming_visits=28
+CODEGEN cpu=emeraldrapids vector_bits=512 functions=4628 instructions=1134511 values=962720 stack_value_bytes=10734152 stack_frame_bytes=10734152 max_stack_frame_bytes=941888 code_bytes=28932243 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=104 allocator=mir-stack fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1548542 exact_successes=1548542 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=77209
+CODEGEN_ALLOCATOR reloads=1043730 spills=902182 boundary_spills=63737 boundary_reloads=63737 boundary_copies=0 copies=0 rematerializations=0 pins=0 splits=0 scheduled=0 schedule_kept=0
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=36633779 median_ns=45651337 throughput_mb_s=0
+TARGET cpu=emeraldrapids features=adx,aes,avx,avx-vnni,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cldemote,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,movbe,movdir64b,pclmul,popcnt,rdrand,rdseed,rtm,serialize,sha,smap,sse2,sse3,sse4.1,sse4.2,ssse3,tsxldtrk,vaes,vpclmulqdq,waitpkg,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                320                      353
+bytes on disk                 30.346.187               30.379.939
+physical lines                   376.407                  377.544
+
+bytes scanned                 30.344.149               30.377.895
+  code                        24.112.202   79.5 %      24.130.873   79.4 %
+  comment                      1.702.214    5.6 %       1.714.881    5.6 %
+  whitespace                   4.529.733   14.9 %       4.532.141   14.9 %
+  literals, within code       13.178.177   43.4 %      13.178.398   43.4 %
+
+lines scanned                    375.388                  376.522
+  code, the sLOC                 337.294   89.9 %         338.121   89.8 %
+  comment                         28.589    7.6 %          28.849    7.7 %
+  blank                           11.168    3.0 %          11.230    3.0 %
+  both, counted twice              1.663    0.4 %           1.678    0.4 %
+
+comments                          24.015                   24.082
+tokens                         2.969.183                2.972.353
+spliced-away lines                 1.019    0.3 %           1.022    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.312.003  111.4 %
+  their spelling bytes        24.557.007  101.8 %
+  bytes retained              33.193.075  109.3 %
+  macro expansions               122.940
+  #define directives               3.321
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            13         5.304  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.746  re-read in total
+IR_FRONTEND_SSA functions=4361 locals=38252 reads=141785 writes=61780 parameters_created=394906 parameters_removed=366787 temporaries=9746 fallback_locals=1893
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1276544 changes=92543
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1276544 changes=9249
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2577814 changes=132588
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=87176 changes=0
+IR_FAST functions=4628 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2047200 retained_bound=15055296 compact_ns=0 instructions_before=1276544 instructions_after=1134511
+IR_LOCAL_PROMOTION candidates=25618 promoted=8 loads_removed=14 stores_removed=10 parameters_inserted=12 parameters_removed=10 uninitialized=0 barriers=8 instructions_before=1276576 instructions_after=1276544 values_before=1104773 values_after=1104753
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=4 block_visits=28 parameter_visits=14 incoming_visits=28
+CODEGEN cpu=emeraldrapids vector_bits=512 functions=4628 instructions=1134511 values=962720 stack_value_bytes=28726184 stack_frame_bytes=28784880 max_stack_frame_bytes=1264272 code_bytes=26957701 forwarded_wide_vector_loads=0 native_vector_operations=1 split_vector_operations=0 vzeroupper=78 simd_operations=104 allocator=none fallback_functions=0
+CODEGEN_ENCODER exact_attempts=0 exact_successes=0 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=0
+Self-host stage 1 took 10.195247 seconds (10195247000 nanoseconds)
+Self-host stage 2 took 47.203938 seconds (47203938000 nanoseconds)
+Self-host stage 2 benchmark took 0.292248 seconds (292248000 nanoseconds)
+Self-host machine stage took 30.046008 seconds (30046008000 nanoseconds)
+Self-host machine stage benchmark took 0.300176 seconds (300176000 nanoseconds)
+Self-host canonical stage took 50.839949 seconds (50839949000 nanoseconds)
