@@ -95,6 +95,10 @@ remains on the include path during reduction. `--generated N`, `--seed N`,
 `--timeout N`, and `--minimize N` are validated bounded integers; zero reduction
 trials disables automatic reduction. `--no-verify` exists for testing older
 compiler binaries that lack the verification flag, and is recorded explicitly.
+`--strict-mir` requires `-fno-machine-fallback` for every MIR allocator and the
+default mode, retaining NONE and its alias as direct controls. It is recorded in
+the manifest and exact child arguments. The built-in `sysv-sseup` case always
+requires this strict policy, including reductions, without an extra option.
 
 ## Configuration authority
 
