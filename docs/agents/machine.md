@@ -84,8 +84,8 @@
   consumed type/value/address facts, row layout, and the unvalidated entry's shape
   check. The canonical IR verifier remains the pipeline validation authority.
   Unsupported machine selections return `supported = false` and
-  `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and
-  `fallback_verify_count` expose the actual canonical fallback. There is no
+  `failed_opcode`; native module generation turns that result into an
+  attributable failed `CodegenModule` and publishes no object. There is no
   declarative pattern-miss category because there is no declarative matcher.
 - Shared canonical-IR facts and the generated FAST/QUALITY rule decision tree
   live in `machine_select.{c,h}`, `machine_select_rules.h`, and
@@ -94,10 +94,10 @@
   third permanent graph IR.
 - `MachineSelectResult.signature_rejected` is set only inside target function
   signature gates; other unclassified selection failures remain distinct.
-  Native dispatch records exactly one `CodegenFallbackReason` per discarded
-  machine function, retaining separate selection-opcode and post-selection
-  counters. The driver can require zero fallback with `-fno-machine-fallback`;
-  see the [driver guide](driver.md) for the curated CI corpus and reason names.
+  Native dispatch maps signature, opcode, verification, placement, encoding,
+  output-capacity and unwind failures to structured codegen errors. It never
+  invokes direct canonical emission. `-fno-machine-fallback` remains accepted
+  for command-line compatibility but cannot make this contract stricter.
 - Native signature and call storage is sized from canonical IR counts. Incoming
   shapes, placements, argument values and normalization rows use arena arrays;
   the existing value-fact walk sizes one reusable call workspace per function.
