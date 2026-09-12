@@ -925,6 +925,27 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
+    // The pair rows leave their sixteen-byte value in a frame operand so
+    // no virtual register pretends to contain two independently allocated
+    // halves. X10 is the explicit address; the complete exclusive-loop
+    // palette is kept away from live values through the clobber contract.
+    [MACHINE_A64_ATOMIC_LOAD_PAIR] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X13) | (1u << MACHINE_A64_X14),
+        .fixed_register_mask = 0x1, .fixed_registers = {MACHINE_A64_X10},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
+    [MACHINE_A64_ATOMIC_STORE_PAIR] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11) | (1u << MACHINE_A64_X12) |
+                        (1u << MACHINE_A64_X13) | (1u << MACHINE_A64_X14),
+        .fixed_register_mask = 0x1, .fixed_registers = {MACHINE_A64_X10},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
     // The exclusive loops run on the canonical emitter's fixed register
     // palette: X9 old value, X10 address, X11 operand/desired, X12
     // scratch/expected, X13 status — the same registers VA_ARG already
@@ -1265,6 +1286,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_ATOMIC_RMW] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 39,
     [MACHINE_A64_ATOMIC_CAS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 40,
     [MACHINE_A64_ATOMIC_FENCE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 41,
+    [MACHINE_A64_ATOMIC_LOAD_PAIR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 63,
+    [MACHINE_A64_ATOMIC_STORE_PAIR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 64,
     [MACHINE_A64_LEA_TLS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 42,
     [MACHINE_A64_STACK_ALLOCATE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 43,
     [MACHINE_A64_SWITCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 44,
@@ -2493,6 +2516,21 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         {
             u32 slot = machine_ref_payload(instruction->operands[0]);
             valid = slot < function->stack_slot_count && function->stack_slot_sizes[slot] >= MACHINE_A64_VA_SAVE_BYTES;
+        } break;
+        case MACHINE_A64_ATOMIC_LOAD_PAIR:
+        case MACHINE_A64_ATOMIC_STORE_PAIR:
+        {
+            MachineRef frame_ref = instruction->operands[1];
+            u32 slot = machine_ref_payload(frame_ref);
+            u32 value_size = instruction->payload & 0xffu;
+            u32 flags = instruction->payload & (MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE);
+            bool order_flags_valid = instruction->opcode == MACHINE_A64_ATOMIC_LOAD_PAIR
+                                         ? flags != MACHINE_A64_ATOMIC_PAIR_RELEASE
+                                         : flags != MACHINE_A64_ATOMIC_PAIR_ACQUIRE;
+            valid = machine_ref_kind(frame_ref) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[slot] >= 16 && value_size > 8 && value_size <= 16 &&
+                    !(instruction->payload & ~(0xffu | MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE)) &&
+                    order_flags_valid;
         } break;
         case MACHINE_X64_CPUID:
         case MACHINE_X64_XGETBV:

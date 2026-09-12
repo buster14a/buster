@@ -3927,7 +3927,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 265);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 267);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_VLOAD_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_VSTORE_PTR_K] = MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -4054,6 +4054,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_VARITH] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_ATOMIC_LOAD] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_STORE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_ATOMIC_LOAD_PAIR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_ATOMIC_STORE_PAIR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_ATOMIC_RMW] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_CAS] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_FENCE] = MACHINE_SCHEDULE_UNIT_BARRIER,
@@ -4301,7 +4303,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 92);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 94);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -4634,9 +4636,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     {
         a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
+    for (u16 opcode = MACHINE_A64_ATOMIC_LOAD_PAIR; opcode <= MACHINE_A64_ATOMIC_STORE_PAIR; opcode += 1)
+    {
+        a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
+    }
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 56);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 3);
-    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 19);
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 21);
 
     MachineFunction function = machine_test_build_function(arguments->arena);
     BUSTER_TEST(arguments, function.instruction_count == 4);
@@ -5457,10 +5463,24 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   // counted function now that the pair signatures, memory,
                                   // constant shifts, carry arithmetic, and comparisons select.
                                   "unsigned __int128 a64_i128_multiply(unsigned __int128 a, unsigned __int128 b) { return a * b; }\n");
+    // Kept separate from the already-near-limit AArch64 source segment so
+    // the host translation unit stays within C99's 4095-byte string-literal
+    // guarantee.
+    String8 machine_c_source_a64_atomic = S8(
+                                  "typedef struct MachineAtomicPair { unsigned long low; unsigned long high; } MachineAtomicPair;\n"
+                                  "unsigned long atomic_pair_round(unsigned long low, unsigned long high) { _Atomic MachineAtomicPair cell;\n"
+                                  "    MachineAtomicPair value = { low, high }; __c11_atomic_store(&cell, value, __ATOMIC_RELEASE);\n"
+                                  "    MachineAtomicPair loaded = __c11_atomic_load(&cell, __ATOMIC_ACQUIRE); return loaded.low ^ loaded.high; }\n"
+                                  "struct __attribute__((packed)) MachineAtomicNine { unsigned long low; unsigned char high; };\n"
+                                  "unsigned long atomic_nine_round(unsigned long low, unsigned long high) { _Atomic struct MachineAtomicNine cell;\n"
+                                  "    struct MachineAtomicNine value = { low, (unsigned char)high }; __c11_atomic_store(&cell, value, __ATOMIC_SEQ_CST);\n"
+                                  "    struct MachineAtomicNine loaded = __c11_atomic_load(&cell, __ATOMIC_SEQ_CST); unsigned char* bytes = (unsigned char*)&cell;\n"
+                                  "    unsigned long padding = 0; for (int index = 9; index < 16; index += 1) { padding |= bytes[index]; }\n"
+                                  "    return loaded.low ^ loaded.high ^ (padding << 8); }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
-    String8 machine_c_source_stage11 =
-        string_format(arguments->arena, S8("{S8}{S8}"), machine_c_source_base, machine_c_source_a64_variadic);
+    String8 machine_c_source_stage11 = string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_base,
+                                                      machine_c_source_a64_variadic, machine_c_source_a64_atomic);
     String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail,
                                               machine_c_source_extra, machine_c_source_i128, machine_c_source_variadic);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
@@ -8201,6 +8221,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("fpair_tail"), S8_INITIALIZER("pair_spill"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("aligned_spot"), S8_INITIALIZER("vlit_make"),
             S8_INITIALIZER("vquad_add"), S8_INITIALIZER("vf4_scale"), S8_INITIALIZER("amix"),
+            S8_INITIALIZER("atomic_pair_round"), S8_INITIALIZER("atomic_nine_round"),
             S8_INITIALIZER("vla_fill"), S8_INITIALIZER("pick4"), S8_INITIALIZER("v8_pass"), S8_INITIALIZER("v2_make"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
@@ -8440,6 +8461,80 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_nine_function, machine_a64_target);
             BUSTER_TEST(arguments, a64_nine_selected.supported);
         }
+        // Sixteen-byte atomic loads and stores stay slot-backed and select
+        // into their exclusive-pair rows. The packed nine-byte case pins
+        // promoted-padding masking as well as the sequential acquire/release
+        // strengths; the full pair covers ordinary acquire/release.
+        String8 a64_atomic_pair_names[] = {S8("atomic_pair_round"), S8("atomic_nine_round")};
+        u32 a64_atomic_pair_sizes[] = {16, 9};
+        u32 a64_atomic_store_flags[] = {MACHINE_A64_ATOMIC_PAIR_RELEASE,
+                                        MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE};
+        u32 a64_atomic_load_flags[] = {MACHINE_A64_ATOMIC_PAIR_ACQUIRE,
+                                       MACHINE_A64_ATOMIC_PAIR_ACQUIRE | MACHINE_A64_ATOMIC_PAIR_RELEASE};
+        for (u32 atomic_index = 0; atomic_index < BUSTER_ARRAY_LENGTH(a64_atomic_pair_names); atomic_index += 1)
+        {
+            IrFunction* atomic_function = machine_test_ir_function_find(machine_a64_module, a64_atomic_pair_names[atomic_index]);
+            BUSTER_TEST(arguments, atomic_function != 0);
+            if (atomic_function)
+            {
+                MachineSelectResult atomic_selected =
+                    machine_select_canonical_function(arguments->arena, machine_a64_program, atomic_function, machine_a64_target);
+                u32 load_rows = 0;
+                u32 store_rows = 0;
+                bool payloads_match = true;
+                for (u32 row_index = 0; atomic_selected.supported && row_index < atomic_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = atomic_selected.function.instructions + row_index;
+                    if (row->opcode == MACHINE_A64_ATOMIC_LOAD_PAIR)
+                    {
+                        load_rows += 1;
+                        payloads_match &= row->payload == (a64_atomic_pair_sizes[atomic_index] | a64_atomic_load_flags[atomic_index]);
+                    }
+                    else if (row->opcode == MACHINE_A64_ATOMIC_STORE_PAIR)
+                    {
+                        store_rows += 1;
+                        payloads_match &= row->payload == (a64_atomic_pair_sizes[atomic_index] | a64_atomic_store_flags[atomic_index]);
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, atomic_selected.supported,
+                                string_format(arguments->arena, S8("a64 pair select {S8} failed at opcode {u32}"),
+                                              a64_atomic_pair_names[atomic_index], (u32)atomic_selected.failed_opcode));
+                BUSTER_TEST(arguments, load_rows == 1 && store_rows == 1 && payloads_match);
+                BUSTER_TEST(arguments, machine_verify_function(&atomic_selected.function).error == MACHINE_VERIFY_NONE);
+                MachineStackPlacement atomic_placement = machine_stack_placement_build(arguments->arena, &atomic_selected.function);
+                MachineEncodeResult atomic_encoded = atomic_placement.valid
+                                                         ? machine_encode_aarch64(arguments->arena, &atomic_selected.function, &atomic_placement)
+                                                         : (MachineEncodeResult){0};
+                BUSTER_TEST(arguments, atomic_placement.valid && atomic_encoded.valid && atomic_encoded.byte_count > 32);
+                bool saw_pair_load = false;
+                bool saw_pair_store = false;
+                u32 expected_load = (a64_atomic_load_flags[atomic_index] ? UINT32_C(0xc87f8000) : UINT32_C(0xc87f0000)) |
+                                    (MACHINE_A64_X14 << 10) | (MACHINE_A64_X10 << 5) | MACHINE_A64_X9;
+                u32 expected_store_load = (a64_atomic_store_flags[atomic_index] & MACHINE_A64_ATOMIC_PAIR_ACQUIRE ? UINT32_C(0xc87f8000)
+                                                                                                                  : UINT32_C(0xc87f0000)) |
+                                          (MACHINE_A64_X14 << 10) | (MACHINE_A64_X10 << 5) | MACHINE_A64_X9;
+                u32 expected_read_back = (a64_atomic_load_flags[atomic_index] & MACHINE_A64_ATOMIC_PAIR_RELEASE ? UINT32_C(0xc8208000)
+                                                                                                               : UINT32_C(0xc8200000)) |
+                                         (MACHINE_A64_X13 << 16) | (MACHINE_A64_X14 << 10) | (MACHINE_A64_X10 << 5) | MACHINE_A64_X9;
+                u32 expected_store = (a64_atomic_store_flags[atomic_index] & MACHINE_A64_ATOMIC_PAIR_RELEASE ? UINT32_C(0xc8208000)
+                                                                                                             : UINT32_C(0xc8200000)) |
+                                     (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (MACHINE_A64_X10 << 5) | MACHINE_A64_X11;
+                u32 expected_retry = UINT32_C(0x35ffffcd);
+                for (u32 byte_offset = 0; atomic_encoded.valid && byte_offset + 3 * sizeof(u32) <= atomic_encoded.byte_count;
+                     byte_offset += sizeof(u32))
+                {
+                    u32 word = 0;
+                    u32 next_word = 0;
+                    u32 retry_word = 0;
+                    memcpy(&word, atomic_encoded.bytes + byte_offset, sizeof(word));
+                    memcpy(&next_word, atomic_encoded.bytes + byte_offset + sizeof(u32), sizeof(next_word));
+                    memcpy(&retry_word, atomic_encoded.bytes + byte_offset + 2 * sizeof(u32), sizeof(retry_word));
+                    saw_pair_load |= word == expected_load && next_word == expected_read_back && retry_word == expected_retry;
+                    saw_pair_store |= word == expected_store_load && next_word == expected_store && retry_word == expected_retry;
+                }
+                BUSTER_TEST(arguments, saw_pair_load && saw_pair_store);
+            }
+        }
         // Every function in this module now uses the AArch64 machine path.
         CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
                                                                          (CodegenModuleOptions){
@@ -8598,6 +8693,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                string_equal(a64_supported_names[name_index], S8("udiv")) ||
                                string_equal(a64_supported_names[name_index], S8("aligned_spot")) ||
                                string_equal(a64_supported_names[name_index], S8("amix")) ||
+                               string_equal(a64_supported_names[name_index], S8("atomic_pair_round")) ||
+                               string_equal(a64_supported_names[name_index], S8("atomic_nine_round")) ||
                                string_equal(a64_supported_names[name_index], S8("vla_fill")) ||
                                string_equal(a64_supported_names[name_index], S8("pick4")) || is_readp;
             bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
