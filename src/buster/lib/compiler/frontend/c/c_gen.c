@@ -11,6 +11,8 @@
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
+// - CIrVlaValue retains evaluated VLA extents and expression category until
+//   pointer consumers finish; c_ir_vla_* owns its sparse per-function table.
 // - CIrLowerMachine is the frame stack for statements and expressions.
 //   Each CIrLowerFrameKind pairs a *_step function (advance the frame one
 //   CIrLowerFrameStage) with a *_frame_push adapter, both dispatched by
@@ -2332,6 +2334,27 @@ struct CIrOverAlignedArrayName
     u32 element_alignment;
 };
 
+// Frontend-only shape for flattened variably modified pointers. Bounds are
+// evaluated by c_ir_lower_vla_layout_step once; dimensions index those saved
+// arrays. Only an array_lvalue may suppress decay for unary &. Slot entries
+// describe the declared pointer type, independently of values stored there.
+#define C_IR_VLA_VALUE_INITIAL_CAPACITY 16u
+#define C_IR_VLA_VALUE_HASH_MULTIPLIER 2654435761u
+
+typedef struct CIrVlaValue CIrVlaValue;
+struct CIrVlaValue
+{
+    IrValueId* counts;
+    IrValueId* sizes;
+    IrTypeId element_type;
+    u32 value_plus_one;
+    u32 dimension;
+    u32 dimension_count;
+    bool array_lvalue;
+    bool slot;
+    bool rvalue;
+};
+
 struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
@@ -2346,6 +2369,9 @@ struct CIntegerIrBuilder
     // their canonical type. Allocate lazily; ordinary functions pay no table.
     u8* unsigned_bit_field_values;
     u32 unsigned_bit_field_value_capacity;
+    CIrVlaValue* vla_values;
+    u32 vla_value_capacity;
+    u32 vla_value_count;
     IrBlockId current_block;
     CIrLabel* labels;
     u32 label_count;
@@ -2515,6 +2541,97 @@ struct CIntegerIrBuilder
 };
 
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind);
+
+BUSTER_C_INTERNAL CIrVlaValue c_ir_vla_value(CIntegerIrBuilder* builder, IrValueId value)
+{
+    CIrVlaValue result = {0};
+    if (builder->vla_value_capacity && value.value < builder->function->value_count)
+    {
+        u32 mask = builder->vla_value_capacity - 1;
+        u32 index = (value.value * C_IR_VLA_VALUE_HASH_MULTIPLIER) & mask;
+        while (builder->vla_values[index].value_plus_one && builder->vla_values[index].value_plus_one != value.value + 1)
+        {
+            index = (index + 1) & mask;
+        }
+        result = builder->vla_values[index];
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_vla_value_set(CIntegerIrBuilder* builder, IrValueId value, CIrVlaValue shape)
+{
+    if (value.value < builder->function->value_count && shape.counts)
+    {
+        if (!builder->vla_value_capacity || (builder->vla_value_count + 1) * 2 > builder->vla_value_capacity)
+        {
+            u32 capacity = builder->vla_value_capacity ? builder->vla_value_capacity * 2 : C_IR_VLA_VALUE_INITIAL_CAPACITY;
+            CIrVlaValue* entries = arena_allocate(builder->arena, CIrVlaValue, capacity);
+            memset(entries, 0, sizeof(*entries) * capacity);
+            for (u32 old = 0; old < builder->vla_value_capacity; old += 1)
+            {
+                CIrVlaValue entry = builder->vla_values[old];
+                if (entry.value_plus_one)
+                {
+                    u32 index = ((entry.value_plus_one - 1) * C_IR_VLA_VALUE_HASH_MULTIPLIER) & (capacity - 1);
+                    while (entries[index].value_plus_one)
+                    {
+                        index = (index + 1) & (capacity - 1);
+                    }
+                    entries[index] = entry;
+                }
+            }
+            builder->vla_values = entries;
+            builder->vla_value_capacity = capacity;
+        }
+        u32 mask = builder->vla_value_capacity - 1;
+        u32 index = (value.value * C_IR_VLA_VALUE_HASH_MULTIPLIER) & mask;
+        while (builder->vla_values[index].value_plus_one && builder->vla_values[index].value_plus_one != value.value + 1)
+        {
+            index = (index + 1) & mask;
+        }
+        builder->vla_value_count += !builder->vla_values[index].value_plus_one;
+        shape.value_plus_one = value.value + 1;
+        builder->vla_values[index] = shape;
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_vla_local_shape(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
+{
+    c_ir_vla_value_set(builder, local->place, (CIrVlaValue){
+        .counts = local->vla_dimension_counts,
+        .sizes = local->vla_suffix_sizes,
+        .element_type = local->vla_element_type,
+        .dimension = local->is_vla_parameter ? 1u : 0u,
+        .dimension_count = local->vla_dimension_count,
+        .array_lvalue = !local->is_vla_parameter,
+        .slot = true,
+    });
+}
+
+BUSTER_C_INTERNAL void c_ir_vla_value_forget(CIntegerIrBuilder* builder, IrValueId value)
+{
+    if (builder->vla_value_capacity)
+    {
+        u32 mask = builder->vla_value_capacity - 1;
+        u32 index = (value.value * C_IR_VLA_VALUE_HASH_MULTIPLIER) & mask;
+        while (builder->vla_values[index].value_plus_one && builder->vla_values[index].value_plus_one != value.value + 1)
+        {
+            index = (index + 1) & mask;
+        }
+        // Keep the key so the open-addressed probe chain stays intact.
+        builder->vla_values[index].counts = 0;
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_vla_loaded_shape(CIntegerIrBuilder* builder, IrValueId result, IrValueId place)
+{
+    CIrVlaValue shape = c_ir_vla_value(builder, place);
+    if (shape.counts && shape.slot)
+    {
+        shape.slot = false;
+        c_ir_vla_value_set(builder, result, shape);
+    }
+}
 
 // The IR type for a builtin C kind during lowering. Almost every kind was
 // created before lowering began and is a load; only a kind that never
@@ -4972,6 +5089,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_read_place(CIntegerIrBuilder* builder, IrVa
                 ssa->locals[local].last_event = previous;
                 ssa->event_count -= 1;
                 ssa->read_count -= 1;
+                c_ir_vla_value_forget(builder, (IrValueId){.value = builder->function->value_count - 1});
                 builder->function->value_count -= 1;
                 IR_CONSTRUCTION_RECORD(SSA_READ_RETRACTIONS, 1);
             }
@@ -6040,6 +6158,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerI
     CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
     IrValueId result = direct ? c_ir_ssa_read(builder, direct, c_ir_token_source_range(builder, token), true)
                              : c_ir_emit_memory_load(builder, local, token);
+    c_ir_vla_loaded_shape(builder, result, local->place);
     return result;
 }
 
@@ -6163,6 +6282,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
     CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
     IrValueId result = local && local->type.value == type.value ? c_ir_ssa_read(builder, local, source, false)
                                                             : c_ir_emit_memory_load_place_raw(builder, place, type, source);
+    c_ir_vla_loaded_shape(builder, result, place);
     return result;
 }
 
@@ -7512,7 +7632,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, Ir
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source)
+BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place_raw(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source)
 {
     if (base.value >= builder->function->value_count || index.value >= builder->function->value_count)
     {
@@ -7646,6 +7766,122 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builde
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
     return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_vla_flat_pointer(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    CIrVlaValue shape = c_ir_vla_value(builder, value);
+    IrValueId result = value;
+    if (shape.counts && !shape.slot)
+    {
+        // Unevaluated type prediction may retain a pointer/array shell which
+        // concrete VLA lowering flattens. Normalize that shell at a consumer;
+        // the saved shape remains the authority for element size and stride.
+        IrTypeId pointer = c_ir_add_pointer_type(builder->program, builder->pointer_types, shape.element_type);
+        result = c_ir_emit_cast(builder, value, pointer, source);
+        if (result.value != value.value)
+        {
+            c_ir_vla_value_set(builder, result, shape);
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source)
+{
+    CIrVlaValue shape = c_ir_vla_value(builder, base);
+    CIrVlaValue reversed = c_ir_vla_value(builder, index);
+    if (!shape.counts && reversed.counts && !reversed.slot)
+    {
+        IrValueId swap = base;
+        base = index;
+        index = swap;
+        shape = reversed;
+    }
+    bool dynamic = shape.counts && !shape.slot;
+    u32 dimension = shape.dimension + (u32)shape.array_lvalue;
+    base = dynamic ? c_ir_vla_flat_pointer(builder, base, source) : base;
+    if (dynamic && index.value < builder->function->value_count)
+    {
+        IrType* index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
+        if (index_type && (index_type->kind == IR_TYPE_INTEGER || index_type->kind == IR_TYPE_BOOLEAN))
+        {
+            index = c_ir_emit_cast(builder, index, builder->ptrdiff_type, source);
+            for (u32 suffix = dimension; suffix < shape.dimension_count; suffix += 1)
+            {
+                IrValueId count = c_ir_emit_cast(builder, shape.counts[suffix], builder->ptrdiff_type, source);
+                index = c_ir_emit_binary_value(builder, index, count, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+            }
+        }
+    }
+    IrValueId result = c_ir_emit_index_place_raw(builder, base, index, source);
+    if (dynamic && dimension < shape.dimension_count && result.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrTypeId type = builder->function->values[result.value].canonical_type;
+        result = c_ir_emit_address_of_place(builder, result, type, source);
+        shape.dimension = dimension;
+        shape.array_lvalue = true;
+        shape.rvalue = false;
+        c_ir_vla_value_set(builder, result, shape);
+    }
+    return result;
+}
+
+// Materialize a distinct pointer rvalue without reading the array object.
+// The witness is frontend shape, never the ADDRESS_OF opcode alone.
+BUSTER_C_INTERNAL IrValueId c_ir_vla_address(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    CIrVlaValue shape = c_ir_vla_value(builder, value);
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (shape.counts && shape.array_lvalue && !shape.slot)
+    {
+        IrValueId place = c_ir_emit_dereference_place(builder, value, source);
+        if (place.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrTypeId type = builder->function->values[place.value].canonical_type;
+            result = c_ir_emit_address_of_place(builder, place, type, source);
+            shape.array_lvalue = false;
+            shape.rvalue = true;
+            c_ir_vla_value_set(builder, result, shape);
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_vla_pointer_rvalue(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    CIrVlaValue shape = c_ir_vla_value(builder, value);
+    IrValueId result = value;
+    if (shape.counts && !shape.slot)
+    {
+        IrValueId place = c_ir_emit_dereference_place(builder, value, source);
+        result = place.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID
+                     : c_ir_emit_address_of_place(builder, place, builder->function->values[place.value].canonical_type, source);
+        shape.dimension += (u32)shape.array_lvalue;
+        shape.array_lvalue = false;
+        shape.rvalue = true;
+        c_ir_vla_value_set(builder, result, shape);
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_vla_conditional_shape(CIntegerIrBuilder* builder, IrValueId place, IrValueId value)
+{
+    CIrVlaValue shape = c_ir_vla_value(builder, value);
+    IrType* type = place.value < builder->function->value_count
+                       ? ir_type_from_id(&builder->program->types, builder->function->values[place.value].canonical_type) : 0;
+    if (shape.counts && !shape.slot && type && type->kind == IR_TYPE_POINTER &&
+        ir_type_from_id(&builder->program->types, type->element_type)->kind != IR_TYPE_VOID)
+    {
+        // Compatible variably modified pointer types have equal remaining
+        // extents. The result retains that declared shape and is an rvalue,
+        // even though its implementation uses a temporary pointer slot.
+        shape.dimension += (u32)shape.array_lvalue;
+        shape.array_lvalue = false;
+        shape.slot = true;
+        shape.rvalue = true;
+        c_ir_vla_value_set(builder, place, shape);
+    }
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_label_address(CIntegerIrBuilder* builder, IrBlockId label, IrSourceRange source)
@@ -12564,17 +12800,26 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
     IrValueId pointer = c_ir_emit_load_place(builder, local->place, local->type, frame->as.vla_index_place.source);
     IrValueId place = pointer.value == IR_ID_UNDERLYING_INVALID
                           ? IR_VALUE_ID_INVALID
-                          : c_ir_emit_index_place(builder, pointer, frame->as.vla_index_place.linear_index, frame->as.vla_index_place.source);
+                          : c_ir_emit_index_place_raw(builder, pointer, frame->as.vla_index_place.linear_index, frame->as.vla_index_place.source);
     // Fewer subscripts than dimensions leaves an array, and an array is the
     // address of its first element everywhere but `sizeof` and `&`. The walk
     // above produced the *element* place at that address, because a
     // variably modified array has no IR array type for the ordinary decay to
-    // recognise, so the decay is performed here: without it `p[i]` on
+    // recognise. Keep a pointer plus an array-lvalue witness: an ordinary
+    // consumer decays it, while & preserves the remaining row. Without it `p[i]` on
     // `char (*p)[width]` -- and on the `char p[][width]` parameter it is the
     // adjusted form of -- loaded one byte where musl's lsearch passes a row.
     if (place.value != IR_ID_UNDERLYING_INVALID && subscripts < local->vla_dimension_count)
     {
         place = c_ir_emit_address_of_place(builder, place, local->vla_element_type, frame->as.vla_index_place.source);
+        c_ir_vla_value_set(builder, place, (CIrVlaValue){
+            .counts = local->vla_dimension_counts,
+            .sizes = local->vla_suffix_sizes,
+            .element_type = local->vla_element_type,
+            .dimension = subscripts,
+            .dimension_count = local->vla_dimension_count,
+            .array_lvalue = true,
+        });
     }
     c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.index);
 }
@@ -19969,6 +20214,21 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         {
             builder->unsigned_bit_field_values[result.value] = 0;
         }
+        // Canonical scalar pointers flatten pointer-to-VLA types. An explicit
+        // cast such as (char *)&rows[i] must discard both row stride and the
+        // array-lvalue witness even when that canonical cast is an identity.
+        CIrVlaValue cast_shape = c_ir_vla_value(builder, result);
+        if (cast_shape.counts)
+        {
+            IrType* result_type = ir_type_from_id(&builder->program->types, builder->function->values[result.value].canonical_type);
+            IrTypeId element = result_type->element_type;
+            IrValueId place = c_ir_emit_dereference_place(builder, result, source);
+            result = place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_address_of_place(builder, place, element, source) : IR_VALUE_ID_INVALID;
+            if (result.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+        }
         *value_count = first;
         values[(*value_count)++] = result;
         return true;
@@ -19979,7 +20239,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         {
             return false;
         }
-        values[*value_count - 2] = values[*value_count - 1];
+        values[*value_count - 2] = c_ir_vla_pointer_rvalue(builder, values[*value_count - 1], source);
         *value_count -= 1;
         return true;
     }
@@ -19990,6 +20250,17 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         return false;
     }
     u32 first = *value_count - operand_count;
+    if (builder->vla_value_count)
+    {
+        for (u32 operand_index = first; operand_index < *value_count; operand_index += 1)
+        {
+            values[operand_index] = c_ir_vla_flat_pointer(builder, values[operand_index], source);
+            if (values[operand_index].value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+        }
+    }
     if (pointer_operator)
     {
         IrValueId operand = values[first];
@@ -20003,7 +20274,16 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             // recover their place from that load below.  Array and aggregate
             // lvalues intentionally remain places (there is no scalar load to
             // materialize), so address-of must accept the place directly.
-            if (builder->function->values[operand.value].category == IR_VALUE_PLACE)
+            CIrVlaValue shape = c_ir_vla_value(builder, operand);
+            if (shape.counts && shape.rvalue)
+            {
+                return false;
+            }
+            if (shape.counts && shape.array_lvalue && !shape.slot)
+            {
+                result = c_ir_vla_address(builder, operand, pointer_source);
+            }
+            else if (builder->function->values[operand.value].category == IR_VALUE_PLACE)
             {
                 result = c_ir_emit_address_of_place(builder, operand, operand_type, pointer_source);
             }
@@ -20106,9 +20386,22 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 // copy and dropped the assignment.  The walk keeps array and
                 // aggregate lvalues as places for the same reason -- see the
                 // address-of arm above -- so hand the place straight back.
-                result = element_type_value && element_type_value->kind == IR_TYPE_ARRAY
-                             ? place
-                             : c_ir_emit_load_place(builder, place, element, pointer_source);
+                CIrVlaValue shape = c_ir_vla_value(builder, operand);
+                u32 dimension = shape.dimension + (u32)shape.array_lvalue;
+                if (shape.counts && !shape.slot && dimension < shape.dimension_count)
+                {
+                    result = c_ir_emit_address_of_place(builder, place, element, pointer_source);
+                    shape.dimension = dimension;
+                    shape.array_lvalue = true;
+                    shape.rvalue = false;
+                    c_ir_vla_value_set(builder, result, shape);
+                }
+                else
+                {
+                    result = element_type_value && element_type_value->kind == IR_TYPE_ARRAY
+                                 ? place
+                                 : c_ir_emit_load_place(builder, place, element, pointer_source);
+                }
             }
         }
         if (result.value == IR_ID_UNDERLYING_INVALID)
@@ -20252,9 +20545,12 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             subtract.result = result;
             IrInstructionId subtract_id = c_ir_append_instruction(builder, subtract, subtract_source);
             builder->function->values[result.value].definition = subtract_id;
-            if (element->layout.size > 1)
+            CIrVlaValue shape = c_ir_vla_value(builder, values[first]);
+            if (shape.counts || element->layout.size > 1)
             {
-                IrValueId divisor = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
+                IrValueId divisor = shape.counts
+                                        ? c_ir_emit_cast(builder, shape.sizes[shape.dimension + (u32)shape.array_lvalue], builder->ptrdiff_type, source)
+                                        : c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
                 IrValueId quotient = c_ir_add_result(builder, builder->ptrdiff_type);
                 IrSourceRange divide_source = source;
                 IrInstruction divide = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->ptrdiff_type);
@@ -20322,7 +20618,9 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             }
             IrType* pointer = ir_type_from_id(&builder->program->types, pointer_type);
             IrValueId place = c_ir_emit_index_place(builder, base, index, source);
-            IrValueId result = pointer ? c_ir_emit_address_of_place(builder, place, pointer->element_type, source) : IR_VALUE_ID_INVALID;
+            CIrVlaValue shape = c_ir_vla_value(builder, place);
+            IrValueId result = shape.counts && shape.array_lvalue ? c_ir_vla_address(builder, place, source)
+                               : pointer ? c_ir_emit_address_of_place(builder, place, pointer->element_type, source) : IR_VALUE_ID_INVALID;
             if (result.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
@@ -21778,7 +22076,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, IrVa
         // when the comparison sees 256 instead of 0.
         values[0] = c_ir_emit_cast(builder, values[0], type, source);
     }
-    return prefix ? c_ir_bit_field_assignment_value(builder, place, values[0], source) : previous;
+    return prefix ? c_ir_bit_field_assignment_value(builder, place, values[0], source) : c_ir_vla_pointer_rvalue(builder, previous, source);
 }
 
 BUSTER_C_INTERNAL bool c_ir_postfix_update_at(CIntegerIrBuilder* builder, u32 index, u32 end)
@@ -25299,19 +25597,44 @@ c_ir_expression_core_loop:
                 }
             }
             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
-            if (is_sizeof && builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER)
+            // A dereference of a pointer-to-VLA names the same array object
+            // as subscript zero. Use its saved size, including through groups,
+            // without reading the object or reevaluating declaration bounds.
+            u32 size_start = operand_start;
+            u32 size_end = operand_end;
+            u32 size_dereferences = 0;
+            bool size_prefix = is_sizeof;
+            while (size_prefix && size_start < size_end)
             {
-                CEntityId size_entity = c_ir_identifier_entity(builder, operand_start);
+                if (c_token_is_punctuator(&builder->preprocess.tokens[size_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    c_ir_matching_delimiter_cached(builder, size_start, size_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == size_end - 1)
+                {
+                    size_start += 1;
+                    size_end -= 1;
+                }
+                else if (c_token_is_punctuator(&builder->preprocess.tokens[size_start], C_PUNCTUATOR_STAR))
+                {
+                    size_dereferences += 1;
+                    size_start += 1;
+                }
+                else
+                {
+                    size_prefix = false;
+                }
+            }
+            if (is_sizeof && size_start < size_end && builder->preprocess.tokens[size_start].kind == C_TOKEN_IDENTIFIER)
+            {
+                CEntityId size_entity = c_ir_identifier_entity(builder, size_start);
                 CIntegerIrLocal* size_local = c_ir_find_local_by_entity(builder, size_entity);
                 if (size_local && size_local->is_variable_length_array)
                 {
-                    u32 suffix_index = 0;
-                    u32 suffix_token = operand_start + 1;
-                    while (suffix_token < operand_end && c_token_is_punctuator(&builder->preprocess.tokens[suffix_token], C_PUNCTUATOR_LEFT_BRACKET))
+                    u32 suffix_index = size_dereferences;
+                    u32 suffix_token = size_start + 1;
+                    while (suffix_token < size_end && c_token_is_punctuator(&builder->preprocess.tokens[suffix_token], C_PUNCTUATOR_LEFT_BRACKET))
                     {
                         u32 suffix_close =
-                            c_ir_matching_delimiter_cached(builder, suffix_token, operand_end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                        if (suffix_close >= operand_end)
+                            c_ir_matching_delimiter_cached(builder, suffix_token, size_end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+                        if (suffix_close >= size_end)
                         {
                             break;
                         }
@@ -25319,7 +25642,7 @@ c_ir_expression_core_loop:
                         suffix_token = suffix_close + 1;
                     }
                     IrValueId runtime_size = IR_VALUE_ID_INVALID;
-                    if (suffix_token == operand_end && suffix_index <= size_local->vla_dimension_count && (suffix_index || !size_local->is_vla_parameter))
+                    if (suffix_token == size_end && suffix_index <= size_local->vla_dimension_count && (suffix_index || !size_local->is_vla_parameter))
                     {
                         runtime_size = size_local->vla_suffix_sizes[suffix_index];
                     }
@@ -25908,7 +26231,8 @@ c_ir_expression_core_loop:
                 IrTypeId element_type = builder->function->values[place.value].canonical_type;
                 IrType* element = ir_type_from_id(&builder->program->types, element_type);
                 bool postfix_update = c_ir_postfix_update_at(builder, prepared->close_index, end);
-                IrValueId indexed_value = element && element->kind == IR_TYPE_ARRAY         ? place
+                IrValueId indexed_value = builder->function->values[place.value].category != IR_VALUE_PLACE ? place
+                                          : element && element->kind == IR_TYPE_ARRAY         ? place
                                           : element && element->is_atomic && postfix_update ? place
                                                                                             : c_ir_emit_expression_place_value(builder, place, element_type, source);
                 if (postfix_update)
@@ -25969,7 +26293,8 @@ c_ir_expression_core_loop:
             IrTypeId element_type = builder->function->values[place.value].canonical_type;
             IrType* element = ir_type_from_id(&builder->program->types, element_type);
             bool postfix_update = c_ir_postfix_update_at(builder, index, end);
-            IrValueId indexed_value = element && element->kind == IR_TYPE_ARRAY         ? place
+            IrValueId indexed_value = builder->function->values[place.value].category != IR_VALUE_PLACE ? place
+                                          : element && element->kind == IR_TYPE_ARRAY         ? place
                                       : element && element->is_atomic && postfix_update ? place
                                                                                         : c_ir_emit_expression_place_value(builder, place, element_type, source);
             if (postfix_update)
@@ -27161,6 +27486,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuild
                 IR_CONSTRUCTION_RECORD(PLACE_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_LOAD);
                 IR_CONSTRUCTION_RECORD(PLACE_ATOMIC_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_ATOMIC_LOAD);
                 builder->function->instruction_count -= 1;
+                c_ir_vla_value_forget(builder, (IrValueId){.value = builder->function->value_count - 1});
                 builder->function->value_count -= 1;
             }
         }
@@ -27235,6 +27561,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
                     builder->previous_instruction_known = false;
                     builder->function->instruction_count = definition_id.value + 1;
                     builder->function->value_count = candidate.value + 1;
+                    for (u32 shape_index = 0; shape_index < builder->vla_value_capacity; shape_index += 1)
+                    {
+                        if (builder->vla_values[shape_index].value_plus_one > builder->function->value_count)
+                        {
+                            builder->vla_values[shape_index].counts = 0;
+                        }
+                    }
                     state->place = candidate;
                     break;
                 }
@@ -29082,6 +29415,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             }
             value = c_ir_emit_integer_to_pointer(builder, value, frame->as.conditional.type, frame->as.conditional.source);
         }
+        c_ir_vla_conditional_shape(builder, frame->as.conditional.place, value);
         if (value.value == IR_ID_UNDERLYING_INVALID ||
             !c_ir_emit_store_place(builder, frame->as.conditional.place, frame->as.conditional.type, value, frame->as.conditional.source) ||
             !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.leaf_continuation, 1,
@@ -29437,10 +29771,13 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             {
                 IrValueId operands[2] = {task.as.arithmetic_conditional.left, value};
                 u32 operand_count = 2;
-                if (!c_ir_apply_operation(builder, C_CONDITIONAL_ADD, operands, &operand_count,
-                                          task.as.arithmetic_conditional.operation_source, IR_TYPE_ID_INVALID) ||
-                    operand_count != 1 ||
-                    !c_ir_emit_store_place(builder, task.as.arithmetic_conditional.place, task.as.arithmetic_conditional.type, operands[0],
+                bool added = c_ir_apply_operation(builder, C_CONDITIONAL_ADD, operands, &operand_count,
+                                                   task.as.arithmetic_conditional.operation_source, IR_TYPE_ID_INVALID) && operand_count == 1;
+                if (added)
+                {
+                    c_ir_vla_conditional_shape(builder, task.as.arithmetic_conditional.place, operands[0]);
+                }
+                if (!added || !c_ir_emit_store_place(builder, task.as.arithmetic_conditional.place, task.as.arithmetic_conditional.type, operands[0],
                                            task.as.arithmetic_conditional.source) ||
                     !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.arithmetic_conditional.merge_block, 1,
                                     task.as.arithmetic_conditional.source) ||
@@ -29463,6 +29800,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             }
             if (task.kind == C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION)
             {
+                c_ir_vla_conditional_shape(builder, task.as.arithmetic_conditional.place, value);
                 if (!c_ir_emit_store_place(builder, task.as.arithmetic_conditional.place, task.as.arithmetic_conditional.type, value,
                                            task.as.arithmetic_conditional.source) ||
                     !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.arithmetic_conditional.merge_block, 1,
@@ -31554,6 +31892,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaL
             local->vla_suffix_sizes = layout->suffix_sizes;
             local->vla_dimension_count = layout->dimension_count;
             local->is_variable_length_array = true;
+            c_ir_vla_local_shape(builder, local);
             emitted = c_ir_emit_store(builder, local, storage, source);
         }
         if (emitted)
@@ -35889,6 +36228,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     local->vla_dimension_count = pointer_layout.dimension_count;
                     local->is_variable_length_array = true;
                     local->is_vla_parameter = true;
+                    c_ir_vla_local_shape(builder, local);
                 }
                 u32 initializer_index = end;
                 u32 declarator_brackets = 0;
@@ -46418,6 +46758,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     local->vla_dimension_count = layout.dimension_count;
                     local->is_variable_length_array = true;
                     local->is_vla_parameter = true;
+                    c_ir_vla_local_shape(&builder, local);
                 }
             }
         }
