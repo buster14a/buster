@@ -3248,8 +3248,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                                 MachineMemoryEffect memory = (effect_index & 1u) || fixtures[fixture].identity
                                                                  ? MACHINE_MEMORY_EFFECT_BARRIER
                                                                  : MACHINE_MEMORY_EFFECT_NONE;
+                                bool flags_define = info && (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) != 0;
+                                bool expected_flags = (effect_index & 2u) != 0 || fixtures[fixture].identity;
                                 BUSTER_TEST(arguments, info && (info->attributes & required) == required &&
-                                                           !(info->attributes & (MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE & ~required)) &&
+                                                           flags_define == expected_flags &&
                                                            machine_opcode_memory_effect(info) == memory);
                                 if (fixtures[fixture].identity)
                                 {
