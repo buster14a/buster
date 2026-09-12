@@ -1,0 +1,224 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
+index 22a7d7f..0167b50 100644
+--- a/src/buster/lib/compiler/frontend/c/c_source.c
++++ b/src/buster/lib/compiler/frontend/c/c_source.c
+@@ -58,6 +58,7 @@
+ //   c_prewarm                                  serial table prewarm
+ 
+ #include "c_internal.h"
++#include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+ 
+ // Locations are recorded as checkpoints instead of one entry per translated
+ // byte: within a run the original offset and the column both advance one per
+@@ -924,27 +925,9 @@ u64 c_source_metrics_code_bytes(CSourceMetrics metrics)
+     return metrics.translated_bytes - metrics.comment_bytes - metrics.blank_bytes;
+ }
+ 
+-// Paths already lexed, so the unique aggregate counts a header once however
+-// often it is included, plus one attribution row per distinct path so the
+-// amplification the two aggregates state only as a ratio can be charged to
+-// the files that cause it. Slots key on the path hash alone: two distinct paths
+-// colliding on 64 bits would merge into one row, which is cheaper to accept
+-// than slot-side path compares on counters that feed no decision.
+-typedef struct CSourceMetricsFileSet CSourceMetricsFileSet;
+-struct CSourceMetricsFileSet
+-{
+-    u64* hashes;
+-    // Parallel to `hashes`: the row the occupied slot's path owns.
+-    u32* slot_rows;
+-    CSourceFileMetrics* rows;
+-    u32 capacity;
+-    u32 count;
+-    u32 row_capacity;
+-};
+-
+ // The row index for `path`, appending a fresh zero-count row the first time
+ // the path is seen; a first sight is `rows[result].lex_count == 0`.
+-BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path)
++BUSTER_C_INTERNAL u32 c_source_metrics_file_row_hashed(Arena* arena, CSourceMetricsFileSet* set, String8 path, u64 hash)
+ {
+     if (set->count * 2 >= set->capacity)
+     {
+@@ -971,12 +954,18 @@ BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFile
+         set->capacity = capacity;
+     }
+     // Zero marks an empty slot, so no path may hash to it.
+-    u64 hash = buster_hash_64((u8*)path.pointer, path.length) | 1;
++    hash |= 1;
+     u32 slot = (u32)hash & (set->capacity - 1);
+     bool found = false;
+     while (set->hashes[slot] && !found)
+     {
+         found = set->hashes[slot] == hash;
++        if (found)
++        {
++            String8 stored_path = set->rows[set->slot_rows[slot]].path;
++            found = stored_path.length == path.length &&
++                    (!path.length || memcmp(stored_path.pointer, path.pointer, path.length) == 0);
++        }
+         slot = found ? slot : (slot + 1) & (set->capacity - 1);
+     }
+     u32 result;
+@@ -1007,6 +996,18 @@ BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFile
+     return result;
+ }
+ 
++BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path)
++{
++    return c_source_metrics_file_row_hashed(arena, set, path, buster_hash_64((u8*)path.pointer, path.length));
++}
++
++#if BUSTER_INCLUDE_TESTS
++u32 c_test_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path, u64 hash)
++{
++    return c_source_metrics_file_row_hashed(arena, set, path, hash);
++}
++#endif
++
+ // The cold tail of c_token_push: the item is 0xFFFF bytes or longer. A
+ // terminated literal — the scan bounded by the item's extent reproduces the
+ // exact length, which certifies both termination and escape parity — stores
+diff --git a/src/buster/lib/compiler/frontend/c/c_source_metrics_internal.h b/src/buster/lib/compiler/frontend/c/c_source_metrics_internal.h
+new file mode 100644
+index 0000000..9e8fad1
+--- /dev/null
++++ b/src/buster/lib/compiler/frontend/c/c_source_metrics_internal.h
+@@ -0,0 +1,23 @@
++#pragma once
++
++#include <buster/lib/compiler/frontend/c/c.h>
++
++// Private source-metrics attribution table. Rows retain borrowed paths for the
++// lifetime of preprocessing; slot_rows holds indices, not pointers into the
++// growable row array. Hash matches require equal path lengths and bytes.
++// c_source_metrics_file_row owns ordinary hashing, probing and table growth.
++// The test-only entry point supplies a hash to the same lookup implementation.
++typedef struct CSourceMetricsFileSet CSourceMetricsFileSet;
++struct CSourceMetricsFileSet
++{
++    u64* hashes;
++    u32* slot_rows;
++    CSourceFileMetrics* rows;
++    u32 capacity;
++    u32 count;
++    u32 row_capacity;
++};
++
++#if BUSTER_INCLUDE_TESTS
++BUSTER_F_DECL u32 c_test_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path, u64 hash);
++#endif
+diff --git a/src/buster/tests/compiler/frontend/c/c_test.c b/src/buster/tests/compiler/frontend/c/c_test.c
+index 3c957ba..99bba58 100644
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -2,6 +2,7 @@
+ #include <buster/lib/time.h>
+ #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
+ #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
++#include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+ #if BUSTER_INCLUDE_TESTS
+ 
+ BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
+@@ -15266,6 +15267,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
+     return result;
+ }
+ 
++// Supplied hashes exercise collisions deterministically without changing the
++// production hash or adding a mutable override to parallel preprocessing.
++BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    {
++        CSourceMetricsFileSet set = {0};
++        String8 first_path = S8("include/a.h");
++        String8 second_path = S8("include/b.h");
++        char8 copied_path[] = "include/a.h";
++        u32 first = c_test_source_metrics_file_row(arguments->arena, &set, first_path, 0);
++        set.rows[first].translated_bytes = 101;
++        set.rows[first].lex_count = 11;
++        u32 second = c_test_source_metrics_file_row(arguments->arena, &set, second_path, 1);
++        set.rows[second].translated_bytes = 23;
++        set.rows[second].lex_count = 7;
++        BUSTER_TEST(arguments, first == 0);
++        BUSTER_TEST(arguments, second == 1);
++        BUSTER_TEST(arguments, first != second);
++        BUSTER_TEST(arguments, set.count == 2);
++        BUSTER_TEST(arguments, set.rows[first].translated_bytes == 101);
++        BUSTER_TEST(arguments, set.rows[first].lex_count == 11);
++        BUSTER_TEST(arguments, set.rows[second].translated_bytes == 23);
++        BUSTER_TEST(arguments, set.rows[second].lex_count == 7);
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set,
++                                                               (String8){copied_path, sizeof(copied_path) - 1}, 1) == first);
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("include/a.hh"), 1) == 2);
++        u32 empty = c_test_source_metrics_file_row(arguments->arena, &set, (String8){0}, 1);
++        BUSTER_TEST(arguments, empty == 3);
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8(""), 0) == empty);
++        BUSTER_TEST(arguments, set.count == 4);
++        BUSTER_TEST(arguments, set.rows[first].translated_bytes == 101 && set.rows[first].lex_count == 11);
++    }
++    // Different hashes with the same initial bucket must also keep probing.
++    {
++        CSourceMetricsFileSet set = {0};
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("a.h"), 1) == 0);
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("b.h"), 257) == 1);
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("c.h"), 513) == 2);
++        BUSTER_TEST(arguments, c_test_source_metrics_file_row(arguments->arena, &set, S8("b.h"), 257) == 1);
++        BUSTER_TEST(arguments, set.count == 3);
++    }
++    // More than the initial 128 rows forces both rehash and row relocation.
++    // UINT64_MAX starts at the last bucket at every capacity, forcing wrap.
++    enum { C_METRICS_COLLISION_PATH_COUNT = 600, C_METRICS_COLLISION_PATH_LENGTH = 7 };
++    char8 paths[C_METRICS_COLLISION_PATH_COUNT][C_METRICS_COLLISION_PATH_LENGTH];
++    for (u32 index = 0; index < C_METRICS_COLLISION_PATH_COUNT; index += 1)
++    {
++        memcpy(paths[index], "h/000.h", C_METRICS_COLLISION_PATH_LENGTH);
++        paths[index][2] = (char8)('0' + index / 100);
++        paths[index][3] = (char8)('0' + (index / 10) % 10);
++        paths[index][4] = (char8)('0' + index % 10);
++    }
++    for (u32 run = 0; run < 2; run += 1)
++    {
++        u64 hash = run ? 0 : UINT64_MAX;
++        CSourceMetricsFileSet set = {0};
++        for (u32 index = 0; index < C_METRICS_COLLISION_PATH_COUNT; index += 1)
++        {
++            u32 row = c_test_source_metrics_file_row(arguments->arena, &set,
++                                                       (String8){paths[index], C_METRICS_COLLISION_PATH_LENGTH}, hash);
++            BUSTER_TEST(arguments, row == index);
++            BUSTER_TEST(arguments, set.count == index + 1);
++            BUSTER_TEST(arguments, set.rows[row].lex_count == 0);
++            BUSTER_TEST(arguments, set.rows[row].translated_bytes == 0);
++            set.rows[row].lex_count = index + 1;
++            set.rows[row].translated_bytes = index + 101;
++        }
++        BUSTER_TEST(arguments, set.count == C_METRICS_COLLISION_PATH_COUNT);
++        BUSTER_TEST(arguments, set.capacity == 2048);
++        BUSTER_TEST(arguments, set.row_capacity == 1024);
++        u32 retained_count = set.count;
++        for (u32 remaining = C_METRICS_COLLISION_PATH_COUNT; remaining; remaining -= 1)
++        {
++            u32 index = remaining - 1;
++            char8 copy[C_METRICS_COLLISION_PATH_LENGTH];
++            memcpy(copy, paths[index], sizeof(copy));
++            u32 row = c_test_source_metrics_file_row(arguments->arena, &set, (String8){copy, sizeof(copy)}, hash);
++            BUSTER_TEST(arguments, row == index);
++            BUSTER_TEST(arguments, set.count == retained_count);
++            BUSTER_TEST(arguments, set.rows[row].lex_count == index + 1);
++            BUSTER_TEST(arguments, set.rows[row].translated_bytes == index + 101);
++            BUSTER_TEST(arguments, set.rows[row].path.pointer == paths[index]);
++        }
++    }
++    return result;
++}
++
+ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+ {
+     UnitTestResult result = {0};
+@@ -15287,6 +15376,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+     c_test_result_add(&result, c_test_position_index_tiles(arguments));
+     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
+     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
++    c_test_result_add(&result, c_test_source_metrics_path_identity(arguments));
+     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
+     c_test_result_add(&result, c_test_typedef_fallback_lookup(arguments));
+     c_test_result_add(&result, c_test_frontend_global_types(arguments));
