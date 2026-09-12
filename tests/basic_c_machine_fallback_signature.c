@@ -1,15 +1,8 @@
-// Win64 still excludes over-aligned aggregate parameters from machine selection.
-// Darwin AArch64 still excludes variadic definitions. Keep both signature
-// failures explicit as supported shapes move into the machine backend.
-#if defined(_WIN32) && defined(__x86_64__)
-struct MachineFallbackParameter { _Alignas(32) long long first; };
-int machine_fallback_signature(struct MachineFallbackParameter value, ...)
+// The direct emitter supports narrow Win64 vectors; their MIR signature
+// transport remains a separate capability, independent of argument count.
+typedef unsigned long long MachineFallbackVector __attribute__((vector_size(8)));
+
+int machine_fallback_signature(MachineFallbackVector value)
 {
-    return (int)value.first;
+    return (int)value[0];
 }
-#else
-int machine_fallback_signature(int value, ...)
-{
-    return value;
-}
-#endif

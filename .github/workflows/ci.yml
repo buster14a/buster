@@ -370,6 +370,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Record native packaging failure
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success' }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ${{ matrix.runner }}
+          BUSTER_CI_REQUIRED: modes differential pack
+          BUSTER_CI_REPRO: See docs/ci-suite-partition.md for native evidence packaging and fallback.
+        run: python3 tools/ci_summary.py
+
       # A packing failure already fails this lane; still retain the original tree.
       - name: Retain unpacked native logs
         if: ${{ !cancelled() && steps.pack.outcome != 'success' }}

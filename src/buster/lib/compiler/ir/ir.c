@@ -3223,6 +3223,8 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
     return result;
 }
 
+// AAPCS64 shares the homogeneous walk between floating-point aggregates and
+// 64/128-bit short-vector aggregates; vector lane types do not distinguish them.
 BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId root_type, IrTypeId* element_out, u32* count_out)
 {
     typedef enum IrHomogeneousFloatTaskOperation
@@ -3266,7 +3268,8 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
             {
                 valid = false;
             }
-            else if (type->kind == IR_TYPE_FLOAT)
+            else if (type->kind == IR_TYPE_FLOAT || (type->kind == IR_TYPE_VECTOR &&
+                (type->layout.size == 8 || type->layout.size == 16)))
             {
                 if (shape_count >= capacity)
                 {
@@ -3349,7 +3352,13 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
                 for (u32 index = 0; index < task.child_count; index += 1)
                 {
                     IrHomogeneousFloatShape shape = shapes[first_shape + index];
-                    if (!shape.count || (element.value != IR_ID_UNDERLYING_INVALID && element.value != shape.element.value))
+                    IrType* prior_element = ir_type_from_id(&program->types, element);
+                    IrType* next_element = ir_type_from_id(&program->types, shape.element);
+                    // AAPCS64 5.10.5 identifies short vectors by their total
+                    // width; lane element types do not affect homogeneity.
+                    bool same_vector = prior_element && next_element && prior_element->kind == IR_TYPE_VECTOR &&
+                        next_element->kind == IR_TYPE_VECTOR && prior_element->layout.size == next_element->layout.size;
+                    if (!shape.count || (element.value != IR_ID_UNDERLYING_INVALID && element.value != shape.element.value && !same_vector))
                     {
                         valid = false;
                         break;
@@ -3688,7 +3697,7 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     for (u32 part = 0; part < count; part += 1)
                     {
                         value.parts[part] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_FLOAT,
+                            .abi_class = element_type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
                             .value_offset = part * (u32)element_type->layout.size,
                             .size = (u32)element_type->layout.size,
                         };

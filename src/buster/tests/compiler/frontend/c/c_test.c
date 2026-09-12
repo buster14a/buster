@@ -1287,6 +1287,164 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    u32 counts[] = {8191, 8192, 8193, 12000, 16384, 16385};
+    u32 maximum = counts[BUSTER_ARRAY_LENGTH(counts) - 1];
+    String8* tags = arena_allocate(temporary.arena, String8, maximum);
+    CTypeId* ids = arena_allocate(temporary.arena, CTypeId, maximum);
+    CParseResult checkpoint = {0};
+    u32 inserted = 0;
+    for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(counts); population += 1)
+    {
+        u32 count = counts[population];
+        for (; inserted < count; inserted += 1)
+        {
+            tags[inserted] = string_format(temporary.arena, S8("growth_tag_{u32}"), inserted);
+            BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[inserted], (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+            ids[inserted] = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = tags[inserted], .tag_scope = {0}});
+            BUSTER_TEST(arguments, ids[inserted].value < parse.type_count);
+        }
+        BUSTER_TEST(arguments, parse.aggregate_lookup->fill == count);
+        BUSTER_TEST(arguments, parse.aggregate_lookup->slot_count >= 2 * count);
+        BUSTER_TEST(arguments, !parse.aggregate_lookup->incomplete);
+        for (u32 index = count; index; index -= 1)
+        {
+            BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[index - 1], (CScopeId){0}).value == ids[index - 1].value);
+        }
+#if BUSTER_BENCH_ALLOCATIONS
+        // Actual production work, including rehash collisions and empty probes.
+        // Unique tags must never visit the type table at either old boundary.
+        BUSTER_TEST(arguments, parse.aggregate_lookup->fallback_type_count == 0);
+        BUSTER_TEST(arguments, parse.aggregate_lookup->probe_count <= (u64)count * 32);
+        BUSTER_TEST(arguments, parse.aggregate_lookup->rehash_slot_count <= (u64)count * 4);
+        if (os_get_environment_variable(S8("BUSTER_AGGREGATE_CENSUS")).length)
+        {
+            arguments->show(arguments, S8("AGGREGATE_CENSUS tags={u32} slots={u32} probes={u64} rehash_slots={u64} fallback_types={u64}\n"),
+                count, parse.aggregate_lookup->slot_count, parse.aggregate_lookup->probe_count,
+                parse.aggregate_lookup->rehash_slot_count, parse.aggregate_lookup->fallback_type_count);
+        }
+#endif
+        if (count == 8192)
+        {
+            checkpoint = parse;
+        }
+    }
+    CAggregateLookupSlot* grown_slots = parse.aggregate_lookup->slots;
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    BUSTER_TEST(arguments, parse.types == checkpoint.types && parse.type_count == checkpoint.type_count);
+    BUSTER_TEST(arguments, parse.aggregate_lookup->slots == grown_slots);
+    BUSTER_TEST(arguments, parse.aggregate_lookup->slot_count >= 2 * maximum);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[8191], (CScopeId){0}).value == ids[8191].value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[8192], (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+    // Reuse a rolled-back ID with another key, then reinsert the old key.
+    CTypeId replacement = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_UNION, .tag = S8("replacement"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, replacement.value == ids[8192].value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[8192], (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+    CTypeId restored = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = tags[8192], .tag_scope = {0}});
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[8192], (CScopeId){0}).value == restored.value);
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // A tiny index forces rehash with a multiple slot, a stale slot, and a
+    // qualified copy present.
+    CAggregateLookup lookup = {.slot_count = 8};
+    lookup.slots = arena_allocate_zeroed(temporary.arena, CAggregateLookupSlot, lookup.slot_count);
+    CScope scopes[] = {{.parent = C_SCOPE_ID_INVALID}, {.parent = {0}}, {.parent = {1}}, {.parent = {0}}};
+    CParseResult parse = {.arena = temporary.arena, .aggregate_lookup = &lookup, .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+        .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+    CTypeId outer = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {0}});
+    CTypeId inner = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
+    CTypeId sibling = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {3}});
+    u32 fill = lookup.fill;
+    CType qualified = parse.types[outer.value];
+    qualified.has_unqualified_type = true;
+    qualified.unqualified_type = outer;
+    qualified.is_const = true;
+    c_test_aggregate_lookup_add(&parse, qualified);
+    BUSTER_TEST(arguments, lookup.fill == fill);
+    CParseResult checkpoint = parse;
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Stale"), .tag_scope = {0}});
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    // A qualified type reusing the stale ID must not become the tag owner.
+    qualified.tag = S8("Stale");
+    c_test_aggregate_lookup_add(&parse, qualified);
+    CTypeId union_id = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_UNION, .tag = S8("Shared"), .tag_scope = {0}});
+    CTypeId enum_id = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_ENUM, .tag = S8("Shared"), .tag_scope = {0}});
+    u32 old_count = lookup.slot_count;
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Grow"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, lookup.slot_count > old_count);
+    BUSTER_TEST(arguments, !lookup.incomplete);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){0}).value == outer.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){1}).value == inner.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){2}).value == inner.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){3}).value == sibling.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), C_SCOPE_ID_INVALID).value == outer.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_UNION, S8("Shared"), (CScopeId){0}).value == union_id.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_ENUM, S8("Shared"), (CScopeId){0}).value == enum_id.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Stale"), (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_UNION, S8("Shared"), (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){2}).value == inner.value);
+    // Exhausted growth preserves complete lookup answers through the existing
+    // fallback and still records a duplicate against an already indexed key.
+    lookup.fill = lookup.slot_count / 2;
+    parse.arena = 0;
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("NoRoom"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, lookup.incomplete);
+    CTypeId duplicate = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){1}).value == duplicate.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("NoRoom"), (CScopeId){0}).value < parse.type_count);
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_frontend(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = 1024 * 1024;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < 8193; index += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("struct T{u32};\n"), index));
+    }
+    c_test_append_source(bytes, capacity, &length, S8(
+        "struct T8192 { int x; }; typedef const struct T8192 Const;\n"
+        "struct T8192 object = {7}; Const *pointer = &object;\n"
+        "int f(void) { struct T8192 { long long y; }; struct T8192 local = {9};\n"
+        " { struct T8192 { char z; }; _Static_assert(sizeof(struct T8192) == 1, \"inner\"); }\n"
+        " _Static_assert(sizeof(struct T8192) == 8, \"outer\"); return (int)local.y; }\n"
+        "_Static_assert(sizeof(struct T8192) == 4, \"file\");\n"));
+    CPreprocessResult tokens;
+    CParseResult parse;
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = bytes, .length = length},
+        S8("aggregate-index-growth.c"), target_native, &tokens, &parse);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.aggregate_lookup->fill == 8193);
+    BUSTER_TEST(arguments, parse.aggregate_lookup->slot_count > 16384);
+    CTypeId tag = c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("T8192"), (CScopeId){0});
+    BUSTER_TEST(arguments, tag.value < parse.type_count);
+    if (tag.value < parse.type_count)
+    {
+        BUSTER_TEST(arguments, parse.types[tag.value].is_complete && !parse.types[tag.value].has_unqualified_type);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_rollback_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15496,6 +15654,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_parse_storage_growth(arguments));
 
     c_test_result_add(&result, c_test_fresh_binding_publication(arguments));
+    c_test_result_add(&result, c_test_aggregate_lookup_growth(arguments));
+    c_test_result_add(&result, c_test_aggregate_lookup_identity(arguments));
+    c_test_result_add(&result, c_test_aggregate_lookup_frontend(arguments));
     c_test_result_add(&result, c_test_type_parse_rollback_growth(arguments));
 
     c_test_result_add(&result, c_test_aggregate_corrections(arguments));

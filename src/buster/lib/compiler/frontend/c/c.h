@@ -1060,13 +1060,11 @@ struct CParserResult
     u32 diagnostic_capacity;
 };
 
-// (kind, tag) -> oldest matching aggregate type id. Slots can go stale when a
-// speculative type parse rolls the result back, so lookups validate the
-// recorded id against the live type table and fall back to the linear scan;
-// staleness costs time, never a wrong answer. The header lives outside
-// CParseResult because rollback restores that struct wholesale from a
-// checkpoint copy while the slot storage keeps its contents; fill only ever
-// grows, which is what guarantees probe termination under the half-full cap.
+// (kind, tag) -> oldest matching aggregate type id. Speculative rollback
+// restores CParseResult wholesale, so this header and its geometrically grown
+// slot arrays live in the unrewound parse arena. Rehash preserves stale and
+// multiple entries; queries validate IDs against the restored live type table.
+// At most half the slots are occupied, guaranteeing probe termination.
 typedef struct CAggregateLookupSlot CAggregateLookupSlot;
 struct CAggregateLookupSlot
 {
@@ -1088,7 +1086,14 @@ struct CAggregateLookup
     CAggregateLookupSlot* slots;
     u32 slot_count;
     u32 fill;
-    bool saturated;
+    // Only an exhausted arena or unrepresentable growth makes the index
+    // incomplete. Duplicate scoped tags use the separate per-slot flag.
+    bool incomplete;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 probe_count;
+    u64 rehash_slot_count;
+    u64 fallback_type_count;
+#endif
 };
 
 // Sorted token positions of the rare spellings whose "does this range contain
