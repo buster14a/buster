@@ -13711,6 +13711,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         encoder.frame_base_offset = placement->frame_size;
     }
     u32 edit_cursor = 0;
+    if (encoder.overflow)
+    {
+        string_print(S8("ISSUE70_X64_PROLOGUE count={u32} capacity={u32}\n"), encoder.count, encoder.capacity);
+    }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
@@ -13719,6 +13723,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         {
             u32 instruction_index = block->first_instruction + offset;
             MachineInstruction* instruction = function->instructions + instruction_index;
+            bool issue70_overflow_before_row = encoder.overflow;
             u8 const* operand_registers = placement->operand_registers + (u64)instruction_index * 4;
             result.row_offsets[instruction_index] = encoder.count;
             MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
@@ -14827,6 +14832,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
             {
                 edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, after, true);
+            }
+            if (!issue70_overflow_before_row && encoder.overflow)
+            {
+                string_print(S8("ISSUE70_X64_ROW opcode={u32} row={u32} count={u32} capacity={u32}\n"),
+                             (u32)instruction->opcode, instruction_index, encoder.count, encoder.capacity);
             }
         }
     }
