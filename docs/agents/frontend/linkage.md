@@ -109,6 +109,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `link_objects` has concatenated its inputs: without it a `constructor(101)`
   in the second object ran after an unprioritized constructor in the first,
   for Clang's objects as much as for this compiler's, which was issue #789.
+  Ordered arrays only need a scan. Unordered arrays use four stable byte-wise
+  radix passes over the `u32` priorities, reusing the inverse-permutation
+  buffer as sorting scratch (GitHub #107).
   That sort moves each entry's relocation and any symbol defined at its slot
   with the entry, and it runs on the merged object rather than in
   `link_initializer_plan_build` so the Mach-O writer -- which keeps the

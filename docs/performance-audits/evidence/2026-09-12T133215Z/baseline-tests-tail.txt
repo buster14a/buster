@@ -1,0 +1,13 @@
+Launched [1336]: "/tmp/buster-tests-15-1-81743580113389/buster-c-multi-driver-15"
+Process [1336]: Time (user): 0:219 s,us, (system): 0:0 s,us. Max RSS: 576280 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+Launched [1337]: "/tmp/buster-tests-15-1-81743580113389/buster-c-mixed-driver-15"
+Process [1337]: Time (user): 0:307 s,us, (system): 0:0 s,us. Max RSS: 576280 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1338]: "/tmp/buster-tests-15-1-81743580113389/buster-c-archive-driver-15"
+Process [1338]: Time (user): 0:164 s,us, (system): 0:0 s,us. Max RSS: 576280 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+TEST_MODULE_TIMING index=44 module=compiler_driver_tests duration_ns=24930138255 passed=11041 failed=0 assertions=11041 status=pass
+TEST_MODULE_TIMING index=45 module=compiler_driver_object_path_tests duration_ns=12027187 passed=22 failed=0 assertions=22 status=pass
+TEST_MODULE_TIMING index=46 module=x86_64_tests duration_ns=243173 passed=18 failed=0 assertions=18 status=pass
+[1944072/1944072] Unit tests
+[47/47] Module tests
+[0/0] External tests
+full_log_sha256=89236fdf5103bd29dfc7d9c9b9fd6acc0c63b59b18972bc695e77c366bb40c5e

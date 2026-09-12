@@ -1,0 +1,12 @@
+SELF_HOST fixed_point bytes=38167160 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+SELF_HOST stage 1 throughput
+SELF_HOST stage 2 throughput
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=50557442 median_ns=68854486 throughput_mb_s=0
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=29201659 median_ns=30291187 throughput_mb_s=0
+Self-host stage 1 took 17.053002 seconds (17053002000 nanoseconds)
+Self-host stage 2 took 70.538539 seconds (70538539000 nanoseconds)
+Self-host stage 2 benchmark took 0.490115 seconds (490115000 nanoseconds)
+Self-host machine stage took 58.093770 seconds (58093770000 nanoseconds)
+Self-host machine stage benchmark took 0.218234 seconds (218234000 nanoseconds)
+Self-host canonical stage took 45.688220 seconds (45688220000 nanoseconds)
+full_log_sha256=057c6121474bdd847feb4a4dd3b6cec72fa175ca671d1f8f5ba88c2df3b830e8
