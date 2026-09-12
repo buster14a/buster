@@ -4939,6 +4939,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_source(MachineA64Selector* 
     {
         encoded = assembly_encode(selector->arena, (String8){.pointer = bytes, .length = write},
                                   (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_DEFAULT});
+        if (encoded.diagnostic_count)
+        {
+            string_print(S8("ISSUE70_A64_ASSEMBLER source='{S8}' diagnostics={u32}\n"),
+                         (String8){.pointer = bytes, .length = write}, encoded.diagnostic_count);
+        }
         valid = encoded.diagnostic_count == 0;
     }
     if (valid)
@@ -4957,6 +4962,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
                     instruction->operand_count == instruction->immediate_count && !instruction->target_count &&
                     extra.operand_name_count <= instruction->operand_count &&
                     (!extra.operand_name_count || extra.operand_names);
+    u32 issue70_stage = 1;
     u32 registers[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u32 slots[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT];
     u8 sizes[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
@@ -4981,6 +4987,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
             selected = false;
         }
     }
+    issue70_stage = selected ? 2u : issue70_stage;
     // A literal register in the template is outside the operand list, but it
     // is still an allocator-visible interference point.  Keep generic
     // operands out of every xN/wN token the admitted AArch64 text spells.
@@ -5007,6 +5014,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
             }
         }
     }
+    issue70_stage = selected ? 3u : issue70_stage;
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
         u64 constraint = instruction->immediates[index];
@@ -5057,6 +5065,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
                                              : 0));
         }
     }
+    issue70_stage = selected ? 4u : issue70_stage;
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
         if (!(operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) continue;
@@ -5083,9 +5092,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
             });
         }
     }
+    issue70_stage = selected ? 5u : issue70_stage;
     String8 source = {0};
     AssemblyEncodeResult encoded = {0};
     selected = selected && machine_a64_inline_assembly_source(selector, instruction, extra, registers, sizes, &source, &encoded);
+    issue70_stage = selected ? 6u : issue70_stage;
     u32 first_relocation = selector->inline_assembly_relocations.total_count;
     for (u32 index = 0; selected && index < encoded.relocation_count; index += 1)
     {
@@ -5136,6 +5147,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
                                                            selector->value_stack_slots[place.value], value);
             }
         }
+    }
+    if (!selected)
+    {
+        string_print(S8("ISSUE70_A64_SELECT stage={u32} template='{S8}' operands={u32}\n"),
+                     issue70_stage, extra.literal, instruction->operand_count);
     }
     return selected;
 }
