@@ -305,6 +305,64 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_in
     return false;
 }
 
+// Win64's closed eight-register x-constraint pool reaches XMM6/XMM7 even
+// though ordinary allocator values do not.  Their low 128-bit halves are
+// ABI-preserved, so find the paired MOVDQU frame save/restore for each in the
+// function that consumes all eight registers.  Matching the displacement as
+// well as the register keeps an unrelated vector spill from satisfying this
+// observer.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_inline_xmm_preserved(ObjectFile* object)
+{
+    bool result = false;
+    if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
+    {
+        ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, S8("asm_sse_eight_outputs"));
+        if (symbol && symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->section == OBJECT_SECTION_TEXT && symbol->value <= text.length &&
+            symbol->size <= text.length - symbol->value)
+        {
+            bool saved[2] = {0};
+            bool restored[2] = {0};
+            s32 save_displacement[2] = {0};
+            u64 save_offset[2] = {0};
+            u64 function_end = symbol->value + symbol->size;
+            for (u64 offset = symbol->value; offset + 5 <= function_end; offset += 1)
+            {
+                u8* bytes = text.pointer + offset;
+                bool movdqu = bytes[0] == 0xf3 && bytes[1] == 0x0f && (bytes[2] == 0x6f || bytes[2] == 0x7f);
+                u8 modrm = movdqu ? bytes[3] : 0;
+                u32 mode = modrm >> 6;
+                u32 xmm = (modrm >> 3) & 7u;
+                bool frame = (modrm & 7u) == 5u && (mode == 1 || mode == 2);
+                u32 displacement_bytes = mode == 1 ? 1u : 4u;
+                if (movdqu && frame && xmm >= 6 && offset + 4u + displacement_bytes <= function_end)
+                {
+                    s32 displacement = mode == 1 ? (s32)(s8)bytes[4] : 0;
+                    if (mode == 2)
+                    {
+                        memcpy(&displacement, bytes + 4, sizeof(displacement));
+                    }
+                    u32 index = xmm - 6u;
+                    if (bytes[2] == 0x7f && !saved[index])
+                    {
+                        saved[index] = true;
+                        save_displacement[index] = displacement;
+                        save_offset[index] = offset;
+                    }
+                    else if (bytes[2] == 0x6f && saved[index] && offset > save_offset[index] &&
+                             displacement == save_displacement[index])
+                    {
+                        restored[index] = true;
+                    }
+                }
+            }
+            result = saved[0] && saved[1] && restored[0] && restored[1] && save_displacement[0] != save_displacement[1];
+        }
+    }
+
+    return result;
+}
+
 // Finds one symbol a module-level assembly block put in an object. The
 // global-assembly fixtures assert on binding, visibility and section rather
 // than on encoded bytes, because what a startup object has to get right is
@@ -696,6 +754,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
     u64 function_end = function->value + function->size;
     bool found_save = false;
     bool found_restore = false;
+    bool found_push = false;
+    bool found_pop = false;
     s32 save_displacement = 0;
     s32 restore_displacement = 0;
     // The canonical encoder uses the compact disp8 form whenever the frame
@@ -705,6 +765,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
     for (u64 offset = function->value; offset < function_end;)
     {
         u64 next_offset = offset + 1;
+        found_push |= offset - function->value < 32 && text.pointer[offset] == 0x53;
+        found_pop |= text.pointer[offset] == 0x5b;
         if (offset + 3 <= function_end && text.pointer[offset] == 0x48 &&
             (text.pointer[offset + 1] == 0x89 || text.pointer[offset + 1] == 0x8b))
         {
@@ -744,7 +806,9 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
         }
         offset = next_offset;
     }
-    if (!found_save || !found_restore || save_displacement != restore_displacement || save_displacement < 0)
+    bool frame_pair = found_save && found_restore && save_displacement == restore_displacement && save_displacement >= 0;
+    bool stack_pair = found_push && found_pop;
+    if (!frame_pair && !stack_pair)
     {
         return false;
     }
@@ -793,6 +857,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
         u8 information = unwind >> 4;
         if (operation == 0 || operation == 3)
         {
+            found_rbx_unwind |= operation == 0 && information == 3;
             code_index += 1;
         }
         else if (operation == 1 && information == 0)
@@ -862,7 +927,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
             code_index += 1;
         }
     }
-    return found_rbx_unwind && frame_size != 0 && (u64)save_displacement + 8 <= frame_size;
+    return found_rbx_unwind && frame_size != 0 && (stack_pair || (u64)save_displacement + 8 <= frame_size);
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_label_relocations(ObjectFile* object, u32* count_out)
@@ -13805,6 +13870,33 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_asm_windows.has_object);
         BUSTER_TEST(arguments, compiler_driver_test_windows_x64_dynamic_rbx(&c_asm_windows.object));
     }
+    {
+        String8 windows_sse_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(windows_sse_allocators); allocator_index += 1)
+        {
+            String8 windows_sse_path = buster_test_temporary_path(
+                c_asm_arena, S8("buster-c-asm-windows-sse"), string_format(c_asm_arena, S8("-{u32}.obj"), allocator_index));
+            String8 windows_sse_command_line[] = {
+                S8("-c"),
+                S8("-g0"),
+                S8("-target"),
+                S8("x86_64-pc-windows-msvc"),
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), windows_sse_allocators[allocator_index]),
+                S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
+                S8("-o"),
+                windows_sse_path,
+                S8("tests/basic_c_asm_sse_win64.c"),
+            };
+            CompilerDriverResult windows_sse = compiler_driver_execute_invocation(
+                c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_sse_command_line)));
+            BUSTER_TEST(arguments, windows_sse.error == COMPILER_DRIVER_ERROR_NONE && windows_sse.has_object);
+            if (windows_sse.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_windows_x64_inline_xmm_preserved(&windows_sse.object));
+            }
+        }
+    }
     // A module-level assembly block that is the image's entry point, which is
     // what a libc's startup object is. Linked with `-e`, so the label the
     // block defines is the entry rather than something startup code reaches,
@@ -13988,19 +14080,20 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     // The two register files an inline-assembly operand may name besides the
     // general registers: the SSE class musl's own x86-64 sqrt, fabs and lrint
-    // are written in, and the x87 stack its `long double` math is. All four
+    // are written in, and the x87 stack its `long double` math is. These
     // fixtures are programs rather than compilations: an operand carried into
     // the wrong register, or pushed into the wrong stack position, still
     // assembles and still hands back a number, so the answers are checked --
     // and `remquol`'s quotient, which is decoded out of the x87 status word, is
-    // the one that a plausible remainder would otherwise hide. Each runs under
-    // every allocator because the operand's frame slot is placed differently by
-    // each.
+    // the one that a plausible remainder would otherwise hide. The eight-SSE-
+    // output case also exhausts the closed operand pool. Each runs under every
+    // allocator because the operand's frame slot is placed differently by each.
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     {
         String8 sse_operand_fixtures[] = {
             S8("tests/basic_c_asm_sse_output.c"),
             S8("tests/basic_c_asm_sse_input.c"),
+            S8("tests/basic_c_asm_sse_win64.c"),
             S8("tests/basic_c_asm_x87_output.c"),
             S8("tests/basic_c_asm_x87_clobber.c"),
             S8("tests/basic_c_asm_x87_control_word.c"),
@@ -14015,6 +14108,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                string_format(c_asm_arena, S8("-{u32}-{u32}"), fixture_index, allocator_index));
                 String8 sse_operand_command_line[] = {
                     string_format(c_asm_arena, S8("-fregister-allocator={S8}"), sse_operand_allocators[allocator_index]),
+                    S8("-fno-machine-fallback"),
+                    S8("-fverify-codegen"),
                     S8("-o"),
                     sse_operand_path,
                     sse_operand_fixtures[fixture_index],
@@ -14035,6 +14130,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     {
                         BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, sse_operand_spawn).result == PROCESS_RESULT_SUCCESS);
                     }
+                }
+            }
+        }
+    }
+#endif
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    {
+        String8 windows_sse_run_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(windows_sse_run_allocators); allocator_index += 1)
+        {
+            String8 windows_sse_run_path = buster_test_temporary_path(
+                c_asm_arena, S8("buster-c-asm-sse-win64-run"), string_format(c_asm_arena, S8("-{u32}.exe"), allocator_index));
+            String8 windows_sse_run_command_line[] = {
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), windows_sse_run_allocators[allocator_index]),
+                S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
+                S8("-o"),
+                windows_sse_run_path,
+                S8("tests/basic_c_asm_sse_win64.c"),
+            };
+            CompilerDriverResult windows_sse_run = compiler_driver_execute_invocation(
+                c_asm_arena,
+                compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_sse_run_command_line)));
+            BUSTER_TEST(arguments, windows_sse_run.error == COMPILER_DRIVER_ERROR_NONE);
+            if (windows_sse_run.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {windows_sse_run_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
+                                                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, spawn).result == PROCESS_RESULT_SUCCESS);
                 }
             }
         }
