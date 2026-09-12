@@ -219,6 +219,17 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // a loader jumping to the program it relocated, and a thread jumping onto
     // a stack that is not the one it is unmapping.
     S8_INITIALIZER("jmp"),
+    // asm-goto conditional transfers retain a real MIR fallthrough edge and
+    // bind each symbolic branch relocation to its target continuation. These
+    // are the GNU/Intel aliases accepted by the shared x86 metadata assembler.
+    S8_INITIALIZER("ja"), S8_INITIALIZER("jae"), S8_INITIALIZER("jb"), S8_INITIALIZER("jbe"),
+    S8_INITIALIZER("jc"), S8_INITIALIZER("je"), S8_INITIALIZER("jg"), S8_INITIALIZER("jge"),
+    S8_INITIALIZER("jl"), S8_INITIALIZER("jle"), S8_INITIALIZER("jna"), S8_INITIALIZER("jnae"),
+    S8_INITIALIZER("jnb"), S8_INITIALIZER("jnbe"), S8_INITIALIZER("jnc"), S8_INITIALIZER("jne"),
+    S8_INITIALIZER("jng"), S8_INITIALIZER("jnge"), S8_INITIALIZER("jnl"), S8_INITIALIZER("jnle"),
+    S8_INITIALIZER("jno"), S8_INITIALIZER("jnp"), S8_INITIALIZER("jns"), S8_INITIALIZER("jnz"),
+    S8_INITIALIZER("jo"), S8_INITIALIZER("jp"), S8_INITIALIZER("jpe"), S8_INITIALIZER("jpo"),
+    S8_INITIALIZER("js"), S8_INITIALIZER("jz"),
     // The scalar SSE instructions musl's own x86-64 math is written in, which
     // are the only reason the 'x' operand class exists here. Each writes only
     // its named vector operands, so they need none of the memory or immediate

@@ -243,6 +243,10 @@ struct MachineX64Selector
     // enter the original entry; canonical outgoing edges leave the last split.
     u32* block_entries;
     u32* block_exits;
+    // Per canonical block, the first of target_count asm-goto continuations,
+    // or UINT32_MAX. Each path publishes output places before entering its
+    // canonical successor.
+    u32* asm_goto_continuations;
     MachineBlock open_block;
     // i128 CMPXCHG16B materializes its ZF result immediately, so later
     // aggregate expected-value copies never rely on flags surviving IR rows.
@@ -4561,6 +4565,59 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly_outputs(MachineX64Selector* selector, IrInstruction* instruction,
+                                                                    u32 const* slots, u8 const* sizes, u8 const* operand_flags)
+{
+    IrFunction* function = selector->function;
+    bool selected = true;
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        if ((operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY)) !=
+            MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+        {
+            continue;
+        }
+        IrValueId place = instruction->operands[index];
+        bool x87 = (operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)) != 0;
+        if (x87)
+        {
+            u8 place_kind = place.value < function->value_count ? selector->place_kinds[place.value] : MACHINE_X64_PLACE_NONE;
+            u32 place_slot = place.value < function->value_count ? selector->value_stack_slots[place.value] : UINT32_MAX;
+            if (place_kind == MACHINE_X64_PLACE_LOCAL && place_slot != UINT32_MAX)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, place_slot),
+                                 machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index])},
+                    .payload = 10,
+                    .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                });
+            }
+            else
+            {
+                u32 address = UINT32_MAX;
+                selected = machine_x64_place_is_addressed(selector, place, place_kind) &&
+                           machine_x64_operand_register(selector, place, &address);
+                if (selected)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address),
+                                     machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index])},
+                        .payload = 10,
+                        .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
+                    });
+                }
+            }
+        }
+        else
+        {
+            u32 value = machine_x64_select_frame_load64(selector, slots[index], 0);
+            selected = machine_x64_select_scalar_store(selector, place, selector->place_kinds[place.value], sizes[index],
+                                                       selector->value_stack_slots[place.value], value);
+        }
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* selector, IrInstruction* instruction)
 {
     IrFunction* function = selector->function;
@@ -4572,8 +4629,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         assembly_target = 0;
         simple_goto = !extra.literal.length || ir_inline_assembly_jump_target(function, instruction, extra.literal, S8("jmp %l"), &assembly_target);
     }
+    u32 first_continuation = selector->asm_goto_continuations ? selector->asm_goto_continuations[selector->current_block] : UINT32_MAX;
+    bool general_goto = instruction->target_count && first_continuation != UINT32_MAX;
+    MachineAssemblyLabelPlan label_plan = {.literal = extra.literal};
+    bool labels_planned = !general_goto || machine_selection_assembly_label_plan(selector->arena, function, instruction, extra, &label_plan);
+    IrInstructionExtra source_extra = extra;
+    source_extra.literal = label_plan.literal;
     bool selected = instruction->operand_count <= MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
-                    instruction->operand_count == instruction->immediate_count && (!instruction->target_count || simple_goto) &&
+                    instruction->operand_count == instruction->immediate_count &&
+                    (!instruction->target_count || simple_goto || general_goto) && labels_planned &&
                     extra.operand_name_count <= instruction->operand_count &&
                     (!instruction->operand_count || (instruction->operands && instruction->immediates)) &&
                     (!extra.operand_name_count || extra.operand_names);
@@ -4765,7 +4829,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     AssemblyEncodeResult encoded = {0};
     if (selected && !simple_goto)
     {
-        selected = machine_x64_inline_assembly_source(selector, instruction, extra, registers, vector_registers, &source, &encoded);
+        selected = machine_x64_inline_assembly_source(selector, instruction, source_extra, registers, vector_registers, &source, &encoded);
     }
     u32 first_relocation = selector->inline_assembly_relocations.total_count;
     for (u32 index = 0; selected && index < encoded.relocation_count; index += 1)
@@ -4773,13 +4837,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         AssemblyRelocation relocation = encoded.relocations[index];
         selected = relocation.symbol < encoded.symbol_count && !encoded.symbols[relocation.symbol].defined && relocation.offset <= UINT32_MAX;
         String8 name = selected ? encoded.symbols[relocation.symbol].name : (String8){0};
-        selected = selected && codegen_assembly_durable_name(extra.literal, &name);
+        u32 label_target = UINT32_MAX;
+        bool block = selected && machine_selection_assembly_label_target(&label_plan, name, &label_target);
+        selected = selected && (block || codegen_assembly_durable_name(extra.literal, &name));
         if (selected)
         {
             MachineInlineAssemblyRelocation* row =
                 (MachineInlineAssemblyRelocation*)machine_stream_append(selector->arena, &selector->inline_assembly_relocations);
             *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = relocation.addend, .offset = (u32)relocation.offset,
-                                                     .block = UINT32_MAX, .kind = (u8)relocation.kind};
+                                                     .block = block ? first_continuation + label_target : UINT32_MAX,
+                                                     .kind = (u8)relocation.kind, .is_block = block};
         }
     }
     if (selected)
@@ -4804,64 +4871,56 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         *descriptor = (MachineInlineAssembly){.source = source, .bytes = encoded.bytes, .clobber_mask = exact_clobbers,
                                               .first_operand = first_operand, .first_relocation = first_relocation,
                                               .operand_count = (u16)instruction->operand_count,
-                                              .relocation_count = (u16)encoded.relocation_count, .effects = effects,
+                                              .relocation_count = (u16)encoded.relocation_count,
+                                              .effects = (u8)(effects | (general_goto ? MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR : 0)),
                                               .preserved_vector_mask = preserved_vector_mask,
-                                              .preserved_vector_slot = preserved_vector_slot};
+                                              .preserved_vector_slot = preserved_vector_slot,
+                                              .fallthrough_block = general_goto ? first_continuation : UINT32_MAX};
         machine_x64_select_row(selector, (MachineInstruction){.payload = descriptor_index, .opcode = MACHINE_X64_INLINE_ASSEMBLY});
-        for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+        if (general_goto)
         {
-            if ((operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY)) ==
-                MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+            u32 source_block = selector->builder.open_block;
+            selected = first_continuation == source_block + 1u &&
+                       instruction->target_count <= MACHINE_REF_PAYLOAD_LIMIT - first_continuation;
+            for (u32 target = 0; selected && target < instruction->target_count; target += 1)
             {
-                IrValueId place = instruction->operands[index];
-                bool x87 = (operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)) != 0;
-                if (x87)
+                machine_builder_edge(&selector->builder, (MachineEdge){.source_block = source_block,
+                                                                       .destination_block = first_continuation + target});
+            }
+            for (u32 target = 0; selected && target < instruction->target_count; target += 1)
+            {
+                machine_builder_block_end(&selector->builder, selector->open_block);
+                machine_builder_block_begin(&selector->builder);
+                selector->open_block = (MachineBlock){0};
+                selected = machine_x64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
+                if (selected)
                 {
-                    u8 place_kind = place.value < function->value_count ? selector->place_kinds[place.value] : MACHINE_X64_PLACE_NONE;
-                    u32 place_slot = place.value < function->value_count ? selector->value_stack_slots[place.value] : UINT32_MAX;
-                    if (place_kind == MACHINE_X64_PLACE_LOCAL && place_slot != UINT32_MAX)
+                    u32 destination = instruction->targets[target].value;
+                    selected = destination < function->block_count;
+                    if (selected)
                     {
                         machine_x64_select_row(selector, (MachineInstruction){
-                            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, place_slot),
-                                         machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index])},
-                            .payload = 10,
-                            .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                            .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, destination))},
+                            .opcode = MACHINE_X64_JMP,
                         });
                     }
-                    else
-                    {
-                        u32 address = UINT32_MAX;
-                        selected = machine_x64_place_is_addressed(selector, place, place_kind) &&
-                                   machine_x64_operand_register(selector, place, &address);
-                        if (selected)
-                        {
-                            machine_x64_select_row(selector, (MachineInstruction){
-                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address),
-                                             machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index])},
-                                .payload = 10,
-                                .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
-                            });
-                        }
-                    }
-                }
-                else
-                {
-                    u32 value = machine_x64_select_frame_load64(selector, slots[index], 0);
-                    selected = machine_x64_select_scalar_store(selector, place, selector->place_kinds[place.value], sizes[index],
-                                                               selector->value_stack_slots[place.value], value);
                 }
             }
         }
-        if (selected && simple_goto)
+        else
         {
-            selected = assembly_target < instruction->target_count && instruction->targets[assembly_target].value < function->block_count;
-            if (selected)
+            selected = machine_x64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
+            if (selected && simple_goto)
             {
-                machine_x64_select_row(selector, (MachineInstruction){
-                    .operands = {machine_ref_make(MACHINE_REF_BLOCK,
-                                                  machine_x64_select_block_entry(selector, instruction->targets[assembly_target].value))},
-                    .opcode = MACHINE_X64_JMP,
-                });
+                selected = assembly_target < instruction->target_count && instruction->targets[assembly_target].value < function->block_count;
+                if (selected)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_BLOCK,
+                                                      machine_x64_select_block_entry(selector, instruction->targets[assembly_target].value))},
+                        .opcode = MACHINE_X64_JMP,
+                    });
+                }
             }
         }
     }
@@ -7001,6 +7060,40 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     expanded_blocks += 2;
                 }
             }
+            IrInstructionExtra asm_extra = instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count
+                                                ? ir_instruction_extra(function, id)
+                                                : (IrInstructionExtra){0};
+            u32 asm_target = 0;
+            bool general_asm_goto = instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count &&
+                                    asm_extra.literal.length &&
+                                    !ir_inline_assembly_jump_target(function, instruction, asm_extra.literal, S8("jmp %l"), &asm_target);
+            if (general_asm_goto)
+            {
+                if (!selector.block_entries)
+                {
+                    selector.block_entries = arena_allocate(arena, u32, function->block_count);
+                    selector.block_exits = arena_allocate(arena, u32, function->block_count);
+                    for (u32 previous = 0; previous < block_index; previous += 1)
+                    {
+                        selector.block_entries[previous] = previous;
+                        selector.block_exits[previous] = previous;
+                    }
+                }
+                if (!selector.asm_goto_continuations)
+                {
+                    selector.asm_goto_continuations = arena_allocate(arena, u32, function->block_count);
+                    memset(selector.asm_goto_continuations, 0xff, sizeof(u32) * function->block_count);
+                }
+                if (instruction->target_count > MACHINE_REF_PAYLOAD_LIMIT - expanded_blocks)
+                {
+                    machine_x64_reject(&selector, IR_OPCODE_INLINE_ASSEMBLY);
+                }
+                else
+                {
+                    selector.asm_goto_continuations[block_index] = expanded_blocks;
+                    expanded_blocks += instruction->target_count;
+                }
+            }
             if (instruction->opcode == IR_OPCODE_CALL && instruction->operand_count)
             {
                 selector.call_argument_capacity = BUSTER_MAX(selector.call_argument_capacity, instruction->operand_count - 1u);
@@ -8194,7 +8287,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
-    machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits);
+    machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits,
+                                               selector.asm_goto_continuations);
     result.function.target = windows_abi ? &machine_x86_64_windows_description : &machine_x86_64_description;
     machine_stream_cursor_close(&selector.immediates, selector.immediate_cursor);
     result.function.immediates = (u64*)machine_stream_materialize(arena, arena, &selector.immediates, BUSTER_ALIGN_OF(u64));
@@ -12690,6 +12784,105 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_x87(MachineX64Encoder* encoder, String8 mnemonic,
+                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count);
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_x87_memory(MachineX64Encoder* encoder, String8 mnemonic, s32 displacement, u16 width);
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80_padding(MachineX64Encoder* encoder, s32 displacement);
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_inline_assembly_outputs(MachineX64Encoder* encoder, MachineFunction* function,
+                                                                 MachineStackPlacement* placement,
+                                                                 MachineInlineAssembly const* assembly,
+                                                                 u32 x87_top, u32 x87_below, u32 input_x87_depth)
+{
+    bool valid = true;
+    u32 x87_depth = input_x87_depth;
+    for (u32 operand_index = 0; operand_index < assembly->operand_count && valid && !encoder->overflow; operand_index += 1)
+    {
+        MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
+        if ((operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR)) ==
+            (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR))
+        {
+            u32 frame_offset = placement->stack_slot_offsets[operand->stack_slot];
+            u32 xmm = operand->physical_register - MACHINE_X64_ZMM0;
+            (void)machine_x64_emit_metadata_xmm_memory(encoder, S8("MOVSD"), xmm, MACHINE_X64_RBP,
+                                                       -(s64)(s32)frame_offset, true, 64, 0);
+        }
+        else if ((operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                 !(operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP |
+                                     MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)))
+        {
+            valid = machine_x64_emit_exact_frame_chunk(encoder, false, operand->physical_register,
+                                                       placement->stack_slot_offsets[operand->stack_slot], 8, 0);
+        }
+    }
+    MachineInlineAssemblyOperand const* top_operand =
+        x87_top != UINT32_MAX ? function->inline_assembly_operands + x87_top : 0;
+    MachineInlineAssemblyOperand const* below_operand =
+        x87_below != UINT32_MAX ? function->inline_assembly_operands + x87_below : 0;
+    if (top_operand && (top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+        !(top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+    {
+        x87_depth += 1;
+    }
+    if (below_operand && (below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+        !(below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+    {
+        x87_depth += 1;
+    }
+    if ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) && x87_depth)
+    {
+        x87_depth -= 1;
+    }
+    if (top_operand && x87_depth)
+    {
+        if (top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+        {
+            s32 displacement = -(s32)placement->stack_slot_offsets[top_operand->stack_slot];
+            machine_x64_emit_x87_memory(encoder, S8("FSTP"), displacement, 80);
+            machine_x64_emit_f80_padding(encoder, displacement);
+            x87_depth -= 1;
+        }
+        else if (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP))
+        {
+            BusterX86MetadataPhysicalOperand st0 = machine_x64_x87_operand(0);
+            (void)machine_x64_emit_x87(encoder, S8("FSTP"), &st0, 1);
+            x87_depth -= 1;
+        }
+    }
+    if (below_operand && x87_depth)
+    {
+        if (below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+        {
+            s32 displacement = -(s32)placement->stack_slot_offsets[below_operand->stack_slot];
+            machine_x64_emit_x87_memory(encoder, S8("FSTP"), displacement, 80);
+            machine_x64_emit_f80_padding(encoder, displacement);
+        }
+        else
+        {
+            BusterX86MetadataPhysicalOperand st0 = machine_x64_x87_operand(0);
+            (void)machine_x64_emit_x87(encoder, S8("FSTP"), &st0, 1);
+        }
+        x87_depth -= 1;
+    }
+    if (assembly->preserved_vector_mask)
+    {
+        u32 preserve_offset = placement->stack_slot_offsets[assembly->preserved_vector_slot];
+        u32 preserve_index = 0;
+        for (u32 xmm = 6; xmm < 8; xmm += 1)
+        {
+            if (assembly->preserved_vector_mask & (1u << xmm))
+            {
+                s64 displacement = -(s64)(s32)(preserve_offset - preserve_index * 16u);
+                (void)machine_x64_emit_metadata_xmm_memory(encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,
+                                                           displacement, false, 128, 0);
+                preserve_index += 1;
+            }
+        }
+    }
+    valid = valid && !x87_depth && !encoder->overflow;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encoder, u32 reg, u64 value,
                                                        MachineX64ExactEmitCounters* counters)
 {
@@ -13745,7 +13938,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         if (capacity_row->opcode == MACHINE_X64_INLINE_ASSEMBLY && capacity_row->payload < function->inline_assembly_count)
         {
             MachineInlineAssembly const* assembly = function->inline_assemblies + capacity_row->payload;
-            capacity64 += assembly->bytes.length + (u64)assembly->operand_count * 24u;
+            u64 paths = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) ? (u64)assembly->relocation_count + 1u : 1u;
+            capacity64 += assembly->bytes.length + paths * ((u64)assembly->operand_count * 24u + 16u);
         }
         if (BUSTER_UNLIKELY((row.flags & MACHINE_OPCODE_ROW_VARIABLE_BUDGET) != 0))
         {
@@ -14275,99 +14469,55 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             }
                             MachineInlineAssemblyRelocation row = function->inline_assembly_relocations[side_index];
                             row.offset += assembly_start;
-                            MachineInlineAssemblyRelocation* output =
-                                (MachineInlineAssemblyRelocation*)machine_stream_append(arena, &inline_assembly_relocations);
-                            *output = row;
-                        }
-                        for (u32 operand_index = 0; operand_index < assembly->operand_count && !encoder.overflow; operand_index += 1)
-                        {
-                            MachineInlineAssemblyOperand const* operand =
-                                function->inline_assembly_operands + assembly->first_operand + operand_index;
-                            if ((operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR)) ==
-                                (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR))
+                            if (!row.is_block)
                             {
-                                u32 frame_offset = placement->stack_slot_offsets[operand->stack_slot];
-                                u32 xmm = operand->physical_register - MACHINE_X64_ZMM0;
-                                (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm,
-                                                                          MACHINE_X64_RBP, -(s64)(s32)frame_offset, true,
-                                                                          64, 0);
-                            }
-                            else if ((operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
-                                     !(operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP |
-                                                         MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW)))
-                            {
-                                machine_x64_emit_exact_frame_chunk(&encoder, false, operand->physical_register,
-                                                                   placement->stack_slot_offsets[operand->stack_slot], 8, 0);
+                                MachineInlineAssemblyRelocation* output =
+                                    (MachineInlineAssemblyRelocation*)machine_stream_append(arena, &inline_assembly_relocations);
+                                *output = row;
                             }
                         }
-                        MachineInlineAssemblyOperand const* top_operand =
-                            x87_top != UINT32_MAX ? function->inline_assembly_operands + x87_top : 0;
-                        MachineInlineAssemblyOperand const* below_operand =
-                            x87_below != UINT32_MAX ? function->inline_assembly_operands + x87_below : 0;
-                        if (top_operand && (top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
-                            !(top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+                        bool captured = machine_x64_emit_inline_assembly_outputs(&encoder, function, placement, assembly,
+                                                                                 x87_top, x87_below, x87_depth);
+                        bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+                        if (captured && terminator)
                         {
-                            x87_depth += 1;
+                            u32 branch_start = encoder.count;
+                            machine_x64_emit_fixed_relative(&encoder, MACHINE_X64_FIXED_TEMPLATE_JMP_REL32, S8("JMP"));
+                            MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                            *fixup = (MachineX64BranchFixup){.patch_offset = branch_start + 1u, .block = assembly->fallthrough_block};
                         }
-                        if (below_operand && (below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
-                            !(below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT))
+                        for (u32 relocation_index = 0;
+                             captured && terminator && relocation_index < assembly->relocation_count; relocation_index += 1)
                         {
-                            x87_depth += 1;
-                        }
-                        if ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) && x87_depth)
-                        {
-                            x87_depth -= 1;
-                        }
-                        if (top_operand && x87_depth)
-                        {
-                            if (top_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+                            MachineInlineAssemblyRelocation const* relocation =
+                                function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                            if (!relocation->is_block)
                             {
-                                s32 displacement = -(s32)placement->stack_slot_offsets[top_operand->stack_slot];
-                                machine_x64_emit_x87_memory(&encoder, S8("FSTP"), displacement, 80);
-                                machine_x64_emit_f80_padding(&encoder, displacement);
-                                x87_depth -= 1;
+                                continue;
                             }
-                            else if (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP))
+                            u32 template_patch = assembly_start + relocation->offset;
+                            u32 stub_offset = encoder.count;
+                            captured = relocation->kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                       relocation->offset <= assembly->bytes.length &&
+                                       assembly->bytes.length - relocation->offset >= sizeof(s32) &&
+                                       machine_x64_emit_inline_assembly_outputs(&encoder, function, placement, assembly,
+                                                                                x87_top, x87_below, x87_depth);
+                            if (captured)
                             {
-                                BusterX86MetadataPhysicalOperand st0 = machine_x64_x87_operand(0);
-                                (void)machine_x64_emit_x87(&encoder, S8("FSTP"), &st0, 1);
-                                x87_depth -= 1;
-                            }
-                        }
-                        if (below_operand && x87_depth)
-                        {
-                            if (below_operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
-                            {
-                                s32 displacement = -(s32)placement->stack_slot_offsets[below_operand->stack_slot];
-                                machine_x64_emit_x87_memory(&encoder, S8("FSTP"), displacement, 80);
-                                machine_x64_emit_f80_padding(&encoder, displacement);
-                            }
-                            else
-                            {
-                                BusterX86MetadataPhysicalOperand st0 = machine_x64_x87_operand(0);
-                                (void)machine_x64_emit_x87(&encoder, S8("FSTP"), &st0, 1);
-                            }
-                            x87_depth -= 1;
-                        }
-                        if (assembly->preserved_vector_mask)
-                        {
-                            u32 preserve_offset = placement->stack_slot_offsets[assembly->preserved_vector_slot];
-                            u32 preserve_index = 0;
-                            for (u32 xmm = 6; xmm < 8; xmm += 1)
-                            {
-                                if (assembly->preserved_vector_mask & (1u << xmm))
+                                u32 branch_start = encoder.count;
+                                machine_x64_emit_fixed_relative(&encoder, MACHINE_X64_FIXED_TEMPLATE_JMP_REL32, S8("JMP"));
+                                MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                                *fixup = (MachineX64BranchFixup){.patch_offset = branch_start + 1u, .block = relocation->block};
+                                s64 displacement = (s64)(u64)stub_offset + relocation->addend - (s64)(u64)template_patch;
+                                captured = displacement >= INT32_MIN && displacement <= INT32_MAX;
+                                if (captured)
                                 {
-                                    s64 displacement = -(s64)(s32)(preserve_offset - preserve_index * 16u);
-                                    (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,
-                                                                                displacement, false, 128, 0);
-                                    preserve_index += 1;
+                                    s32 encoded_displacement = (s32)displacement;
+                                    memcpy(encoder.bytes + template_patch, &encoded_displacement, sizeof(encoded_displacement));
                                 }
                             }
                         }
-                        if (x87_depth)
-                        {
-                            encoder.overflow = true;
-                        }
+                        encoder.overflow = encoder.overflow || !captured;
                     }
                     break; case MACHINE_X64_CPUID:
                     case MACHINE_X64_XGETBV:

@@ -2886,12 +2886,31 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     (!preserved_vector_count ||
                      (assembly->preserved_vector_slot < function->stack_slot_count &&
                       function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u));
+            bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+            valid = valid && (!terminator || assembly->fallthrough_block < function->block_count);
             for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
             {
                 MachineInlineAssemblyRelocation* relocation =
                     function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
                 valid = relocation->kind < ASSEMBLY_RELOCATION_COUNT && relocation->offset < assembly->bytes.length &&
                         (relocation->is_block ? relocation->block < function->block_count : relocation->symbol.length && relocation->symbol.pointer);
+                if (valid && relocation->is_block)
+                {
+                    bool x64_kind = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY &&
+                                    relocation->kind == ASSEMBLY_RELOCATION_X86_PC32;
+                    bool a64_kind = instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY &&
+                                    (relocation->kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 ||
+                                     relocation->kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ||
+                                     relocation->kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
+                                     relocation->kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14);
+                    valid = terminator && (x64_kind || a64_kind);
+                }
+                else if (valid)
+                {
+                    valid = relocation->kind != ASSEMBLY_RELOCATION_AARCH64_CONDBR19 &&
+                            relocation->kind != ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 &&
+                            relocation->kind != ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                }
             }
         } break;
         case MACHINE_X64_INLINE_EFFECTS_NONE:
@@ -3590,6 +3609,32 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             if (is_terminator != is_last)
             {
                 MACHINE_VERIFY_REJECT(MACHINE_VERIFY_TERMINATOR);
+            }
+            if (is_terminator && (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY || instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY))
+            {
+                MachineInlineAssembly* assembly = function->inline_assemblies + instruction->payload;
+                for (u32 required_index = 0; required_index <= assembly->relocation_count; required_index += 1)
+                {
+                    bool required = required_index == 0;
+                    u32 destination = assembly->fallthrough_block;
+                    if (required_index)
+                    {
+                        MachineInlineAssemblyRelocation* relocation =
+                            function->inline_assembly_relocations + assembly->first_relocation + required_index - 1u;
+                        required = relocation->is_block != 0;
+                        destination = relocation->block;
+                    }
+                    bool edge_found = !required;
+                    for (u32 edge_index = 0; !edge_found && edge_index < function->edge_count; edge_index += 1)
+                    {
+                        MachineEdge* edge = function->edges + edge_index;
+                        edge_found = edge->source_block == block_index && edge->destination_block == destination;
+                    }
+                    if (!edge_found)
+                    {
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
+                    }
+                }
             }
             for (u32 operand_index = 0; operand_index < BUSTER_ARRAY_LENGTH(instruction->operands); operand_index += 1)
             {

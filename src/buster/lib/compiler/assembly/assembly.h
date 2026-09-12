@@ -59,6 +59,11 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_X86_PC16,
     ASSEMBLY_RELOCATION_X86_PC64,
     ASSEMBLY_RELOCATION_AARCH64_CALL26,
+    // Local control-flow relocations used by inline asm-goto lowering. Object
+    // writers intentionally reject these local-only architectural forms.
+    ASSEMBLY_RELOCATION_AARCH64_CONDBR19,
+    ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19,
+    ASSEMBLY_RELOCATION_AARCH64_TESTBR14,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 

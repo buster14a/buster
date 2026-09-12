@@ -14141,9 +14141,28 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 s64 target = 0;
                 if (!assembly_expression_target(builder, expression, &target))
                 {
-                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
-                                        S8("AArch64 control relocation requires a local label"));
-                    return;
+                    BusterAarch64ControlSemanticRecord row = {0};
+                    AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+                    String8 private_prefix = S8(".Lbuster.inline.asm.");
+                    String8 symbol_name = expression.has_symbol && expression.symbol < builder->result.symbol_count
+                                              ? builder->result.symbols[expression.symbol].name
+                                              : (String8){0};
+                    bool private_label = symbol_name.length > private_prefix.length &&
+                                         !memcmp(symbol_name.pointer, private_prefix.pointer, private_prefix.length);
+                    if (private_label && buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
+                    {
+                        if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                    }
+                    if (kind == ASSEMBLY_RELOCATION_COUNT ||
+                        !assembly_relocation_append(builder, instruction->offset, expression, kind, 0))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                            S8("AArch64 control relocation requires a local branch label"));
+                        return;
+                    }
+                    continue;
                 }
                 if (target < 0 || (u64)target > UINT64_MAX)
                 {

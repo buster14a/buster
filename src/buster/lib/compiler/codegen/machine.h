@@ -1199,6 +1199,10 @@ struct MachineInlineAssembly
     u8 preserved_vector_mask;
     u8 reserved[2];
     u32 preserved_vector_slot;
+    // General asm-goto's explicit fallthrough successor. The transaction
+    // encoder captures outputs and branches here before laying out taken-edge
+    // landing stubs. Meaningful only when EFFECT_TERMINATOR is set.
+    u32 fallthrough_block;
 };
 
 // Optional selector certificates for individual frame objects in a function

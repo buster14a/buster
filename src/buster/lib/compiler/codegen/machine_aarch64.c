@@ -231,6 +231,10 @@ struct MachineA64Selector
     // targets enter its first machine block; outgoing edges leave its last.
     u32* block_entries;
     u32* block_exits;
+    // First private continuation block for a general asm-goto terminator in
+    // each canonical block, or UINT32_MAX when that block has none.
+    u32* asm_goto_continuations;
+    u32 current_block;
     MachineBlock open_block;
     u32 virtual_register_count;
     IrOpcode failed_opcode;
@@ -4826,6 +4830,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_compiler_barrier(MachineA64Selector*
 
 #define MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT 16u
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_block_entry(MachineA64Selector* selector, u32 canonical_block);
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_register(String8 clobber, u32* register_out)
 {
     bool valid = false;
@@ -4985,12 +4991,52 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_inline_assembly_source(MachineA64Selector* 
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly_outputs(MachineA64Selector* selector, IrInstruction* instruction,
+                                                                    u32 const* slots, u8 const* sizes, u8 const* operand_flags)
+{
+    bool selected = true;
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        if ((operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY)) !=
+            MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+        {
+            continue;
+        }
+        u32 value = machine_a64_synthesize_register(selector);
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value),
+                         machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index])},
+            .opcode = MACHINE_A64_LOAD_FRAME,
+        });
+        machine_a64_define(selector, value, row);
+        IrValueId place = instruction->operands[index];
+        MachineSelectionAddress address = machine_a64_address(selector, place);
+        selected = machine_a64_select_scalar_store(selector, place, address.opcode, sizes[index],
+                                                   selector->value_stack_slots[place.value], value);
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* selector, IrInstruction* instruction)
 {
     IrFunction* function = selector->function;
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+    u32 assembly_target = UINT32_MAX;
+    bool simple_goto = false;
+    if (instruction->target_count && instruction->targets)
+    {
+        assembly_target = 0;
+        simple_goto = !extra.literal.length || ir_inline_assembly_jump_target(function, instruction, extra.literal, S8("b %l"), &assembly_target);
+    }
+    u32 first_continuation = selector->asm_goto_continuations ? selector->asm_goto_continuations[selector->current_block] : UINT32_MAX;
+    bool general_goto = instruction->target_count && first_continuation != UINT32_MAX;
+    MachineAssemblyLabelPlan label_plan = {.literal = extra.literal};
+    bool labels_planned = !general_goto || machine_selection_assembly_label_plan(selector->arena, function, instruction, extra, &label_plan);
+    IrInstructionExtra source_extra = extra;
+    source_extra.literal = label_plan.literal;
     bool selected = instruction->operand_count <= MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
-                    instruction->operand_count == instruction->immediate_count && !instruction->target_count &&
+                    instruction->operand_count == instruction->immediate_count &&
+                    (!instruction->target_count || simple_goto || general_goto) && labels_planned &&
                     extra.operand_name_count <= instruction->operand_count &&
                     (!extra.operand_name_count || extra.operand_names);
     u32 registers[MACHINE_A64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
@@ -5150,20 +5196,26 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
     }
     String8 source = {0};
     AssemblyEncodeResult encoded = {0};
-    selected = selected && machine_a64_inline_assembly_source(selector, instruction, extra, registers, sizes, &source, &encoded);
+    if (selected && !simple_goto)
+    {
+        selected = machine_a64_inline_assembly_source(selector, instruction, source_extra, registers, sizes, &source, &encoded);
+    }
     u32 first_relocation = selector->inline_assembly_relocations.total_count;
     for (u32 index = 0; selected && index < encoded.relocation_count; index += 1)
     {
         AssemblyRelocation relocation = encoded.relocations[index];
         selected = relocation.symbol < encoded.symbol_count && !encoded.symbols[relocation.symbol].defined && relocation.offset <= UINT32_MAX;
         String8 name = selected ? encoded.symbols[relocation.symbol].name : (String8){0};
-        selected = selected && codegen_assembly_durable_name(extra.literal, &name);
+        u32 label_target = UINT32_MAX;
+        bool block = selected && machine_selection_assembly_label_target(&label_plan, name, &label_target);
+        selected = selected && (block || codegen_assembly_durable_name(extra.literal, &name));
         if (selected)
         {
             MachineInlineAssemblyRelocation* row =
                 (MachineInlineAssemblyRelocation*)machine_stream_append(selector->arena, &selector->inline_assembly_relocations);
             *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = relocation.addend, .offset = (u32)relocation.offset,
-                                                     .block = UINT32_MAX, .kind = (u8)relocation.kind};
+                                                     .block = block ? first_continuation + label_target : UINT32_MAX,
+                                                     .kind = (u8)relocation.kind, .is_block = block};
         }
     }
     if (selected)
@@ -5183,24 +5235,55 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
         *descriptor = (MachineInlineAssembly){.source = source, .bytes = encoded.bytes, .clobber_mask = exact_clobbers,
                                               .first_operand = first_operand, .first_relocation = first_relocation,
                                               .operand_count = (u16)instruction->operand_count,
-                                              .relocation_count = (u16)encoded.relocation_count, .effects = effects};
+                                              .relocation_count = (u16)encoded.relocation_count,
+                                              .effects = (u8)(effects | (general_goto ? MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR : 0)),
+                                              .preserved_vector_slot = UINT32_MAX,
+                                              .fallthrough_block = general_goto ? first_continuation : UINT32_MAX};
         machine_a64_select_row(selector, (MachineInstruction){.payload = descriptor_index, .opcode = MACHINE_A64_INLINE_ASSEMBLY});
-        for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+        if (general_goto)
         {
-            if ((operand_flags[index] & (MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY)) ==
-                MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+            u32 source_block = selector->builder.open_block;
+            selected = first_continuation == source_block + 1u &&
+                       instruction->target_count <= MACHINE_REF_PAYLOAD_LIMIT - first_continuation;
+            for (u32 target = 0; selected && target < instruction->target_count; target += 1)
             {
-                u32 value = machine_a64_synthesize_register(selector);
-                u32 row = machine_a64_select_row(selector, (MachineInstruction){
-                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value),
-                                 machine_ref_make(MACHINE_REF_STACK_SLOT, slots[index])},
-                    .opcode = MACHINE_A64_LOAD_FRAME,
-                });
-                machine_a64_define(selector, value, row);
-                IrValueId place = instruction->operands[index];
-                MachineSelectionAddress address = machine_a64_address(selector, place);
-                selected = machine_a64_select_scalar_store(selector, place, address.opcode, sizes[index],
-                                                           selector->value_stack_slots[place.value], value);
+                machine_builder_edge(&selector->builder, (MachineEdge){.source_block = source_block,
+                                                                       .destination_block = first_continuation + target});
+            }
+            for (u32 target = 0; selected && target < instruction->target_count; target += 1)
+            {
+                machine_builder_block_end(&selector->builder, selector->open_block);
+                machine_builder_block_begin(&selector->builder);
+                selector->open_block = (MachineBlock){0};
+                selected = machine_a64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
+                if (selected)
+                {
+                    u32 destination = instruction->targets[target].value;
+                    selected = destination < function->block_count;
+                    if (selected)
+                    {
+                        machine_a64_select_row(selector, (MachineInstruction){
+                            .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, destination))},
+                            .opcode = MACHINE_A64_B,
+                        });
+                    }
+                }
+            }
+        }
+        else
+        {
+            selected = machine_a64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
+            if (selected && simple_goto)
+            {
+                selected = assembly_target < instruction->target_count && instruction->targets[assembly_target].value < function->block_count;
+                if (selected)
+                {
+                    machine_a64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_BLOCK,
+                                                      machine_a64_block_entry(selector, instruction->targets[assembly_target].value))},
+                        .opcode = MACHINE_A64_B,
+                    });
+                }
             }
         }
     }
@@ -6023,6 +6106,40 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         expanded_blocks += 2;
                     }
                 }
+                IrInstructionExtra asm_extra = instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count
+                                                    ? ir_instruction_extra(function, id)
+                                                    : (IrInstructionExtra){0};
+                u32 asm_target = 0;
+                bool general_asm_goto = instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count &&
+                                        asm_extra.literal.length &&
+                                        !ir_inline_assembly_jump_target(function, instruction, asm_extra.literal, S8("b %l"), &asm_target);
+                if (general_asm_goto)
+                {
+                    if (!selector.block_entries)
+                    {
+                        selector.block_entries = arena_allocate(arena, u32, function->block_count);
+                        selector.block_exits = arena_allocate(arena, u32, function->block_count);
+                        for (u32 previous = 0; previous < block_index; previous += 1)
+                        {
+                            selector.block_entries[previous] = previous;
+                            selector.block_exits[previous] = previous;
+                        }
+                    }
+                    if (!selector.asm_goto_continuations)
+                    {
+                        selector.asm_goto_continuations = arena_allocate(arena, u32, function->block_count);
+                        memset(selector.asm_goto_continuations, 0xff, sizeof(u32) * function->block_count);
+                    }
+                    if (instruction->target_count > MACHINE_REF_PAYLOAD_LIMIT - expanded_blocks)
+                    {
+                        machine_a64_reject(&selector, IR_OPCODE_INLINE_ASSEMBLY);
+                    }
+                    else
+                    {
+                        selector.asm_goto_continuations[block_index] = expanded_blocks;
+                        expanded_blocks += instruction->target_count;
+                    }
+                }
                 if ((MACHINE_A64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
                 {
                     candidate_rows[candidate_count] = block_row_count;
@@ -6579,6 +6696,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
+            selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);
             selector.open_block = (MachineBlock){.parameter_offset = selector.builder.block_parameters.total_count};
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
@@ -6957,7 +7075,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         result.function = machine_function_builder_finish(arena, &selector.builder);
-        machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits);
+        machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits,
+                                                  selector.asm_goto_continuations);
         result.function.target = &machine_aarch64_description;
         result.function.windows_aarch64_frame = target_uses_pe_unwind(target);
         result.function.windows_aarch64_variadic = windows_variadic;
@@ -7548,6 +7667,73 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encode
         }
         machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
     }
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_emit_inline_assembly_outputs(MachineA64Encoder* encoder, MachineFunction* function,
+                                                                  MachineStackPlacement* placement, u32 frame_area,
+                                                                  MachineInlineAssembly const* assembly)
+{
+    bool valid = assembly->first_operand <= function->inline_assembly_operand_count &&
+                 assembly->operand_count <= function->inline_assembly_operand_count - assembly->first_operand;
+    for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
+    {
+        MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
+        valid = operand->stack_slot < function->stack_slot_count;
+        if (valid && (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT))
+        {
+            u32 operand_offset = placement->stack_slot_offsets[operand->stack_slot];
+            machine_a64_emit_frame_memory(encoder, operand->physical_register, machine_a64_frame_offset(frame_area, operand_offset), 8, true);
+            valid = !encoder->error && !encoder->overflow;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_patch_inline_assembly_branch(MachineA64Encoder* encoder, u32 patch_offset,
+                                                                   AssemblyRelocationKind kind, s64 addend, u32 target_offset)
+{
+    bool valid = encoder && !encoder->sparse && patch_offset <= encoder->count && encoder->count - patch_offset >= sizeof(u32);
+    s64 displacement = 0;
+    if (valid)
+    {
+        s64 base = (s64)(u64)target_offset - (s64)(u64)patch_offset;
+        valid = addend >= 0 ? base <= INT64_MAX - addend : base >= INT64_MIN - addend;
+        displacement = valid ? base + addend : 0;
+    }
+    u32 word = 0;
+    if (valid)
+    {
+        memcpy(&word, encoder->bytes + patch_offset, sizeof(word));
+        if (kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26)
+        {
+            valid = a64_pc_relative_patch(A64_OPCODE_B, word, displacement, &word);
+        }
+        else if (kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 || kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19)
+        {
+            valid = !(displacement & 3) && displacement >= -INT64_C(0x100000) && displacement <= INT64_C(0xffffc);
+            if (valid)
+            {
+                word = (word & ~UINT32_C(0x00ffffe0)) | ((u32)((u64)displacement >> 2) & UINT32_C(0x7ffff)) << 5;
+            }
+        }
+        else if (kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14)
+        {
+            valid = !(displacement & 3) && displacement >= -INT64_C(0x8000) && displacement <= INT64_C(0x7ffc);
+            if (valid)
+            {
+                word = (word & ~UINT32_C(0x0007ffe0)) | ((u32)((u64)displacement >> 2) & UINT32_C(0x3fff)) << 5;
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    if (valid)
+    {
+        memcpy(encoder->bytes + patch_offset, &word, sizeof(word));
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_load(MachineA64Encoder* encoder, u32 register_number, u32 offset)
@@ -8451,7 +8637,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             if (capacity_row->payload < function->inline_assembly_count)
             {
                 MachineInlineAssembly const* assembly = function->inline_assemblies + capacity_row->payload;
-                capacity64 += assembly->bytes.length + (u64)assembly->operand_count * (large_save_offset ? 32u : 8u);
+                u64 path_count = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR)
+                                     ? (u64)assembly->relocation_count + 1u
+                                     : 1u;
+                capacity64 += assembly->bytes.length + path_count * ((u64)assembly->operand_count * (large_save_offset ? 32u : 8u) + 8u);
             }
             break;
         default:
@@ -9245,19 +9434,47 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     }
                     MachineInlineAssemblyRelocation row = function->inline_assembly_relocations[side_index];
                     row.offset += assembly_start;
-                    MachineInlineAssemblyRelocation* output =
-                        (MachineInlineAssemblyRelocation*)machine_stream_append(arena, &inline_assembly_relocations);
-                    *output = row;
-                }
-                for (u32 operand_index = 0; operand_index < assembly->operand_count && !encoder.error; operand_index += 1)
-                {
-                    MachineInlineAssemblyOperand const* operand =
-                        function->inline_assembly_operands + assembly->first_operand + operand_index;
-                    if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
+                    if (!row.is_block)
                     {
-                        u32 operand_offset = placement->stack_slot_offsets[operand->stack_slot];
-                        machine_a64_emit_frame_memory(&encoder, operand->physical_register, machine_a64_frame_offset(frame_area, operand_offset), 8, true);
+                        MachineInlineAssemblyRelocation* output =
+                            (MachineInlineAssemblyRelocation*)machine_stream_append(arena, &inline_assembly_relocations);
+                        *output = row;
                     }
+                }
+                bool captured = machine_a64_emit_inline_assembly_outputs(&encoder, function, placement, frame_area, assembly);
+                bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+                if (captured && terminator)
+                {
+                    MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
+                    *fixup = (MachineA64BranchFixup){.patch_offset = encoder.count, .block = assembly->fallthrough_block,
+                                                     .opcode = A64_OPCODE_B};
+                    machine_a64_emit(&encoder, UINT32_C(0x14000000));
+                }
+                for (u32 relocation_index = 0;
+                     captured && terminator && relocation_index < assembly->relocation_count; relocation_index += 1)
+                {
+                    MachineInlineAssemblyRelocation const* relocation =
+                        function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                    if (!relocation->is_block)
+                    {
+                        continue;
+                    }
+                    u32 template_patch = assembly_start + relocation->offset;
+                    u32 stub_offset = encoder.count;
+                    captured = machine_a64_emit_inline_assembly_outputs(&encoder, function, placement, frame_area, assembly);
+                    if (captured)
+                    {
+                        MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
+                        *fixup = (MachineA64BranchFixup){.patch_offset = encoder.count, .block = relocation->block, .opcode = A64_OPCODE_B};
+                        machine_a64_emit(&encoder, UINT32_C(0x14000000));
+                        captured = machine_a64_patch_inline_assembly_branch(&encoder, template_patch,
+                                                                            (AssemblyRelocationKind)relocation->kind,
+                                                                            relocation->addend, stub_offset);
+                    }
+                }
+                if (!captured)
+                {
+                    encoder.error = true;
                 }
             }
                 break;

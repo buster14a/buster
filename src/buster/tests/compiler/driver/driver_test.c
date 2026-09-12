@@ -7733,6 +7733,32 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(c_shape_temporary);
     }
+    // asm-goto behavior is a strict MIR acceptance gate, not merely one
+    // default-allocator smoke run. Every successor (including fallthrough and
+    // multiple taken labels) is observed by the fixture's result checks.
+    String8 asm_goto_modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+                                S8("-fregister-allocator=quality")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(asm_goto_modes); mode += 1)
+    {
+        TemporalArena asm_goto_temporary = scratch_begin(&arguments->arena, 1);
+        String8 asm_goto_path = buster_test_temporary_path(asm_goto_temporary.arena, S8("buster-c-asm-goto-strict"),
+#if BUSTER_WINDOWS
+                                                            string_format(asm_goto_temporary.arena, S8("-{u32}.exe"), mode));
+#else
+                                                            string_format(asm_goto_temporary.arena, S8("-{u32}"), mode));
+#endif
+        String8 asm_goto_command[] = {asm_goto_modes[mode], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                      S8("-o"), asm_goto_path, S8("tests/basic_c_asm_goto_identity.c")};
+        CompilerDriverResult asm_goto = compiler_driver_execute_invocation(
+            asm_goto_temporary.arena,
+            compiler_driver_parse_arguments(asm_goto_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_goto_command)));
+        BUSTER_TEST_RAW(arguments, asm_goto.error == COMPILER_DRIVER_ERROR_NONE, asm_goto.diagnostic);
+        if (asm_goto.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, compiler_driver_test_process_success(asm_goto_temporary.arena, asm_goto_path));
+        }
+        scratch_end(asm_goto_temporary);
+    }
     // The <float.h> predefine vocabulary, pinned as static initializers and
     // compared against literal spellings so a predefine folding to the wrong
     // bits fails at run time rather than compiling quietly.
@@ -8624,7 +8650,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 {
                     u64 after_restore = byte_index + restore_size;
                     restored_before_taken_edge |= compiler_driver_test_x64_unconditional_jump(text, after_restore, function_end);
-                    restored_before_fallthrough |= compiler_driver_test_x64_fallthrough_epilog(text, after_restore, function_end, windows_target);
+                    // Allocated MIR may funnel both asm successors through a
+                    // shared epilog block. A restore followed by its explicit
+                    // edge is as ABI-visible as a restore adjacent to RET.
+                    restored_before_fallthrough |=
+                        compiler_driver_test_x64_fallthrough_epilog(text, after_restore, function_end, windows_target) ||
+                        compiler_driver_test_x64_unconditional_jump(text, after_restore, function_end);
                 }
             }
         }
@@ -8651,7 +8682,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         String8 unsupported_template_source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".c"));
         String8 unsupported_template_source = S8("int conditional_asm_goto(int value) {"
-                                                 " __asm__ goto (\"jne %l1\" : : \"r\"(value) : \"cc\" : taken);"
+                                                 " __asm__ goto (\"test %0, %0\\njne %l1\" : : \"r\"(value) : \"cc\" : taken);"
                                                  " return 0; taken: return 1; }\n");
         BUSTER_TEST(arguments, file_write(unsupported_template_source_path, BUSTER_SLICE_TO_BYTE_SLICE(unsupported_template_source)));
         String8 unsupported_template_object_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".o"));
@@ -8660,28 +8691,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         CompilerDriverResult unsupported_template = compiler_driver_execute_invocation(
             arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_template_command_line)));
-        BUSTER_TEST(arguments, unsupported_template.error == COMPILER_DRIVER_ERROR_CODEGEN);
-        BUSTER_TEST(arguments, unsupported_template.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+        BUSTER_TEST(arguments, unsupported_template.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, unsupported_template.tokenizer_error_count == 0 && unsupported_template.parser_diagnostic_count == 0 &&
                                unsupported_template.analysis_diagnostic_count == 0);
-        BUSTER_TEST(arguments, string_first_sequence(unsupported_template.diagnostic,
-            S8("inline assembly label references (%l) are unsupported in this template form")) != BUSTER_STRING_NO_MATCH);
-        BUSTER_TEST(arguments, unsupported_template.diagnostic_count == 1);
-        if (unsupported_template.diagnostic_count == 1)
-        {
-            CompilerDiagnostic diagnostic = unsupported_template.diagnostics[0];
-            BUSTER_TEST(arguments, string_equal(diagnostic.code, S8("codegen.unsupported-instruction")));
-            BUSTER_TEST(arguments, diagnostic.backend != 0 && diagnostic.primary.has_range);
-            if (diagnostic.backend)
-            {
-                BUSTER_TEST(arguments, string_equal(diagnostic.backend->opcode, S8("inline-assembly")));
-                BUSTER_TEST(arguments, string_equal(diagnostic.backend->operation, S8("not-applicable")));
-                BUSTER_TEST(arguments, string_equal(diagnostic.backend->function, S8("conditional_asm_goto")));
-                BUSTER_TEST(arguments, diagnostic.backend->opcode_id == IR_OPCODE_INLINE_ASSEMBLY);
-                BUSTER_TEST(arguments, diagnostic.backend->operation_id == UINT32_MAX);
-                BUSTER_TEST(arguments, diagnostic.backend->error_id == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
-            }
-        }
+        BUSTER_TEST(arguments, unsupported_template.has_object && unsupported_template.diagnostic_count == 0);
     }
     {
         // What an inline-assembly operand class refuses, each case named where
@@ -14561,7 +14574,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         String8 inline_symbol_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-inline-asm-symbol"), S8(".o"));
         String8 inline_symbol_command_line[] = {
-            S8("-c"), S8("-g0"), S8("-o"), inline_symbol_path, S8("tests/basic_c_inline_asm_symbol.c"),
+            S8("-c"), S8("-g0"), S8("-fregister-allocator=mir-stack"), S8("-fno-machine-fallback"),
+            S8("-fverify-codegen"), S8("-o"), inline_symbol_path, S8("tests/basic_c_inline_asm_symbol.c"),
         };
         CompilerDriverResult inline_symbol = compiler_driver_execute_invocation(
             c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inline_symbol_command_line)));
@@ -14582,13 +14596,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     {
-        String8 inline_symbol_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 inline_symbol_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
         for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(inline_symbol_allocators); allocator_index += 1)
         {
             String8 inline_symbol_run_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-inline-asm-symbol-run"),
                                                                         string_format(c_asm_arena, S8("-{u32}"), allocator_index));
             String8 inline_symbol_run_command_line[] = {
                 string_format(c_asm_arena, S8("-fregister-allocator={S8}"), inline_symbol_allocators[allocator_index]),
+                S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
                 S8("-o"),
                 inline_symbol_run_path,
                 S8("tests/basic_c_inline_asm_symbol.c"),

@@ -3166,6 +3166,7 @@ struct MachineCompilerBarrierTestFixture
     u32 name_count;
     bool supported;
     bool identity;
+    bool general;
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArguments* arguments)
@@ -3176,7 +3177,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
         S8("compiler_barrier_implicit_volatile"), S8("compiler_barrier_cc"), S8("compiler_barrier_memory_cc"),
         S8("compiler_barrier_cc_memory"),
     };
-    String8 rejected[] = {
+    String8 general[] = {
         S8("compiler_barrier_template"), S8("compiler_barrier_register_after_memory"),
         S8("compiler_barrier_register_before_cc"),
         S8("compiler_hint_input"), S8("compiler_hint_register"), S8("compiler_hint_goto"),
@@ -3189,7 +3190,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
     String8 gotos[] = {S8("compiler_barrier_goto")};
     MachineCompilerBarrierTestFixture fixtures[] = {
         {S8("tests/basic_c_compiler_barrier.c"), accepted, BUSTER_ARRAY_LENGTH(accepted), true},
-        {S8("tests/basic_c_compiler_barrier_fallback.c"), rejected, BUSTER_ARRAY_LENGTH(rejected), false},
+        {S8("tests/basic_c_compiler_barrier_fallback.c"), general, BUSTER_ARRAY_LENGTH(general), true, false, true},
         {S8("tests/basic_c_compiler_barrier_fallback.c"), identities, BUSTER_ARRAY_LENGTH(identities), true, true},
         {S8("tests/basic_c_compiler_barrier_fallback.c"), gotos, BUSTER_ARRAY_LENGTH(gotos), true},
     };
@@ -3223,13 +3224,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                             if (supported && selected.supported)
                             {
                                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
-                                u32 effect_index = string_equal(description, S8("compiler_barrier_memory")) ? 1u
-                                                 : string_equal(description, S8("compiler_barrier_cc")) ? 2u
-                                                 : string_equal(description, S8("compiler_barrier_memory_cc")) ||
-                                                           string_equal(description, S8("compiler_barrier_cc_memory"))
-                                                       ? 3u
-                                                       : 0u;
-                                u16 barrier_opcode = (u16)((architectures[architecture] == CPU_ARCH_X86_64
+                                bool memory_effect = string_equal(description, S8("compiler_barrier_memory")) ||
+                                                     string_equal(description, S8("compiler_barrier_goto")) ||
+                                                     string_equal(description, S8("compiler_barrier_template")) ||
+                                                     string_equal(description, S8("compiler_barrier_register_after_memory")) ||
+                                                     string_equal(description, S8("compiler_hint_input")) ||
+                                                     string_equal(description, S8("compiler_hint_goto"));
+                                bool flags_effect = string_equal(description, S8("compiler_barrier_cc")) ||
+                                                    string_equal(description, S8("compiler_barrier_memory_cc")) ||
+                                                    string_equal(description, S8("compiler_barrier_cc_memory")) ||
+                                                    string_equal(description, S8("compiler_barrier_register_before_cc")) ||
+                                                    string_equal(description, S8("compiler_hint_register"));
+                                u32 effect_index = (memory_effect ? 1u : 0u) | (flags_effect ? 2u : 0u);
+                                u16 barrier_opcode = fixtures[fixture].general
+                                                         ? (architectures[architecture] == CPU_ARCH_X86_64 ? MACHINE_X64_INLINE_ASSEMBLY
+                                                                                                         : MACHINE_A64_INLINE_ASSEMBLY)
+                                                         : (u16)((architectures[architecture] == CPU_ARCH_X86_64
                                                                ? MACHINE_X64_INLINE_EFFECTS_NONE
                                                                : MACHINE_A64_INLINE_EFFECTS_NONE) + effect_index);
                                 if (fixtures[fixture].identity)
@@ -3242,25 +3252,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                                     barrier_count += selected.function.instructions[row].opcode == barrier_opcode;
                                 }
                                 BUSTER_TEST_RAW(arguments, barrier_count == 1, description);
-                                MachineOpcodeInfo const* info = machine_opcode_info(barrier_opcode);
-                                u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
-                                               ((effect_index & 2u) || fixtures[fixture].identity ? MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE : 0);
-                                MachineMemoryEffect memory = (effect_index & 1u) || fixtures[fixture].identity
-                                                                 ? MACHINE_MEMORY_EFFECT_BARRIER
-                                                                 : MACHINE_MEMORY_EFFECT_NONE;
-                                bool flags_define = info && (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) != 0;
-                                bool expected_flags = (effect_index & 2u) != 0 || fixtures[fixture].identity;
-                                BUSTER_TEST(arguments, info && (info->attributes & required) == required &&
-                                                           flags_define == expected_flags &&
-                                                           machine_opcode_memory_effect(info) == memory);
+                                if (fixtures[fixture].general)
+                                {
+                                    MachineInlineAssembly* descriptor = 0;
+                                    for (u32 row = 0; row < selected.function.instruction_count && !descriptor; row += 1)
+                                    {
+                                        MachineInstruction* machine_row = selected.function.instructions + row;
+                                        if (machine_row->opcode == barrier_opcode && machine_row->payload < selected.function.inline_assembly_count)
+                                        {
+                                            descriptor = selected.function.inline_assemblies + machine_row->payload;
+                                        }
+                                    }
+                                    bool terminator = string_equal(description, S8("compiler_hint_goto"));
+                                    bool register_visible = !string_equal(description, S8("compiler_barrier_template")) &&
+                                                            !string_equal(description, S8("compiler_hint_goto"));
+                                    BUSTER_TEST(arguments, descriptor &&
+                                                               ((descriptor->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY) != 0) == memory_effect &&
+                                                               ((descriptor->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS) != 0) == flags_effect &&
+                                                               ((descriptor->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0) == terminator &&
+                                                               (descriptor->clobber_mask != 0) == register_visible);
+                                }
+                                else
+                                {
+                                    MachineOpcodeInfo const* info = machine_opcode_info(barrier_opcode);
+                                    u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
+                                                   ((effect_index & 2u) || fixtures[fixture].identity ? MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE : 0);
+                                    MachineMemoryEffect memory = (effect_index & 1u) || fixtures[fixture].identity
+                                                                     ? MACHINE_MEMORY_EFFECT_BARRIER
+                                                                     : MACHINE_MEMORY_EFFECT_NONE;
+                                    bool flags_define = info && (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) != 0;
+                                    bool expected_flags = (effect_index & 2u) != 0 || fixtures[fixture].identity;
+                                    BUSTER_TEST(arguments, info && (info->attributes & required) == required &&
+                                                               flags_define == expected_flags &&
+                                                               machine_opcode_memory_effect(info) == memory);
+                                }
                                 if (fixtures[fixture].identity)
                                 {
                                     BUSTER_TEST(arguments, machine_opcode_operand_is_tied(info, 0, 1));
                                 }
-                            }
-                            else if (!supported)
-                            {
-                                BUSTER_TEST_RAW(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY, description);
                             }
                         }
                     }
@@ -3279,7 +3308,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArg
     ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
     String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
     String8 names[] = {S8("goto_numeric"), S8("goto_named"), S8("goto_swap"), S8("goto_fallthrough"),
-                       S8("goto_join"), S8("goto_loop"), S8("goto_no_operands")};
+                       S8("goto_join"), S8("goto_loop"), S8("goto_no_operands"), S8("goto_conditional"),
+                       S8("goto_multiple_targets"), S8("goto_read_write")};
     BUSTER_TEST(arguments, input.length != 0);
     CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
     for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
@@ -3312,22 +3342,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArg
                         u32 target_index = 0;
                         bool recognized = !extra.literal.length ||
                                           ir_inline_assembly_jump_target(function, terminator, extra.literal, architectures[architecture] == CPU_ARCH_AARCH64 ? S8("b %l") : S8("jmp %l"), &target_index);
-                        BUSTER_TEST(arguments, recognized);
-                        MachineBlock* block = selected.function.blocks + block_index;
-                        MachineInstruction* branch = selected.function.instructions + block->first_instruction + block->instruction_count - 1u;
-                        u32 destination = terminator->targets[target_index].value;
-                        BUSTER_TEST(arguments, branch->opcode == (architectures[architecture] == CPU_ARCH_AARCH64 ? MACHINE_A64_B : MACHINE_X64_JMP) && machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
-                                               machine_ref_payload(branch->operands[0]) == destination);
-                        u32 successors = 0;
-                        for (u32 edge_index = 0; edge_index < selected.function.edge_count; edge_index += 1)
+                        if (recognized)
                         {
-                            MachineEdge* edge = selected.function.edges + edge_index;
-                            if (edge->source_block != block_index) continue;
-                            successors += 1;
-                            BUSTER_TEST(arguments, edge->destination_block == destination &&
-                                                   edge->copy_count == selected.function.blocks[destination].parameter_count);
+                            MachineBlock* block = selected.function.blocks + block_index;
+                            MachineInstruction* branch = selected.function.instructions + block->first_instruction + block->instruction_count - 1u;
+                            u32 destination = terminator->targets[target_index].value;
+                            BUSTER_TEST(arguments, branch->opcode == (architectures[architecture] == CPU_ARCH_AARCH64 ? MACHINE_A64_B : MACHINE_X64_JMP) && machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
+                                                   machine_ref_payload(branch->operands[0]) == destination);
+                            u32 successors = 0;
+                            for (u32 edge_index = 0; edge_index < selected.function.edge_count; edge_index += 1)
+                            {
+                                MachineEdge* edge = selected.function.edges + edge_index;
+                                if (edge->source_block != block_index) continue;
+                                successors += 1;
+                                BUSTER_TEST(arguments, edge->destination_block == destination &&
+                                                       edge->copy_count == selected.function.blocks[destination].parameter_count);
+                            }
+                            BUSTER_TEST(arguments, successors == 1);
                         }
-                        BUSTER_TEST(arguments, successors == 1);
+                        else
+                        {
+                            u16 inline_opcode = architectures[architecture] == CPU_ARCH_AARCH64 ? MACHINE_A64_INLINE_ASSEMBLY
+                                                                                                : MACHINE_X64_INLINE_ASSEMBLY;
+                            u16 branch_opcode = architectures[architecture] == CPU_ARCH_AARCH64 ? MACHINE_A64_B : MACHINE_X64_JMP;
+                            u32 assembly_row = UINT32_MAX;
+                            for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                            {
+                                if (selected.function.instructions[row].opcode == inline_opcode)
+                                {
+                                    assembly_row = row;
+                                    break;
+                                }
+                            }
+                            u32 source_block = UINT32_MAX;
+                            for (u32 machine_block = 0; machine_block < selected.function.block_count; machine_block += 1)
+                            {
+                                MachineBlock* candidate = selected.function.blocks + machine_block;
+                                if (assembly_row >= candidate->first_instruction && assembly_row - candidate->first_instruction < candidate->instruction_count)
+                                {
+                                    source_block = machine_block;
+                                    break;
+                                }
+                            }
+                            BUSTER_TEST(arguments, assembly_row != UINT32_MAX && source_block != UINT32_MAX);
+                            if (assembly_row != UINT32_MAX && source_block != UINT32_MAX)
+                            {
+                                MachineInstruction* assembly_row_value = selected.function.instructions + assembly_row;
+                                MachineInlineAssembly* descriptor = assembly_row_value->payload < selected.function.inline_assembly_count
+                                                                        ? selected.function.inline_assemblies + assembly_row_value->payload
+                                                                        : 0;
+                                MachineBlock* source = selected.function.blocks + source_block;
+                                u32 source_successors = 0;
+                                for (u32 edge_index = 0; edge_index < selected.function.edge_count; edge_index += 1)
+                                {
+                                    source_successors += selected.function.edges[edge_index].source_block == source_block;
+                                }
+                                BUSTER_TEST(arguments, descriptor &&
+                                                           (descriptor->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) &&
+                                                           source_successors == terminator->target_count && source->instruction_count);
+                                for (u32 successor = 0; successor < terminator->target_count; successor += 1)
+                                {
+                                    u32 continuation_block = source_block + 1u + successor;
+                                    bool source_edge = false;
+                                    u32 continuation_successors = 0;
+                                    for (u32 edge_index = 0; edge_index < selected.function.edge_count; edge_index += 1)
+                                    {
+                                        MachineEdge* edge = selected.function.edges + edge_index;
+                                        source_edge |= edge->source_block == source_block && edge->destination_block == continuation_block &&
+                                                       !edge->copy_count;
+                                        continuation_successors += edge->source_block == continuation_block;
+                                    }
+                                    BUSTER_TEST(arguments, source_edge);
+                                    MachineBlock* continuation = selected.function.blocks + continuation_block;
+                                    MachineInstruction* branch = selected.function.instructions + continuation->first_instruction + continuation->instruction_count - 1u;
+                                    BUSTER_TEST(arguments, branch->opcode == branch_opcode && continuation_successors == 1);
+                                }
+                            }
+                        }
                     }
                     BUSTER_TEST_RAW(arguments, assembly_blocks != 0, names[name]);
                 }

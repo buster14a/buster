@@ -33,6 +33,24 @@ struct MachineAssemblyIdentityPlan
     u32 target_index; // UINT32_MAX without a control-flow target.
 };
 
+// One target-local spelling for every explicit asm-goto label. The canonical
+// fallthrough is target zero and deliberately has no spelling: target
+// assemblers see only the names substituted for `%lN` / `%l[name]`, while
+// selectors retain the target index needed to bind each resulting relocation
+// to a MIR successor.
+typedef struct MachineAssemblyLabelPlan MachineAssemblyLabelPlan;
+struct MachineAssemblyLabelPlan
+{
+    String8 literal;
+    String8* target_symbols;
+    u32 target_count;
+};
+
+BUSTER_F_DECL bool machine_selection_assembly_label_plan(Arena* arena, IrFunction* function, IrInstruction* instruction,
+                                                         IrInstructionExtra extra, MachineAssemblyLabelPlan* plan);
+BUSTER_F_DECL bool machine_selection_assembly_label_target(MachineAssemblyLabelPlan const* plan, String8 symbol,
+                                                           u32* target_index_out);
+
 // Empty templates transport only scalar generic-register inputs into
 // read/write or explicitly tied outputs; unspecified pure outputs stay out.
 // A nonempty jump_prefix additionally admits literal unconditional asm-goto
@@ -196,10 +214,12 @@ BUSTER_F_DECL MachineSelectionValidationError machine_selection_validate_functio
 BUSTER_F_DECL MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count);
 
 struct MachineFunction;
-// Remap canonical edges after block expansion, retaining only the executable
-// successor and its argument copies for selected literal assembly branches.
+// Remap canonical edges after block expansion. Deterministic literal assembly
+// keeps its one executable successor; general asm-goto edges leave the target
+// continuation which captures and publishes that path's output values.
 BUSTER_F_DECL void machine_selection_finish_canonical_edges(struct MachineFunction* machine, IrFunction* source,
-                                                             u32 canonical_edge_offset, u32 const* block_entries, u32 const* block_exits);
+                                                             u32 canonical_edge_offset, u32 const* block_entries, u32 const* block_exits,
+                                                             u32 const* asm_goto_continuations);
 
 // Called at selector publication, before row/line-mark remapping. Existing
 // canonical-to-machine spans identify every frame object touched by volatile
