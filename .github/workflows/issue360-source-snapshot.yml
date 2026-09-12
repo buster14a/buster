@@ -2,7 +2,7 @@ name: Issue 360 checked publication
 on:
   push:
     branches: [work/360-source-snapshot]
-    paths: [.github/issue360.patch.gz.b64]
+    paths: [.github/issue360.patch.gz.b64, .github/workflows/issue360-source-snapshot.yml]
 permissions:
   contents: write
 jobs:
@@ -14,6 +14,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue360-transport
+          path: .github/issue360.patch.gz.b64
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify and publish the isolated product tree
         shell: bash
         run: |
