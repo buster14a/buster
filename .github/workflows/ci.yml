@@ -240,6 +240,8 @@ jobs:
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Redirect inside cmd, so native stderr is not a terminating PS error.
+          cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

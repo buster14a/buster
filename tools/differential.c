@@ -75,6 +75,13 @@ BUSTER_GLOBAL_LOCAL bool d_contains(String8 text, String8 part)
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL String8 d_reference_compiler(Arena* arena, String8 file)
+{
+    bool explicit_path = d_contains(file, S8("/")) || d_contains(file, S8("\\"));
+    String8 result = explicit_path ? os_path_absolute(arena, file, true) : executable_resolve_in_path(arena, file);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool d_sanitizer(String8 text)
 {
     String8 names[] = {S8("AddressSanitizer"), S8("UndefinedBehaviorSanitizer"), S8("MemorySanitizer"),
@@ -906,9 +913,11 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
 
 BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
 {
+    String8 self = os_path_absolute(arena, program_state->input.arguments.pointer[0], true);
+    u32 path_errors = !self.length || !string_equal(d_reference_compiler(arena, self), self);
     DObservation normal = {.kind = D_EXIT};
     DObservation other = normal;
-    u32 errors = d_difference(normal, other) != 0;
+    u32 errors = path_errors + (d_difference(normal, other) != 0);
     other.status = 7; errors += d_difference(normal, other) != 2;
     other = normal; other.kind = D_TIMEOUT; errors += d_difference(normal, other) != 1;
     other.kind = D_SIGNAL; other.status = 11; errors += d_normal(other);
@@ -1121,7 +1130,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         if (!list)
         {
             settings.ide = os_path_absolute(arena, settings.ide, true);
-            settings.cc = executable_resolve_in_path(arena, settings.cc);
+            settings.cc = d_reference_compiler(arena, settings.cc);
             if (!path_exists(arena, settings.ide) || !settings.cc.length || !d_create_output(arena, settings.out))
             {
                 string_print(S8("error: compiler missing or output directory already exists (refusing stale evidence)\n"));
