@@ -20,6 +20,7 @@
 //                                              kept in differential agreement
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
+//   c_lex_validate_word_utf8                   bounded word encoding checks
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
 //   c_lex_compact_tables_build,                the SIMD lexer (Validark
 //   c_lex_compact                              method, AGENTS.md): one
@@ -393,9 +394,9 @@ BUSTER_C_INTERNAL bool c_identifier_continue(char8 character)
     return c_identifier_start(character) || c_ascii_digit(character);
 }
 
-// One byte per character value: nonzero when the character continues an
-// identifier. Built from c_identifier_continue at first use so the two can
-// never drift; the lexer's identifier run scan ANDs eight entries per step
+// One byte per character value: nonzero for an ASCII identifier continuation.
+// High bytes stop the fast run for bounded UTF-8 validation in the lexer;
+// the identifier run scan ANDs eight entries per step
 // instead of branching per byte. c_prewarm() fills it ahead of any gang.
 BUSTER_C_INTERNAL u8 c_identifier_continue_table[256];
 BUSTER_C_INTERNAL bool c_identifier_continue_table_built;
@@ -405,7 +406,7 @@ BUSTER_C_INTERNAL void c_identifier_continue_table_build(void)
     BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 character = 0; character < 256; character += 1)
     {
-        c_identifier_continue_table[character] = c_identifier_continue((char8)character) ? 1 : 0;
+        c_identifier_continue_table[character] = character < 0x80 && c_identifier_continue((char8)character) ? 1 : 0;
     }
     c_identifier_continue_table_built = true;
 }
@@ -1436,13 +1437,45 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_block_comment_stop_find(String8 source, 
 
 #endif
 
+// Only identifier/pp-number spellings use this source-input contract. Comments
+// and literal payloads retain their byte policy; OS utf8_decode is unrelated.
+// Report the first byte of the first ill-formed sequence, including a truncated
+// leader at the end of this bounded token. Translation checkpoints recover its
+// physical position even when a CRLF splice occurs inside the sequence.
+BUSTER_C_INTERNAL void c_lex_validate_word_utf8(CLexState* state, u64 offset, u64 end)
+{
+    const u8* bytes = (const u8*)state->translated.source.pointer;
+    while (offset < end)
+    {
+        u8 leader = bytes[offset];
+        u32 length = leader < 0x80 ? 1 : leader >= 0xC2 && leader <= 0xDF ? 2 :
+                     leader >= 0xE0 && leader <= 0xEF ? 3 : leader >= 0xF0 && leader <= 0xF4 ? 4 : 0;
+        bool valid = length && length <= end - offset;
+        for (u32 index = 1; valid && index < length; index += 1)
+        {
+            valid = (bytes[offset + index] & 0xC0) == 0x80;
+        }
+        if (valid && length >= 3)
+        {
+            u8 second = bytes[offset + 1];
+            valid = (leader != 0xE0 || second >= 0xA0) && (leader != 0xED || second < 0xA0) &&
+                    (leader != 0xF0 || second >= 0x90) && (leader != 0xF4 || second < 0x90);
+        }
+        if (!valid)
+        {
+            c_diagnostic_push(state->result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count,
+                              offset, C_DIAGNOSTIC_INVALID_UTF8, S8("invalid UTF-8 sequence in C source token"));
+            break;
+        }
+        offset += length;
+    }
+}
+
 // One item of the scalar lexer: a whitespace byte, a newline, a comment, or a
-// token, starting at `offset` and returning the offset just past it.  The
-// compaction emitter escapes to this for every shape its masks do not model,
-// so the two paths agree on the hard cases by construction rather than by
-// duplicated reasoning.  Long comment and literal bodies fast-forward in
-// 64-byte strides when the caller is the window pipeline (state->simd_scan);
-// the reference path keeps the byte loops so the gate compares the two.
+// token, starting at `offset` and returning the offset just past it. The
+// compaction emitter escapes here for shapes its masks do not model. Long
+// comment/literal bodies fast-forward in 64-byte strides for state->simd_scan;
+// the reference keeps byte loops so the differential gate compares the two.
 BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
 {
     CLexResult* result = state->result;
@@ -1589,7 +1622,16 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
     if (c_identifier_start(character))
     {
         u64 start = offset;
-        offset = c_identifier_run_end(translated.source, offset + 1);
+        offset = c_identifier_run_end(translated.source, offset + (character < 0x80));
+        if (BUSTER_UNLIKELY(offset < translated.source.length && translated.source.pointer[offset] >= 0x80))
+        {
+            u64 first_high = offset;
+            while (offset < translated.source.length && c_identifier_continue(translated.source.pointer[offset]))
+            {
+                offset += 1;
+            }
+            c_lex_validate_word_utf8(state, first_high, offset);
+        }
         c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
         {
@@ -1601,6 +1643,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
     if (c_ascii_digit(character) || (character == '.' && offset + 1 < translated.source.length && c_ascii_digit(translated.source.pointer[offset + 1])))
     {
         u64 start = offset++;
+        u8 high_bytes = 0;
         while (offset < translated.source.length)
         {
             character = translated.source.pointer[offset];
@@ -1611,7 +1654,12 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
             {
                 break;
             }
+            high_bytes |= (u8)character;
             offset += 1;
+        }
+        if (BUSTER_UNLIKELY(high_bytes & 0x80))
+        {
+            c_lex_validate_word_utf8(state, start, offset);
         }
         c_token_push(result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
@@ -1958,9 +2006,8 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         u64 star_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('*'));
         u64 colon_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8(':'));
         u64 repeated = (u64)_mm512_cmpeq_epi8_mask(chunk0, chunk1);
-        // c_identifier_start admits `$` and every byte above ASCII, so those
-        // join the identifier class rather than the invalid one -- the table
-        // carries the ASCII half and the sign mask the rest.
+        // High bytes still join word extents, but their whole token escapes
+        // below for UTF-8 validation before it can reach the batch emitter.
         u64 word = high_byte | (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WORD));
         u64 white = (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WHITE));
 
@@ -2259,12 +2306,25 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         // punctuator byte is C_TOKEN_INVALID, whose diagnostic the scalar path
         // formats.
         u64 unclassified = available & ~word & ~white & ~line_feed & ~punctuator_byte;
-        if (unclassified)
+        // ASCII windows retain the existing uncommon-byte branch. High bytes
+        // reuse the sign mask and escape at their whole word's start; only
+        // resolved words before a deferred item matter. Comments and literals
+        // keep their byte semantics.
+        if (BUSTER_UNLIKELY(unclassified | high_byte))
         {
-            u64 candidate = (u64)__builtin_ctzll(unclassified);
-            if (candidate < trigger_at)
+            if (unclassified)
             {
-                trigger_at = candidate;
+                u64 candidate = (u64)__builtin_ctzll(unclassified);
+                trigger_at = BUSTER_MIN(trigger_at, candidate);
+            }
+            u64 word_high = high_byte & ~comment_span & ~literal_span & c_lex_mask_below(defer_at);
+            if (word_high)
+            {
+                u64 first_high = (u64)__builtin_ctzll(word_high);
+                u64 owners = (identifier_starts | number_starts) & c_lex_mask_below(first_high + 1);
+                BUSTER_CHECK(owners);
+                u64 candidate = (u64)(63 - __builtin_clzll(owners));
+                trigger_at = BUSTER_MIN(trigger_at, candidate);
             }
         }
 
