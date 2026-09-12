@@ -42,6 +42,112 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
     };
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {0, 1, 2, 17, 17, 18, 4097};
+    u32 sparse[] = {UINT32_MAX, 0x01000000, 256, 0, 65536, 1, UINT32_MAX, 0x80000000, 0x00ffffff,
+                    257, 65535, 255, 0x7fffffff, 0x01000001, 256, 65536, 1, 0};
+    Arena* arena = arena_create((ArenaCreation){0});
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(counts); shape += 1)
+    {
+        u32 count = counts[shape];
+        u32* priorities = arena_allocate(arena, u32, count);
+        u32* destinations = arena_allocate(arena, u32, count);
+        for (u32 entry = 0; entry < count; entry += 1)
+        {
+            priorities[entry] = shape == 4 ? UINT32_MAX : shape == 5 ? sparse[entry] : shape == 6 ? count - entry : entry;
+            destinations[entry] = shape == 6 ? count - entry - 1 : entry;
+        }
+        // Independent stable-rank oracle for sparse priorities: exercise all
+        // four key bytes, unsigned ordering, repeated keys and the NONE sentinel.
+        if (shape == 5)
+        {
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+                u32 rank = 0;
+                for (u32 other = 0; other < count; other += 1)
+                {
+                    rank += priorities[other] < priorities[entry] || (priorities[other] == priorities[entry] && other < entry);
+                }
+                destinations[entry] = rank;
+            }
+        }
+        u8 text[8] = {0};
+        u32 text_symbol = 2 * count + 2;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, text_symbol + 1);
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, 2 * count + 1);
+        ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                                                  (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), symbols, text_symbol + 1,
+                                                  relocations, 2 * count + 1);
+        for (u32 slot = 0; slot < 2; slot += 1)
+        {
+            ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+            u8* data = arena_allocate(arena, u8, (u64)count * OBJECT_INITIALIZER_ENTRY_SIZE);
+            object.sections[kind].data = (ByteSlice){.pointer = data, .length = (u64)count * OBJECT_INITIALIZER_ENTRY_SIZE};
+            object.initializer_priorities[slot] = priorities;
+            for (u32 entry = 0; entry < count; entry += 1)
+            {
+                u64 value = UINT64_C(0x0101010101010101) * (entry + 1) ^ ((u64)slot << 63);
+                memcpy(data + (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE, &value, sizeof(value));
+                symbols[slot * count + entry] = (ObjectSymbol){
+                    .name = S8("array_entry"), .section = (u32)kind, .kind = OBJECT_SYMBOL_DATA,
+                    .value = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE + entry % OBJECT_INITIALIZER_ENTRY_SIZE, .size = 1,
+                };
+                relocations[slot * count + entry] = (ObjectRelocation){
+                    .section = (u32)kind, .symbol = text_symbol, .kind = OBJECT_RELOCATION_ABSOLUTE32,
+                    .offset = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE + entry % 5, .addend = -(s64)entry,
+                };
+            }
+            symbols[2 * count + slot] = (ObjectSymbol){
+                .name = S8("array_end"), .section = (u32)kind, .kind = OBJECT_SYMBOL_DATA,
+                .value = (u64)count * OBJECT_INITIALIZER_ENTRY_SIZE,
+            };
+        }
+        symbols[text_symbol] = (ObjectSymbol){.name = S8("text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .value = 1};
+        relocations[2 * count] = (ObjectRelocation){.section = OBJECT_SECTION_TEXT, .symbol = text_symbol,
+                                                    .kind = OBJECT_RELOCATION_ABSOLUTE32, .offset = 2, .addend = -7};
+        LinkObjectResult linked = link_objects(arena, &object, 1, (LinkOptions){0});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+        if (linked.error == LINK_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, linked.object.symbol_count == object.symbol_count);
+            BUSTER_TEST(arguments, linked.object.relocation_count == object.relocation_count);
+            for (u32 slot = 0; slot < 2; slot += 1)
+            {
+                ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+                BUSTER_TEST(arguments, linked.object.sections[kind].data.length == object.sections[kind].data.length);
+                BUSTER_TEST(arguments, linked.object.symbols[2 * count + slot].value == (u64)count * OBJECT_INITIALIZER_ENTRY_SIZE);
+                for (u32 entry = 0; entry < count; entry += 1)
+                {
+                    u32 destination = destinations[entry];
+                    u64 value = 0;
+                    memcpy(&value, linked.object.sections[kind].data.pointer + (u64)destination * OBJECT_INITIALIZER_ENTRY_SIZE, sizeof(value));
+                    BUSTER_TEST(arguments, value == (UINT64_C(0x0101010101010101) * (entry + 1) ^ ((u64)slot << 63)));
+                    BUSTER_TEST(arguments, linked.object.initializer_priorities[slot][destination] == priorities[entry]);
+                    ObjectSymbol symbol = linked.object.symbols[slot * count + entry];
+                    ObjectRelocation relocation = linked.object.relocations[slot * count + entry];
+                    BUSTER_TEST(arguments, symbol.section == (u32)kind && symbol.value == (u64)destination * OBJECT_INITIALIZER_ENTRY_SIZE + entry % OBJECT_INITIALIZER_ENTRY_SIZE);
+                    BUSTER_TEST(arguments, relocation.section == (u32)kind && relocation.offset == (u64)destination * OBJECT_INITIALIZER_ENTRY_SIZE + entry % 5);
+                    BUSTER_TEST(arguments, relocation.symbol == text_symbol && relocation.kind == OBJECT_RELOCATION_ABSOLUTE32 && relocation.addend == -(s64)entry);
+                    // Linking must leave the input metadata and section bytes intact.
+                    memcpy(&value, object.sections[kind].data.pointer + (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE, sizeof(value));
+                    BUSTER_TEST(arguments, value == (UINT64_C(0x0101010101010101) * (entry + 1) ^ ((u64)slot << 63)));
+                    BUSTER_TEST(arguments, symbols[slot * count + entry].value == (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE + entry % OBJECT_INITIALIZER_ENTRY_SIZE);
+                    BUSTER_TEST(arguments, relocations[slot * count + entry].offset == (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE + entry % 5);
+                }
+            }
+            BUSTER_TEST(arguments, linked.object.symbols[text_symbol].section == OBJECT_SECTION_TEXT && linked.object.symbols[text_symbol].value == 1);
+            ObjectRelocation text_relocation = linked.object.relocations[2 * count];
+            BUSTER_TEST(arguments, text_relocation.section == OBJECT_SECTION_TEXT && text_relocation.offset == 2 &&
+                                   text_relocation.symbol == text_symbol && text_relocation.addend == -7);
+        }
+        arena_reset_to_start(arena);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL u32 link_test_symbol_find(ObjectFile* object, String8 name)
 {
@@ -2467,6 +2573,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_unused_got_marker(UnitTestArguments
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult initializer_order = link_test_initializer_order(arguments);
+    result.succeeded_test_count += initializer_order.succeeded_test_count;
+    result.test_count += initializer_order.test_count;
     UnitTestResult got_marker = link_test_unused_got_marker(arguments);
     result.succeeded_test_count += got_marker.succeeded_test_count;
     result.test_count += got_marker.test_count;
