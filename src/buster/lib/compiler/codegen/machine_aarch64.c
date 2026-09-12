@@ -9695,6 +9695,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             }
         }
     }
+    if (encoder.overflow || encoder.error)
+    {
+        string_print(S8("ISSUE70_A64_ERROR overflow={u32} error={u32} count={u32} capacity={u32} instructions={u32}\n"),
+                     (u32)encoder.overflow, (u32)encoder.error, encoder.count, encoder.capacity, function->instruction_count);
+    }
     if (!encoder.overflow && !encoder.error)
     {
         if (!machine_a64_relax_branches(&encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,

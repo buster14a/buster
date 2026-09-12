@@ -14815,7 +14815,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             .block = machine_ref_payload(instruction->operands[1]),
                         };
                     }
-                    break; default: machine_x64_exact_counters_assign(&result, exact_counters); return result;
+                    break; default:
+                        string_print(S8("ISSUE70_X64_DEFAULT opcode={u32} row={u32}\n"), (u32)instruction->opcode, instruction_index);
+                        machine_x64_exact_counters_assign(&result, exact_counters);
+                        return result;
                 }
             }
             MachinePoint after = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
@@ -14827,6 +14830,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     }
     if (encoder.overflow)
     {
+        string_print(S8("ISSUE70_X64_OVERFLOW count={u32} capacity={u32} instructions={u32}\n"),
+                     encoder.count, encoder.capacity, function->instruction_count);
         machine_x64_exact_counters_assign(&result, exact_counters);
         return result;
     }
