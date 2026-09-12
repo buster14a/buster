@@ -20703,6 +20703,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     {
         codegen_buffer_ensure_x64_metadata_cache(&buffer, &x64_metadata_cache_tried, arena, module->function_count);
     }
+    u32 assembly_function_begin = result.function_count;
     for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
     {
         u32 failed_line = 0;
@@ -20727,6 +20728,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             .code_size = end - entry->offset,
         };
     }
+    result.assembly_function_count = result.function_count - assembly_function_begin;
     result.code = (ByteSlice){
         .pointer = buffer.bytes,
         .length = buffer.count,

@@ -2898,6 +2898,66 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         }
     }
 
+    // A module-level assembly label is retained as a sized text symbol, but
+    // it has no compiler prologue or unwind directives. The ARM64 COFF writer
+    // must therefore omit only the trailing raw-assembly descriptor from
+    // .pdata/.xdata while keeping the preceding C function's unwind record.
+    IrSymbolId windows_arm64_assembly_symbol = ir_program_add_symbol(&separate_program, (IrSymbol){
+        .name = S8("raw_assembly_function"),
+        .kind = IR_SYMBOL_FUNCTION,
+        .linkage = IR_LINKAGE_EXTERNAL,
+        .is_definition = true,
+    });
+    u8 windows_arm64_assembly_code[sizeof(windows_arm64_code) + 8] = {0};
+    memcpy(windows_arm64_assembly_code, windows_arm64_code, sizeof(windows_arm64_code));
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 0] = 0x40;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 1] = 0x05;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 2] = 0x80;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 3] = 0x52;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 4] = 0xc0;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 5] = 0x03;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 6] = 0x5f;
+    windows_arm64_assembly_code[sizeof(windows_arm64_code) + 7] = 0xd6;
+    CodegenModuleEntry windows_arm64_assembly_entries[] = {
+        separate_entry,
+        {.symbol = windows_arm64_assembly_symbol, .offset = sizeof(windows_arm64_code)},
+    };
+    CodegenFunctionDescriptor windows_arm64_assembly_functions[] = {
+        windows_arm64_function,
+        {.symbol = windows_arm64_assembly_symbol, .code_offset = sizeof(windows_arm64_code), .code_size = 8},
+    };
+    CodegenModule windows_arm64_assembly_module = windows_arm64_module;
+    windows_arm64_assembly_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_arm64_assembly_code);
+    windows_arm64_assembly_module.entries = windows_arm64_assembly_entries;
+    windows_arm64_assembly_module.functions = windows_arm64_assembly_functions;
+    windows_arm64_assembly_module.entry_count = 2;
+    windows_arm64_assembly_module.function_count = 2;
+    windows_arm64_assembly_module.assembly_function_count = 1;
+    ObjectFile windows_arm64_assembly_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_assembly_module, windows_arm64_target);
+    BUSTER_TEST(arguments, windows_arm64_assembly_object.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_arm64_assembly_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
+    BUSTER_TEST(arguments, windows_arm64_assembly_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_arm64_xdata));
+    BUSTER_TEST(arguments, windows_arm64_assembly_object.relocation_count == 2);
+    bool windows_arm64_assembly_symbol_valid = false;
+    for (u32 symbol_index = 0; symbol_index < windows_arm64_assembly_object.symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = windows_arm64_assembly_object.symbols + symbol_index;
+        if (string_equal(symbol->name, S8("raw_assembly_function")))
+        {
+            windows_arm64_assembly_symbol_valid = symbol->section == OBJECT_SECTION_TEXT && symbol->value == sizeof(windows_arm64_code) &&
+                                                  symbol->size == 8 && symbol->global;
+        }
+    }
+    BUSTER_TEST(arguments, windows_arm64_assembly_symbol_valid);
+    ObjectArtifact windows_arm64_assembly_coff = object_write(arguments->arena, &windows_arm64_assembly_object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, windows_arm64_assembly_coff.error == OBJECT_ERROR_NONE);
+    CodegenModule invalid_windows_arm64_assembly_module = windows_arm64_assembly_module;
+    invalid_windows_arm64_assembly_module.assembly_function_count = 3;
+    BUSTER_TEST(arguments, object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_windows_arm64_assembly_module,
+                                                                 windows_arm64_target)
+                               .error == OBJECT_ERROR_INVALID_INPUT);
+
     // MIR saves precede X29 establishment. Its epilog shares the suffix
     // starting at SET_FP, including sparse allocator saves in reverse order.
     u8 windows_arm64_machine_code[80] = {0};
