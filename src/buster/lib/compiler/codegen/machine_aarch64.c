@@ -109,6 +109,11 @@ struct MachineA64ValueShape
     bool indirect;
     // Short vectors and homogeneous floating/vector aggregates use direct V transfers.
     bool vector;
+    // AAPCS64 widens the lanes of two- and four-byte multi-lane vector
+    // results across D0. Canonical slots retain their compact source image;
+    // these fields describe the ABI-edge packing only.
+    u8 widened_vector_lane_count;
+    u8 widened_vector_element_bits;
     bool stack_aligned;
     // AAPCS64 starts a sixteen-byte integer pair at an even X argument
     // register.  The bare integer-128 shape deliberately remains outside the
@@ -327,13 +332,21 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
         {
             return false;
         }
+        IrType* vector_element = ir_type_from_id(&program->types, type->element_type);
+        bool widened_result = use == IR_ABI_USE_RESULT && abi.parts[0].size < 8 && vector_element && vector_element->kind == IR_TYPE_INTEGER &&
+                              (type->element_count == 2 || type->element_count == 4) &&
+                              (vector_element->bit_width == 8 || vector_element->bit_width == 16) &&
+                              type->layout.size == type->element_count * (vector_element->bit_width / 8);
         *shape = (MachineA64ValueShape){
             .part_is_float = {1},
             .part_sizes = {(u8)abi.parts[0].size},
             .part_count = 1,
             .byte_size = (abi.parts[0].size + 7u) & ~7u,
+            .exact_byte_size = (u32)type->layout.size,
             .aggregate = true,
             .vector = true,
+            .widened_vector_lane_count = (u8)(widened_result ? type->element_count : 0),
+            .widened_vector_element_bits = (u8)(widened_result ? vector_element->bit_width : 0),
             .stack_aligned = type->layout.alignment > 8,
         };
         return true;
@@ -1190,6 +1203,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_to_float(MachineA64Selector* selector, IrInstruction* instruction,
                                                           IrType* source_type, IrType* target_type, u32 result_register);
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_float_to_f128(MachineA64Selector* selector, IrInstruction* instruction,
+                                                         IrType* source_type, IrType* target_type);
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
@@ -1204,7 +1219,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
     IrType* early_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
     bool source_is_integer128 = early_source_type && early_source_type->kind == IR_TYPE_INTEGER && early_source_type->bit_width == 128;
     bool target_is_integer128 = early_target_type && early_target_type->kind == IR_TYPE_INTEGER && early_target_type->bit_width == 128;
-    if (source_is_integer128 && early_target_type && early_target_type->kind == IR_TYPE_FLOAT)
+    if (early_target_type && early_target_type->kind == IR_TYPE_FLOAT && early_target_type->bit_width == 128)
+    {
+        selected = machine_a64_select_float_to_f128(selector, instruction, early_source_type, early_target_type);
+    }
+    else if (source_is_integer128 && early_target_type && early_target_type->kind == IR_TYPE_FLOAT)
     {
         selected = machine_a64_select_i128_to_float(selector, instruction, early_source_type, early_target_type, result_register);
     }
@@ -1795,6 +1814,87 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_select_float_to_pair_step(MachineA64Selector
     }
     machine_a64_select_row(selector, row);
     return result;
+}
+
+// Binary32/64 widen exactly into a binary128 frame image. Normalize the
+// significand with CLZ, rebias the exponent, and retain every payload bit.
+// Only special inputs visit FP arithmetic: multiplying infinity or NaN by
+// one quiets a signaling NaN and raises invalid without exposing finite
+// subnormals to the target's flush-to-zero mode. The quiet bit remains a
+// consumed value, so its floating exception cannot disappear as dead work.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_float_to_f128(MachineA64Selector* selector, IrInstruction* instruction,
+                                                         IrType* source_type, IrType* target_type)
+{
+    IrFunction* function = selector->function;
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    u32 source = UINT32_MAX;
+    bool selected = source_type && source_type->kind == IR_TYPE_FLOAT && (source_type->bit_width == 32 || source_type->bit_width == 64) &&
+                    target_type && target_type->kind == IR_TYPE_FLOAT && target_type->bit_width == 128 &&
+                    instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND && result_slot != UINT32_MAX &&
+                    machine_a64_operand_register(selector, instruction->operands[0], &source);
+    if (selected)
+    {
+        bool wide = source_type->bit_width == 64;
+        u32 fraction_bits = wide ? 52u : 23u;
+        u32 zero = machine_a64_select_immediate_register(selector, 0);
+        u32 one = machine_a64_select_immediate_register(selector, 1);
+        u32 fraction_shift = machine_a64_select_immediate_register(selector, fraction_bits);
+        u32 exponent_mask = machine_a64_select_immediate_register(selector, wide ? 2047u : 255u);
+        u32 fraction_mask = machine_a64_select_immediate_register(selector, (UINT64_C(1) << fraction_bits) - 1);
+        u32 fraction = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, source, fraction_mask);
+        u32 exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, source, fraction_shift);
+        exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, exponent, exponent_mask);
+        u32 has_exponent = machine_a64_select_compare_set(selector, exponent, zero, MACHINE_A64_CONDITION_NOT_EQUAL);
+        u32 hidden_bit = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, has_exponent, fraction_shift);
+        u32 significand = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, fraction, hidden_bit);
+        u32 leading = machine_a64_select_zero_count(selector, significand, UINT32_MAX, true, true);
+        u32 normalized = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, significand, leading);
+        u32 rebias = machine_a64_select_immediate_register(selector, wide ? 16383u - 1023u : 16383u - 127u);
+        u32 quad_exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, exponent, rebias);
+        u32 subnormal = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, has_exponent, one);
+        u32 subnormal_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, subnormal);
+        u32 normal_leading = machine_a64_select_immediate_register(selector, 64u - fraction_bits);
+        u32 correction = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, leading, normal_leading);
+        correction = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, correction, subnormal_mask);
+        quad_exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, quad_exponent, correction);
+        u32 nonzero = machine_a64_select_compare_set(selector, significand, zero, MACHINE_A64_CONDITION_NOT_EQUAL);
+        u32 nonzero_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, nonzero);
+        quad_exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, quad_exponent, nonzero_mask);
+        u32 special = machine_a64_select_compare_set(selector, exponent, exponent_mask, MACHINE_A64_CONDITION_EQUAL);
+        u32 special_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, special);
+        u32 quad_special = machine_a64_select_immediate_register(selector, 32767);
+        u32 exponent_delta = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, quad_exponent, quad_special);
+        exponent_delta = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, exponent_delta, special_mask);
+        quad_exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, quad_exponent, exponent_delta);
+
+        u32 special_source = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, source, special_mask);
+        u32 unit = machine_a64_select_immediate_register(selector, wide ? UINT64_C(0x3ff0000000000000) : UINT64_C(0x3f800000));
+        u32 quieted = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_FARITH, special_source, unit, wide ? 0x102u : 2u);
+        u32 quiet_position = machine_a64_select_immediate_register(selector, fraction_bits - 1u);
+        u32 quiet_bit = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, quieted, quiet_position);
+        quiet_bit = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, quiet_bit, one);
+        u32 quad_quiet_position = machine_a64_select_immediate_register(selector, 47);
+        quiet_bit = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, quiet_bit, quad_quiet_position);
+        u32 sign_position = machine_a64_select_immediate_register(selector, wide ? 63u : 31u);
+        u32 sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, source, sign_position);
+        sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, sign, one);
+        u32 quad_sign_position = machine_a64_select_immediate_register(selector, 63);
+        sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, sign, quad_sign_position);
+        u32 high_shift = machine_a64_select_immediate_register(selector, 15);
+        u32 high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, normalized, high_shift);
+        u32 high_mask = machine_a64_select_immediate_register(selector, UINT64_C(0x0000ffffffffffff));
+        high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, high, high_mask);
+        u32 exponent_position = machine_a64_select_immediate_register(selector, 48);
+        quad_exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, quad_exponent, exponent_position);
+        high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, high, quad_exponent);
+        high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, high, quiet_bit);
+        high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, high, sign);
+        u32 low_shift = machine_a64_select_immediate_register(selector, 49);
+        u32 low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, normalized, low_shift);
+        machine_a64_select_frame_store64(selector, result_slot, 0, low);
+        machine_a64_select_frame_store64(selector, result_slot, 8, high);
+    }
+    return selected;
 }
 
 // Match the direct oracle's 2^64 magnitude split using ordinary scalar MIR.
@@ -3556,6 +3656,37 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
                                          });
     }}
 
+// Converts between a compact canonical short-vector image and the AAPCS64
+// result image. For a two-lane result the ABI places each element in a
+// 32-bit lane of D0; for four lanes it uses 16-bit lanes. Only the low source
+// element bits of each ABI lane carry the vector value.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_select_widened_vector_result(MachineA64Selector* selector, u32 source, MachineA64ValueShape* shape,
+                                                                 bool compact)
+{
+    u32 result = machine_a64_select_immediate_register(selector, 0);
+    u32 abi_lane_bits = 64u / shape->widened_vector_lane_count;
+    u32 source_lane_bits = compact ? abi_lane_bits : shape->widened_vector_element_bits;
+    u32 result_lane_bits = compact ? shape->widened_vector_element_bits : abi_lane_bits;
+    u32 mask = machine_a64_select_immediate_register(selector, (UINT64_C(1) << shape->widened_vector_element_bits) - 1);
+    for (u32 lane = 0; lane < shape->widened_vector_lane_count; lane += 1)
+    {
+        u32 lane_value = source;
+        if (lane && source_lane_bits)
+        {
+            u32 shift = machine_a64_select_immediate_register(selector, lane * source_lane_bits);
+            lane_value = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, lane_value, shift);
+        }
+        lane_value = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, lane_value, mask);
+        if (lane && result_lane_bits)
+        {
+            u32 shift = machine_a64_select_immediate_register(selector, lane * result_lane_bits);
+            lane_value = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, lane_value, shift);
+        }
+        result = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, result, lane_value);
+    }
+    return result;
+}
+
 // Collects the returned value: indirect results are already in their slot,
 // aggregates come back in parts, and a scalar arrives in X0 or V0.
 BUSTER_GLOBAL_LOCAL bool machine_a64_receive_call_result(MachineA64Selector* selector, IrInstruction* instruction, MachineA64CallPlan* plan,
@@ -3574,9 +3705,23 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_receive_call_result(MachineA64Selector* sel
         received = result_slot != UINT32_MAX;
         if (received)
         {
-            for (u32 part = 0; part < plan->return_shape.part_count; part += 1)
+            if (plan->return_shape.widened_vector_lane_count)
             {
-                machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, part, part, true));
+                u32 abi_image = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, abi_image)},
+                                                     .payload = 0,
+                                                     .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                 });
+                u32 compact_image = machine_a64_select_widened_vector_result(selector, abi_image, &plan->return_shape, true);
+                machine_a64_select_frame_store64(selector, result_slot, 0, compact_image);
+            }
+            else
+            {
+                for (u32 part = 0; part < plan->return_shape.part_count; part += 1)
+                {
+                    machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, part, part, true));
+                }
             }
         }
     }
@@ -4980,9 +5125,22 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
             selected = value_slot != UINT32_MAX;
             if (selected)
             {
-                for (u32 part = 0; part < selector->return_shape.part_count; part += 1)
+                if (selector->return_shape.widened_vector_lane_count)
                 {
-                    machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, part, part, false));
+                    u32 compact_image = machine_a64_select_frame_load64(selector, value_slot, 0);
+                    u32 abi_image = machine_a64_select_widened_vector_result(selector, compact_image, &selector->return_shape, false);
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, abi_image)},
+                                                         .payload = 0,
+                                                         .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                     });
+                }
+                else
+                {
+                    for (u32 part = 0; part < selector->return_shape.part_count; part += 1)
+                    {
+                        machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, part, part, false));
+                    }
                 }
             }
         }
@@ -5333,7 +5491,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
-                bool wide = parameter_type && parameter_type->kind == IR_TYPE_INTEGER && parameter_type->bit_width == 128;
+                bool wide = parameter_type && ((parameter_type->kind == IR_TYPE_INTEGER && parameter_type->bit_width == 128) ||
+                    (parameter_type->kind == IR_TYPE_VECTOR && parameter_type->layout.resolved && parameter_type->layout.size <= 16));
                 if (parameter->value.value >= function->value_count ||
                     (!wide && !machine_a64_type_is_scalar_register(parameter_type) && !machine_a64_type_is_float_scalar(parameter_type)))
                 {
@@ -5756,7 +5915,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                          value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                          (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                           value_type->kind == IR_TYPE_VECTOR || value_type->kind == IR_TYPE_VA_LIST ||
-                          (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||
+                          ((value_type->kind == IR_TYPE_INTEGER || value_type->kind == IR_TYPE_FLOAT) && value_type->bit_width == 128) ||
                           ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
                 {
                     // Aggregate and vector values own a frame slot like the
@@ -5764,8 +5923,15 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     // transfers address it directly. A vector slot is
                     // sixteen-aligned so the V-register edge rows keep their
                     // scaled addressing form.
+                    // Edge pairs snapshot both eightbytes. Short vector images
+                    // participating in a join need storage for both reads too.
+                    u32 slot_size = (u32)((value_type->layout.size + 7) & ~(u64)7);
+                    if (selector.value_pairs && selector.value_pairs[instruction->result.value].registers[0] != UINT32_MAX && slot_size < 16)
+                    {
+                        slot_size = 16;
+                    }
                     selector.value_stack_slots[instruction->result.value] = machine_a64_append_slot(
-                        &selector, (u32)((value_type->layout.size + 7) & ~(u64)7), value_type->kind == IR_TYPE_VECTOR ? 16u : 8u);
+                        &selector, slot_size, value_type->kind == IR_TYPE_VECTOR ? 16u : 8u);
                 }
             }
         }

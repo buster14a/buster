@@ -66,6 +66,13 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
+On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
+compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
+`0fb54300b56512754221d80adda85ddb9815bceb` (0.9.28rc) bootstraps this tree
+without changing those initializers. Keep the chosen TCC source/binary identity
+with local validation evidence; the older compiler's failure is not a reason
+to report a Clang-built driver as the canonical TCC bootstrap.
+
 Keep build orchestration and policy in `build.c`, with the least practical
 process-launch and scripting overhead. Shell and PowerShell scripts exist only
 to bootstrap `build/build`; do not grow them into build systems. Use CMake only
