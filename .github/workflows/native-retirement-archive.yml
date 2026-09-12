@@ -17,66 +17,8 @@ env:
   CONTRACT: docs/performance-audits/evidence/2026-09-12-retirement/archive-contract.json
 
 jobs:
-  publish:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Publish immutable evidence bytes
-    runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - name: Check out archival implementation and source history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Retrieve expiring Actions archives
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir "$RUNNER_TEMP/archive-input"
-          gh api repos/${{ github.repository }}/actions/artifacts/10303964052/zip > "$RUNNER_TEMP/archive-input/native-retirement-eb1bef2-34714527496.zip"
-          gh api repos/${{ github.repository }}/actions/artifacts/10304642722/zip > "$RUNNER_TEMP/archive-input/strict-retirement-eb1bef2-34714527496.zip"
-      - name: Freeze validation, candidate and direct-oracle source
-        run: |
-          git archive --format=tar.gz --prefix=buster-validation-38f150f/ 38f150f7affdf458a9b394961709d659cc738bf3 > "$RUNNER_TEMP/archive-input/buster-validation-source-38f150f.tar.gz"
-          git archive --format=tar.gz --prefix=buster-candidate-eb1bef2/ eb1bef2f124c6a778a435ae1eda18ae489c489c5 > "$RUNNER_TEMP/archive-input/buster-candidate-source-eb1bef2.tar.gz"
-          git archive --format=tar.gz --prefix=buster-direct-oracle-3e912a3/ 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e > "$RUNNER_TEMP/archive-input/buster-direct-oracle-source-3e912a3.tar.gz"
-      - name: Verify originals and prepare release assets
-        run: >-
-          python3 tools/native_retirement_archive.py prepare
-          --contract "$CONTRACT"
-          --source "$RUNNER_TEMP/archive-input"
-          --output "$RUNNER_TEMP/release-assets"
-      - name: Publish durable release
-        env:
-          GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-        run: |
-          if ! gh release view "$EVIDENCE_TAG" >/dev/null 2>&1; then
-            gh release create "$EVIDENCE_TAG" \
-              --target 38f150f7affdf458a9b394961709d659cc738bf3 \
-              --title "Native-retirement evidence for eb1bef2" \
-              --notes-file docs/performance-audits/evidence/2026-09-12-retirement/RELEASE.md \
-              --prerelease
-          fi
-          for asset in "$RUNNER_TEMP/release-assets"/*; do
-            name=$(basename "$asset")
-            remote=$(gh api "repos/${{ github.repository }}/releases/tags/$EVIDENCE_TAG" \
-              --jq ".assets[] | select(.name == \"$name\") | [.size,.digest] | @tsv")
-            if [[ -n "$remote" ]]; then
-              read -r remote_size remote_digest <<< "$remote"
-              local_size=$(stat -c %s "$asset")
-              local_digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
-              [[ "$remote_size" == "$local_size" && "$remote_digest" == "$local_digest" ]]
-            else
-              gh release upload "$EVIDENCE_TAG" "$asset"
-            fi
-          done
-
   census_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    needs: publish
     name: Download and replay census archive
     runs-on: ubuntu-26.04
     timeout-minutes: 120
@@ -110,6 +52,11 @@ jobs:
           tar -xzf "$RUNNER_TEMP/release-assets/buster-validation-source-38f150f.tar.gz" -C "$RUNNER_TEMP/source"
           tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" -C "$RUNNER_TEMP/source"
           tar -xzf "$RUNNER_TEMP/release-assets/buster-direct-oracle-source-3e912a3.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Restore tracked input omitted by Actions hidden-file packaging
+        run: >-
+          python3 tools/native_retirement_archive.py restore-census-inputs
+          --evidence "$RUNNER_TEMP/census/candidate/evidence"
+          --source "$RUNNER_TEMP/source/buster-candidate-eb1bef2"
       - name: Rebuild the direct oracle from its archived source
         working-directory: ${{ runner.temp }}/source/buster-direct-oracle-3e912a3
         run: |
@@ -152,7 +99,6 @@ jobs:
 
   strict_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    needs: publish
     name: Download and replay strict archive
     runs-on: ubuntu-26.04
     timeout-minutes: 120

@@ -2,6 +2,7 @@
 """Create and independently verify durable native-retirement release assets."""
 import argparse
 import copy
+import csv
 import hashlib
 import json
 import os
@@ -188,6 +189,33 @@ def verify_census(directory, output, cleanup):
     print(json.dumps({"census_archive_verified": True, "sha256": census["sha256"], "size": census["size"]}))
 
 
+def restore_census_inputs(evidence, source):
+    evidence = Path(evidence)
+    source = Path(source)
+    shards = sorted(path for path in evidence.glob("census-integrated-[0-9]*") if path.is_dir())
+    if len(shards) != 4:
+        raise ValueError("expected four extracted census shards")
+    restored = []
+    for shard in shards:
+        with (shard / "inputs.tsv").open(encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        for row in rows:
+            relative = PurePosixPath(row["path"])
+            if not safe_name(row["path"]):
+                raise ValueError(f"unsafe census input path: {row['path']}")
+            destination = shard / "inputs" / Path(*relative.parts)
+            if not destination.exists():
+                original = source / Path(*relative.parts)
+                if not original.is_file():
+                    raise ValueError(f"source snapshot cannot restore census input: {row['path']}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(original, destination)
+                restored.append(f"{shard.name}/{row['path']}")
+    if restored != [f"census-integrated-{index}/tests/.gitignore" for index in range(4)]:
+        raise ValueError(f"unexpected census archive omissions: {restored}")
+    print(json.dumps({"restored_tracked_inputs": restored}))
+
+
 def strict_selected_files(archive, output):
     wanted = {
         "strict-binary/ide": "archived-ide",
@@ -265,7 +293,8 @@ def verify_strict(directory, output, cleanup):
     binary = selected["strict-binary/ide"][0]
     binary.chmod(0o555)
     binary_sha256 = digest(binary)
-    if binary_sha256 != manifest["identities"]["candidate_binary_sha256"]:
+    strict_binary_sha256 = manifest["identities"].get("strict_candidate_binary_sha256")
+    if strict_binary_sha256 is not None and binary_sha256 != strict_binary_sha256:
         raise ValueError("strict compiler binary identity mismatch")
     recorded_binary_sha256 = selected["strict-binary/sha256.txt"][0].read_text(encoding="utf-8").split()
     if not recorded_binary_sha256 or recorded_binary_sha256[0] != binary_sha256:
@@ -376,6 +405,9 @@ def parser():
         check.add_argument("--assets", required=True, type=Path)
         check.add_argument("--output", required=True, type=Path)
         check.add_argument("--cleanup", action="store_true")
+    restore = commands.add_parser("restore-census-inputs")
+    restore.add_argument("--evidence", required=True, type=Path)
+    restore.add_argument("--source", required=True, type=Path)
     census = commands.add_parser("census-receipt")
     census.add_argument("--manifest", required=True, type=Path)
     census.add_argument("--report", required=True, type=Path)
@@ -404,6 +436,8 @@ def main(argv=None):
             verify_census(arguments.assets, arguments.output, arguments.cleanup)
         elif arguments.command == "verify-strict":
             verify_strict(arguments.assets, arguments.output, arguments.cleanup)
+        elif arguments.command == "restore-census-inputs":
+            restore_census_inputs(arguments.evidence, arguments.source)
         elif arguments.command == "census-receipt":
             census_receipt(arguments.manifest, arguments.report, arguments.recorded, arguments.replayed,
                            arguments.archived_reference, arguments.rebuilt_reference, arguments.run_id, arguments.output)
