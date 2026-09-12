@@ -40,7 +40,7 @@ and compiler hashes, commands, host metadata and all raw files.
 
 ## Scope and bounds
 
-There are 63 unsigned 64-bit counters: 504 bytes of fixed storage per OS thread.
+There are 67 unsigned 64-bit counters: 536 bytes of fixed storage per OS thread.
 The snapshot is cumulative on the calling thread, before metrics formatting,
 matching the allocation snapshot's existing scope. A single compilation is
 currently serial; worker totals are **not** aggregated, and this interface must
@@ -89,14 +89,23 @@ every sum below 2^44. Nonzero cells are **not** an exact first-touch count.
 `candidate_region_clear_bytes` is table zeroing (8 bytes/cell).
 `initial_value_clear_bytes` covers baseline traffic, raw traffic and the candidate
 inverse-map initialization (one u64 and two u32 arrays, 16 bytes/value). It
-excludes the first durable pin array initialization, prepass allocations and
+excludes the separately counted initial pin-map initialization, prepass allocations and
 other allocator/arena clearing.
 
 `heap_snapshot_bytes` counts the initial retained-heap copy (24 bytes/interval);
 `heap_restore_bytes` counts all actual attempt restores. `attempt_reset_bytes`
-counts stores to the pin IDs, copied span endpoints, assigned/excluded counts and
-pin depths for each entered attempt. It is reset/store traffic, **not exclusively
-zero-fill**. `pin_mask_clear_bytes` counts the two per-instruction mask clears
+counts stores to the previous attempt's touched pin IDs, assigned/excluded counts
+and pin depths for each entered attempt. It is reset/store traffic, **not exclusively
+zero-fill**. `pin_reset_values` counts those touched IDs. `pin_initial_clear_bytes`
+counts the one global pin-map initialization, deferred until a nonempty candidate
+population reaches pin planning. That map now lives only in scratch.
+`pin_span_write_bytes` counts the two endpoints written when a whole or split
+pin is assigned (8 bytes/assignment); endpoints of unpinned values are unread.
+`pin_mask_values` counts the assigned values visited when building instruction
+masks. The latter walk and retry cleanup are bounded by eight spans per target
+register, independent of the global value-ID universe. These four keys are
+additive; older compilers do not report them. The span arrays remain globally
+indexed for the existing FAST interface, but no attempt copies full arrays. `pin_mask_clear_bytes` counts the two per-instruction mask clears
 before a pinned placement. These are logical bytes explicitly written by named
 loops, not measured cache/memory transactions, retained bytes or RSS. The existing
 allocation observer separately reports allocation requests and arena zeroing.
