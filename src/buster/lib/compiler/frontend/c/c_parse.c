@@ -404,7 +404,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_delimiter(CTok
     }
     else
     {
-        index->matching_delimiters[stack[--*stack_count].position] = token_index;
+        index->matching_delimiters_plus_one[stack[--*stack_count].position] = token_index + 1;
     }
 }
 
@@ -447,8 +447,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
 {
     CTokenPositionIndex* index = result->position_index;
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
-    index->matching_delimiters = arena_allocate(result->arena, u32, preprocess.token_count ? preprocess.token_count : 1);
-    memset(index->matching_delimiters, 0xff, sizeof(*index->matching_delimiters) * preprocess.token_count);
+    index->matching_delimiters_plus_one = arena_allocate_zeroed(result->arena, u32, preprocess.token_count ? preprocess.token_count : 1);
     TemporalArena temporary = scratch_begin(&result->arena, 1);
     CParseDelimiterStackEntry* stack = arena_allocate(temporary.arena, CParseDelimiterStackEntry, preprocess.token_count ? preprocess.token_count : 1);
     u32 stack_count = 0;
@@ -542,14 +541,15 @@ BUSTER_C_SHARED void c_parse_position_index_ensure(CParseResult* result, CPrepro
 }
 
 // Matching closer for the opening delimiter at open, or UINT32_MAX; see
-// CTokenPositionIndex.matching_delimiters.
+// CTokenPositionIndex.matching_delimiters_plus_one. The stored bias makes an
+// unmatched opener's zero decode to UINT32_MAX without a test of its own.
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter_indexed(CParseResult* result, CPreprocessResult preprocess, u32 open)
 {
     if (!result->position_index->built)
     {
         c_parse_position_index_build(result, preprocess);
     }
-    return open < preprocess.token_count ? result->position_index->matching_delimiters[open] : UINT32_MAX;
+    return open < preprocess.token_count ? result->position_index->matching_delimiters_plus_one[open] - 1 : UINT32_MAX;
 }
 
 // First recorded position in [start, end), or UINT32_MAX. Positions are
@@ -610,15 +610,16 @@ BUSTER_C_SHARED void c_parse_diagnostic(CParseResult* result, CSourceLocation lo
 }
 
 // Identifier uses are looked up by token index from parsing, semantic queries, and IR lowering.
-// `identifier_use_by_token` keeps the first use recorded for each token so those lookups stay
-// constant time instead of rescanning every use recorded so far.
+// `identifier_use_by_token_plus_one` keeps the first use recorded for each token so those lookups
+// stay constant time instead of rescanning every use recorded so far.  The stored value is the use
+// index plus one, so subtracting one turns the unrecorded zero into C_ID_UNDERLYING_INVALID.
 BUSTER_C_SHARED u32 c_parse_identifier_use_index(CParseResult* result, u32 token_index)
 {
     if (token_index >= result->identifier_use_by_token_capacity)
     {
         return C_ID_UNDERLYING_INVALID;
     }
-    return result->identifier_use_by_token[token_index];
+    return result->identifier_use_by_token_plus_one[token_index] - 1;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
@@ -11848,9 +11849,9 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         .entity = entity,
         .scope = scope,
     };
-    if (token_index < result->identifier_use_by_token_capacity && result->identifier_use_by_token[token_index] == C_ID_UNDERLYING_INVALID)
+    if (token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index])
     {
-        result->identifier_use_by_token[token_index] = use_index;
+        result->identifier_use_by_token_plus_one[token_index] = use_index + 1;
     }
     // The predefined names -- __func__ and its GNU forms, the __builtin_ and
     // atomic families, GNU's complex-part operators, C23's true/false/nullptr
@@ -15712,10 +15713,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
-    result.identifier_use_by_token = arena_allocate(arena, u32, result.identifier_use_by_token_capacity);
-    memset(result.identifier_use_by_token, 0xff, sizeof(*result.identifier_use_by_token) * result.identifier_use_by_token_capacity);
-    result.token_classes = arena_allocate(arena, u8, result.identifier_use_by_token_capacity);
-    memset(result.token_classes, 0, sizeof(*result.token_classes) * result.identifier_use_by_token_capacity);
+    result.identifier_use_by_token_plus_one = arena_allocate_zeroed(arena, u32, result.identifier_use_by_token_capacity);
+    result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){

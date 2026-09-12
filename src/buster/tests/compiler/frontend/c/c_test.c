@@ -5706,14 +5706,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         return result;
     }
     u32 token_count = (u32)preprocess.token_count;
-    u32* expected_matching = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    u32* expected_matching_plus_one = arena_allocate_zeroed(arguments->arena, u32, token_count ? token_count : 1);
     u32* expected_vector_size = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     u32* expected_alignas = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     u32* expected_labels = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     u32* expected_attributes = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     u32* expected_stack_positions = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     CPunctuator* expected_stack_openings = arena_allocate(arguments->arena, CPunctuator, token_count ? token_count : 1);
-    memset(expected_matching, 0xff, sizeof(*expected_matching) * token_count);
     u32 vector_size_count = 0;
     u32 alignas_count = 0;
     u32 label_count = 0;
@@ -5767,7 +5766,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         }
         else
         {
-            expected_matching[expected_stack_positions[--stack_count]] = token_index;
+            expected_matching_plus_one[expected_stack_positions[--stack_count]] = token_index + 1;
         }
     }
     mismatch_count += stack_count;
@@ -5792,7 +5791,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     {
         BUSTER_TEST(arguments, memcmp(indexed->attribute_positions, expected_attributes, sizeof(*expected_attributes) * attribute_count) == 0);
     }
-    BUSTER_TEST(arguments, memcmp(indexed->matching_delimiters, expected_matching, sizeof(*expected_matching) * token_count) == 0);
+    BUSTER_TEST(arguments, memcmp(indexed->matching_delimiters_plus_one, expected_matching_plus_one,
+                                  sizeof(*expected_matching_plus_one) * token_count) == 0);
 
     // Run the same index through the scalar/reference shape fallback. The
     // production sidecar is present above; clearing only this private pointer
@@ -5834,7 +5834,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     {
         BUSTER_TEST(arguments, memcmp(scalar_index.attribute_positions, expected_attributes, sizeof(*expected_attributes) * attribute_count) == 0);
     }
-    BUSTER_TEST(arguments, memcmp(scalar_index.matching_delimiters, expected_matching, sizeof(*expected_matching) * token_count) == 0);
+    BUSTER_TEST(arguments, memcmp(scalar_index.matching_delimiters_plus_one, expected_matching_plus_one,
+                                  sizeof(*expected_matching_plus_one) * token_count) == 0);
     return result;
 }
 
@@ -9891,7 +9892,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArgum
                 if (string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[token]), S8("__typeof__")))
                 {
                     start = token + 2;
-                    end = parse.position_index->matching_delimiters[token + 1];
+                    end = parse.position_index->matching_delimiters_plus_one[token + 1] - 1;
                 }
             }
             Arena* probe = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(16)});
@@ -14936,8 +14937,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.name_lookup_buckets != 0 && parse.entity_lookup_bucket_count != 0);
 
-    CEntityId* token_entities = arena_allocate(arena, CEntityId, preprocess.token_count);
-    memset(token_entities, 0xff, sizeof(*token_entities) * preprocess.token_count);
+    // The production array stores each entity id plus one so an unresolved
+    // token is zero; the oracle builds it in the same encoding.
+    u32* token_entities_plus_one = arena_allocate_zeroed(arena, u32, preprocess.token_count);
 
     CEntityId oldest_shadow = C_ENTITY_ID_INVALID;
     u32 shadow_count = 0;
@@ -14955,8 +14957,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
         shadow_count += 1;
     }
     BUSTER_TEST(arguments, shadow_count == 2);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_index_equivalent(&parse, preprocess, token_entities, (u32)preprocess.token_count));
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_index_lifetime(&parse, preprocess, token_entities, (u32)preprocess.token_count));
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_index_equivalent(&parse, preprocess, token_entities_plus_one, (u32)preprocess.token_count));
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_index_lifetime(&parse, preprocess, token_entities_plus_one, (u32)preprocess.token_count));
 
     // A forged nonzero token symbol must not turn an empty symbol bucket into
     // an early invalid result. Validate the token spelling first, then keep
@@ -14983,7 +14985,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
         malformed_symbol_tokens[shadow_token].symbol = wrong_symbol;
         CPreprocessResult malformed_symbol_preprocess = preprocess;
         malformed_symbol_preprocess.tokens = malformed_symbol_tokens;
-        BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&parse, malformed_symbol_preprocess, token_entities, shadow_token).value == oldest_shadow.value);
+        BUSTER_TEST(arguments,
+                    c_test_ir_constant_entity_at(&parse, malformed_symbol_preprocess, token_entities_plus_one, shadow_token).value == oldest_shadow.value);
     }
 
     bool saw_shadow_fallback = false;
@@ -15004,7 +15007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
                 break;
             }
         }
-        CEntityId actual = c_test_ir_constant_entity_at(&parse, preprocess, token_entities, token_index);
+        CEntityId actual = c_test_ir_constant_entity_at(&parse, preprocess, token_entities_plus_one, token_index);
         BUSTER_TEST(arguments, actual.value == expected.value);
         if (string_equal(name, S8("shadow")) && actual.value == oldest_shadow.value)
         {
@@ -15029,7 +15032,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
     CScope collision_scopes[] = {{.parent = C_SCOPE_ID_INVALID}};
     CEntityId collision_entity_buckets[] = {C_ENTITY_ID_INVALID};
     CEntityId collision_name_buckets[] = {{.value = 1}};
-    CEntityId collision_token_entities[] = {C_ENTITY_ID_INVALID, C_ENTITY_ID_INVALID};
+    u32 collision_token_entities_plus_one[] = {0, 0};
     CPreprocessResult collision_preprocess = {
         .tokens = collision_tokens,
         .spelling_base = collision_spellings.pointer,
@@ -15044,8 +15047,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
         .scope_count = BUSTER_ARRAY_LENGTH(collision_scopes),
         .entity_lookup_bucket_count = 1,
     };
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&collision_parse, collision_preprocess, collision_token_entities, 0).value == 0);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&collision_parse, collision_preprocess, collision_token_entities, 1).value == 1);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&collision_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&collision_parse, collision_preprocess, collision_token_entities_plus_one, 1).value == 1);
 
     // Malformed hand-built chains must never dereference an out-of-range node
     // or loop forever. In either case, discard the partial bucket answer and
@@ -15058,8 +15061,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
     CParseResult malformed_bucket_parse = collision_parse;
     malformed_bucket_parse.entities = malformed_bucket_entities;
     malformed_bucket_parse.name_lookup_buckets = malformed_bucket_head;
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&malformed_bucket_parse, collision_preprocess, collision_token_entities, 0).value == 0);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&malformed_bucket_parse, collision_preprocess, collision_token_entities, 1).value == 1);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&malformed_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&malformed_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 1).value == 1);
 
     CEntity cycle_bucket_entities[] = {
         {.name = S8("alpha"), .next_by_name = {.value = 1}},
@@ -15069,8 +15072,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
     CParseResult cycle_bucket_parse = collision_parse;
     cycle_bucket_parse.entities = cycle_bucket_entities;
     cycle_bucket_parse.name_lookup_buckets = cycle_bucket_head;
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&cycle_bucket_parse, collision_preprocess, collision_token_entities, 0).value == 0);
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&cycle_bucket_parse, collision_preprocess, collision_token_entities, 1).value == 1);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&cycle_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&cycle_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 1).value == 1);
 
     CEntity unordered_bucket_entities[] = {
         {.name = S8("alpha"), .next_by_name = {.value = 1}},
@@ -15081,7 +15084,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
     unordered_bucket_parse.entities = unordered_bucket_entities;
     unordered_bucket_parse.entity_count = BUSTER_ARRAY_LENGTH(unordered_bucket_entities);
     unordered_bucket_parse.name_lookup_buckets = unordered_bucket_head;
-    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&unordered_bucket_parse, collision_preprocess, collision_token_entities, 0).value == 0);
+    BUSTER_TEST(arguments, c_test_ir_constant_entity_at(&unordered_bucket_parse, collision_preprocess, collision_token_entities_plus_one, 0).value == 0);
     scratch_end(temporary);
     return result;
 }
