@@ -3318,7 +3318,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         if (!bootstrap_trace_close(&trace))
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not write bootstrap tokens: {S8}"), path);
             goto end;
         }
@@ -3426,7 +3426,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         bootstrap_trace_ir(&trace, lowered.program, module);
         if (!bootstrap_trace_close(&trace))
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not write bootstrap IR: {S8}"), ir_path);
             goto end;
         }
@@ -3437,7 +3437,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         bootstrap_trace_u64(&mir_trace, invocation.position_independent);
         if (mir_trace.failed)
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not open bootstrap MIR: {S8}"), mir_path);
             goto end;
         }
@@ -3456,7 +3456,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         if (!bootstrap_trace_close(&mir_trace))
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = S8("could not complete bootstrap MIR trace");
             goto end;
         }
