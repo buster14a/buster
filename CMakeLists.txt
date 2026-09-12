@@ -817,6 +817,7 @@ buster_register_module(os "${BUSTER_SOURCE_DIR}/os${COMMON_EXTENSION}")
 buster_register_module(entry_point "${BUSTER_SOURCE_DIR}/entry_point${COMMON_EXTENSION}")
 buster_register_module(arena "${BUSTER_SOURCE_DIR}/arena${COMMON_EXTENSION}")
 buster_register_module(string "${BUSTER_SOURCE_DIR}/string${COMMON_EXTENSION}")
+buster_register_module(byte_writer "${BUSTER_SOURCE_DIR}/byte_writer${COMMON_EXTENSION}")
 buster_register_module(integer "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}")
 buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
 buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
@@ -871,6 +872,7 @@ buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 # Test sources follow the selected build mode: test.c includes them in unity
 # builds, while CMake compiles them as independent translation units otherwise.
 set(BUSTER_TEST_SOURCES
+    src/buster/tests/byte_writer_test.c
     src/buster/tests/arena_test.c
     src/buster/tests/hash_test.c
     src/buster/tests/simd_test.c
@@ -920,6 +922,7 @@ set(BUSTER_TEST_SOURCES
 )
 set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
+    src/buster/tests/byte_writer_test.h
     src/buster/tests/arena_test.h
     src/buster/tests/hash_test.h
     src/buster/tests/simd_test.h
@@ -1794,6 +1797,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_bootstrap_trace
     compiler_codegen
     compiler_dwarf
+    byte_writer
     compiler_codeview
     compiler_pdb
     compiler_object

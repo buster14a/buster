@@ -67,6 +67,7 @@
 #pragma clang attribute pop
 #endif
 #endif
+#include <buster/lib/byte_writer.c>
 #include <buster/lib/arena.c>
 #include <buster/lib/integer.c>
 #include <buster/lib/os.c>

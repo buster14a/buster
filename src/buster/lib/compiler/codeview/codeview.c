@@ -2,10 +2,12 @@
 // and .debug$T type streams a COFF object carries for Windows debuggers,
 // built from DebugModule records. codeview_emit_field_list chains bounded
 // type records, and codeview_scope_walk_make indexes scopes once per build.
+// ByteWriter owns bounded primitive writes; this file owns allocation/layout.
 // pdb.c packages these streams into a standalone PDB at link time.
 
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/string.h>
+#include <buster/lib/byte_writer.h>
 
 #include <string.h>
 
@@ -64,106 +66,37 @@ enum
 #define CODEVIEW_LINE_STATEMENT 0x80000000u
 #define CODEVIEW_LINE_NUMBER_MASK 0x00ffffffu
 
-typedef struct CodeviewBuffer CodeviewBuffer;
-struct CodeviewBuffer
-{
-    u8* bytes;
-    u64 count;
-    u64 capacity;
-    bool overflow;
-    u8 reserved[7];
-};
-
-// See pdb_emit_bytes: remaining-space form so a wrapping `count + size` cannot
-// satisfy the bound.
-BUSTER_GLOBAL_LOCAL void codeview_emit_bytes(CodeviewBuffer* buffer, void const* source, u64 size)
-{
-    if (size > buffer->capacity - buffer->count)
-    {
-        buffer->overflow = true;
-        return;
-    }
-    if (size)
-    {
-        memcpy(buffer->bytes + buffer->count, source, size);
-    }
-    buffer->count += size;
-}
-
-BUSTER_GLOBAL_LOCAL void codeview_emit_u8(CodeviewBuffer* buffer, u8 value)
-{
-    codeview_emit_bytes(buffer, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void codeview_emit_u16(CodeviewBuffer* buffer, u16 value)
-{
-    codeview_emit_bytes(buffer, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void codeview_emit_u32(CodeviewBuffer* buffer, u32 value)
-{
-    codeview_emit_bytes(buffer, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void codeview_write_u16_at(CodeviewBuffer* buffer, u64 offset, u16 value)
-{
-    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
-    {
-        buffer->overflow = true;
-        return;
-    }
-    memcpy(buffer->bytes + offset, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void codeview_write_u32_at(CodeviewBuffer* buffer, u64 offset, u32 value)
-{
-    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
-    {
-        buffer->overflow = true;
-        return;
-    }
-    memcpy(buffer->bytes + offset, &value, sizeof(value));
-}
-
-BUSTER_GLOBAL_LOCAL void codeview_align4(CodeviewBuffer* buffer)
-{
-    while ((buffer->count & 3) && !buffer->overflow)
-    {
-        codeview_emit_u8(buffer, 0);
-    }
-}
-
 // Opens a subsection and returns the offset of its length field, which
 // codeview_subsection_end patches once the payload size is known.
-BUSTER_GLOBAL_LOCAL u64 codeview_subsection_begin(CodeviewBuffer* buffer, u32 kind)
+BUSTER_GLOBAL_LOCAL u64 codeview_subsection_begin(ByteWriter* buffer, u32 kind)
 {
-    codeview_align4(buffer);
-    codeview_emit_u32(buffer, kind);
+    byte_writer_align4(buffer);
+    byte_writer_emit_u32_le(buffer, kind);
     u64 length_offset = buffer->count;
-    codeview_emit_u32(buffer, 0);
+    byte_writer_emit_u32_le(buffer, 0);
     return length_offset;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_subsection_end(CodeviewBuffer* buffer, u64 length_offset)
+BUSTER_GLOBAL_LOCAL void codeview_subsection_end(ByteWriter* buffer, u64 length_offset)
 {
-    codeview_write_u32_at(buffer, length_offset, (u32)(buffer->count - (length_offset + 4)));
-    codeview_align4(buffer);
+    byte_writer_patch_u32_le(buffer, length_offset, (u32)(buffer->count - (length_offset + 4)));
+    byte_writer_align4(buffer);
 }
 
 // Opens a symbol record and returns the offset of its length field; the
 // record length excludes the length field itself and includes 4-alignment
 // padding, which codeview_record_end appends.
-BUSTER_GLOBAL_LOCAL u64 codeview_record_begin(CodeviewBuffer* buffer, u16 record_type)
+BUSTER_GLOBAL_LOCAL u64 codeview_record_begin(ByteWriter* buffer, u16 record_type)
 {
     u64 length_offset = buffer->count;
-    codeview_emit_u16(buffer, 0);
-    codeview_emit_u16(buffer, record_type);
+    byte_writer_emit_u16_le(buffer, 0);
+    byte_writer_emit_u16_le(buffer, record_type);
     return length_offset;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_record_end(CodeviewBuffer* buffer, u64 length_offset)
+BUSTER_GLOBAL_LOCAL void codeview_record_end(ByteWriter* buffer, u64 length_offset)
 {
-    codeview_align4(buffer);
+    byte_writer_align4(buffer);
     u64 size = buffer->count - length_offset;
     if (size < 4 || size > CODEVIEW_MAX_RECORD_SIZE)
     {
@@ -171,20 +104,20 @@ BUSTER_GLOBAL_LOCAL void codeview_record_end(CodeviewBuffer* buffer, u64 length_
     }
     else
     {
-        codeview_write_u16_at(buffer, length_offset, (u16)(size - 2));
+        byte_writer_patch_u16_le(buffer, length_offset, (u16)(size - 2));
     }
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_name(CodeviewBuffer* buffer, String8 name)
+BUSTER_GLOBAL_LOCAL void codeview_emit_name(ByteWriter* buffer, String8 name)
 {
-    codeview_emit_bytes(buffer, name.pointer, name.length);
-    codeview_emit_u8(buffer, 0);
+    byte_writer_emit_bytes(buffer, name.pointer, name.length);
+    byte_writer_emit_u8(buffer, 0);
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_numeric_u32(CodeviewBuffer* buffer, u64 value)
+BUSTER_GLOBAL_LOCAL void codeview_emit_numeric_u32(ByteWriter* buffer, u64 value)
 {
-    codeview_emit_u16(buffer, CV_LF_ULONG);
-    codeview_emit_u32(buffer, (u32)BUSTER_MIN(value, UINT32_MAX));
+    byte_writer_emit_u16_le(buffer, CV_LF_ULONG);
+    byte_writer_emit_u32_le(buffer, (u32)BUSTER_MIN(value, UINT32_MAX));
 }
 
 BUSTER_GLOBAL_LOCAL u32 codeview_model_type_index(DebugModel* model, DebugTypeId type)
@@ -227,15 +160,15 @@ BUSTER_GLOBAL_LOCAL u32 codeview_model_simple_type(DebugType* type)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u64 codeview_type_record_begin(CodeviewBuffer* buffer, u16 leaf)
+BUSTER_GLOBAL_LOCAL u64 codeview_type_record_begin(ByteWriter* buffer, u16 leaf)
 {
     u64 offset = buffer->count;
-    codeview_emit_u16(buffer, 0);
-    codeview_emit_u16(buffer, leaf);
+    byte_writer_emit_u16_le(buffer, 0);
+    byte_writer_emit_u16_le(buffer, leaf);
     return offset;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_type_padding(CodeviewBuffer* buffer)
+BUSTER_GLOBAL_LOCAL void codeview_type_padding(ByteWriter* buffer)
 {
     // Type records use CodeView padding leaves rather than the zero padding
     // accepted by the C13 subsection and symbol readers.  The pad bytes are
@@ -246,11 +179,11 @@ BUSTER_GLOBAL_LOCAL void codeview_type_padding(CodeviewBuffer* buffer)
     u32 padding = (u32)((4 - (buffer->count & 3)) & 3);
     for (u32 index = padding; index != 0; index -= 1)
     {
-        codeview_emit_u8(buffer, (u8)(0xf0 + index));
+        byte_writer_emit_u8(buffer, (u8)(0xf0 + index));
     }
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_type_record_end(CodeviewBuffer* buffer, u64 offset)
+BUSTER_GLOBAL_LOCAL void codeview_type_record_end(ByteWriter* buffer, u64 offset)
 {
     codeview_type_padding(buffer);
     u64 size = buffer->count - offset;
@@ -260,7 +193,7 @@ BUSTER_GLOBAL_LOCAL void codeview_type_record_end(CodeviewBuffer* buffer, u64 of
     }
     else
     {
-        codeview_write_u16_at(buffer, offset, (u16)(size - 2));
+        byte_writer_patch_u16_le(buffer, offset, (u16)(size - 2));
     }
 }
 
@@ -269,7 +202,7 @@ BUSTER_GLOBAL_LOCAL u32 codeview_model_register_target(u16 machine)
     return machine == CODEVIEW_MACHINE_ARM64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(CodeviewBuffer* symbols, DebugLocationRange* range, u32 function_offset, u16 machine)
+BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine)
 {
     if (!range || range->end <= range->start || range->location.kind == DEBUG_LOCATION_UNAVAILABLE)
     {
@@ -281,20 +214,20 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(CodeviewBuffer* symbols, D
     {
         u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER);
         u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, range->location.reg);
-        codeview_emit_u16(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
-        codeview_emit_u16(symbols, 0);
-        codeview_emit_u32(symbols, start);
-        codeview_emit_u16(symbols, 1);
-        codeview_emit_u16(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
+        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
+        byte_writer_emit_u16_le(symbols, 0);
+        byte_writer_emit_u32_le(symbols, start);
+        byte_writer_emit_u16_le(symbols, 1);
+        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
         codeview_record_end(symbols, record);
     }
     else if (range->location.kind == DEBUG_LOCATION_FRAME)
     {
         u64 record = codeview_record_begin(symbols, S_DEFRANGE_FRAMEPOINTER_REL);
-        codeview_emit_u32(symbols, (u32)range->location.frame_offset);
-        codeview_emit_u32(symbols, start);
-        codeview_emit_u16(symbols, 1);
-        codeview_emit_u16(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
+        byte_writer_emit_u32_le(symbols, (u32)range->location.frame_offset);
+        byte_writer_emit_u32_le(symbols, start);
+        byte_writer_emit_u16_le(symbols, 1);
+        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
         codeview_record_end(symbols, record);
     }
     else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
@@ -308,29 +241,29 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(CodeviewBuffer* symbols, D
             {
                 u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD_REGISTER);
                 u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, piece->reg);
-                codeview_emit_u16(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
-                codeview_emit_u16(symbols, 0);
-                codeview_emit_u32(symbols, piece->value_offset);
-                codeview_emit_u32(symbols, piece_start);
-                codeview_emit_u16(symbols, 1);
-                codeview_emit_u16(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
+                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
+                byte_writer_emit_u16_le(symbols, 0);
+                byte_writer_emit_u32_le(symbols, piece->value_offset);
+                byte_writer_emit_u32_le(symbols, piece_start);
+                byte_writer_emit_u16_le(symbols, 1);
+                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
                 codeview_record_end(symbols, record);
             }
             else if (piece->kind == DEBUG_LOCATION_FRAME)
             {
                 u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
-                codeview_emit_u32(symbols, 0);
-                codeview_emit_u16(symbols, (u16)BUSTER_MIN(piece->value_offset, UINT16_MAX));
-                codeview_emit_u32(symbols, piece_start);
-                codeview_emit_u16(symbols, 1);
-                codeview_emit_u16(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
+                byte_writer_emit_u32_le(symbols, 0);
+                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece->value_offset, UINT16_MAX));
+                byte_writer_emit_u32_le(symbols, piece_start);
+                byte_writer_emit_u16_le(symbols, 1);
+                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
                 codeview_record_end(symbols, record);
             }
         }
     }
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(CodeviewBuffer* symbols, DebugModel* model, DebugVariable* variable, u32 function_offset,
+BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(ByteWriter* symbols, DebugModel* model, DebugVariable* variable, u32 function_offset,
                                                       u16 machine)
 {
     if (variable)
@@ -341,7 +274,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(CodeviewBuffer* symbols, D
         if (has_constant)
         {
             u64 record = codeview_record_begin(symbols, S_CONSTANT);
-            codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
+            byte_writer_emit_u32_le(symbols, codeview_model_type_index(model, variable->type));
             codeview_emit_numeric_u32(symbols, variable->locations[0].location.constant);
             codeview_emit_name(symbols, variable->name);
             codeview_record_end(symbols, record);
@@ -349,8 +282,8 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(CodeviewBuffer* symbols, D
         else
         {
             u64 record = codeview_record_begin(symbols, S_LOCAL);
-            codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
-            codeview_emit_u16(symbols, variable->kind == DEBUG_VARIABLE_PARAMETER ? 1 : 0);
+            byte_writer_emit_u32_le(symbols, codeview_model_type_index(model, variable->type));
+            byte_writer_emit_u16_le(symbols, variable->kind == DEBUG_VARIABLE_PARAMETER ? 1 : 0);
             codeview_emit_name(symbols, variable->name);
             codeview_record_end(symbols, record);
             for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
@@ -361,7 +294,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(CodeviewBuffer* symbols, D
     }
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_scope_variables(CodeviewBuffer* symbols, DebugModel* model, DebugScope* scope, u32 function_offset,
+BUSTER_GLOBAL_LOCAL void codeview_emit_scope_variables(ByteWriter* symbols, DebugModel* model, DebugScope* scope, u32 function_offset,
                                                        u16 machine)
 {
     if (!scope)
@@ -419,7 +352,7 @@ BUSTER_GLOBAL_LOCAL CodeviewScopeWalk codeview_scope_walk_make(Arena* arena, Deb
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(CodeviewBuffer* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
+BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
                                                   CodeviewScopeWalk* walk)
 {
     if (model && root != DEBUG_SCOPE_INVALID && root < model->scope_count)
@@ -441,11 +374,11 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(CodeviewBuffer* symbols, Debug
                 }
                 DebugScope* scope = model->scopes + child;
                 u64 block = codeview_record_begin(symbols, S_BLOCK32);
-                codeview_emit_u32(symbols, 0);
-                codeview_emit_u32(symbols, 0);
-                codeview_emit_u32(symbols, scope->end > scope->start ? scope->end - scope->start : 1);
-                codeview_emit_u32(symbols, scope->start >= function_offset ? scope->start - function_offset : 0);
-                codeview_emit_u16(symbols, 1);
+                byte_writer_emit_u32_le(symbols, 0);
+                byte_writer_emit_u32_le(symbols, 0);
+                byte_writer_emit_u32_le(symbols, scope->end > scope->start ? scope->end - scope->start : 1);
+                byte_writer_emit_u32_le(symbols, scope->start >= function_offset ? scope->start - function_offset : 0);
+                byte_writer_emit_u16_le(symbols, 1);
                 codeview_emit_name(symbols, S8("scope"));
                 codeview_record_end(symbols, block);
                 codeview_emit_scope_variables(symbols, model, scope, function_offset, machine);
@@ -465,7 +398,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(CodeviewBuffer* symbols, Debug
     }
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(CodeviewBuffer* symbols, DebugModel* model, DebugVariable* variable,
+BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(ByteWriter* symbols, DebugModel* model, DebugVariable* variable,
                                                        CodeviewRelocation* relocations, u32* relocation_count)
 {
     if (!variable)
@@ -473,7 +406,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(CodeviewBuffer* symbols, 
         return;
     }
     u64 record = codeview_record_begin(symbols, S_GDATA32);
-    codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
+    byte_writer_emit_u32_le(symbols, codeview_model_type_index(model, variable->type));
     if (relocations && relocation_count && *relocation_count < UINT32_MAX)
     {
         relocations[*relocation_count] = (CodeviewRelocation){
@@ -484,7 +417,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(CodeviewBuffer* symbols, 
         };
         *relocation_count += 1;
     }
-    codeview_emit_u32(symbols, 0);
+    byte_writer_emit_u32_le(symbols, 0);
     if (relocations && relocation_count && *relocation_count < UINT32_MAX)
     {
         relocations[*relocation_count] = (CodeviewRelocation){
@@ -495,7 +428,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(CodeviewBuffer* symbols, 
         };
         *relocation_count += 1;
     }
-    codeview_emit_u16(symbols, 1);
+    byte_writer_emit_u16_le(symbols, 1);
     codeview_emit_name(symbols, variable->name);
     codeview_record_end(symbols, record);
 }
@@ -503,7 +436,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(CodeviewBuffer* symbols, 
 // Emit the tail segment first, so LF_INDEX always refers to an already
 // emitted record. Segments retain ascending member order; only their physical
 // order is reversed. A primary type's field-list reference is patched later.
-BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(CodeviewBuffer* types, DebugModel* model, DebugType* type, u32* next_index)
+BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(ByteWriter* types, DebugModel* model, DebugType* type, u32* next_index)
 {
     u32 end = type->kind == DEBUG_TYPE_ENUM ? type->enum_member_count : type->field_count;
     u32 continuation = 0;
@@ -540,17 +473,17 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(CodeviewBuffer* types, DebugMod
             if (type->kind == DEBUG_TYPE_ENUM)
             {
                 DebugEnumMember* member = type->enum_members + index;
-                codeview_emit_u16(types, CV_LF_ENUMERATE);
-                codeview_emit_u16(types, 0);
+                byte_writer_emit_u16_le(types, CV_LF_ENUMERATE);
+                byte_writer_emit_u16_le(types, 0);
                 codeview_emit_numeric_u32(types, member->value);
                 codeview_emit_name(types, member->name);
             }
             else
             {
                 DebugTypeField* field = type->fields + index;
-                codeview_emit_u16(types, CV_LF_MEMBER);
-                codeview_emit_u16(types, 0);
-                codeview_emit_u32(types, codeview_model_type_index(model, field->type));
+                byte_writer_emit_u16_le(types, CV_LF_MEMBER);
+                byte_writer_emit_u16_le(types, 0);
+                byte_writer_emit_u32_le(types, codeview_model_type_index(model, field->type));
                 codeview_emit_numeric_u32(types, field->offset);
                 codeview_emit_name(types, field->name);
             }
@@ -559,9 +492,9 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(CodeviewBuffer* types, DebugMod
         }
         if (continuation)
         {
-            codeview_emit_u16(types, CV_LF_INDEX);
-            codeview_emit_u16(types, 0);
-            codeview_emit_u32(types, continuation);
+            byte_writer_emit_u16_le(types, CV_LF_INDEX);
+            byte_writer_emit_u16_le(types, 0);
+            byte_writer_emit_u32_le(types, continuation);
         }
         codeview_type_record_end(types, record);
         continuation = *next_index;
@@ -571,7 +504,7 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(CodeviewBuffer* types, DebugMod
     return continuation;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugModel* model, u64* auxiliary_offsets)
+BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel* model, u64* auxiliary_offsets)
 {
     for (u32 type_index = 0; type_index < model->type_count && !types->overflow; type_index += 1)
     {
@@ -586,29 +519,29 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
                                                                                                                                   : CV_LF_MODIFIER);
         if (type->kind == DEBUG_TYPE_POINTER)
         {
-            codeview_emit_u32(types, codeview_model_type_index(model, type->element_type));
+            byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
             // PointerKind 0x0c is the 64-bit near pointer used by both
             // supported native CodeView targets.
-            codeview_emit_u32(types, 0x0c);
+            byte_writer_emit_u32_le(types, 0x0c);
         }
         else if (type->kind == DEBUG_TYPE_ARRAY || type->kind == DEBUG_TYPE_VECTOR)
         {
-            codeview_emit_u32(types, codeview_model_type_index(model, type->element_type));
-            codeview_emit_u32(types, 0x0074);
+            byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
+            byte_writer_emit_u32_le(types, 0x0074);
             codeview_emit_numeric_u32(types, type->element_count);
             codeview_emit_name(types, type->name);
         }
         else if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
         {
             types->overflow |= type->field_count > UINT16_MAX;
-            codeview_emit_u16(types, (u16)type->field_count);
-            codeview_emit_u16(types, 0);
+            byte_writer_emit_u16_le(types, (u16)type->field_count);
+            byte_writer_emit_u16_le(types, 0);
             auxiliary_offsets[type_index] = types->count;
-            codeview_emit_u32(types, 0);
+            byte_writer_emit_u32_le(types, 0);
             if (type->kind == DEBUG_TYPE_STRUCT)
             {
-                codeview_emit_u32(types, 0);
-                codeview_emit_u32(types, 0);
+                byte_writer_emit_u32_le(types, 0);
+                byte_writer_emit_u32_le(types, 0);
             }
             codeview_emit_numeric_u32(types, type->size);
             codeview_emit_name(types, type->name);
@@ -616,36 +549,36 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
         else if (type->kind == DEBUG_TYPE_ENUM)
         {
             types->overflow |= type->enum_member_count > UINT16_MAX;
-            codeview_emit_u16(types, (u16)type->enum_member_count);
-            codeview_emit_u16(types, 0);
-            codeview_emit_u32(types, codeview_model_type_index(model, DEBUG_ID_INVALID));
+            byte_writer_emit_u16_le(types, (u16)type->enum_member_count);
+            byte_writer_emit_u16_le(types, 0);
+            byte_writer_emit_u32_le(types, codeview_model_type_index(model, DEBUG_ID_INVALID));
             auxiliary_offsets[type_index] = types->count;
-            codeview_emit_u32(types, 0);
+            byte_writer_emit_u32_le(types, 0);
             codeview_emit_name(types, type->name);
         }
         else if (type->kind == DEBUG_TYPE_TYPEDEF)
         {
-            codeview_emit_u32(types, codeview_model_type_index(model, type->element_type));
+            byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
             codeview_emit_name(types, type->name);
         }
         else if (type->kind == DEBUG_TYPE_FUNCTION)
         {
-            codeview_emit_u32(types, codeview_model_type_index(model, type->return_type));
-            codeview_emit_u8(types, 0);
-            codeview_emit_u8(types, type->is_variadic ? 1 : 0);
+            byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->return_type));
+            byte_writer_emit_u8(types, 0);
+            byte_writer_emit_u8(types, type->is_variadic ? 1 : 0);
             types->overflow |= type->parameter_count > UINT16_MAX;
-            codeview_emit_u16(types, (u16)type->parameter_count);
+            byte_writer_emit_u16_le(types, (u16)type->parameter_count);
             auxiliary_offsets[type_index] = types->count;
-            codeview_emit_u32(types, 0);
+            byte_writer_emit_u32_le(types, 0);
         }
         else
         {
             u32 referent = type->kind == DEBUG_TYPE_QUALIFIED
                                ? codeview_model_type_index(model, type->unqualified_type != DEBUG_ID_INVALID ? type->unqualified_type : type->element_type)
                                : codeview_model_simple_type(type);
-            codeview_emit_u32(types, referent);
+            byte_writer_emit_u32_le(types, referent);
             u16 attributes = (u16)((type->is_const ? 1 : 0) | (type->is_volatile ? 2 : 0));
-            codeview_emit_u16(types, attributes);
+            byte_writer_emit_u16_le(types, attributes);
         }
         codeview_type_record_end(types, record);
     }
@@ -656,16 +589,16 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
         if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION || type->kind == DEBUG_TYPE_ENUM)
         {
             u32 field_index = codeview_emit_field_list(types, model, type, &next_index);
-            codeview_write_u32_at(types, auxiliary_offsets[type_index], field_index);
+            byte_writer_patch_u32_le(types, auxiliary_offsets[type_index], field_index);
         }
         else if (type->kind == DEBUG_TYPE_FUNCTION)
         {
-            codeview_write_u32_at(types, auxiliary_offsets[type_index], next_index++);
+            byte_writer_patch_u32_le(types, auxiliary_offsets[type_index], next_index++);
             u64 record = codeview_type_record_begin(types, CV_LF_ARGLIST);
-            codeview_emit_u32(types, type->parameter_count);
+            byte_writer_emit_u32_le(types, type->parameter_count);
             for (u32 parameter_index = 0; parameter_index < type->parameter_count; parameter_index += 1)
             {
-                codeview_emit_u32(types, codeview_model_type_index(model, type->parameter_types[parameter_index]));
+                byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->parameter_types[parameter_index]));
             }
             codeview_type_record_end(types, record);
         }
@@ -711,34 +644,31 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             symbol_capacity += (u64)input.model->variable_count * 192 + (u64)input.model->scope_count * 96 +
                                (u64)input.model->inline_site_count * 64 + 256;
         }
-        CodeviewBuffer symbols = {
-            .bytes = arena_allocate(arena, u8, symbol_capacity),
-            .capacity = symbol_capacity,
-        };
+        ByteWriter symbols = byte_writer_make(arena_allocate(arena, u8, symbol_capacity), symbol_capacity);
         u64 relocation_capacity = (u64)input.function_count * 4;
         if (input.model && input.model->valid)
         {
             relocation_capacity += (u64)input.model->variable_count * 2;
         }
         result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity);
-        codeview_emit_u32(&symbols, CV_SIGNATURE_C13);
+        byte_writer_emit_u32_le(&symbols, CV_SIGNATURE_C13);
 
         // Translation-unit records: object name and compiler description.
         u64 unit_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
         u64 objname = codeview_record_begin(&symbols, S_OBJNAME);
-        codeview_emit_u32(&symbols, 0);
-        codeview_emit_bytes(&symbols, input.file_paths[0].pointer, input.file_paths[0].length);
-        codeview_emit_u8(&symbols, 0);
+        byte_writer_emit_u32_le(&symbols, 0);
+        byte_writer_emit_bytes(&symbols, input.file_paths[0].pointer, input.file_paths[0].length);
+        byte_writer_emit_u8(&symbols, 0);
         codeview_record_end(&symbols, objname);
         u64 compile3 = codeview_record_begin(&symbols, S_COMPILE3);
-        codeview_emit_u32(&symbols, 0);
-        codeview_emit_u16(&symbols, input.machine);
+        byte_writer_emit_u32_le(&symbols, 0);
+        byte_writer_emit_u16_le(&symbols, input.machine);
         for (u32 version_index = 0; version_index < 8; version_index += 1)
         {
-            codeview_emit_u16(&symbols, 0);
+            byte_writer_emit_u16_le(&symbols, 0);
         }
-        codeview_emit_bytes(&symbols, input.producer.pointer, input.producer.length);
-        codeview_emit_u8(&symbols, 0);
+        byte_writer_emit_bytes(&symbols, input.producer.pointer, input.producer.length);
+        byte_writer_emit_u8(&symbols, 0);
         codeview_record_end(&symbols, compile3);
         codeview_subsection_end(&symbols, unit_symbols);
 
@@ -771,34 +701,34 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             DwarfFunction* function = input.functions + function_index;
             u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
             u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
-            codeview_emit_u32(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, 0);
             u64 end_pointer_offset = symbols.count;
-            codeview_emit_u32(&symbols, 0);
-            codeview_emit_u32(&symbols, 0);
-            codeview_emit_u32(&symbols, function->code_size);
-            codeview_emit_u32(&symbols, 0);
-            codeview_emit_u32(&symbols, function->code_size);
+            byte_writer_emit_u32_le(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, function->code_size);
+            byte_writer_emit_u32_le(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, function->code_size);
             u32 function_type = 0;
             if (input.model && input.model->valid && function_index < input.model->function_count)
             {
                 function_type = codeview_model_type_index(input.model, input.model->functions[function_index].type);
             }
-            codeview_emit_u32(&symbols, function_type);
+            byte_writer_emit_u32_le(&symbols, function_type);
             result.relocations[result.relocation_count++] = (CodeviewRelocation){
                 .offset = symbols.count,
                 .function = function_index,
                 .kind = CODEVIEW_RELOCATION_SECREL32,
             };
-            codeview_emit_u32(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, 0);
             result.relocations[result.relocation_count++] = (CodeviewRelocation){
                 .offset = symbols.count,
                 .function = function_index,
                 .kind = CODEVIEW_RELOCATION_SECTION16,
             };
-            codeview_emit_u16(&symbols, 0);
-            codeview_emit_u8(&symbols, 0);
-            codeview_emit_bytes(&symbols, function->name.pointer, function->name.length);
-            codeview_emit_u8(&symbols, 0);
+            byte_writer_emit_u16_le(&symbols, 0);
+            byte_writer_emit_u8(&symbols, 0);
+            byte_writer_emit_bytes(&symbols, function->name.pointer, function->name.length);
+            byte_writer_emit_u8(&symbols, 0);
             codeview_record_end(&symbols, procedure);
 
             if (input.model && input.model->valid && function_index < input.model->function_count)
@@ -817,9 +747,9 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                         continue;
                     }
                     u64 inline_record = codeview_record_begin(&symbols, S_INLINESITE);
-                    codeview_emit_u32(&symbols, 0);
-                    codeview_emit_u32(&symbols, 0);
-                    codeview_emit_u32(&symbols, 0x1000u + (u32)(debug_function - input.model->functions));
+                    byte_writer_emit_u32_le(&symbols, 0);
+                    byte_writer_emit_u32_le(&symbols, 0);
+                    byte_writer_emit_u32_le(&symbols, 0x1000u + (u32)(debug_function - input.model->functions));
                     codeview_record_end(&symbols, inline_record);
                     u64 inline_end = codeview_record_begin(&symbols, S_INLINESITE_END);
                     codeview_record_end(&symbols, inline_end);
@@ -830,7 +760,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             codeview_record_end(&symbols, end_marker);
             if (end_record <= UINT32_MAX)
             {
-                codeview_write_u32_at(&symbols, end_pointer_offset, (u32)end_record);
+                byte_writer_patch_u32_le(&symbols, end_pointer_offset, (u32)end_record);
             }
             codeview_subsection_end(&symbols, function_symbols);
 
@@ -840,15 +770,15 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 .function = function_index,
                 .kind = CODEVIEW_RELOCATION_SECREL32,
             };
-            codeview_emit_u32(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, 0);
             result.relocations[result.relocation_count++] = (CodeviewRelocation){
                 .offset = symbols.count,
                 .function = function_index,
                 .kind = CODEVIEW_RELOCATION_SECTION16,
             };
-            codeview_emit_u16(&symbols, 0);
-            codeview_emit_u16(&symbols, 0);
-            codeview_emit_u32(&symbols, function->code_size);
+            byte_writer_emit_u16_le(&symbols, 0);
+            byte_writer_emit_u16_le(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, function->code_size);
             u32 function_end = function->code_offset + function->code_size;
             while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function->code_offset)
             {
@@ -858,10 +788,10 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             {
                 u32 run_file = input.lines[line_cursor].file;
                 u64 block_start = symbols.count;
-                codeview_emit_u32(&symbols, run_file * 8);
+                byte_writer_emit_u32_le(&symbols, run_file * 8);
                 u64 count_offset = symbols.count;
-                codeview_emit_u32(&symbols, 0);
-                codeview_emit_u32(&symbols, 0);
+                byte_writer_emit_u32_le(&symbols, 0);
+                byte_writer_emit_u32_le(&symbols, 0);
                 u32 run_lines = 0;
                 while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end && input.lines[line_cursor].file == run_file)
                 {
@@ -871,12 +801,12 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                     {
                         continue;
                     }
-                    codeview_emit_u32(&symbols, entry->code_offset - function->code_offset);
-                    codeview_emit_u32(&symbols, (entry->line & CODEVIEW_LINE_NUMBER_MASK) | CODEVIEW_LINE_STATEMENT);
+                    byte_writer_emit_u32_le(&symbols, entry->code_offset - function->code_offset);
+                    byte_writer_emit_u32_le(&symbols, (entry->line & CODEVIEW_LINE_NUMBER_MASK) | CODEVIEW_LINE_STATEMENT);
                     run_lines += 1;
                 }
-                codeview_write_u32_at(&symbols, count_offset, run_lines);
-                codeview_write_u32_at(&symbols, count_offset + 4, (u32)(symbols.count - block_start));
+                byte_writer_patch_u32_le(&symbols, count_offset, run_lines);
+                byte_writer_patch_u32_le(&symbols, count_offset + 4, (u32)(symbols.count - block_start));
             }
             codeview_subsection_end(&symbols, function_lines);
         }
@@ -886,27 +816,27 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         u64 checksums = codeview_subsection_begin(&symbols, DEBUG_S_FILECHKSMS);
         for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
         {
-            codeview_emit_u32(&symbols, 1 + (u32)file_index);
-            codeview_emit_u8(&symbols, 0);
-            codeview_emit_u8(&symbols, 0);
-            codeview_emit_u16(&symbols, 0);
+            byte_writer_emit_u32_le(&symbols, 1 + (u32)file_index);
+            byte_writer_emit_u8(&symbols, 0);
+            byte_writer_emit_u8(&symbols, 0);
+            byte_writer_emit_u16_le(&symbols, 0);
         }
         codeview_subsection_end(&symbols, checksums);
         u64 string_table = codeview_subsection_begin(&symbols, DEBUG_S_STRINGTABLE);
         u64 string_base = symbols.count;
-        codeview_emit_u8(&symbols, 0);
+        byte_writer_emit_u8(&symbols, 0);
         u32* string_offsets = arena_allocate(arena, u32, input.file_count);
         for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
         {
             string_offsets[file_index] = (u32)(symbols.count - string_base);
-            codeview_emit_bytes(&symbols, input.file_paths[file_index].pointer, input.file_paths[file_index].length);
-            codeview_emit_u8(&symbols, 0);
+            byte_writer_emit_bytes(&symbols, input.file_paths[file_index].pointer, input.file_paths[file_index].length);
+            byte_writer_emit_u8(&symbols, 0);
         }
         codeview_subsection_end(&symbols, string_table);
         // Patch the checksum entries now that string offsets are known.
         for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
         {
-            codeview_write_u32_at(&symbols, checksums + 4 + (u64)file_index * 8, string_offsets[file_index]);
+            byte_writer_patch_u32_le(&symbols, checksums + 4 + (u64)file_index * 8, string_offsets[file_index]);
         }
 
         u64 type_capacity = 4;
@@ -928,11 +858,8 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 }
             }
         }
-        CodeviewBuffer types = {
-            .bytes = arena_allocate(arena, u8, type_capacity),
-            .capacity = type_capacity,
-        };
-        codeview_emit_u32(&types, CV_SIGNATURE_C13);
+        ByteWriter types = byte_writer_make(arena_allocate(arena, u8, type_capacity), type_capacity);
+        byte_writer_emit_u32_le(&types, CV_SIGNATURE_C13);
         if (input.model && input.model->valid)
         {
             u64* auxiliary_offsets = arena_allocate(arena, u64, input.model->type_count ? input.model->type_count : 1);
@@ -940,15 +867,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         }
         if (!symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
         {
-            result.symbols = (ByteSlice){
-                .pointer = symbols.bytes,
-                .length = symbols.count,
-            };
-            result.types = (ByteSlice){
-                .pointer = types.bytes,
-                .length = types.count,
-            };
-            result.valid = true;
+            result.valid = byte_writer_commit(&symbols, &result.symbols) && byte_writer_commit(&types, &result.types);
         }
     }
 
