@@ -1,0 +1,47 @@
+{
+  "0": {
+    "base": {
+      "median_ns": 22030.0,
+      "min_ns": 21867,
+      "max_ns": 52193,
+      "retained": 94092
+    },
+    "patch": {
+      "median_ns": 22283.0,
+      "min_ns": 21806,
+      "max_ns": 23372,
+      "retained": 93612
+    },
+    "change_percent": 1.1484339536995014
+  },
+  "4096": {
+    "base": {
+      "median_ns": 55655.5,
+      "min_ns": 53783,
+      "max_ns": 127737,
+      "retained": 216972
+    },
+    "patch": {
+      "median_ns": 50588.0,
+      "min_ns": 49218,
+      "max_ns": 429732,
+      "retained": 200108
+    },
+    "change_percent": -9.105119889319113
+  },
+  "65536": {
+    "base": {
+      "median_ns": 746810.0,
+      "min_ns": 612920,
+      "max_ns": 4793699,
+      "retained": 2060172
+    },
+    "patch": {
+      "median_ns": 607992.5,
+      "min_ns": 539764,
+      "max_ns": 4685197,
+      "retained": 1797548
+    },
+    "change_percent": -18.588061220390728
+  }
+}

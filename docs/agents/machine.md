@@ -129,6 +129,11 @@
   The private `register_allocator_quality_internal.h` helpers are shared with
   bounded arithmetic/ordering tests. The 24-byte interval, 8-byte traffic cells
   and corresponding diagnostic clear/copy accounting are checked together.
+  Pin planning records assigned value IDs in a bounded touched list (eight spans
+  per target register). Retries clear only those IDs; endpoints are initialized
+  on assignment and read only after the pin-map membership check. Instruction
+  masks and final pin counts use the same list. The global pin-map bridge is
+  scratch-owned and is not retained by the returned placement.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
