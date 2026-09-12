@@ -6442,7 +6442,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     inline_descriptor.preserved_vector_mask = 0;
     inline_function.target = machine_target_x86_64();
     inline_operand.physical_register = MACHINE_X64_RAX;
-    inline_descriptor.clobber_mask = 1ull << MACHINE_X64_RAX;
+    inline_descriptor.clobber_mask = 0;
     inline_operand.constraint_class = IR_INLINE_ASSEMBLY_CONSTRAINT_T;
     inline_operand.flags = MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP;
     BUSTER_TEST(arguments, machine_verify_function(&inline_function).error == MACHINE_VERIFY_NONE);

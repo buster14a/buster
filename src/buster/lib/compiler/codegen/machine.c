@@ -2849,7 +2849,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     bool physical_vector = (function->target->vector_register_mask & (UINT64_C(1) << operand->physical_register)) != 0;
                     valid = physical_vector == vector && ((!x87_top && !x87_below) || function->target == machine_target_x86_64());
                 }
-                operand_register_mask |= valid ? UINT64_C(1) << operand->physical_register : 0;
+                operand_register_mask |= valid && !x87_top && !x87_below ? UINT64_C(1) << operand->physical_register : 0;
                 x87_top_count += x87_top;
                 x87_below_count += x87_below;
                 x87_top_flags |= x87_top ? operand->flags : 0;
