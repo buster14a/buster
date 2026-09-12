@@ -4460,7 +4460,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
 
     CLexResult malformed = c_lex(arguments->arena, S8("/* unterminated"));
     BUSTER_TEST(arguments, malformed.token_count != 0 && malformed.token_shapes != 0);
-    for (u32 token_index = 0; token_index < malformed.token_count; token_index += 1)
+    for (u32 token_index = 0; malformed.token_shapes && malformed.tokens && token_index < malformed.token_count; token_index += 1)
     {
         BUSTER_TEST(arguments, malformed.token_shapes[token_index] == c_token_shape_from_token(malformed.tokens[token_index]));
     }

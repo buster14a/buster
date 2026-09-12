@@ -548,18 +548,13 @@ static u32 wasm64_log2_alignment(u32 alignment)
 
 static bool wasm64_signature_equal(Wasm64Signature* a, Wasm64Signature* b)
 {
-    if (a->param_count != b->param_count || a->has_result != b->has_result || (a->has_result && a->result != b->result))
+    bool result = a->param_count == b->param_count && a->has_result == b->has_result && (!a->has_result || a->result == b->result) &&
+                  (!a->param_count || (a->params && b->params));
+    for (u32 index = 0; result && index < a->param_count; index += 1)
     {
-        return false;
+        result = a->params[index] == b->params[index];
     }
-    for (u32 index = 0; index < a->param_count; index += 1)
-    {
-        if (a->params[index] != b->params[index])
-        {
-            return false;
-        }
-    }
-    return true;
+    return result;
 }
 
 static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature signature)

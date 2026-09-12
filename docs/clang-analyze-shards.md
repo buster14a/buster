@@ -59,13 +59,17 @@ together and assignments do not depend on database order or completion order.
 Identical basenames in different directories share a shard but keep distinct TU
 identities. Empty shards publish an explicit empty report.
 
-Projection retains the existing analyzer policy: replace the compile operation
-with `--analyze`, use text diagnostics, remove object/dependency output options
-and the existing build-host-only definitions. All other database arguments are
-passed in order, including target, optimization, include paths and language
-semantics. The manifest records both original and projected arguments.
+Projection replaces the compile operation with `--analyze`, uses text
+diagnostics and removes object/dependency output options. All semantic arguments
+are retained in order, including build-host definitions previously discarded by
+the old gate. Windows command-field decoding preserves escaped quotes and paths
+with spaces. Commands must explicitly name the selected source. Response files
+are rejected because they could override the projected action; they are not
+emitted by the canonical database. The manifest records both original and
+projected arguments.
 
-Every TU gets a diagnostic log and one terminal row in its shard report. A
+Every TU gets a diagnostic log and one terminal row in its shard report,
+including a SHA-256 of the log. Missing or changed logs fail aggregation too. A
 warning on either output stream fails even with a zero exit status. Nonzero
 exits, crashes, deadlines, launch failures and evidence write failures fail with
 the source/shard named. Aggregation checks every expected shard and TU, rejects
@@ -115,3 +119,17 @@ RSS**. Windows reports zero for unavailable RSS. Compare wall time and the same
 eligible TU count alongside these memory/concurrency limits; no platform-wide
 speedup follows from a single hosted-runner sample. CI retains the revision,
 Clang version, database, CMake cache, manifest, shard reports and logs.
+
+## Split-analysis contracts
+
+The first complete split run found paths hidden by unity analysis. The gate
+keeps every checker enabled and every warning fatal. The accompanying source
+changes short-circuit varargs validation before reading missing types, decline
+layout parsing without its parser context, preserve empty-copy validity and
+check optional backend type/CFG storage. Tests no longer dereference failed
+lexer outputs or invalid register indices after recording an assertion failure.
+Existing internal invariants are explicit at their consumers: list endpoints
+are published together, index arrays exist for counted nonempty ranges, local
+rows and symbol rows share allocation, and metadata helpers retain value
+storage. These checks document the existing validated-input contracts rather
+than suppressing analyzer reports.

@@ -5154,9 +5154,32 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
         while (index < command.length)
         {
             char8 c = command.pointer[index++];
-            if (c == '"')
+            if (c == '\\')
             {
-                in_quotes = !in_quotes;
+                u64 backslashes = 1;
+                while (index < command.length && command.pointer[index] == '\\')
+                {
+                    backslashes += 1;
+                    index += 1;
+                }
+                bool quote = index < command.length && command.pointer[index] == '"';
+                u64 literal = quote ? backslashes / 2 : backslashes;
+                for (u64 i = 0; i < literal; i += 1) arena_append_char8(arena, '\\');
+                if (quote)
+                {
+                    index += 1;
+                    if (backslashes & 1) arena_append_char8(arena, '"');
+                    else in_quotes = !in_quotes;
+                }
+            }
+            else if (c == '"')
+            {
+                if (in_quotes && index < command.length && command.pointer[index] == '"')
+                {
+                    arena_append_char8(arena, '"');
+                    index += 1;
+                }
+                else in_quotes = !in_quotes;
             }
             else if (!in_quotes && character_is_space(c))
             {
@@ -5167,6 +5190,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
                 arena_append_char8(arena, c);
             }
         }
+        *valid = !in_quotes;
 
         String8 argument = {.pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start};
         arena_append_char8(arena, 0);
@@ -5274,14 +5298,6 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 a
     String8 joined_options[] = {
         S8("-MF"), S8("-MJ"), S8("-MQ"), S8("-MT"), S8("-o"), S8("--output="), S8("-dependency-file="),
     };
-    String8 build_host_definitions[] = {
-        S8("-DBUSTER_HOST_C_COMPILER="),
-        S8("-DBUSTER_HOST_C_COMPILER_ID="),
-        S8("-DBUSTER_HOST_C_COMPILER_ARG1="),
-        S8("-DBUSTER_HOST_C_RESOURCE_INCLUDE="),
-        S8("-DBUSTER_HOST_C_COMPILER_MSVC="),
-    };
-
     bool result = false;
     *skip_count = 0;
 
@@ -5311,29 +5327,6 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 a
         if (argument.length > prefix.length && string_starts_with_sequence(argument, prefix))
         {
             *skip_count = 1;
-            result = true;
-            break;
-        }
-    }
-
-    for (u64 i = 0; !result && i < BUSTER_ARRAY_LENGTH(build_host_definitions); i += 1)
-    {
-        String8 prefix = build_host_definitions[i];
-        if (argument.length >= prefix.length && string_starts_with_sequence(argument, prefix))
-        {
-            *skip_count = 1;
-            // CMake can emit an escaped string definition containing spaces as
-            // multiple command arguments on Windows. These build-host values
-            // are adjacent to compiler options and are irrelevant to analysis.
-            while (argument_index + *skip_count < arguments.length)
-            {
-                String8 continuation = arguments.pointer[argument_index + *skip_count];
-                if (continuation.length && continuation.pointer[0] == '-')
-                {
-                    break;
-                }
-                *skip_count += 1;
-            }
             result = true;
             break;
         }

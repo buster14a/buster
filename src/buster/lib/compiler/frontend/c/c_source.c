@@ -3730,6 +3730,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         // so an index of that size covers this symbol and every earlier one;
         // the first definition builds it, and a definition whose id lies
         // past it (the table doubled since) regrows it from the list.
+        BUSTER_CHECK(*first); // The first/last list endpoints are published together.
         if (symbol >= (*first)->by_symbol_capacity)
         {
             c_macro_index_rebuild(arena, *first, symbols->name_capacity);
@@ -6311,6 +6312,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
+            BUSTER_CHECK(!spelling.length || copy); // Counted in foreign_length above.
             for (u64 byte_index = 0; byte_index < spelling.length; byte_index += 1)
             {
                 copy[byte_index] = spelling.pointer[byte_index];
@@ -7448,6 +7450,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
         u32 root_row = c_source_metrics_file_row(arena, &metrics_files, options.source_path);
+        BUSTER_CHECK(metrics_files.rows && root_row < metrics_files.count);
         if (metrics_files.rows[root_row].lex_count == 0)
         {
             c_source_metrics_add(&result.detail->source_unique, &root_lex.metrics);

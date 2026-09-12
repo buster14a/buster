@@ -54,6 +54,7 @@ typedef enum ClangAnalyzeStatus
     CLANG_ANALYZE_PASS,
     CLANG_ANALYZE_WARNING,
     CLANG_ANALYZE_FAILURE,
+    CLANG_ANALYZE_CRASH,
     CLANG_ANALYZE_TIMEOUT,
     CLANG_ANALYZE_LAUNCH,
     CLANG_ANALYZE_LOG_FAILURE,
@@ -62,7 +63,7 @@ typedef enum ClangAnalyzeStatus
 
 BUSTER_GLOBAL_LOCAL String8 clang_analyze_status_name(u64 status)
 {
-    String8 names[] = {S8("pass"), S8("warning"), S8("failure"), S8("timeout"), S8("launch-failure"), S8("log-failure")};
+    String8 names[] = {S8("pass"), S8("warning"), S8("failure"), S8("crash"), S8("timeout"), S8("launch-failure"), S8("log-failure")};
     String8 result = status < BUSTER_ARRAY_LENGTH(names) ? names[status] : S8("invalid-result");
     return result;
 }
@@ -167,6 +168,32 @@ BUSTER_GLOBAL_LOCAL u64 clang_analyze_module_shard(String8 module, u64 shards)
     return hash % shards;
 }
 
+BUSTER_GLOBAL_LOCAL bool clang_analyze_command_accounts_for_source(Arena* arena, CompileCommandEntry entry, SliceString8 arguments)
+{
+    bool valid = true;
+    bool found = false;
+    String8 source = build_relative_path(arena, entry.directory, entry.file);
+    for (u64 i = 0; valid && i < arguments.length; i += 1)
+    {
+        String8 argument = arguments.pointer[i];
+        for (u64 c = 0; valid && c < argument.length; c += 1) valid = argument.pointer[c] != 0;
+        // Response files could reintroduce -c/-o after the analyzer projection.
+        // Refuse them explicitly instead of accepting an unaccounted action.
+        valid = valid && !(argument.length && argument.pointer[0] == '@');
+        if (argument.length && argument.pointer[0] != '-' && clang_analyze_is_c_source(argument))
+        {
+            String8 candidate = build_relative_path(arena, entry.directory, argument);
+            found = found || build_artifact_fanout_path_equal(source, candidate);
+        }
+    }
+    valid = valid && found;
+    if (!valid)
+    {
+        string_print(S8("error: analyzer command must explicitly name its source and contain no response files or NUL bytes: {S8}\n"), entry.file);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool clang_analyze_plan(Arena* arena, ClangAnalyzeOptions options, ClangAnalyzePlan* plan)
 {
     String8 database = clang_analyze_read(arena, options.database);
@@ -187,6 +214,14 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_plan(Arena* arena, ClangAnalyzeOptions op
         valid = valid && arguments.length && arguments.pointer[0].length;
         if (valid && clang_analyze_is_c_source(entry.file) && clang_analyze_entry_matches_config(arena, entry, arguments, options.config))
         {
+            valid = clang_analyze_command_accounts_for_source(arena, entry, arguments);
+            if (!entry.output.length)
+            {
+                for (u64 i = 1; i + 1 < arguments.length; i += 1)
+                {
+                    if (string_equal(arguments.pointer[i], S8("-o"))) entry.output = arguments.pointer[i + 1];
+                }
+            }
             // A TU identity is its directory/file/output in this configuration.
             // Conflicting commands for the same output fail rather than silently
             // choosing one. Distinct outputs for the same source remain eligible.
@@ -245,7 +280,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_plan(Arena* arena, ClangAnalyzeOptions op
     {
         String8List parts = {0};
         string8_list_push(arena, &parts, S8("BUSTER_CLANG_ANALYZE_PLAN_V1\n"));
-        build_artifact_fanout_provenance_record_append_string(arena, &parts, options.results);
+        build_artifact_fanout_provenance_record_append_string(arena, &parts, os_path_absolute_lexical(arena, options.results, true));
         build_artifact_fanout_provenance_record_append_string(arena, &parts, options.config);
         build_artifact_fanout_provenance_record_append_string(arena, &parts, options.clang);
         build_artifact_fanout_provenance_record_append_u64(arena, &parts, options.shards);
@@ -344,7 +379,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_worker(Arena* arena, ClangAnalyzeOptions 
             String8 err = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length};
             bool warning = clang_analyze_output_has_warning(out) || clang_analyze_output_has_warning(err);
             u64 status = !spawn.handle ? CLANG_ANALYZE_LAUNCH : wait.timed_out ? CLANG_ANALYZE_TIMEOUT :
-                         wait.result != PROCESS_RESULT_SUCCESS ? CLANG_ANALYZE_FAILURE : warning ? CLANG_ANALYZE_WARNING : CLANG_ANALYZE_PASS;
+                         wait.result == PROCESS_RESULT_CRASH ? CLANG_ANALYZE_CRASH : wait.result != PROCESS_RESULT_SUCCESS ? CLANG_ANALYZE_FAILURE : warning ? CLANG_ANALYZE_WARNING : CLANG_ANALYZE_PASS;
             String8 pieces[] = {out, err};
             String8 log = string_join_arena(scratch, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), true);
             String8 log_path = path_join(scratch, directory, string_format(scratch, S8("unit-{u64}.log"), i));
@@ -353,7 +388,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_worker(Arena* arena, ClangAnalyzeOptions 
                 status = CLANG_ANALYZE_LOG_FAILURE;
             }
             u64 elapsed = os_now_microseconds() - unit_start;
-            string8_list_push(arena, &rows, string_format(arena, S8("{u64}\n{u64}\n{u64}\n"), i, status, elapsed));
+            string8_list_push(arena, &rows, string_format(arena, S8("{u64}\n{u64}\n{u64}\n{S8}\n"), i, status, elapsed, clang_analyze_sha256(scratch, log)));
             count += 1;
             success = success && status == CLANG_ANALYZE_PASS;
             if (!options.quiet || status != CLANG_ANALYZE_PASS)
@@ -418,9 +453,18 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_aggregate(Arena* arena, ClangAnalyzeOptio
             u64 index = 0;
             u64 status = 0;
             u64 duration = 0;
+            String8 log_fingerprint = {0};
             valid = build_artifact_fanout_provenance_record_read_u64(text, &cursor, &index) && index < plan.count && !seen[index] &&
                     plan.units[index].shard == shard && build_artifact_fanout_provenance_record_read_u64(text, &cursor, &status) &&
-                    status < CLANG_ANALYZE_STATUS_COUNT && build_artifact_fanout_provenance_record_read_u64(text, &cursor, &duration);
+                    status < CLANG_ANALYZE_STATUS_COUNT && build_artifact_fanout_provenance_record_read_u64(text, &cursor, &duration) &&
+                    build_artifact_fanout_provenance_record_read_line(text, &cursor, &log_fingerprint);
+            if (valid)
+            {
+                String8 log_path = path_join(arena, clang_analyze_shard_directory(arena, options, shard), string_format(arena, S8("unit-{u64}.log"), index));
+                String8 log = clang_analyze_read(arena, log_path);
+                valid = log.pointer && string_equal(log_fingerprint, clang_analyze_sha256(arena, log));
+                if (!valid) string_print(S8("error: missing or changed analyzer log: shard={u64} file={S8}\n"), shard, plan.units[index].entry.file);
+            }
             if (valid)
             {
                 seen[index] = true;
@@ -626,6 +670,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_baseline(Arena* arena, ClangAnalyzeOption
 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions options)
 {
+    u64 setup_start = os_now_microseconds();
     ClangAnalyzePlan plan;
     bool success = clang_analyze_plan(arena, options, &plan);
     if (success && options.worker)
@@ -642,6 +687,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
                   clang_analyze_write(arena, path_join(arena, options.results, S8("manifest.txt")), plan.manifest);
         if (success && !options.prepare)
         {
+            u64 setup_us = os_now_microseconds() - setup_start;
             bool baseline = !options.baseline_driver.length || clang_analyze_baseline(arena, options, plan);
             u64 start = os_now_microseconds();
             u64 peak_pending = 0;
@@ -686,7 +732,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             bool aggregate = clang_analyze_aggregate(arena, options, plan);
             success = success && aggregate && baseline;
             string_print(S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} results={S8} status={S8}\n"),
-                         os_now_microseconds() - start, peak_pending, options.jobs, resources.samples, resources.peak_processes, resources.peak_tree_rss,
+                         os_now_microseconds() - start + setup_us, peak_pending, options.jobs, resources.samples, resources.peak_processes, resources.peak_tree_rss,
                          options.results, success ? S8("pass") : S8("fail"));
         }
     }
@@ -810,6 +856,17 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_test_check(bool condition, String8 name, 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 {
     u64 failures = 0;
+    bool split_valid = true;
+    SliceString8 split = shell_split(arena, S8("\"clang tool\" \"-DBUSTER_HOST_C_COMPILER=\\\"C:/Program Files/clang.exe\\\"\" -I\"dir with spaces\" -c \"source file.c\" -o output.o"), &split_valid);
+    String8 expected_macro = S8("-DBUSTER_HOST_C_COMPILER=\"C:/Program Files/clang.exe\"");
+    bool quoted = split_valid && split.length == 7 && string_equal(split.pointer[0], S8("clang tool")) &&
+                  string_equal(split.pointer[1], expected_macro) && string_equal(split.pointer[2], S8("-Idir with spaces")) &&
+                  string_equal(split.pointer[4], S8("source file.c"));
+    clang_analyze_test_check(quoted, S8("compile-command-quoting"), &failures);
+    SliceString8 projected = quoted ? clang_analyzer_command(arena, split, (String8){0}) : (SliceString8){0};
+    clang_analyze_test_check(projected.length == 9 && string_equal(projected.pointer[6], expected_macro) &&
+                             string_equal(projected.pointer[7], S8("-Idir with spaces")) && string_equal(projected.pointer[8], S8("source file.c")),
+                             S8("preserve-semantic-compile-arguments"), &failures);
     String8 root = os_path_absolute_lexical(arena, string_format(arena, S8("build/analyzer-self-test-{u64}"), os_now_microseconds()), true);
     bool ready = clang_analyze_new_directory(arena, root);
     String8 fixture = path_join(arena, root, S8("fixture.exe"));
@@ -860,7 +917,8 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
             clang_analyze_test_check(clang_analyze_write(arena, path, extra) && !clang_analyze_aggregate(arena, options, plan), S8("unaccounted-result"), &failures);
             // Keep a valid header but duplicate one row, then omit a row. These
             // are structurally valid reports whose coverage must still fail.
-            String8 duplicate = string_format(arena, S8(BUSTER_ANALYZE_RESULT_VERSION "{S8}\n{u64}\n2\n1\n1\n0\n0\n1\n0\n0\n1\n"), plan.fingerprint, shard);
+            String8 empty_hash = clang_analyze_sha256(arena, S8(""));
+            String8 duplicate = string_format(arena, S8(BUSTER_ANALYZE_RESULT_VERSION "{S8}\n{u64}\n2\n1\n1\n0\n0\n1\n{S8}\n0\n0\n1\n{S8}\n"), plan.fingerprint, shard, empty_hash, empty_hash);
             clang_analyze_test_check(clang_analyze_write(arena, path, duplicate) && !clang_analyze_aggregate(arena, options, plan), S8("duplicate-TU"), &failures);
             String8 omitted = string_format(arena, S8(BUSTER_ANALYZE_RESULT_VERSION "{S8}\n{u64}\n0\n1\n1\n"), plan.fingerprint, shard);
             clang_analyze_test_check(clang_analyze_write(arena, path, omitted) && !clang_analyze_aggregate(arena, options, plan), S8("omitted-TU"), &failures);
@@ -870,6 +928,11 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
             stale.pointer[sizeof(BUSTER_ANALYZE_RESULT_VERSION) - 1] = 'z';
             clang_analyze_test_check(clang_analyze_write(arena, path, stale) && !clang_analyze_aggregate(arena, options, plan), S8("stale-result"), &failures);
             clang_analyze_test_check(clang_analyze_write(arena, path, original) && clang_analyze_aggregate(arena, options, plan), S8("restored-coverage"), &failures);
+            String8 log_path = path_join(arena, clang_analyze_shard_directory(arena, options, shard), S8("unit-0.log"));
+            remove_path_recursive(arena, log_path);
+            clang_analyze_test_check(!clang_analyze_aggregate(arena, options, plan), S8("missing-log"), &failures);
+            clang_analyze_test_check(clang_analyze_write(arena, log_path, S8("changed")) && !clang_analyze_aggregate(arena, options, plan), S8("changed-log"), &failures);
+            clang_analyze_test_check(clang_analyze_write(arena, log_path, S8("")) && clang_analyze_aggregate(arena, options, plan), S8("restored-log"), &failures);
             options.shard = shard;
             clang_analyze_test_check(!clang_analyze_worker(arena, options, plan), S8("duplicate-worker-refused"), &failures);
             options.config = S8("Debug");

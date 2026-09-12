@@ -4193,7 +4193,9 @@ BUSTER_F_DECL u32 machine_fast_picker_test_cases(void)
         lru_order &= caller_mask && caller_registers[2] != UINT32_MAX;
         ctz_guard &= description->register_count &&
                      machine_fast_first_set(1ull << (description->register_count - 1)) == description->register_count - 1;
-        if (!preferred_mask || !caller_mask || caller_registers[1] == UINT32_MAX || caller_registers[2] == UINT32_MAX)
+        if (!preferred_mask || !caller_mask || preferred_registers[0] >= MACHINE_TARGET_REGISTER_LIMIT ||
+            caller_registers[0] >= MACHINE_TARGET_REGISTER_LIMIT || caller_registers[1] >= MACHINE_TARGET_REGISTER_LIMIT ||
+            caller_registers[2] >= MACHINE_TARGET_REGISTER_LIMIT)
         {
             continue;
         }

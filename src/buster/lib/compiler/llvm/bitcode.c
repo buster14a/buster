@@ -2966,11 +2966,11 @@ static bool llvm_bc_emit_aggregate_instruction(LlvmBcContext* context, LlvmBcFun
     IrType* aggregate_type = llvm_bc_ir_type(context, instruction->canonical_type);
     u32 aggregate_llvm_type = context->ir_type_ids[instruction->canonical_type.value];
     u32 aggregate_value = llvm_bc_undef_constant(context, aggregate_llvm_type);
-    if (aggregate_value == LLVM_BC_INVALID_ID)
+    if (!aggregate_type || aggregate_value == LLVM_BC_INVALID_ID)
     {
         return false;
     }
-    bool vector = aggregate_type && aggregate_type->kind == IR_TYPE_VECTOR;
+    bool vector = aggregate_type->kind == IR_TYPE_VECTOR;
     for (u32 index = 0; index < instruction->operand_count; index += 1)
     {
         u32 value = llvm_bc_function_value_id(context, record, instruction->operands[index]);
