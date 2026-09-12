@@ -23,6 +23,7 @@
 // compiler_driver_unit_lane owns one private TU arena/collector per stable
 // input slot. Opt-in native C link batches publish in input order only after
 // the gang returns; assembly and archive selection remain serial boundaries.
+// archive.c owns indexed archive extraction and its pass-ordered worklist.
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/driver/codegen_configurations.h>
@@ -37,6 +38,7 @@
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
+#include <buster/lib/compiler/driver/archive.c>
 
 void compiler_prewarm(void)
 {
@@ -1641,49 +1643,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_input(String8 path)
     return path.length >= 4 && path.pointer[path.length - 4] == '.' && (path.pointer[path.length - 3] == 'l' || path.pointer[path.length - 3] == 'L') &&
            (path.pointer[path.length - 2] == 'i' || path.pointer[path.length - 2] == 'I') &&
            (path.pointer[path.length - 1] == 'b' || path.pointer[path.length - 1] == 'B');
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_member_needed(ObjectFile* member, ObjectFile* selected, u32 selected_count)
-{
-    // ELF weak references may bind to an already selected definition, but
-    // do not request archive extraction themselves. Keep other formats'
-    // existing selection policy separate from that ELF binding rule.
-    bool weak_extracts = object_format_for_target(member->target) != OBJECT_FORMAT_ELF64;
-    for (u32 member_symbol_index = 0; member_symbol_index < member->symbol_count; member_symbol_index += 1)
-    {
-        ObjectSymbol* member_symbol = &member->symbols[member_symbol_index];
-        if (!member_symbol->global || member_symbol->section == OBJECT_SECTION_UNDEFINED)
-        {
-            continue;
-        }
-        bool unresolved = false;
-        bool defined = false;
-        for (u32 object_index = 0; object_index < selected_count; object_index += 1)
-        {
-            ObjectFile* object = &selected[object_index];
-            for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-            {
-                ObjectSymbol* symbol = &object->symbols[symbol_index];
-                if (!symbol->global || !string_equal(symbol->name, member_symbol->name))
-                {
-                    continue;
-                }
-                if (symbol->section == OBJECT_SECTION_UNDEFINED)
-                {
-                    unresolved = unresolved || !symbol->weak || weak_extracts;
-                }
-                else
-                {
-                    defined = true;
-                }
-            }
-        }
-        if (unresolved && !defined)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 typedef struct CompilerDriverDynamicLibraries CompilerDriverDynamicLibraries;
@@ -3829,6 +3788,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         .suppress_records = invocation.suppress_diagnostic_records,
     };
     CompilerDriverResult result = {.compilation_workers = 1};
+    CompilerDriverArchiveState archive_state = {0};
     u32 fallback_record_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
@@ -4054,23 +4014,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         if (compiler_driver_archive_input(input_path))
         {
             ObjectArchive* archive = &input_archives[input_index];
-            bool* selected = arena_allocate(arena, bool, archive->object_count);
-            memset(selected, 0, sizeof(*selected) * archive->object_count);
-            bool added = false;
-            do
-            {
-                added = false;
-                for (u32 member_index = 0; member_index < archive->object_count; member_index += 1)
-                {
-                    if (selected[member_index] || !compiler_driver_archive_member_needed(&archive->objects[member_index], objects, object_count))
-                    {
-                        continue;
-                    }
-                    selected[member_index] = true;
-                    objects[object_count++] = archive->objects[member_index];
-                    added = true;
-                }
-            } while (added);
+            compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
             continue;
         }
         if (compiler_driver_object_input(input_path))
@@ -4373,23 +4317,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             continue;
         }
         ObjectArchive* archive = &library_archives[library_index];
-        bool* selected = arena_allocate(arena, bool, archive->object_count);
-        memset(selected, 0, sizeof(*selected) * archive->object_count);
-        bool added = false;
-        do
-        {
-            added = false;
-            for (u32 member_index = 0; member_index < archive->object_count; member_index += 1)
-            {
-                if (selected[member_index] || !compiler_driver_archive_member_needed(&archive->objects[member_index], objects, object_count))
-                {
-                    continue;
-                }
-                selected[member_index] = true;
-                objects[object_count++] = archive->objects[member_index];
-                added = true;
-            }
-        } while (added);
+        compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
+    }
+    if (archive_state.arena)
+    {
+        arena_destroy(archive_state.arena, 1);
+        archive_state.arena = 0;
     }
     if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
     {
@@ -4504,6 +4437,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
     }
 finish:
+    if (archive_state.arena) arena_destroy(archive_state.arena, 1);
     // Every lane has joined before this unwind. A failed input can leave
     // later slots populated; none may outlive the driver invocation.
     for (u32 index = 0; index < unit_task_count; index += 1)
