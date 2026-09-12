@@ -167,6 +167,78 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
+    if (fatal_mode.length)
+    {
+        if (string_ends_with_sequence(fatal_mode, S8("closed")))
+        {
+            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
+        }
+#if BUSTER_LINUX
+        if (string_ends_with_sequence(fatal_mode, S8("full")))
+        {
+            int full = open("/dev/full", O_WRONLY);
+            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
+            close(full);
+        }
+#endif
+        if (string_starts_with_sequence(fatal_mode, S8("raw")))
+        {
+            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
+        }
+        else
+        {
+            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
+        }
+    }
+    {
+        String8 modes[] = {S8("raw-live"), S8("formatted-live"), S8("raw-closed"), S8("formatted-closed"),
+#if BUSTER_LINUX
+                           S8("raw-full"), S8("formatted-full"),
+#endif
+        };
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
+        {
+            SliceString8 inherited_keys = program_state->input.environment_keys;
+            SliceString8 inherited_values = program_state->input.environment_values;
+            String8* keys = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            String8* values = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            keys[0] = S8("BUSTER_OS_FATAL_OUTPUT_MODE"); values[0] = modes[index];
+            keys[1] = S8("BUSTER_TEST_JOBS"); values[1] = S8("1");
+            u64 count = 2;
+            for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+            {
+                if (!string_equal(inherited_keys.pointer[inherited], keys[0]) && !string_equal(inherited_keys.pointer[inherited], keys[1]))
+                {
+                    keys[count] = inherited_keys.pointer[inherited]; values[count] = inherited_values.pointer[inherited];
+                    count += 1;
+                }
+            }
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                (SliceString8){keys, count}, (SliceString8){values, count},
+                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+#if BUSTER_WINDOWS
+                BUSTER_TEST(arguments, wait.platform_status == 1);
+#else
+                // Darwin's wait macros take the address of their argument.
+                int native_status = (int)wait.platform_status;
+                BUSTER_TEST(arguments, WIFEXITED(native_status) && WEXITSTATUS(native_status) == 1);
+#endif
+                String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+                BUSTER_TEST(arguments, index < 2 ? string_equal(error, S8("fatal-output-37 at os-fail-regression.c:19 in child\n")) : !error.length);
+            }
+        }
+    }
+#endif
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
     // Recoverable file IO must distinguish errors from EOF, retain short
     // reads, and report write errors instead of aborting a result-producing tool.

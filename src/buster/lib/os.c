@@ -236,29 +236,23 @@ BUSTER_COLD bool is_debugger_present(void)
     return (bool)program_state->_is_debugger_present;
 }
 
-BUSTER_GLOBAL_LOCAL void os_error_print(String8 format, ...)
-{
-    va_list variable_arguments;
-    va_start(variable_arguments, format);
-    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));
-    va_end(variable_arguments);
-}
-
 BUSTER_NORETURN BUSTER_COLD void os_fail_va(u32 line, String8 function, String8 file, String8 context, ...)
 {
+    TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, context);
-    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));
+    String8 message = string_format_va(scratch.arena, context, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));
     va_end(variable_arguments);
-    os_error_print(S8(" at {S8}:{u32} in {S8}\n"), file, line, function);
-    os_exit(1);
+    os_fail_raw(line, function, file, message);
 }
 
 BUSTER_COLD BUSTER_GLOBAL_LOCAL void os_fail_raw_write(OsFileDescriptor* stream, String8 string)
 {
     if (string.length)
     {
-        os_file_write(stream, BUSTER_SLICE_TO_BYTE_SLICE(string));
+        // The process already failed. A full, closed, or disconnected error
+        // stream must not recursively enter the fatal reporter again.
+        (void)os_file_write_attempt(stream, BUSTER_SLICE_TO_BYTE_SLICE(string));
     }
 }
 
