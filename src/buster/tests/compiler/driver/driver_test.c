@@ -4697,6 +4697,95 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, preprocessor_error.error == COMPILER_DRIVER_ERROR_TOKENIZE);
     BUSTER_TEST(arguments, preprocessor_error.tokenizer_error_count == 1);
     BUSTER_TEST(arguments, string_first_sequence(preprocessor_error.diagnostic, S8("expanded driver error")) != BUSTER_STRING_NO_MATCH);
+    // Source UTF-8 errors fail preprocessing, syntax checks and object output.
+    // Keep raw bytes in generated files so host compiler decoding cannot alter
+    // the regression. Includes must name the physical header, not its caller.
+    {
+        String8 malformed[] = {
+            S8("\x80"), S8("\xFF"), S8("\xC0\xAF"), S8("\xED\xA0\x80"), S8("\xF4\x90\x80\x80"), S8("\xE2\x82"),
+        };
+        String8 operations[] = {S8("-E"), S8("-fsyntax-only"), S8("-c")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+        {
+            for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+            {
+                TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+                Arena* utf8_arena = utf8_temporary.arena;
+                String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8"), S8(".c"));
+                String8 output = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8"), S8(".o"));
+                String8 source = string_format(utf8_arena, S8("// heading\r\nint pre\\\r\nfix{S8};\n"), malformed[index]);
+                BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+                String8 sentinel = S8("existing output must survive a source error");
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                String8 utf8_command_line[] = {operations[operation], S8("-std=gnu23"), S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+                BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+                BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+                if (refused.diagnostic_count)
+                {
+                    BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("c.invalid-utf8"));
+                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.offset == 25);
+                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.line == 3);
+                    BUSTER_TEST(arguments, refused.diagnostics[0].primary.position.column == 4);
+                }
+                BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
+                    string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), input)) != BUSTER_STRING_NO_MATCH);
+                ByteSlice retained = file_read(utf8_arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), sentinel);
+                scratch_end(utf8_temporary);
+            }
+        }
+        String8 contexts[] = {
+            S8("#if 0\nint \xFF;\n#endif\n"),
+            S8("#define unused \xFF\n"),
+            S8("#define unused 1.\xFF\n"),
+            S8("#define Q(x) #x\nchar* value = Q(\xFF);\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(contexts); index += 1)
+        {
+            TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+            Arena* utf8_arena = utf8_temporary.arena;
+            String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-context"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(contexts[index])));
+            String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+            BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("invalid UTF-8 sequence")) != BUSTER_STRING_NO_MATCH);
+            scratch_end(utf8_temporary);
+        }
+        TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* utf8_arena = utf8_temporary.arena;
+        String8 header = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-header"), S8(".h"));
+        String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-include"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("// heading\r\nint pre\\\r\nfix\xFF;\n"))));
+        // Both files share a directory. Windows' temporary root is relative;
+        // including that whole path would repeat it relative to the input.
+        u64 header_name_offset = 0;
+        for (u64 index = 0; index < header.length; index += 1)
+        {
+            if (header.pointer[index] == '/' || header.pointer[index] == '\\') header_name_offset = index + 1;
+        }
+        String8 header_name = {header.pointer + header_name_offset, header.length - header_name_offset};
+        String8 source = string_format(utf8_arena, S8("#include \"{S8}\"\n"), header_name);
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+        BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+        BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+        if (refused.diagnostic_count)
+        {
+            BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("c.invalid-utf8"));
+        }
+        BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
+            string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), header)) != BUSTER_STRING_NO_MATCH);
+        scratch_end(utf8_temporary);
+    }
     String8 warning_multi_command_line[] = {
         S8("-fsyntax-only"),
         S8("tests/basic_c_preprocessor_warning.c"),
@@ -11297,6 +11386,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
         S8("tests/basic_c_integer_literals.c"),
+        S8("tests/basic_c_utf8_identifiers.c"),
         S8("tests/basic_c_local_enum_declarator.c"),
         S8("tests/basic_c_attribute_short_spelling.c"),
         S8("tests/basic_c_atomic_specifier.c"),
@@ -11316,6 +11406,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
         S8("buster-c-integer-literals"),
+        S8("buster-c-utf8-identifiers"),
         S8("buster-c-local-enum-declarator"),
         S8("buster-c-attribute-short-spelling"),
         S8("buster-c-atomic-specifier"),
@@ -11332,6 +11423,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-macro-empty-paste"),
         S8("buster-c-preprocessor-short-circuit"),
     };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) == BUSTER_ARRAY_LENGTH(c_quickjs_regression_names));
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
         for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)

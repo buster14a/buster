@@ -187,6 +187,23 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
+- Identifier and preprocessing-number spellings require well-formed UTF-8:
+  shortest encodings of Unicode scalar values, with no surrogate or value above
+  U+10FFFF. This validates encoding without adding Unicode identifier-category
+  or normalization restrictions. `c_lex_validate_word_utf8` reports one
+  `C_DIAGNOSTIC_INVALID_UTF8` per affected word, at the first byte of its first
+  malformed sequence (including a truncated leader). Translation checkpoints
+  retain its original file, byte offset, line and byte column across CRLF and
+  splices, including splices inside a sequence. Lexing precedes preprocessing,
+  so discarded branches, unused macro bodies and stringized arguments are checked.
+  The compact lexer reuses its high-byte mask to escape at the whole word's
+  start; ASCII words retain batch emission. Comments, quoted header names and
+  literal payloads retain their existing byte/literal-conversion policies;
+  angle-header words use the ordinary token encoding rule. This contract does
+  not change shared `utf8_decode` or OS path/argument handling. The independent
+  validity oracle, guard-page/window differential cases and driver failures are
+  registered in the frontend/driver suites; `basic_c_utf8_identifiers.c` checks
+  valid source through every native allocator (GitHub #253).
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.

@@ -1,0 +1,9 @@
+{
+  "baseline": 2611685.5,
+  "candidate": 2627762.5,
+  "median_paired_ratio": 0.9961385459870795,
+  "binaries": {
+    "baseline": "5e972f2af13c5804c393e0f0f13ff44273d693abf7d5a7ea70799e4f9070a685",
+    "candidate": "91fa1ee22525f5b4f9d59a131482e1b4851425773bccafdb24d2e7d0acbf4833"
+  }
+}
