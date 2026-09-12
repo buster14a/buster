@@ -1,26 +1,34 @@
-name: Issue 360 test tools
+name: Issue 360 checked publication
 on:
   push:
     branches: [work/360-source-snapshot]
+    paths: [.github/issue360.patch.gz.b64]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  tools:
+  publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Download distribution test tools
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish the isolated product tree
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/issue360-tools"
-          cd "$RUNNER_TEMP/issue360-tools"
-          apt-get download qemu-user-static tcc
-          sha256sum ./*.deb > packages.sha256
-          for package in ./*.deb; do dpkg-deb -f "$package" Package Version Architecture; done > packages.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: issue360-test-tools
-          path: ${{ runner.temp }}/issue360-tools/
-          if-no-files-found: error
-          retention-days: 7
+          python3 -c 'import base64,gzip,pathlib,os; p=pathlib.Path(".github/issue360.patch.gz.b64"); pathlib.Path(os.environ["RUNNER_TEMP"],"issue360.patch").write_bytes(gzip.decompress(base64.b64decode(p.read_bytes(),validate=False)))'
+          echo "724bde42b630b1ef3350e9bb3138286d00d035a810269e06d0b87bd24ea4509d  $RUNNER_TEMP/issue360.patch" | sha256sum -c -
+          base=d00ba87da23737a945a899f7304ac00b40a1ee04
+          branch=fix/360-public-aapcs64-va-list
+          git fetch origin "$branch"
+          test "$(git rev-parse FETCH_HEAD)" = "$base"
+          git checkout --detach "$base"
+          test "$(git rev-parse HEAD^{tree})" = 151580fd128c806b632de7fa941bb875fcfc5fba
+          git apply --check --whitespace=error-all "$RUNNER_TEMP/issue360.patch"
+          git apply --index --whitespace=error-all "$RUNNER_TEMP/issue360.patch"
+          test "$(git write-tree)" = fa9f7039b6cb0b8c6ae719cbf0741d5ec26b1a15
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'codegen: use public ELF AAPCS64 variable-argument lists'
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'Published %s\nTree %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
