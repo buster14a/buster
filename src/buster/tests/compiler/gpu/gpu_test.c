@@ -201,6 +201,33 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("-filetype=asm")));
     }
     {
+        // Real LLVM 18 llc rejects -g. Debug-enabled IR inputs must remain
+        // usable in every llc pipeline; metadata is carried by the input IR.
+        String8 inputs[] = {S8("kernel.ll")};
+        String8 triples[] = {S8("spirv64"), S8("nvptx64"), S8("amdgcn")};
+        String8 architectures[] = {{0}, S8("sm_70"), S8("gfx900")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(triples); index += 1)
+        {
+            GpuTarget target = gpu_test_target(triples[index]);
+            target.architecture = architectures[index];
+            GpuPipelineOptions options = gpu_test_options(inputs, 1, target, GPU_PIPELINE_ACTION_OBJECT);
+            options.debug_info = true;
+            GpuPipelinePlan plan = gpu_pipeline_plan(arena, options);
+            BUSTER_TEST(arguments, plan.error == GPU_PIPELINE_ERROR_NONE && plan.step_count == 1);
+            BUSTER_TEST(arguments, gpu_test_plan_has_tool(plan, S8("llc")));
+            BUSTER_TEST(arguments, !gpu_test_step_has_argument(plan, 0, S8("-g")));
+        }
+        // Source frontends still receive the requested debug generation flag.
+        inputs[0] = S8("kernel.cl");
+        GpuTarget target = gpu_test_target(S8("amdgcn"));
+        target.architecture = S8("gfx900");
+        GpuPipelineOptions options = gpu_test_options(inputs, 1, target, GPU_PIPELINE_ACTION_OBJECT);
+        options.debug_info = true;
+        GpuPipelinePlan plan = gpu_pipeline_plan(arena, options);
+        BUSTER_TEST(arguments, plan.error == GPU_PIPELINE_ERROR_NONE);
+        BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("-g")));
+    }
+    {
         String8 inputs[] = {S8("kernel.cu")};
         GpuPipelinePlan plan = gpu_pipeline_plan(arena, gpu_test_options(inputs, 1, gpu_test_target(S8("nvptx")), GPU_PIPELINE_ACTION_OBJECT));
         BUSTER_TEST(arguments, plan.error == GPU_PIPELINE_ERROR_INVALID_INPUT);
