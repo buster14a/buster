@@ -274,8 +274,14 @@ erase an earlier failure or turn otherwise successful tests green.
 
 `bash tests/mobile_ci_scripts_test.sh` covers nonzero and hanging commands,
 bounded output, independent batch results and cleanup failure propagation.
-The macOS lifecycle job additionally invokes real codesign against an empty
-app and real simctl shutdown against an invalid device ID. These intentional,
+The macOS lifecycle job first requires real CoreSimulator runtime discovery
+within 180 seconds, retaining its output and status. The fake boot does not
+initialize that service; startup must finish before measuring the native
+negative case against the unchanged 30-second shutdown deadline. Readiness
+failure or timeout fails the job, and the negative case still requires an
+ordinary native error with diagnostic output, never a timeout.
+It then invokes real codesign against an empty app and real simctl shutdown
+against an invalid device ID. These intentional,
 bounded rejections retain native diagnostics and Xcode/runtime provenance;
 they do not diagnose the intermittent signing/shutdown stalls from #394.
 Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` to retain each case's files; the lifecycle
