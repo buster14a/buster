@@ -3347,7 +3347,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_hints(UnitTestArguments* 
     BUSTER_TEST(arguments, input.length != 0);
     String8 names[] = {S8("hint_nop"), S8("hint_nop_clobbers"), S8("hint_spin"), S8("hint_spin_clobbers")};
     CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
-    u16 opcodes[][2] = {{MACHINE_X64_NOP, MACHINE_X64_PAUSE}, {MACHINE_A64_NOP, MACHINE_A64_YIELD}};
     String8 bytes[][2] = {{S8("\x90"), S8("\xf3\x90")}, {S8("\x1f\x20\x03\xd5"), S8("\x3f\x20\x03\xd5")}};
     for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
     {
@@ -3369,7 +3368,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_hints(UnitTestArguments* 
                     BUSTER_TEST_RAW(arguments, selected.supported && encoded.valid, names[name]);
                     if (selected.supported && encoded.valid)
                     {
-                        u16 opcode = opcodes[architecture][name / 2];
+                        u16 opcode = (u16)((architectures[architecture] == CPU_ARCH_X86_64
+                                                ? MACHINE_X64_INLINE_EFFECTS_NONE
+                                                : MACHINE_A64_INLINE_EFFECTS_NONE) +
+                                           (name & 1u ? 3u : 0u));
                         String8 expected = bytes[architecture][name / 2];
                         u32 hint_count = 0;
                         for (u32 row = 0; row < selected.function.instruction_count; row += 1)
@@ -3384,9 +3386,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_hints(UnitTestArguments* 
                         }
                         BUSTER_TEST_RAW(arguments, hint_count == 1, names[name]);
                         MachineOpcodeInfo const* info = machine_opcode_info(opcode);
-                        u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE;
+                        u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
+                                       (name & 1u ? MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE : 0);
                         BUSTER_TEST(arguments, info && (info->attributes & required) == required &&
-                            info->memory_effect == MACHINE_MEMORY_EFFECT_BARRIER && info->clobber_mask == 0);
+                            info->memory_effect == (name & 1u ? MACHINE_MEMORY_EFFECT_BARRIER : MACHINE_MEMORY_EFFECT_NONE) &&
+                            info->clobber_mask == 0);
                     }
                 }
             }
@@ -5835,7 +5839,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 116);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 126);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -7670,8 +7674,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult windows_variadic_selected =
                 machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_function, windows_machine_target);
             BUSTER_TEST(arguments, !windows_variadic_selected.supported);
-            BUSTER_TEST(arguments, !variadic_unsupported_first_selected.supported &&
-                                       variadic_unsupported_first_selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
+            BUSTER_TEST(arguments, variadic_unsupported_first_selected.supported);
+            if (variadic_unsupported_first_selected.supported)
+            {
+                BUSTER_TEST(arguments, machine_verify_function(&variadic_unsupported_first_selected.function).error == MACHINE_VERIFY_NONE);
+            }
         }
         // The lifted non-vector gaps: a thread-local address (ELF local-exec
         // fs sequence), an rvalue compound-literal array base, a variadic
@@ -8251,7 +8258,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, mir_module.statistics.exact_successes == mir_module.statistics.exact_attempts);
         BUSTER_TEST(arguments, mir_module.statistics.exact_failures == 0);
         BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 1,
+        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 0,
                         string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
         IrFunction* mir_add_function = machine_test_ir_function_find(machine_module, S8("add"));
         if (mir_add_function)

@@ -8481,13 +8481,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     memcpy(&movk32, long_text.pointer + byte_offset + 12, sizeof(movk32));
                     memcpy(&movk48, long_text.pointer + byte_offset + 16, sizeof(movk48));
                     memcpy(&add, long_text.pointer + byte_offset + 20, sizeof(add));
-                    bool is_adr_x9 = adr == UINT32_C(0x10000009);
-                    bool is_movz_x10 = (movz & UINT32_C(0xffe0001f)) == UINT32_C(0xd280000a);
-                    bool is_movk16_x10 = (movk16 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2a0000a);
-                    bool is_movk32_x10 = (movk32 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2c0000a);
-                    bool is_movk48_x10 = (movk48 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2e0000a);
-                    bool is_add_x9_x9_x10 = add == UINT32_C(0x8b0a0129);
-                    long_label_sequence |= is_adr_x9 && is_movz_x10 && is_movk16_x10 && is_movk32_x10 && is_movk48_x10 && is_add_x9_x9_x10;
+                    u32 address_register = adr & 31u;
+                    u32 offset_register = movz & 31u;
+                    bool is_adr = (adr & UINT32_C(0x9f000000)) == UINT32_C(0x10000000);
+                    bool is_movz = (movz & UINT32_C(0xffe00000)) == UINT32_C(0xd2800000);
+                    bool is_movk16 = (movk16 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2a00000) | offset_register);
+                    bool is_movk32 = (movk32 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2c00000) | offset_register);
+                    bool is_movk48 = (movk48 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2e00000) | offset_register);
+                    bool is_add = (add & UINT32_C(0xffe0ffff)) ==
+                                  (UINT32_C(0x8b000000) | (offset_register << 16) |
+                                   (address_register << 5) | address_register);
+                    long_label_sequence |= is_adr && is_movz && address_register != offset_register &&
+                                           is_movk16 && is_movk32 && is_movk48 && is_add;
                 }
             }
         }
