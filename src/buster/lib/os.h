@@ -150,6 +150,22 @@ struct OsError
     u32 v;
 };
 
+// A zero error is success. Transfer counts remain valid on failure and never
+// include bytes from a failed system call. Capture errors before cleanup.
+typedef struct OsFileTransferResult OsFileTransferResult;
+struct OsFileTransferResult
+{
+    u64 transferred;
+    OsError error;
+};
+
+typedef struct OsFileOpenResult OsFileOpenResult;
+struct OsFileOpenResult
+{
+    OsFileDescriptor* file;
+    OsError error;
+};
+
 #define BUSTER_OS_ERROR_BUFFER_MAX_LENGTH (BUSTER_KB(64))
 
 BUSTER_F_DECL OsError os_get_last_error(void);
@@ -174,6 +190,12 @@ BUSTER_F_DECL bool os_file_delete(String8 path);
 // Returns whether the tree is gone; a missing `path` counts as success.
 BUSTER_F_DECL bool os_directory_delete(String8 path);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_descriptor, ByteSlice buffer);
+// Flush is explicit: ordinary artifact writes promise completion, not crash
+// durability. Close always consumes the descriptor, including on failure.
+BUSTER_F_DECL OsError os_file_flush(OsFileDescriptor* file_descriptor);
+BUSTER_F_DECL OsError os_file_close_checked(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
 BUSTER_F_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
