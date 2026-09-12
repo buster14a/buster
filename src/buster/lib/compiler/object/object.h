@@ -57,6 +57,13 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_DEBUG_RANGES,
     OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
     OBJECT_SECTION_DEBUG_CODEVIEW_TYPES,
+    // External DWARF 5 contributions stay opaque; relocations join them to
+    // the existing debug sections without changing the compiler's DWARF 4 writer.
+    OBJECT_SECTION_DEBUG_ADDR,
+    OBJECT_SECTION_DEBUG_STR_OFFSETS,
+    OBJECT_SECTION_DEBUG_LINE_STR,
+    OBJECT_SECTION_DEBUG_RNGLISTS,
+    OBJECT_SECTION_DEBUG_LOCLISTS,
     OBJECT_SECTION_COUNT,
 } ObjectSectionKind;
 

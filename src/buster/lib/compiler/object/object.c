@@ -14,6 +14,9 @@
 // ELF and Mach-O write it back out; COFF cannot, because a COMDAT needs its
 // own section and this model merges sections by kind.
 //
+// DWARF 4/5 section payloads are carried without parsing unit headers;
+// object_debug_section_kind_from_name defines the supported section family.
+//
 // __attribute__((alias)) arrives as IrModule.aliases and is turned into
 // symbols by object_from_canonical_codegen_module: an alias owns no storage,
 // so it takes its target's section, offset, size and kind and contributes
@@ -793,104 +796,180 @@ BUSTER_GLOBAL_LOCAL u32 object_assembly_alignment_exponent(u32 alignment)
 
 BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, ObjectSectionKind kind)
 {
+    String8 result;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
         switch (kind)
         {
         case OBJECT_SECTION_TEXT:
-            return S8("\t.section __TEXT,__text,regular,pure_instructions\n");
+            result = S8("\t.section __TEXT,__text,regular,pure_instructions\n");
+            break;
         case OBJECT_SECTION_READ_ONLY_DATA:
-            return S8("\t.section __TEXT,__const\n");
+            result = S8("\t.section __TEXT,__const\n");
+            break;
         case OBJECT_SECTION_DATA:
-            return S8("\t.section __DATA,__data\n");
+            result = S8("\t.section __DATA,__data\n");
+            break;
         case OBJECT_SECTION_ZERO:
-            return S8("\t.section __DATA,__bss,zerofill\n");
+            result = S8("\t.section __DATA,__bss,zerofill\n");
+            break;
         case OBJECT_SECTION_THREAD_LOCAL_DATA:
-            return S8("\t.section __DATA,__thread_data\n");
+            result = S8("\t.section __DATA,__thread_data\n");
+            break;
         case OBJECT_SECTION_THREAD_LOCAL_ZERO:
-            return S8("\t.section __DATA,__thread_bss\n");
+            result = S8("\t.section __DATA,__thread_bss\n");
+            break;
         case OBJECT_SECTION_INIT_ARRAY:
-            return S8("\t.section __DATA,__mod_init_func,mod_init_funcs\n");
+            result = S8("\t.section __DATA,__mod_init_func,mod_init_funcs\n");
+            break;
         case OBJECT_SECTION_FINI_ARRAY:
-            return S8("\t.section __DATA,__mod_term_func,mod_term_funcs\n");
+            result = S8("\t.section __DATA,__mod_term_func,mod_term_funcs\n");
+            break;
         case OBJECT_SECTION_UNWIND:
-            return S8("\t.section __TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support\n");
+            result = S8("\t.section __TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support\n");
+            break;
         case OBJECT_SECTION_WINDOWS_PDATA:
-            return S8("\t.section __DATA,__pdata\n");
+            result = S8("\t.section __DATA,__pdata\n");
+            break;
         case OBJECT_SECTION_WINDOWS_XDATA:
-            return S8("\t.section __DATA,__xdata\n");
+            result = S8("\t.section __DATA,__xdata\n");
+            break;
         case OBJECT_SECTION_DEBUG_INFO:
-            return S8("\t.section __DWARF,__debug_info\n");
+            result = S8("\t.section __DWARF,__debug_info\n");
+            break;
         case OBJECT_SECTION_DEBUG_ABBREV:
-            return S8("\t.section __DWARF,__debug_abbrev\n");
+            result = S8("\t.section __DWARF,__debug_abbrev\n");
+            break;
         case OBJECT_SECTION_DEBUG_LINE:
-            return S8("\t.section __DWARF,__debug_line\n");
+            result = S8("\t.section __DWARF,__debug_line\n");
+            break;
         case OBJECT_SECTION_DEBUG_STR:
-            return S8("\t.section __DWARF,__debug_str\n");
+            result = S8("\t.section __DWARF,__debug_str\n");
+            break;
         case OBJECT_SECTION_DEBUG_LOC:
-            return S8("\t.section __DWARF,__debug_loc\n");
+            result = S8("\t.section __DWARF,__debug_loc\n");
+            break;
         case OBJECT_SECTION_DEBUG_RANGES:
-            return S8("\t.section __DWARF,__debug_ranges\n");
+            result = S8("\t.section __DWARF,__debug_ranges\n");
+            break;
+        case OBJECT_SECTION_DEBUG_ADDR:
+            result = S8("\t.section __DWARF,__debug_addr\n");
+            break;
+        case OBJECT_SECTION_DEBUG_STR_OFFSETS:
+            result = S8("\t.section __DWARF,__debug_str_offs\n");
+            break;
+        case OBJECT_SECTION_DEBUG_LINE_STR:
+            result = S8("\t.section __DWARF,__debug_line_str\n");
+            break;
+        case OBJECT_SECTION_DEBUG_RNGLISTS:
+            result = S8("\t.section __DWARF,__debug_rnglists\n");
+            break;
+        case OBJECT_SECTION_DEBUG_LOCLISTS:
+            result = S8("\t.section __DWARF,__debug_loclists\n");
+            break;
         case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
-            return S8("\t.section __DWARF,__debug$S\n");
+            result = S8("\t.section __DWARF,__debug$S\n");
+            break;
         case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
-            return S8("\t.section __DWARF,__debug$T\n");
+            result = S8("\t.section __DWARF,__debug$T\n");
+            break;
         case OBJECT_SECTION_COUNT:
+        default:
+            result = (String8){0};
             break;
         }
     }
-    switch (kind)
+    else
     {
-    case OBJECT_SECTION_TEXT:
-        return S8("\t.text\n");
-    case OBJECT_SECTION_READ_ONLY_DATA:
-        return S8("\t.section .rodata\n");
-    case OBJECT_SECTION_DATA:
-        return S8("\t.section .data\n");
-    case OBJECT_SECTION_ZERO:
-        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .bss\n")
-                                                                                           : S8("\t.section .bss,\"aw\",@nobits\n");
-    case OBJECT_SECTION_THREAD_LOCAL_DATA:
-        return S8("\t.section .tdata\n");
-    case OBJECT_SECTION_THREAD_LOCAL_ZERO:
-        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tbss\n")
-                                                                                           : S8("\t.section .tbss,\"awT\",@nobits\n");
-    // PE spells these arrays in the `.CRT$X*` group its C runtime walks, not
-    // under the model's neutral name, and object_write_coff writes them there
-    // -- the unprioritized member of each group, because a printed section
-    // carries no per-entry priority (object_initializer_section_name).
-    case OBJECT_SECTION_INIT_ARRAY:
-        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .CRT$XCU,\"dr\"\n")
-                                                                                           : S8("\t.section .init_array,\"aw\",@init_array\n");
-    case OBJECT_SECTION_FINI_ARRAY:
-        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .CRT$XTX,\"dr\"\n")
-                                                                                           : S8("\t.section .fini_array,\"aw\",@fini_array\n");
-    case OBJECT_SECTION_UNWIND:
-        return S8("\t.section .eh_frame,\"a\",@progbits\n");
-    case OBJECT_SECTION_WINDOWS_PDATA:
-        return S8("\t.section .pdata\n");
-    case OBJECT_SECTION_WINDOWS_XDATA:
-        return S8("\t.section .xdata\n");
-    case OBJECT_SECTION_DEBUG_INFO:
-        return S8("\t.section .debug_info\n");
-    case OBJECT_SECTION_DEBUG_ABBREV:
-        return S8("\t.section .debug_abbrev\n");
-    case OBJECT_SECTION_DEBUG_LINE:
-        return S8("\t.section .debug_line\n");
-    case OBJECT_SECTION_DEBUG_STR:
-        return S8("\t.section .debug_str\n");
-    case OBJECT_SECTION_DEBUG_LOC:
-        return S8("\t.section .debug_loc\n");
-    case OBJECT_SECTION_DEBUG_RANGES:
-        return S8("\t.section .debug_ranges\n");
-    case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
-        return S8("\t.section .debug$S\n");
-    case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
-        return S8("\t.section .debug$T\n");
-    case OBJECT_SECTION_COUNT:
-        break;
+        switch (kind)
+        {
+        case OBJECT_SECTION_TEXT:
+            result = S8("\t.text\n");
+            break;
+        case OBJECT_SECTION_READ_ONLY_DATA:
+            result = S8("\t.section .rodata\n");
+            break;
+        case OBJECT_SECTION_DATA:
+            result = S8("\t.section .data\n");
+            break;
+        case OBJECT_SECTION_ZERO:
+            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .bss\n")
+                                                                                               : S8("\t.section .bss,\"aw\",@nobits\n");
+            break;
+        case OBJECT_SECTION_THREAD_LOCAL_DATA:
+            result = S8("\t.section .tdata\n");
+            break;
+        case OBJECT_SECTION_THREAD_LOCAL_ZERO:
+            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tbss\n")
+                                                                                               : S8("\t.section .tbss,\"awT\",@nobits\n");
+            break;
+        // PE spells these arrays in the `.CRT$X*` group its C runtime walks, not
+        // under the model's neutral name, and object_write_coff writes them there
+        // -- the unprioritized member of each group, because a printed section
+        // carries no per-entry priority (object_initializer_section_name).
+        case OBJECT_SECTION_INIT_ARRAY:
+            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .CRT$XCU,\"dr\"\n")
+                                                                                               : S8("\t.section .init_array,\"aw\",@init_array\n");
+            break;
+        case OBJECT_SECTION_FINI_ARRAY:
+            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .CRT$XTX,\"dr\"\n")
+                                                                                               : S8("\t.section .fini_array,\"aw\",@fini_array\n");
+            break;
+        case OBJECT_SECTION_UNWIND:
+            result = S8("\t.section .eh_frame,\"a\",@progbits\n");
+            break;
+        case OBJECT_SECTION_WINDOWS_PDATA:
+            result = S8("\t.section .pdata\n");
+            break;
+        case OBJECT_SECTION_WINDOWS_XDATA:
+            result = S8("\t.section .xdata\n");
+            break;
+        case OBJECT_SECTION_DEBUG_INFO:
+            result = S8("\t.section .debug_info\n");
+            break;
+        case OBJECT_SECTION_DEBUG_ABBREV:
+            result = S8("\t.section .debug_abbrev\n");
+            break;
+        case OBJECT_SECTION_DEBUG_LINE:
+            result = S8("\t.section .debug_line\n");
+            break;
+        case OBJECT_SECTION_DEBUG_STR:
+            result = S8("\t.section .debug_str\n");
+            break;
+        case OBJECT_SECTION_DEBUG_LOC:
+            result = S8("\t.section .debug_loc\n");
+            break;
+        case OBJECT_SECTION_DEBUG_RANGES:
+            result = S8("\t.section .debug_ranges\n");
+            break;
+        case OBJECT_SECTION_DEBUG_ADDR:
+            result = S8("\t.section .debug_addr\n");
+            break;
+        case OBJECT_SECTION_DEBUG_STR_OFFSETS:
+            result = S8("\t.section .debug_str_offsets\n");
+            break;
+        case OBJECT_SECTION_DEBUG_LINE_STR:
+            result = S8("\t.section .debug_line_str\n");
+            break;
+        case OBJECT_SECTION_DEBUG_RNGLISTS:
+            result = S8("\t.section .debug_rnglists\n");
+            break;
+        case OBJECT_SECTION_DEBUG_LOCLISTS:
+            result = S8("\t.section .debug_loclists\n");
+            break;
+        case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
+            result = S8("\t.section .debug$S\n");
+            break;
+        case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
+            result = S8("\t.section .debug$T\n");
+            break;
+        case OBJECT_SECTION_COUNT:
+        default:
+            result = (String8){0};
+            break;
+        }
     }
-    return (String8){0};
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
@@ -3764,50 +3843,87 @@ BUSTER_GLOBAL_LOCAL bool object_read_string_checked(ByteSlice bytes, u64 table_o
 
 String8 object_section_name_for_kind(ObjectSectionKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case OBJECT_SECTION_TEXT:
-        return S8(".text");
+        result = S8(".text");
+        break;
     case OBJECT_SECTION_READ_ONLY_DATA:
-        return S8(".rodata");
+        result = S8(".rodata");
+        break;
     case OBJECT_SECTION_DATA:
-        return S8(".data");
+        result = S8(".data");
+        break;
     case OBJECT_SECTION_ZERO:
-        return S8(".bss");
+        result = S8(".bss");
+        break;
     case OBJECT_SECTION_THREAD_LOCAL_DATA:
-        return S8(".tdata");
+        result = S8(".tdata");
+        break;
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
-        return S8(".tbss");
+        result = S8(".tbss");
+        break;
     case OBJECT_SECTION_INIT_ARRAY:
-        return S8(".init_array");
+        result = S8(".init_array");
+        break;
     case OBJECT_SECTION_FINI_ARRAY:
-        return S8(".fini_array");
+        result = S8(".fini_array");
+        break;
     case OBJECT_SECTION_UNWIND:
-        return S8(".eh_frame");
+        result = S8(".eh_frame");
+        break;
     case OBJECT_SECTION_WINDOWS_PDATA:
-        return S8(".pdata");
+        result = S8(".pdata");
+        break;
     case OBJECT_SECTION_WINDOWS_XDATA:
-        return S8(".xdata");
+        result = S8(".xdata");
+        break;
     case OBJECT_SECTION_DEBUG_INFO:
-        return S8(".debug_info");
+        result = S8(".debug_info");
+        break;
     case OBJECT_SECTION_DEBUG_ABBREV:
-        return S8(".debug_abbrev");
+        result = S8(".debug_abbrev");
+        break;
     case OBJECT_SECTION_DEBUG_LINE:
-        return S8(".debug_line");
+        result = S8(".debug_line");
+        break;
     case OBJECT_SECTION_DEBUG_STR:
-        return S8(".debug_str");
+        result = S8(".debug_str");
+        break;
     case OBJECT_SECTION_DEBUG_LOC:
-        return S8(".debug_loc");
+        result = S8(".debug_loc");
+        break;
     case OBJECT_SECTION_DEBUG_RANGES:
-        return S8(".debug_ranges");
+        result = S8(".debug_ranges");
+        break;
+    case OBJECT_SECTION_DEBUG_ADDR:
+        result = S8(".debug_addr");
+        break;
+    case OBJECT_SECTION_DEBUG_STR_OFFSETS:
+        result = S8(".debug_str_offsets");
+        break;
+    case OBJECT_SECTION_DEBUG_LINE_STR:
+        result = S8(".debug_line_str");
+        break;
+    case OBJECT_SECTION_DEBUG_RNGLISTS:
+        result = S8(".debug_rnglists");
+        break;
+    case OBJECT_SECTION_DEBUG_LOCLISTS:
+        result = S8(".debug_loclists");
+        break;
     case OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS:
-        return S8(".debug$S");
+        result = S8(".debug$S");
+        break;
     case OBJECT_SECTION_DEBUG_CODEVIEW_TYPES:
-        return S8(".debug$T");
+        result = S8(".debug$T");
+        break;
     case OBJECT_SECTION_COUNT:
+    default:
+        result = (String8){0};
         break;
     }
-    return (String8){0};
+    return result;
 }
 
 u32 object_section_default_alignment(ObjectSectionKind kind)
@@ -3863,6 +3979,26 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     else if (string_equal(name, S8(".debug_ranges")) || string_equal(name, S8("__debug_ranges")))
     {
         result = OBJECT_SECTION_DEBUG_RANGES;
+    }
+    else if (string_equal(name, S8(".debug_addr")) || string_equal(name, S8("__debug_addr")))
+    {
+        result = OBJECT_SECTION_DEBUG_ADDR;
+    }
+    else if (string_equal(name, S8(".debug_str_offsets")) || string_equal(name, S8("__debug_str_offs")))
+    {
+        result = OBJECT_SECTION_DEBUG_STR_OFFSETS;
+    }
+    else if (string_equal(name, S8(".debug_line_str")) || string_equal(name, S8("__debug_line_str")))
+    {
+        result = OBJECT_SECTION_DEBUG_LINE_STR;
+    }
+    else if (string_equal(name, S8(".debug_rnglists")) || string_equal(name, S8("__debug_rnglists")))
+    {
+        result = OBJECT_SECTION_DEBUG_RNGLISTS;
+    }
+    else if (string_equal(name, S8(".debug_loclists")) || string_equal(name, S8("__debug_loclists")))
+    {
+        result = OBJECT_SECTION_DEBUG_LOCLISTS;
     }
     else if (string_equal(name, S8(".debug$S")))
     {
@@ -4349,6 +4485,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     read_ok = false;
                 }
+                if (read_ok && debug_kind != OBJECT_SECTION_COUNT && (flags & 0x800))
+                {
+                    // SHF_COMPRESSED payloads need decompression before their
+                    // relocations or contribution offsets can be interpreted.
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported compressed ELF debug section {S8}"), name);
+                    }
+                    read_ok = false;
+                }
             }
             ObjectSectionKind kind = {0};
             if (read_ok)
@@ -4815,6 +4962,21 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
                         {
                             read_ok = false;
+                            if (source_symbol < symbol_count)
+                            {
+                                u16 symbol_section_index = 0;
+                                u32 section_name_offset = 0;
+                                String8 section_name = {0};
+                                if (object_read_u16(bytes, symbol_offset + (u64)source_symbol * ELF_SYMBOL_SIZE + 6, &symbol_section_index) &&
+                                    symbol_section_index && symbol_section_index < section_count &&
+                                    object_read_u32(bytes, section_table + (u64)symbol_section_index * ELF_SECTION_HEADER_SIZE, &section_name_offset) &&
+                                    object_read_string_checked(bytes, section_string_offset, section_string_size, section_name_offset, &section_name) &&
+                                    object_reader_arena_can_allocate_bytes(arena, section_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    result.diagnostic = string_format(arena, S8("ELF relocation references unsupported section {S8}"), section_name);
+                                }
+                            }
                         }
                     }
                     ObjectRelocationKind kind = OBJECT_RELOCATION_COUNT;
@@ -8553,7 +8715,9 @@ bool object_section_kind_is_debug(ObjectSectionKind kind)
 {
     return kind == OBJECT_SECTION_DEBUG_INFO || kind == OBJECT_SECTION_DEBUG_ABBREV || kind == OBJECT_SECTION_DEBUG_LINE ||
            kind == OBJECT_SECTION_DEBUG_STR || kind == OBJECT_SECTION_DEBUG_LOC || kind == OBJECT_SECTION_DEBUG_RANGES ||
-           kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+           kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES ||
+           kind == OBJECT_SECTION_DEBUG_ADDR || kind == OBJECT_SECTION_DEBUG_STR_OFFSETS || kind == OBJECT_SECTION_DEBUG_LINE_STR ||
+           kind == OBJECT_SECTION_DEBUG_RNGLISTS || kind == OBJECT_SECTION_DEBUG_LOCLISTS;
 }
 
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
@@ -11071,6 +11235,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                : source->kind == OBJECT_SECTION_DEBUG_STR        ? S8("__debug_str")
                                : source->kind == OBJECT_SECTION_DEBUG_LOC        ? S8("__debug_loc")
                                : source->kind == OBJECT_SECTION_DEBUG_RANGES     ? S8("__debug_ranges")
+                               : source->kind == OBJECT_SECTION_DEBUG_ADDR       ? S8("__debug_addr")
+                               : source->kind == OBJECT_SECTION_DEBUG_STR_OFFSETS ? S8("__debug_str_offs")
+                               : source->kind == OBJECT_SECTION_DEBUG_LINE_STR   ? S8("__debug_line_str")
+                               : source->kind == OBJECT_SECTION_DEBUG_RNGLISTS   ? S8("__debug_rnglists")
+                               : source->kind == OBJECT_SECTION_DEBUG_LOCLISTS   ? S8("__debug_loclists")
                                                                                : S8("__data");
         String8 segment_name =
             (source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
