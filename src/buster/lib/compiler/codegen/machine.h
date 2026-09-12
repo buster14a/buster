@@ -1759,6 +1759,8 @@ BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
 // below; the accessor fills it on a first serial touch for callers that reach
 // the allocators without going through codegen (tests, the assembler).
 BUSTER_F_DECL MachineOpcodeRow const* machine_opcode_row_table(void);
+BUSTER_F_DECL MachineOpcodeRow machine_instruction_opcode_row(struct MachineFunction const* function,
+                                                              MachineInstruction const* instruction);
 BUSTER_F_DECL void machine_opcode_rows_prewarm(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 // The Win64 register file: the same allocatable set with RSI and RDI moved

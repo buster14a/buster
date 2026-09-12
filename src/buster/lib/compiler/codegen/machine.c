@@ -1678,6 +1678,29 @@ MachineOpcodeRow const* machine_opcode_row_table(void)
     return machine_opcode_row_records;
 }
 
+MachineOpcodeRow machine_instruction_opcode_row(MachineFunction const* function, MachineInstruction const* instruction)
+{
+    MachineOpcodeRow row = {0};
+    machine_opcode_rows_once();
+    if (instruction && instruction->opcode < MACHINE_OPCODE_COUNT)
+    {
+        row = machine_opcode_row_records[instruction->opcode];
+        bool inline_assembly = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY ||
+                               instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY;
+        if (inline_assembly && function && instruction->payload < function->inline_assembly_count)
+        {
+            MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
+            row.clobber_mask = assembly->clobber_mask;
+            row.flags &= (u8)~(MACHINE_OPCODE_ROW_CLOBBERS | MACHINE_OPCODE_ROW_TERMINATOR);
+            row.flags |= assembly->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0;
+            row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0;
+            row.schedule_flags = MACHINE_SCHEDULE_UNIT_BARRIER |
+                                 ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0);
+        }
+    }
+    return row;
+}
+
 u32 machine_x86_64_emit_registry_count(void)
 {
     return MACHINE_X86_64_EMIT_REGISTRY_COUNT;
@@ -3559,7 +3582,7 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             {
                 MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
             }
-            bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
+            bool is_terminator = (machine_instruction_opcode_row(function, instruction).flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
             bool is_last = offset == block->instruction_count - 1;
             if (is_terminator != is_last)
             {
@@ -3792,7 +3815,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
             {
                 return placement;
             }
-            placement.callee_saved_mask |= info->clobber_mask & target->callee_saved_mask;
+            placement.callee_saved_mask |= machine_instruction_opcode_row(function, function->instructions + instruction_index).clobber_mask &
+                                           target->callee_saved_mask;
         }
         u32 push_count = 0;
         for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)

@@ -1261,7 +1261,6 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         memset(prepass.predecessor_offsets, 0, ((u64)function->block_count + 1u) * sizeof(*prepass.predecessor_offsets));
         u32 backward_edge_count = 0;
         bool block_references_only_in_terminators = true;
-        MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
         // The callee-saved question is asked of the union, once, instead of of
         // every row: the mask is a reduction and the row walk only needs to
         // add to it.
@@ -1282,7 +1281,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 // to ask of the 88-byte descriptor: the operand roles, the
                 // constraint predicate, the call/terminator attributes, the
                 // clobber set and the indirect-branch identity.
-                MachineOpcodeRow opcode_row = opcode_rows[opcode];
+                MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
                 clobber_union |= opcode_row.clobber_mask;
                 bool constrained = (opcode_row.flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0;
                 // The operand kinds are three compares of the four inline
@@ -1577,7 +1576,6 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         {
             return placement;
         }
-        MachineOpcodeRow const* placement_opcode_rows = machine_opcode_row_table();
         MachineBuilderStream edits;
         machine_stream_initialize(&edits, sizeof(MachineEdit));
         // Only the callee-saved pins cost a prologue save; a caller-saved pin
@@ -1997,7 +1995,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 // The three predicates and the clobber set come from the
                 // published row, one line, instead of six fields of the
                 // descriptor spread over two.
-                MachineOpcodeRow opcode_row = placement_opcode_rows[instruction->opcode];
+                MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
                 bool constrained = (opcode_row.flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0;
                 bool is_call = (opcode_row.flags & MACHINE_OPCODE_ROW_CALL) != 0;
                 bool is_terminator = (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
@@ -2201,7 +2199,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                     }
                 }
-                u64 clobber_mask = info->clobber_mask;
+                u64 clobber_mask = opcode_row.clobber_mask;
                 for (u32 physical_register = 0; clobber_mask; physical_register += 1)
                 {
                     if (clobber_mask & (1ull << physical_register))
