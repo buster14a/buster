@@ -932,6 +932,39 @@ bool buster_aarch64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOpera
     return true;
 }
 
+bool buster_aarch64_gpr_encode_for_target(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word)
+{
+    bool result = false;
+    if (word && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target) &&
+        form_index < BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT)
+    {
+        BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + form_index;
+        if (a64_gpr_generated_form_valid(form) &&
+            (form->required_feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, form->required_feature)) &&
+            operand_count == form->operand_count && (!operand_count || operands))
+        {
+            u32 encoded = form->fixed_value;
+            result = true;
+            for (u32 index = 0; result && index < operand_count; index += 1)
+            {
+                result = a64_gpr_operand_valid(form->operands[index], operands[index]);
+                if (result)
+                {
+                    encoded |= (u32)operands[index].index << form->operands[index].bit_lsb;
+                }
+            }
+            BusterAarch64CanonicalDecodeResult decoded = {0};
+            result = result && buster_aarch64_canonical_decode(target, encoded, &decoded) == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
+                     decoded.arm_row_digest == form->arm_row_digest;
+            if (result)
+            {
+                *word = encoded;
+            }
+        }
+    }
+    return result;
+}
+
 bool buster_aarch64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
                                                u32* word)
 {
@@ -1319,6 +1352,29 @@ bool buster_aarch64_arm_m1_scalar_integer_encode(Target target, u32 form_index, 
         return false;
     }
     return a64_scalar_recipe_encode(form, operands, operand_count, modifiers, modifier_count, word);
+}
+
+bool buster_aarch64_scalar_integer_encode_for_target(Target target, u32 form_index, A64ScalarIntOperand const* operands, u32 operand_count,
+                                                      A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* word)
+{
+    bool result = false;
+    if (word && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target) &&
+        form_index < BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT)
+    {
+        BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + form_index;
+        u32 encoded = 0;
+        result = a64_scalar_generated_form_valid(form) &&
+                 (form->required_feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, form->required_feature)) &&
+                 a64_scalar_recipe_encode(form, operands, operand_count, modifiers, modifier_count, &encoded);
+        BusterAarch64CanonicalDecodeResult decoded = {0};
+        result = result && buster_aarch64_canonical_decode(target, encoded, &decoded) == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
+                 decoded.arm_row_digest == form->arm_row_digest;
+        if (result)
+        {
+            *word = encoded;
+        }
+    }
+    return result;
 }
 
 bool buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic, A64ScalarIntOperand const* operands,
