@@ -222,6 +222,61 @@ BUSTER_GLOBAL_LOCAL bool c_test_translate_source_paths_agree(Arena* arena, Strin
 // A lexer differential helper reuses its arena. Its rewind must retain the
 // dirty prefix, or the following semantic parse can read non-bool bytes from
 // an aggregate lookup table allocated with arena_allocate_zeroed (#235).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("void *test(int width, volatile int rows[][width], int i) { return &((rows[i])); }"),
+        S8("void *test(int width, char rows[][width]) { return &(rows + 1); }"),
+        S8("void *test(int width, char rows[][width]) { return &(rows[1] + 1); }"),
+        S8("void *test(int width, char rows[][width]) { return &(&rows[1]); }"),
+        S8("void *test(int width, char rows[][width]) { return &(rows[1][0] + 1); }"),
+        S8("void *test(int width, char rows[][width]) { return &((char *)rows[1]); }"),
+        S8("void *test(int width, char rows[][width]) { char (*p)[width] = rows; return &(p++); }"),
+        S8("void *test(int width, char rows[][width]) { return &(0, rows[1]); }"),
+        S8("void *test(int width, char rows[][width]) { return &(width ? &rows[0] : &rows[1]); }"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vla-row-place.c"), tokens, parse, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (index)
+            {
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, sources[index]);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+                if (lowered.program && !lowered.diagnostic_count)
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                        {
+                            // An address computation may load its pointer/index
+                            // locals, but must never read the volatile row.
+                            BUSTER_TEST(arguments, !function->instructions[instruction].volatile_access);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15273,6 +15328,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_parser_diagnostic_storage(arguments));
     c_test_result_add(&result, c_test_constexpr_leaf_storage(arguments));
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
+    c_test_result_add(&result, c_test_vla_row_places(arguments));
     c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
     c_test_result_add(&result, c_test_initializer_relocation_orders(arguments));

@@ -357,6 +357,25 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   it and libc-test's `functional/strftime` failed all 64 of its checks.
   `tests/basic_c_pointer_to_array_place.c` pins that shape under all four
   register allocators.
+- Variably modified arrays use flattened scalar pointers in canonical IR.
+  `CIrVlaValue` in `c_gen.c` keeps the frontend's saved element type, bound
+  arrays, remaining dimension and array-lvalue/pointer-rvalue distinction in
+  a lazy per-function hash table. A partial subscript retains an array-lvalue
+  witness: ordinary decay advances one dimension, while `&` preserves it.
+  Indexing, pointer offsets/differences and dereferencing use that saved shape;
+  pointer-local reads restore their declaration's bounds. Explicit scalar
+  pointer casts discard it, even when canonical pointer types match. `sizeof`
+  of a named VLA pointer's dereference reads the cached suffix size.
+  Compatible conditional pointer results retain their shape through the
+  result slot and remain rvalues. Concrete consumers normalize any pointer
+  shell retained by unevaluated type prediction before applying scalar element
+  scaling. The table dies with the frontend builder; no frontend IDs or shape
+  entries enter canonical IR. Every value-ID retraction invalidates its entry
+  while retaining the hash key, including bulk bit-field recovery rewinds.
+  `tests/basic_c_vla_row_address.c` runs byte/wider-element rows, multidimensional
+  partial subscripts, captured bounds, pointer-slot addresses and joins across
+  both frontend forms and all native allocator modes. Frontend tests separately
+  reject address-of pointer rvalues and check that volatile rows are not read.
 - **An aggregate member the next `.` walks through is a place, not a value.**
   `((T *)p)->a.b` names b, and C 6.5.2.3 gives the route to it no read of its
   own. The expression walk in `c_gen.c` loaded `a` anyway and then recovered
