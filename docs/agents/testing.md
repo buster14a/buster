@@ -30,7 +30,10 @@
   matrix, Android and iOS — on GitHub's standard runners for the migration
   described in `docs/ci-github-actions.md`. Its six desktop lanes cover every
   desktop OS at both x86-64 and AArch64; three independent mobile shards retain
-  the Android and iOS suites without repeating desktop work. Require the
+  the Android and iOS suites without repeating desktop work. The independent
+  `UEFI firmware boot` lane executes both firmware targets in every allocator
+  and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
+  Require the
   aggregate `CI complete` result, not just the desktop names. The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.

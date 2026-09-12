@@ -527,9 +527,61 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  uefi:
+    name: UEFI firmware boot
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned QEMU and reference firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The immutable snapshot keeps the exact packages available after updates.
+          cat > "$RUNNER_TEMP/uefi-sources.list" <<'SOURCES'
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
+          SOURCES
+          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' -o 'APT::Get::List-Cleanup=0')
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
+            qemu-system-x86=1:8.2.2+ds-0ubuntu1.18 qemu-system-arm=1:8.2.2+ds-0ubuntu1.18 \
+            qemu-system-common=1:8.2.2+ds-0ubuntu1.18 qemu-system-data=1:8.2.2+ds-0ubuntu1.18 \
+            ovmf=2024.02-2ubuntu0.9 qemu-efi-aarch64=2024.02-2ubuntu0.9
+      - name: Build driver and validate the boot oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/uefi-driver
+          build/uefi-driver test_uefi --self-test build/uefi-self-test
+      - name: Build compiler and boot both architectures in all allocators
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/uefi-driver generate --build-directory build/uefi-compiler --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          build/uefi-driver build --build-directory build/uefi-compiler --config Release -t ide -- -j2
+          build/uefi-driver test_uefi build/uefi-compiler/Release/ide build/uefi
+      - name: Retain firmware execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: uefi-boot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/uefi
+            !build/uefi/**/VARS.fd
+            build/uefi-self-test
+            build/uefi-compiler/CMakeCache.txt
+          if-no-files-found: warn
+          retention-days: 14
+
   complete:
     name: CI complete
-    needs: [lint, test, native, mobile]
+    needs: [lint, test, native, mobile, uefi]
     if: ${{ always() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -541,13 +593,15 @@ jobs:
           DESKTOP_RESULT: ${{ needs.test.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
           MOBILE_RESULT: ${{ needs.mobile.result }}
+          UEFI_RESULT: ${{ needs.uefi.result }}
         run: |
           {
             printf '| Shards | Result |\n| --- | --- |\n| All six desktop lanes | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
             printf '| All four native lanes | %s |\n' "$NATIVE_RESULT"
+            printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success ]]; then
-            echo '::error::All desktop, native and mobile shards must succeed; failure, cancellation and skips do not pass.'
+          if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success || "$UEFI_RESULT" != success ]]; then
+            echo '::error::All desktop, native, mobile and UEFI shards must succeed; failure, cancellation and skips do not pass.'
             exit 1
           fi
