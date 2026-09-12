@@ -176,6 +176,16 @@ semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
+`object_print_assembly` builds immutable per-section views of symbol and
+relocation indices. Offset ordering uses original table indices to break ties;
+label and duplicate-relocation order, original `.extern`/`.size` order and
+range-query table precedence are preserved. Section emission advances cursors;
+nonmonotonic decoder/literal queries use binary search without moving them.
+Ordered sections skip sorting, and all index/internal-label scratch is rewound
+before returning the assembly bytes. See the [printer scaling
+replay](benchmarking.md#object-assembly-printer-scaling) for output and memory
+controls.
+
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
 layer above `assembly_encode`: it interprets the directive vocabulary, tracks
