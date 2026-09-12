@@ -352,7 +352,9 @@ BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_find_form(String8 mnemonic, A64GprO
 BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count,
                                                     u32* word);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands,
-                                                             u32 operand_count, u32* word);
+                                                              u32 operand_count, u32* word);
+BUSTER_F_DECL bool buster_aarch64_gpr_encode_for_target(Target target, u32 form_index, A64GprOperand const* operands,
+                                                        u32 operand_count, u32* word);
 // Short aliases used by assembler-side code and tests.
 BUSTER_F_DECL bool a64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* form_index);
 BUSTER_F_DECL bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word);
@@ -475,9 +477,13 @@ BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_encode(Target target, u3
                                                               u32 operand_count, A64ScalarIntModifier const* modifiers,
                                                               u32 modifier_count, u32* word);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic,
-                                                                       A64ScalarIntOperand const* operands, u32 operand_count,
-                                                                       A64ScalarIntModifier const* modifiers, u32 modifier_count,
-                                                                       u32* word);
+                                                                         A64ScalarIntOperand const* operands, u32 operand_count,
+                                                                         A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                                         u32* word);
+BUSTER_F_DECL bool buster_aarch64_scalar_integer_encode_for_target(Target target, u32 form_index,
+                                                                   A64ScalarIntOperand const* operands, u32 operand_count,
+                                                                   A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                                   u32* word);
 // Short aliases used by assembler-side code and tests.
 BUSTER_F_DECL bool a64_arm_m1_scalar_integer_find_form(String8 mnemonic, A64ScalarIntOperand const* operands, u32 operand_count,
                                                        A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* form_index);

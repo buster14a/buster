@@ -4015,7 +4015,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             {
                 return true;
             }
-            if (!buster_aarch64_arm_m1_scalar_integer_target(target)) return false;
             u32 scalar_form_count = buster_aarch64_arm_m1_scalar_integer_form_count();
             u8 scalar_operand_count = 0;
             bool scalar_found = false;
@@ -4050,7 +4049,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             // mnemonic known even when an explicit feature subtraction later
             // rejects the selected row, so diagnostics distinguish unsupported
             // features from malformed operands.
-            if (!buster_aarch64_arm_m1_gpr_target(target)) return false;
             u32 form_count = buster_aarch64_arm_m1_gpr_form_count();
             u8 operand_count = 0;
             bool found = false;
@@ -8050,8 +8048,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_m1_collision_parse(AssemblyBuilder* bu
 
         bool scalar_known = false;
         u8 scalar_operand_count = 0;
-        for (u32 form_index = 0; buster_aarch64_arm_m1_scalar_integer_target(builder->target) &&
-                                  form_index < buster_aarch64_arm_m1_scalar_integer_form_count(); form_index += 1)
+        for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_scalar_integer_form_count(); form_index += 1)
         {
             BusterAarch64ArmM1ScalarIntegerForm form = {0};
             if (!buster_aarch64_arm_m1_scalar_integer_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic))
@@ -8088,8 +8085,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_m1_collision_parse(AssemblyBuilder* bu
 
         bool gpr_known = false;
         u8 gpr_operand_count = 0;
-        for (u32 form_index = 0; buster_aarch64_arm_m1_gpr_target(builder->target) &&
-                                  form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
+        for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
         {
             BusterAarch64ArmM1GprForm form = {0};
             if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic))
@@ -13962,7 +13958,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 };
             }
             u32 word = 0;
-            if (!a64_arm_m1_gpr_encode(builder->target, instruction->aarch64_gpr_form_index, gpr_operands, instruction->operand_count, &word))
+            if (!buster_aarch64_gpr_encode_for_target(builder->target, instruction->aarch64_gpr_form_index, gpr_operands,
+                                                       instruction->operand_count, &word))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
                                     S8("AArch64 instruction could not be encoded"));
@@ -14155,11 +14152,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER)
         {
             u32 word = 0;
-            if (!a64_arm_m1_scalar_integer_encode(builder->target, instruction->aarch64_scalar_integer_form_index,
-                                                  instruction->aarch64_scalar_integer_operands,
-                                                  instruction->aarch64_scalar_integer_operand_count,
-                                                  instruction->aarch64_scalar_integer_modifiers,
-                                                  instruction->aarch64_scalar_integer_modifier_count, &word))
+            if (!buster_aarch64_scalar_integer_encode_for_target(builder->target, instruction->aarch64_scalar_integer_form_index,
+                                                                  instruction->aarch64_scalar_integer_operands,
+                                                                  instruction->aarch64_scalar_integer_operand_count,
+                                                                  instruction->aarch64_scalar_integer_modifiers,
+                                                                  instruction->aarch64_scalar_integer_modifier_count, &word))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
                                     S8("AArch64 instruction could not be encoded"));
