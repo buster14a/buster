@@ -3252,6 +3252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                                     barrier_count += selected.function.instructions[row].opcode == barrier_opcode;
                                 }
                                 BUSTER_TEST_RAW(arguments, barrier_count == 1, description);
+                                MachineOpcodeInfo const* info = machine_opcode_info(barrier_opcode);
                                 if (fixtures[fixture].general)
                                 {
                                     MachineInlineAssembly* descriptor = 0;
@@ -3274,7 +3275,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                                 }
                                 else
                                 {
-                                    MachineOpcodeInfo const* info = machine_opcode_info(barrier_opcode);
                                     u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
                                                    ((effect_index & 2u) || fixtures[fixture].identity ? MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE : 0);
                                     MachineMemoryEffect memory = (effect_index & 1u) || fixtures[fixture].identity
