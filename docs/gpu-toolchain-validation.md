@@ -17,7 +17,7 @@ run is availability information and provides no semantic acceptance evidence.
 
 | Profile | Supported tools | Artifact and independent acceptance |
 |---|---|---|
-| `spirv-dxc-2025.07` | DXC release `v1.8.2505.1`, commit `b106a961`; SPIRV-Tools 2025.1 | HLSL compute SM 6.0 to Vulkan 1.2 SPIR-V; `spirv-val --target-env vulkan1.2 artifact` |
+| `spirv-dxc-2025.07` | DXC release `v1.8.2505.1`, commit `b106a961`; SPIRV-Tools 2025.1 or 2026.1 | HLSL compute SM 6.0 to Vulkan 1.2 SPIR-V; `spirv-val --target-env vulkan1.2 artifact` |
 | `ptx-llvm18-cuda12.4` | LLVM 18.1.x; NVIDIA ptxas 12.4.131 | NVVM-annotated LLVM IR to `sm_70` PTX; `ptxas -v -arch=sm_70 artifact -o accepted.cubin`, requiring the kernel name in its assembly report |
 | `amdgcn-llvm18` | Clang, LLD, llvm-readobj and llvm-objdump 18.1.x | OpenCL to `gfx900` ET_REL and HSA ET_DYN; read headers, symbols and decoded kernel metadata; disassemble and require `s_endpgm` without unknown instructions |
 | `metal-xcode16.4` | macOS, Xcode 16.4, macOS SDK, accessible Metal device | Metal source to AIR; real metallib linker accepts AIR; separately built C Metal-framework consumer loads the metallib, resolves `buster_gpu_smoke`, and creates its compute pipeline |
@@ -104,7 +104,11 @@ The output directory preserves:
 
 `.github/workflows/gpu-toolchains.yml` runs all four Linux profiles when the
 repository's existing `GH_ACTIONS_CI_ENABLED` switch is enabled. Ubuntu supplies
-the LLVM 18.1 and SPIRV-Tools 2025.1 families. DXC's archive is SHA-256 pinned;
+the LLVM 18.1 family and, on the Ubuntu 26.04 runner, SPIRV-Tools 2026.1.
+The original SPIRV-Tools 2025.1 consumer remains supported for local replay;
+other releases fail version admission. The self-test covers both accepted
+banners and rejects untested releases and version-prefix collisions.
+DXC's archive is SHA-256 pinned;
 NVIDIA's small ptxas wheel is pinned in `tests/gpu/ptxas-requirements.txt` and
 installed with `--require-hashes --no-deps`. Python is only a tool provisioner;
 the build, execution and acceptance logic are native C. The required profiles
