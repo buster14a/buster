@@ -7311,7 +7311,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left
     {
         valid = os_file_close(right_fd) && valid;
     }
-    valid = valid && (allow_empty || (left_size && right_size));
+    valid = valid && left_size != UINT64_MAX && right_size != UINT64_MAX && (allow_empty || (left_size && right_size));
     u64 offset = 0;
     if (valid && left_size && right_size)
     {

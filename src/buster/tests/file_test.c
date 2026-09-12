@@ -81,10 +81,122 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_write_failures(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_failures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("file-read-fault"), S8(".bin"));
+    String8 text = S8("0123456789abcdefghijklmnopqrstuvwxyz");
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    u8 buffer[64];
+    memset(buffer, 0xA5, sizeof(buffer));
+    OsFileReadResult empty = os_file_read_some(0, (ByteSlice){0});
+    BUSTER_TEST(arguments, empty.status == OS_FILE_READ_OK && !empty.transferred && !empty.error.v);
+    BUSTER_TEST(arguments, os_file_read_exact(0, (ByteSlice){0}).status == OS_FILE_READ_OK);
+    BUSTER_TEST(arguments, os_file_read_some(0, (ByteSlice){buffer, 1}).status == OS_FILE_READ_ERROR);
+    BUSTER_TEST(arguments, os_file_read_exact(0, (ByteSlice){buffer, 1}).status == OS_FILE_READ_ERROR);
+    FileStats invalid = os_file_get_stats(0, (FileStatsOptions){.size = 1});
+    BUSTER_TEST(arguments, !invalid.valid && invalid.error.v != 0);
+    BUSTER_TEST(arguments, os_file_get_size(0) == UINT64_MAX);
+
+    OsFileTestStep prefix[] = {{OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}};
+    for (u32 exact = 0; exact < 2; exact += 1)
+    {
+        os_file_test_begin(path, prefix, 2);
+        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        BUSTER_TEST(arguments, file != 0);
+        if (file)
+        {
+            OsFileReadResult read;
+            if (exact) read = os_file_read_exact(file, (ByteSlice){buffer, text.length});
+            else
+            {
+                read = os_file_read_some(file, (ByteSlice){buffer, text.length});
+                BUSTER_TEST(arguments, read.status == OS_FILE_READ_OK && read.transferred == 7 && !read.error.v);
+                BUSTER_TEST(arguments, memory_compare(buffer, text.pointer, 7));
+                read = os_file_read_some(file, (ByteSlice){buffer + 7, text.length - 7});
+            }
+            BUSTER_TEST(arguments, read.status == OS_FILE_READ_ERROR && read.error.v == 12345);
+            BUSTER_TEST(arguments, read.transferred == (exact ? 7u : 0u));
+            BUSTER_TEST(arguments, memory_compare(buffer, text.pointer, 7));
+            BUSTER_TEST(arguments, os_file_close(file));
+        }
+        BUSTER_TEST(arguments, os_file_test_end() == 2);
+    }
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    BUSTER_TEST(arguments, file != 0);
+    if (file)
+    {
+        OsFileReadResult read = os_file_read_exact(file, (ByteSlice){buffer, sizeof(buffer)});
+        BUSTER_TEST(arguments, read.status == OS_FILE_READ_EOF && read.transferred == text.length && !read.error.v);
+        BUSTER_TEST(arguments, memory_compare(buffer, text.pointer, text.length));
+        read = os_file_read_some(file, (ByteSlice){buffer, sizeof(buffer)});
+        BUSTER_TEST(arguments, read.status == OS_FILE_READ_EOF && !read.transferred && !read.error.v);
+        BUSTER_TEST(arguments, os_file_close(file));
+    }
+    // Sizes smaller/larger than the actual descriptor model growth/truncation
+    // immediately after the size snapshot, independent of thread scheduling.
+    OsFileTestStep scripts[][4] = {
+        {{OS_FILE_TEST_OPEN, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_STATS, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345},
+         {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
+        {{OS_FILE_TEST_READ, OS_FILE_TEST_ZERO, 0}},
+        {{OS_FILE_TEST_STATS, OS_FILE_TEST_SIZE, 100}},
+        {{OS_FILE_TEST_STATS, OS_FILE_TEST_SIZE, 7}},
+        {{OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7},
+         {OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}},
+        {{OS_FILE_TEST_STATS, OS_FILE_TEST_SIZE, 0}, {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 1},
+         {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}},
+        {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
+    };
+    u32 counts[] = {1, 1, 1, 3, 1, 1, 1, 3, 3, 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(scripts); index += 1)
+    {
+        bool success = index == 6 || index == 7;
+        u64 mark = arguments->arena->position;
+        os_file_test_begin(path, scripts[index], counts[index]);
+        FileReadResult read = file_read_checked(arguments->arena, path, (FileReadOptions){.start_padding = 3, .end_padding = 5});
+        BUSTER_TEST(arguments, os_file_test_end() == counts[index]);
+        BUSTER_TEST(arguments, (read.bytes.pointer != 0) == success);
+        BUSTER_TEST(arguments, (read.status == OS_FILE_READ_OK) == success);
+        if (success)
+        {
+            BUSTER_TEST(arguments, read.bytes.length == (index == 6 ? 7 : text.length));
+            BUSTER_TEST(arguments, memory_compare(read.bytes.pointer, text.pointer, read.bytes.length));
+            BUSTER_TEST(arguments, read.bytes.pointer[read.bytes.length] == 0 && read.bytes.pointer[read.bytes.length + 4] == 0);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, arguments->arena->position == mark && read.bytes.length == 0);
+            if (index == 4 || index == 5) BUSTER_TEST(arguments, read.status == OS_FILE_READ_EOF && !read.error.v);
+            else BUSTER_TEST(arguments, read.error.v == (index == 9 ? 23456u : 12345u));
+        }
+        arena_set_position(arguments->arena, mark);
+        os_file_test_begin(path, scripts[index], counts[index]);
+        ByteSlice legacy = file_read(arguments->arena, path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, os_file_test_end() == counts[index]);
+        BUSTER_TEST(arguments, (legacy.pointer != 0) == success);
+        arena_set_position(arguments->arena, mark);
+    }
+    // File copying streams through the same checked read loop.
+    String8 copy = buster_test_temporary_path(arguments->arena, S8("file-read-failed-copy"), S8(".bin"));
+    os_file_test_begin(path, prefix, 2);
+    BUSTER_TEST(arguments, !file_copy((CopyFileArguments){.original_path = path, .new_path = copy}));
+    BUSTER_TEST(arguments, os_file_test_end() == 2);
+    BUSTER_TEST(arguments, os_file_delete(copy));
+    BUSTER_TEST(arguments, file_write(path, (ByteSlice){0}));
+    FileReadResult empty_file = file_read_checked(arguments->arena, path, (FileReadOptions){0});
+    BUSTER_TEST(arguments, empty_file.status == OS_FILE_READ_OK && empty_file.bytes.pointer && !empty_file.bytes.length);
+    BUSTER_TEST(arguments, os_file_delete(path));
+    return result;
+}
+
 UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, file_test_write_failures);
+    BUSTER_TEST_FIXTURE(arguments, file_test_read_failures);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("file-test-source"), S8(".bin"));
     String8 destination_path = buster_test_temporary_path(arguments->arena, S8("file-test-destination"), S8(".bin"));
