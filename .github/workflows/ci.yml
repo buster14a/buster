@@ -23,7 +23,8 @@ permissions:
   contents: read
 
 env:
-  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+  # Sanitizer correctness policy belongs to generated test commands; keeping a
+  # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
 
 jobs:

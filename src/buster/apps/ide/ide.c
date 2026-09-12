@@ -51,6 +51,7 @@
 #include <buster/lib/target.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/test.h>
+#include <buster/tests/sanitizer_test_internal.h>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #endif
 
@@ -280,32 +281,40 @@ ProcessResult process_arguments(void)
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
 {
 #if BUSTER_INCLUDE_TESTS
-    // Match the parallel lanes' lazy reservation in test.c. Fixture scopes
-    // reclaim independent results; the reservation itself is not an RSS budget.
-    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512)});
-    if (!arena)
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    String8 sanitizer_canary_mode = os_get_environment_variable(S8("BUSTER_SANITIZER_CANARY_MODE"));
+    if (sanitizer_canary_mode.length)
     {
-        return PROCESS_RESULT_FAILED;
+        result = sanitizer_test_canary_run(sanitizer_canary_mode);
     }
-    UnitTestArguments arguments = {arena, &default_show};
+    else
+    {
+        // Match the parallel lanes' lazy reservation in test.c. Fixture scopes
+        // reclaim independent results; the reservation itself is not an RSS budget.
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512)});
+        if (arena)
+        {
+            UnitTestArguments arguments = {arena, &default_show};
 
-    ThreadContext* application_context = thread_context_selected();
-    ThreadContext* test_context = thread_context_allocate();
-    BUSTER_CHECK(application_context != 0 && test_context != 0);
-    thread_context_select(test_context);
+            ThreadContext* application_context = thread_context_selected();
+            ThreadContext* test_context = thread_context_allocate();
+            BUSTER_CHECK(application_context != 0 && test_context != 0);
+            thread_context_select(test_context);
 
-    u64 position = arena->position;
-    BatchTestResult batch = library_tests(&arguments);
-    arena_set_position(arena, position);
+            u64 position = arena->position;
+            BatchTestResult batch = library_tests(&arguments);
+            arena_set_position(arena, position);
 
-    thread_context_release(test_context);
-    (void)arena_pool_release_thread();
-    thread_context_select(application_context);
+            thread_context_release(test_context);
+            (void)arena_pool_release_thread();
+            thread_context_select(application_context);
 
-    position = arena->position;
-    ProcessResult result = batch_test_report(&arguments, batch) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-    arena_set_position(arena, position);
-    arena_destroy(arena, 1);
+            position = arena->position;
+            result = batch_test_report(&arguments, batch) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+            arena_set_position(arena, position);
+            arena_destroy(arena, 1);
+        }
+    }
     return result;
 #else
     string_print(S8("tests are not included in this build\n"));

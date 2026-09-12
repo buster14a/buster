@@ -875,6 +875,7 @@ buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 set(BUSTER_TEST_SOURCES
     src/buster/tests/byte_writer_test.c
     src/buster/tests/arena_test.c
+    src/buster/tests/sanitizer_test.c
     src/buster/tests/hash_test.c
     src/buster/tests/simd_test.c
     src/buster/tests/string_test.c
@@ -926,6 +927,8 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
     src/buster/tests/arena_test.h
+    src/buster/tests/sanitizer_test.h
+    src/buster/tests/sanitizer_test_internal.h
     src/buster/tests/hash_test.h
     src/buster/tests/simd_test.h
     src/buster/tests/string_test.h
@@ -1119,21 +1122,33 @@ if (BUSTER_CI)
 endif()
 
 set(BUSTER_TEST_ENV)
+set(BUSTER_LSAN_SUPPORTED OFF)
+set(BUSTER_SANITIZER_POLICY_MODE unsupported)
+
+if (BUSTER_SANITIZE AND NOT CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT C_COMPILER_ZIG)
+    set(BUSTER_LSAN_SUPPORTED ON)
+endif()
 
 if (NOT WIN32)
-    set(BUSTER_LSAN_OPTIONS "suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=1")
-    if (DEFINED ENV{LSAN_OPTIONS})
-        if (NOT "$ENV{LSAN_OPTIONS}" STREQUAL "")
-            set(BUSTER_LSAN_OPTIONS "$ENV{LSAN_OPTIONS}:${BUSTER_LSAN_OPTIONS}")
-        endif()
-    endif()
-    list(APPEND BUSTER_TEST_ENV "LSAN_OPTIONS=${BUSTER_LSAN_OPTIONS}")
-
-    if (UNIX AND NOT APPLE)
+    if (UNIX AND NOT APPLE AND BUSTER_USE_VULKAN)
         list(APPEND BUSTER_TEST_ENV "VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING=1")
     endif()
 
     if (BUSTER_SANITIZE)
+        # Correctness targets own their sanitizer policy. Environment values
+        # are deliberately not captured at configure time, and the generated
+        # launch command replaces values exported only before an incremental
+        # build. This makes policy independent of caller shell history.
+        set(BUSTER_SANITIZER_POLICY_MODE fatal)
+        if (BUSTER_LSAN_SUPPORTED)
+            set(BUSTER_LSAN_OPTIONS "detect_leaks=1:exitcode=86:print_suppressions=1")
+            message(STATUS "BUSTER_LSAN_POLICY: enabled")
+        else()
+            set(BUSTER_LSAN_OPTIONS "exitcode=86:print_suppressions=1")
+            message(STATUS "BUSTER_LSAN_POLICY: unsupported for this platform/toolchain")
+        endif()
+        list(APPEND BUSTER_TEST_ENV "LSAN_OPTIONS=${BUSTER_LSAN_OPTIONS}")
+
         string(REGEX MATCH "^[0-9]+" BUSTER_SANITIZER_COMPILER_MAJOR "${CMAKE_C_COMPILER_VERSION}")
         set(BUSTER_LLVM_SYMBOLIZER_NAMES llvm-symbolizer)
         if (BUSTER_SANITIZER_COMPILER_MAJOR)
@@ -1141,8 +1156,8 @@ if (NOT WIN32)
         endif()
         find_program(BUSTER_LLVM_SYMBOLIZER NAMES ${BUSTER_LLVM_SYMBOLIZER_NAMES})
 
-        set(BUSTER_ASAN_OPTIONS "symbolize=1")
-        set(BUSTER_UBSAN_OPTIONS "print_stacktrace=1")
+        set(BUSTER_ASAN_OPTIONS "halt_on_error=1:symbolize=1")
+        set(BUSTER_UBSAN_OPTIONS "halt_on_error=1:exitcode=87:print_stacktrace=1")
         if (BUSTER_LLVM_SYMBOLIZER)
             list(APPEND BUSTER_TEST_ENV "ASAN_SYMBOLIZER_PATH=${BUSTER_LLVM_SYMBOLIZER}")
             set(BUSTER_ASAN_OPTIONS "${BUSTER_ASAN_OPTIONS}:external_symbolizer_path=${BUSTER_LLVM_SYMBOLIZER}")
@@ -1152,22 +1167,12 @@ if (NOT WIN32)
             message(STATUS "BUSTER_LLVM_SYMBOLIZER: not found")
         endif()
 
-        if (DEFINED ENV{ASAN_OPTIONS})
-            if (NOT "$ENV{ASAN_OPTIONS}" STREQUAL "")
-                set(BUSTER_ASAN_OPTIONS "$ENV{ASAN_OPTIONS}:${BUSTER_ASAN_OPTIONS}")
-            endif()
-        endif()
-        if (DEFINED ENV{UBSAN_OPTIONS})
-            if (NOT "$ENV{UBSAN_OPTIONS}" STREQUAL "")
-                set(BUSTER_UBSAN_OPTIONS "$ENV{UBSAN_OPTIONS}:${BUSTER_UBSAN_OPTIONS}")
-            endif()
-        endif()
-
         list(APPEND BUSTER_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}")
         list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")
-
+        message(STATUS "BUSTER_SANITIZER_POLICY: fatal; ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}; UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}; LSAN_OPTIONS=${BUSTER_LSAN_OPTIONS}")
     endif()
 endif()
+list(APPEND BUSTER_TEST_ENV "BUSTER_SANITIZER_POLICY_MODE=${BUSTER_SANITIZER_POLICY_MODE}")
 
 set(BUSTER_SHADER_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/buster/lib/shaders")
 set(BUSTER_SHADER_BINARY_DIR "${CMAKE_BINARY_DIR}/shaders")
@@ -1481,6 +1486,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_OPTIMIZE=${BUSTER_OPTIMIZE_DEFINE}
         BUSTER_INCLUDE_TESTS=$<IF:$<BOOL:${BUSTER_INCLUDE_TESTS}>,1,0>
         BUSTER_SANITIZE=$<IF:$<BOOL:${BUSTER_SANITIZE}>,1,0>
+        BUSTER_LSAN_SUPPORTED=$<IF:$<BOOL:${BUSTER_LSAN_SUPPORTED}>,1,0>
         BUSTER_FUZZ_AVAILABLE=$<IF:$<BOOL:${BUSTER_FUZZ_AVAILABLE}>,1,0>
         BUSTER_LINK_LIBC=$<IF:$<BOOL:${BUSTER_LINK_LIBC}>,1,0>
         BUSTER_SINGLE_THREADED=$<IF:$<BOOL:${BUSTER_SINGLE_THREADED}>,1,0>
@@ -1599,8 +1605,8 @@ function(executable_add name is_buster_program main_file)
         endif()
 
         if (NOT C_COMPILER_MSVC)
-            target_compile_options(${name} PRIVATE -fsanitize-recover=all)
-            target_link_options(${name} PRIVATE -fsanitize-recover=all)
+            target_compile_options(${name} PRIVATE -fno-sanitize-recover=all)
+            target_link_options(${name} PRIVATE -fno-sanitize-recover=all)
         endif()
     else()
         if (C_COMPILER_ZIG AND NOT WIN32)

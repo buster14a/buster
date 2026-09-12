@@ -271,6 +271,30 @@ Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 diagnostic. The internal `self_host_from_existing` worker is the narrow
 exception for build-driver-supplied `--ci/--no-ci` and
 `--fuzz/--no-fuzz`, and requires the captured provenance record.
+
+Sanitized correctness trees compile and link with
+`-fno-sanitize-recover=all`. Their generated test commands set fatal ASan and
+UBSan options, enable LeakSanitizer on native Linux Clang/GCC with a distinctive
+exit code, and print the effective policy during the registered suite.
+`ASAN_OPTIONS`, `UBSAN_OPTIONS`
+and `LSAN_OPTIONS` from the configuring shell are deliberately not copied into
+the build graph. Values exported only before an incremental `build` are also
+replaced by the generated command. This fixed precedence prevents
+`halt_on_error=0` or an old suppression path from turning a correctness gate
+into a diagnostic-only run. Invoke a built binary directly, outside the
+`test_all`/`test_ide` targets, for exploratory recovery behavior; that run is
+not a correctness result.
+
+Generated test commands also set `BUSTER_SANITIZER_POLICY_MODE=fatal` or
+`unsupported`. The registered test treats missing fatal sanitizer options as a
+failure; child processes without the generated launcher marker remain quiet.
+
+Headless tests never load an LSan suppression file. The Linux Vulkan loader's
+dynamic-library-unloading workaround is present only in configurations built
+with `BUSTER_USE_VULKAN=ON`; it is not a leak suppression and is absent from
+the default compiler configuration. Add no generic thread-entry or Buster
+application-frame suppression to a correctness target.
+
 TCC is reserved for compiling `build.c` through `build.sh`/`build.ps1` and
 `generate --cc tcc` is rejected as an application compiler.
 `--optimize`/`--no-optimize` are configuration shorthands for
