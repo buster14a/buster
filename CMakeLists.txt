@@ -9,6 +9,7 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
+include(cmake/IOSBundleAssets.cmake)
 
 set(BUSTER_CONFIG_TYPES Debug Release)
 
@@ -1698,12 +1699,9 @@ function(executable_add name is_buster_program main_file)
                 "${CMAKE_BINARY_DIR}/ios/Info-${name}.plist"
                 @ONLY)
 
-            # Bundle test data (read at runtime via relative paths) into Resources/tests.
-            add_custom_command(TARGET ${name} POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_directory
-                    "${CMAKE_SOURCE_DIR}/tests"
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${name}>/tests"
-                COMMENT "Bundling test data into ${name}.app")
+            # Test data is read at runtime through repository-relative paths.
+            # Keep it in a separate graph so fixture changes do not relink the app.
+            buster_add_ios_test_assets(${name})
 
         endif()
     endif()
