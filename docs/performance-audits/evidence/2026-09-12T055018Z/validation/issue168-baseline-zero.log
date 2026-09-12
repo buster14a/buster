@@ -1,0 +1,3 @@
+/workspace/scratch/d28011d09620/issue168/ebpf_baseline_instrumented.c:379:16: runtime error: null pointer passed as argument 1, which is declared to never be null
+/usr/include/string.h:61:62: note: nonnull attribute specified here
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /workspace/scratch/d28011d09620/issue168/ebpf_baseline_instrumented.c:379:16 

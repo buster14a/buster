@@ -1,0 +1,19 @@
+Retained tail only; full log hash is in provenance.json.
+Process [642]: Time (user): 0:73457 s,us, (system): 0:22240 s,us. Max RSS: 680844 KB. PF (soft): 9811, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 78, (invol): 1
+Launched [650]: "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node tests/wasm_integer_opcodes_execution.js /tmp/buster-tests-15-1-51658449635629/buster-wasm64-integer-opcodes-15.wasm" 
+3254/3254 scalar integer Wasm64 engine checks passed
+Process [650]: Time (user): 0:57409 s,us, (system): 0:25305 s,us. Max RSS: 680844 KB. PF (soft): 10222, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 94, (invol): 12
+Launched [658]: "/usr/bin/clang -target x86_64-unknown-linux-gnu -nostdinc -fno-pic -fno-pie -g0 -c -o /tmp/buster-tests-15-1-51658449635629/buster-c-host-no-pic-15.o tests/basic_c_pic.c" 
+Process [658]: Time (user): 0:15516 s,us, (system): 0:7870 s,us. Max RSS: 680844 KB. PF (soft): 4215, (hard): 0. Block (input): 0, (output): 8. CTX SW (vol): 1, (invol): 3
+Launched [659]: "/usr/bin/clang -target x86_64-unknown-linux-gnu -nostdinc -fPIC -g0 -c -o /tmp/buster-tests-15-1-51658449635629/buster-c-host-pic-15.o tests/basic_c_pic.c" 
+Process [659]: Time (user): 0:12351 s,us, (system): 0:8532 s,us. Max RSS: 680844 KB. PF (soft): 4206, (hard): 0. Block (input): 0, (output): 8. CTX SW (vol): 1, (invol): 0
+Launched [660]: "/tmp/buster-tests-15-1-51658449635629/buster-c-host-no-pic-15" 
+Process [660]: Time (user): 0:161 s,us, (system): 0:0 s,us. Max RSS: 680844 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [661]: "/tmp/buster-tests-15-1-51658449635629/buster-c-host-pic-15" 
+Process [661]: Time (user): 0:155 s,us, (system): 0:0 s,us. Max RSS: 680844 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+TEST_MODULE_TIMING index=44 module=compiler_driver_tests duration_ns=25873034055 passed=7567 failed=0 assertions=7567 status=pass
+TEST_MODULE_TIMING index=45 module=compiler_driver_object_path_tests duration_ns=11960730 passed=22 failed=0 assertions=22 status=pass
+TEST_MODULE_TIMING index=46 module=x86_64_tests duration_ns=2643494 passed=18 failed=0 assertions=18 status=pass
+[1839191/1839191] Unit tests
+[47/47] Module tests
+[0/0] External tests

@@ -1,0 +1,10 @@
+--- base/ebpf.c
++++ instrumented/ebpf.c
+@@ -581,6 +581,7 @@
+ {
+     for (u32 index = 0; index < context->symbol_count; index += 1)
+     {
++        audit_key_probes += 1;
+         if (context->symbols[index].key == key)
+         {
+             return context->symbols + index;

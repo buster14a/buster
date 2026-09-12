@@ -1,0 +1,19 @@
+Retained tail only; full log hash is in provenance.json.
+Launched [1327]: "/tmp/buster-tests-10-1-52076698156432/buster-asm-unit-mixed-10" 
+Process [1327]: Time (user): 0:121 s,us, (system): 0:0 s,us. Max RSS: 602356 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1328]: "/tmp/buster-tests-10-1-52076698156432/buster-asm-abs32-10" 
+Process [1328]: Time (user): 0:167 s,us, (system): 0:0 s,us. Max RSS: 602356 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1329]: "/tmp/buster-tests-10-1-52076698156432/buster-c-export-dynamic-10" 
+Process [1329]: Time (user): 0:1363 s,us, (system): 0:0 s,us. Max RSS: 602356 KB. PF (soft): 60, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1330]: "/tmp/buster-tests-10-1-52076698156432/buster-c-multi-driver-10" 
+Process [1330]: Time (user): 0:0 s,us, (system): 0:0 s,us. Max RSS: 602356 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 0, (invol): 0
+Launched [1331]: "/tmp/buster-tests-10-1-52076698156432/buster-c-mixed-driver-10" 
+Process [1331]: Time (user): 0:191 s,us, (system): 0:0 s,us. Max RSS: 602356 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1332]: "/tmp/buster-tests-10-1-52076698156432/buster-c-archive-driver-10" 
+Process [1332]: Time (user): 0:163 s,us, (system): 0:0 s,us. Max RSS: 602356 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+TEST_MODULE_TIMING index=44 module=compiler_driver_tests duration_ns=7462444636 passed=10929 failed=0 assertions=10929 status=pass
+TEST_MODULE_TIMING index=45 module=compiler_driver_object_path_tests duration_ns=6157351 passed=22 failed=0 assertions=22 status=pass
+TEST_MODULE_TIMING index=46 module=x86_64_tests duration_ns=247524 passed=18 failed=0 assertions=18 status=pass
+[1852070/1852070] Unit tests
+[47/47] Module tests
+[0/0] External tests

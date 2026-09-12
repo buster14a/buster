@@ -1,0 +1,231 @@
+{
+  "base": "641cd88d33decfd56fa2da9a960c6ac075935a71",
+  "local_code_head": "83067005cbf8cf4ba868852331d3a7093ed7b3f7",
+  "remote_code_head": "cc3d961668fcd8c41467701ac6b28f4b5cad0991",
+  "code_tree": "50a2541114207bc923e165d338be07f1b9cebdf0",
+  "binary_sha256": {
+    "base": "aefb63ac6ca5bfd0b6ba42cd809b2a12468f704899a209817a2d7b73f1a49219",
+    "head": "8493b7a95579f45124f30639fc9fa95c1c303027b7e139a5ffdd45886acca885"
+  },
+  "build_configs": {
+    "buster-168-base641": [
+      "BUSTER_BENCH_ALLOCATIONS:BOOL=OFF",
+      "BUSTER_CHECK_OPTIONAL_WARNINGS:BOOL=ON",
+      "BUSTER_CI:BOOL=OFF",
+      "BUSTER_COMPILE_SHADERS:BOOL=OFF",
+      "BUSTER_DEBUG_INFO:BOOL=ON",
+      "BUSTER_DEVELOPER_TARGETS:BOOL=ON",
+      "BUSTER_FRAME_POINTERS:BOOL=ON",
+      "BUSTER_FUZZ_AVAILABLE:BOOL=OFF",
+      "BUSTER_INCLUDE_TESTS:BOOL=ON",
+      "BUSTER_INSTRUMENT:BOOL=OFF",
+      "BUSTER_LINK_LIBC:BOOL=ON",
+      "BUSTER_LTO:BOOL=OFF",
+      "BUSTER_REQUIRE_VULKAN_SDK:BOOL=ON",
+      "BUSTER_SANITIZE:BOOL=OFF",
+      "BUSTER_SINGLE_THREADED:BOOL=OFF",
+      "BUSTER_SLANGC_EXECUTABLE:FILEPATH=BUSTER_SLANGC_EXECUTABLE-NOTFOUND",
+      "BUSTER_SPIRV_OPT_EXECUTABLE:FILEPATH=BUSTER_SPIRV_OPT_EXECUTABLE-NOTFOUND",
+      "BUSTER_TIME_TRACE:BOOL=OFF",
+      "BUSTER_UNITY_BUILD:BOOL=ON",
+      "BUSTER_USE_D3D12:BOOL=OFF",
+      "BUSTER_USE_METAL:BOOL=OFF",
+      "BUSTER_USE_VULKAN:BOOL=OFF",
+      "BUSTER_VULKAN_INCLUDE_DIR:PATH=BUSTER_VULKAN_INCLUDE_DIR-NOTFOUND",
+      "BUSTER_VULKAN_SDK:PATH=",
+      "CMAKE_C_COMPILER:STRING=/usr/bin/clang",
+      "CMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG",
+      "BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Wshift_bool:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Wthread_safety:INTERNAL=1",
+      "BUSTER_HAS_C_FLAG__Wunique_object_duplication:INTERNAL=",
+      "BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS:INTERNAL=-Wthread-safety",
+      "BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_CACHE_KEY:INTERNAL=Clang|18.1.3|/usr/bin/clang"
+    ],
+    "buster-168": [
+      "BUSTER_BENCH_ALLOCATIONS:BOOL=OFF",
+      "BUSTER_CHECK_OPTIONAL_WARNINGS:BOOL=ON",
+      "BUSTER_CI:BOOL=OFF",
+      "BUSTER_COMPILE_SHADERS:BOOL=OFF",
+      "BUSTER_DEBUG_INFO:BOOL=ON",
+      "BUSTER_DEVELOPER_TARGETS:BOOL=ON",
+      "BUSTER_FRAME_POINTERS:BOOL=ON",
+      "BUSTER_FUZZ_AVAILABLE:BOOL=OFF",
+      "BUSTER_INCLUDE_TESTS:BOOL=ON",
+      "BUSTER_INSTRUMENT:BOOL=OFF",
+      "BUSTER_LINK_LIBC:BOOL=ON",
+      "BUSTER_LTO:BOOL=OFF",
+      "BUSTER_REQUIRE_VULKAN_SDK:BOOL=ON",
+      "BUSTER_SANITIZE:BOOL=OFF",
+      "BUSTER_SINGLE_THREADED:BOOL=OFF",
+      "BUSTER_SLANGC_EXECUTABLE:FILEPATH=BUSTER_SLANGC_EXECUTABLE-NOTFOUND",
+      "BUSTER_SPIRV_OPT_EXECUTABLE:FILEPATH=BUSTER_SPIRV_OPT_EXECUTABLE-NOTFOUND",
+      "BUSTER_TIME_TRACE:BOOL=OFF",
+      "BUSTER_UNITY_BUILD:BOOL=ON",
+      "BUSTER_USE_D3D12:BOOL=OFF",
+      "BUSTER_USE_METAL:BOOL=OFF",
+      "BUSTER_USE_VULKAN:BOOL=OFF",
+      "BUSTER_VULKAN_INCLUDE_DIR:PATH=BUSTER_VULKAN_INCLUDE_DIR-NOTFOUND",
+      "BUSTER_VULKAN_SDK:PATH=",
+      "CMAKE_C_COMPILER:STRING=/usr/bin/clang",
+      "CMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG",
+      "BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Wshift_bool:INTERNAL=",
+      "BUSTER_HAS_C_FLAG__Wthread_safety:INTERNAL=1",
+      "BUSTER_HAS_C_FLAG__Wunique_object_duplication:INTERNAL=",
+      "BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS:INTERNAL=-Wthread-safety",
+      "BUSTER_SUPPORTED_CLANG_GNU_FAMILY_OPTIONAL_WARNINGS_CACHE_KEY:INTERNAL=Clang|18.1.3|/usr/bin/clang"
+    ]
+  },
+  "inputs": {
+    "symbols_8.c": {
+      "sha256": "0ca0294645b22a961df8d43bc0297b23768e1bc090e6a04be8d1f51f46429b87",
+      "bytes": 1513,
+      "functions": 16,
+      "globals": 24
+    },
+    "symbols_64.c": {
+      "sha256": "78ee23c840e30ff99bce2ff40f01521940876e7e6b5cb5c50da3c40db6285414",
+      "bytes": 12748,
+      "functions": 128,
+      "globals": 192
+    },
+    "symbols_512.c": {
+      "sha256": "5685e8b27be587d5a99c8e3e566ac5c03fe20a04df5d08fcb26a57d58cd82c04",
+      "bytes": 107744,
+      "functions": 1024,
+      "globals": 1536
+    },
+    "symbols_2048.c": {
+      "sha256": "8ac97bf86078890120abc942776b65089d36c89109524918b3992ef644187cc2",
+      "bytes": 447492,
+      "functions": 4096,
+      "globals": 6144
+    },
+    "tiny_startup.c": {
+      "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+      "bytes": 133
+    },
+    "many_functions.c": {
+      "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+      "bytes": 39898
+    }
+  },
+  "objects": {
+    "many_functions-fast-0.o": {
+      "bytes": 164304,
+      "sha256": "061029fb0bea14331185a7a8603a65b36270dead2115f1392e6a9ad59b0c9653"
+    },
+    "many_functions-fast-1.o": {
+      "bytes": 164304,
+      "sha256": "061029fb0bea14331185a7a8603a65b36270dead2115f1392e6a9ad59b0c9653"
+    },
+    "tiny_startup-fast-0.o": {
+      "bytes": 696,
+      "sha256": "0d3b70566ff6d5714bb5e84bd477da5c1a63b4cc6d1ca333da34cc3cfeafba4d"
+    },
+    "symbols_512-fast-0.o": {
+      "bytes": 337688,
+      "sha256": "7303ddfbeb4178ba910adfcae712759424a569d9b8ebc9362e94b2de2d347192"
+    },
+    "symbols_8-fast-0.o": {
+      "bytes": 6024,
+      "sha256": "3abb68a191f7d2b61108307791185f5e9bacde4df29fe2a556f0d953c923318b"
+    },
+    "symbols_8-fast-1.o": {
+      "bytes": 6024,
+      "sha256": "3abb68a191f7d2b61108307791185f5e9bacde4df29fe2a556f0d953c923318b"
+    },
+    "tiny_startup-fast-1.o": {
+      "bytes": 696,
+      "sha256": "0d3b70566ff6d5714bb5e84bd477da5c1a63b4cc6d1ca333da34cc3cfeafba4d"
+    },
+    "symbols_2048-fast-0.o": {
+      "bytes": 1355152,
+      "sha256": "18eba41c35bab4d66bdf9ce138bdec175d77987ceb46c6b964f2d8d5493a5ad4"
+    },
+    "symbols_2048-fast-1.o": {
+      "bytes": 1355152,
+      "sha256": "18eba41c35bab4d66bdf9ce138bdec175d77987ceb46c6b964f2d8d5493a5ad4"
+    },
+    "symbols_64-fast-0.o": {
+      "bytes": 42640,
+      "sha256": "16836c36e526e53fe6ddc0432ef4442cb0628cc61ed91b82c1e682eddde1355a"
+    },
+    "symbols_512-fast-1.o": {
+      "bytes": 337688,
+      "sha256": "7303ddfbeb4178ba910adfcae712759424a569d9b8ebc9362e94b2de2d347192"
+    },
+    "symbols_64-fast-1.o": {
+      "bytes": 42640,
+      "sha256": "16836c36e526e53fe6ddc0432ef4442cb0628cc61ed91b82c1e682eddde1355a"
+    },
+    "baseline_synthetic.o": {
+      "bytes": 14024,
+      "sha256": "9ef377bc350545d8ef955a36fdc81ad9320965f6363aa269797c6db5a3b22c9c"
+    },
+    "candidate_synthetic.o": {
+      "bytes": 14024,
+      "sha256": "9ef377bc350545d8ef955a36fdc81ad9320965f6363aa269797c6db5a3b22c9c"
+    }
+  },
+  "logs": {
+    "issue168-baseline-regression.log": {
+      "full_bytes": 787,
+      "full_sha256": "eb853802c0ddaa856342a54c7a53e06af5619fe1221ec0b9ba58b64d9bd40f8a",
+      "retained": "full"
+    },
+    "issue168-baseline-zero.log": {
+      "full_bytes": 365,
+      "full_sha256": "1ac1e48e031886b93a1256daf8e30611f059c6a1dff1207a8ae2a6a6136053b4",
+      "retained": "full"
+    },
+    "issue168-final-debug-tests.log": {
+      "full_bytes": 339113,
+      "full_sha256": "b8ecc8f2c3de3280be5d0102593a1744b909e14e288ae29f1d182161ab336cfe",
+      "retained": "last 18 lines"
+    },
+    "issue168-final-sanitize-test-all.log": {
+      "full_bytes": 168602,
+      "full_sha256": "48e71cb813d7ad0a27b29014912fd4593ecbc973055334a3f376e5d620309c8a",
+      "retained": "last 18 lines"
+    },
+    "issue168-release-test-all.log": {
+      "full_bytes": 343734,
+      "full_sha256": "5a6b31306923c50cb0fbe38d5e483d9dc2c0350b7d15342cb620e54ed5c5a39e",
+      "retained": "last 18 lines"
+    },
+    "issue168-base-generate.log": {
+      "full_bytes": 6302,
+      "full_sha256": "dfc82efdcc82cf3ee09e59633f925cb029d170213697275508b3e49036158779",
+      "retained": "full"
+    }
+  },
+  "collection": {
+    "argv": [
+      "/workspace/scratch/d28011d09620/issue168/measure_objects",
+      "/tmp/issue168-measure/bin/base",
+      "/tmp/issue168-measure/bin/head",
+      "/workspace/scratch/d28011d09620/issue168",
+      "/tmp/issue168-measure/result",
+      "/workspace/scratch/d28011d09620/buster-168"
+    ],
+    "wrapper_exit": 1,
+    "replay_exit": 0,
+    "cpu_affinity": "unmodified; config.cpu=-1, no pinning requested",
+    "measured_rows": 384,
+    "process_records": 396,
+    "warmups": 12,
+    "rounds": 2,
+    "pairs_per_round": 16,
+    "zero_cpu_rows": [
+      "r0-p00-j2-v1",
+      "r0-p01-j2-v1"
+    ],
+    "qualification": "Original postprocessor failed after complete collection; independent all-row replay only. No guarded non-regression verdict."
+  }
+}

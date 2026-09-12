@@ -112,7 +112,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
         block->last_instruction = exit;
     }
     BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error == IR_VALIDATION_NONE);
+    u64 emit_before = arena->position;
     EbpfArtifact artifact = ebpf_emit_program(arena, &program);
+    printf("synthetic_emit_arena_bytes=%llu object_bytes=%llu\n", (unsigned long long)(arena->position - emit_before), (unsigned long long)artifact.bytes.length);
     if (!artifact.success) arguments->show(arguments, S8("eBPF string symbols: {S8}\n"), artifact.error.message);
     BUSTER_TEST(arguments, artifact.success);
     if (artifact.success)

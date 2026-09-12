@@ -905,7 +905,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
 
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = codegen_test_ebpf_scalars(arguments);
+    UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
+    result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
+    result.test_count += ebpf_scalars.test_count;
     UnitTestResult local_aggregates = codegen_test_ebpf_local_aggregates(arguments);
     result.succeeded_test_count += local_aggregates.succeeded_test_count;
     result.test_count += local_aggregates.test_count;
