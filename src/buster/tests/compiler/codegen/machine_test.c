@@ -3391,7 +3391,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArg
                                 MachineInlineAssembly* descriptor = assembly_row_value->payload < selected.function.inline_assembly_count
                                                                         ? selected.function.inline_assemblies + assembly_row_value->payload
                                                                         : 0;
-                                MachineBlock* source = selected.function.blocks + source_block;
+                                MachineBlock* source_block_info = selected.function.blocks + source_block;
                                 u32 source_successors = 0;
                                 for (u32 edge_index = 0; edge_index < selected.function.edge_count; edge_index += 1)
                                 {
@@ -3399,7 +3399,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArg
                                 }
                                 BUSTER_TEST(arguments, descriptor &&
                                                            (descriptor->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) &&
-                                                           source_successors == terminator->target_count && source->instruction_count);
+                                                           source_successors == terminator->target_count && source_block_info->instruction_count);
                                 for (u32 successor = 0; successor < terminator->target_count; successor += 1)
                                 {
                                     u32 continuation_block = source_block + 1u + successor;
