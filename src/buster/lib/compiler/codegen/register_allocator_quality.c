@@ -1,3 +1,7 @@
+// QUALITY placement owns frequency-weighted candidate ranking and bounded pin
+// attempts; FAST consumes each completed plan. machine_quality_placement_build_core
+// builds the baseline, probes whole/split spans and verifies accepted placement.
+// pinned_values records the attempt's assignments for sparse reset/mask work.
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
@@ -57,6 +61,7 @@ MachineQualityCensus machine_quality_census_snapshot(void)
 
 // Bounds keep the pass linear-ish and its worst case reportable.
 #define MACHINE_QUALITY_MAXIMUM_CANDIDATES 4096
+#define MACHINE_QUALITY_SPANS_PER_REGISTER 8u
 
 // Free registers an instruction keeps above its own register operands,
 // so the local scan's LRU picks always have a candidate that is not one
@@ -214,11 +219,6 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     machine_function_stamp_frequency_classes(function);
     TemporalArena scratch = scratch_begin(&arena, 1);
     u32 register_count = function->virtual_register_count;
-    u32* pinned_registers = arena_allocate(arena, u32, register_count ? register_count : 1);
-    for (u32 register_index = 0; register_index < register_count; register_index += 1)
-    {
-        pinned_registers[register_index] = UINT32_MAX;
-    }
     // One prepass feeds this whole pass and both scan runs below: the touch
     // intervals with their constrained-opcode disqualifications (a value
     // touched by an opcode whose encoder pins its operands cannot hold an
@@ -401,7 +401,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         candidate_indices[register_index] = UINT32_MAX;
     }
     // Two traffic arrays and the inverse candidate map have now been cleared.
-    // The durable pin array's initial clear is deliberately excluded here.
+    // The pin map's initial clear is counted separately below.
     BUSTER_QUALITY_COUNT(initial_value_clear_bytes, (u64)register_count * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
     MachineQualityInterval* heap = arena_allocate(scratch.arena, MachineQualityInterval, MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     u32 heap_count = 0;
@@ -802,12 +802,25 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         heap_backup[backup_index] = heap[backup_index];
     }
     u32 heap_backup_count = heap_count;
+    // FAST queries pins by global value ID, but only assigned values have span
+    // endpoints. Keep that bridge in scratch: no returned placement retains it.
+    // A candidate is assigned at most once per attempt, and every assignment
+    // consumes one of the fixed per-register span slots. This bounds both the
+    // touched list and all retry cleanup independently of the function's IDs.
+    u32* pinned_registers = arena_allocate(scratch.arena, u32, register_count);
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        pinned_registers[register_index] = UINT32_MAX;
+    }
+    BUSTER_QUALITY_COUNT(pin_initial_clear_bytes, (u64)register_count * sizeof(u32));
+    u32 pinned_values[MACHINE_TARGET_REGISTER_LIMIT * MACHINE_QUALITY_SPANS_PER_REGISTER];
+    u32 pinned_value_count = 0;
     u64* pin_active_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
     u64* pin_entry_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
     u32* span_starts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
     u32* span_ends = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-    u32 assigned_starts[MACHINE_TARGET_REGISTER_LIMIT][8];
-    u32 assigned_ends[MACHINE_TARGET_REGISTER_LIMIT][8];
+    u32 assigned_starts[MACHINE_TARGET_REGISTER_LIMIT][MACHINE_QUALITY_SPANS_PER_REGISTER];
+    u32 assigned_ends[MACHINE_TARGET_REGISTER_LIMIT][MACHINE_QUALITY_SPANS_PER_REGISTER];
     u32 assigned_counts[MACHINE_TARGET_REGISTER_LIMIT];
     u32 excluded_rows[MACHINE_TARGET_REGISTER_LIMIT][MACHINE_QUALITY_EXCLUDED_ROW_LIMIT];
     u32 excluded_row_counts[MACHINE_TARGET_REGISTER_LIMIT];
@@ -830,15 +843,15 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             continue;
         }
         BUSTER_QUALITY_COUNT(attempts, 1);
-        BUSTER_QUALITY_COUNT(attempt_reset_bytes, (u64)register_count * 3 * sizeof(u32) +
+        BUSTER_QUALITY_COUNT(attempt_reset_bytes, (u64)pinned_value_count * sizeof(u32) +
                                                     (u64)attempt_file_count * 2 * sizeof(u32) + function->instruction_count);
+        BUSTER_QUALITY_COUNT(pin_reset_values, pinned_value_count);
         BUSTER_QUALITY_COUNT(heap_restore_bytes, (u64)heap_backup_count * sizeof(MachineQualityInterval));
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+        for (u32 pin_index = 0; pin_index < pinned_value_count; pin_index += 1)
         {
-            pinned_registers[register_index] = UINT32_MAX;
-            span_starts[register_index] = interval_starts[register_index];
-            span_ends[register_index] = interval_ends[register_index];
+            pinned_registers[pinned_values[pin_index]] = UINT32_MAX;
         }
+        pinned_value_count = 0;
         for (u32 file_index = 0; file_index < attempt_file_count; file_index += 1)
         {
             assigned_counts[file_index] = 0;
@@ -942,6 +955,10 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
                     assigned_counts[file_index] += 1;
                     BUSTER_QUALITY_COUNT(whole_assignments, 1);
                     pinned_registers[candidate.virtual_register] = pin_register;
+                    span_starts[candidate.virtual_register] = candidate.start;
+                    span_ends[candidate.virtual_register] = candidate.end;
+                    pinned_values[pinned_value_count++] = candidate.virtual_register;
+                    BUSTER_QUALITY_COUNT(pin_span_write_bytes, 2 * sizeof(u32));
                     pinned_mask |= 1ull << pin_register;
                     for (u32 instruction_index = candidate.start; instruction_index <= candidate.end; instruction_index += 1)
                     {
@@ -1093,6 +1110,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
                     BUSTER_QUALITY_COUNT(split_assignments, 1);
                     span_starts[candidate.virtual_register] = region_start;
                     span_ends[candidate.virtual_register] = region_end;
+                    pinned_values[pinned_value_count++] = candidate.virtual_register;
+                    BUSTER_QUALITY_COUNT(pin_span_write_bytes, 2 * sizeof(u32));
                     for (u32 instruction_index = region_start; instruction_index <= region_end; instruction_index += 1)
                     {
                         pin_depths[instruction_index] += 1;
@@ -1142,12 +1161,10 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             pin_active_masks[instruction_index] = 0;
             pin_entry_masks[instruction_index] = 0;
         }
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+        BUSTER_QUALITY_COUNT(pin_mask_values, pinned_value_count);
+        for (u32 pin_index = 0; pin_index < pinned_value_count; pin_index += 1)
         {
-            if (pinned_registers[register_index] == UINT32_MAX)
-            {
-                continue;
-            }
+            u32 register_index = pinned_values[pin_index];
             u64 pin_bit = 1ull << pinned_registers[register_index];
             pin_entry_masks[span_starts[register_index]] |= pin_bit;
             for (u32 instruction_index = span_starts[register_index]; instruction_index <= span_ends[register_index]; instruction_index += 1)
@@ -1278,11 +1295,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             }
             break;
         }
-        placement.pinned_register_count = 0;
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            placement.pinned_register_count += pinned_registers[register_index] != UINT32_MAX;
-        }
+        placement.pinned_register_count = pinned_value_count;
         placement.split_register_count = split_entry_count;
         BUSTER_QUALITY_COUNT(accepted_placements, 1);
         scratch_end(scratch);
