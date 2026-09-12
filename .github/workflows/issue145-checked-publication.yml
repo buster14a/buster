@@ -1,0 +1,46 @@
+name: Issue 145 checked publication
+
+on:
+  push:
+    branches:
+      - codex/issue145-checked-publication-20260912
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' && github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish the tested two-file tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=641cd88d33decfd56fa2da9a960c6ac075935a71
+          expected_tree=d7d34dca57f362cdcb4020864c214e9972b82299
+          branch=codex/issue145-elf-reader-guards
+          patch="$RUNNER_TEMP/issue145.patch"
+          git show "$GITHUB_SHA:.github/issue145-checked-publication.patch" > "$patch"
+          printf '%s  %s\n' bfb89cd1cecc5eb8fc9e8033a2b52a21aaed171b319dceafbb0aa5b09e01ae69 "$patch" | sha256sum --check
+          git checkout --detach "$base"
+          test "$(git rev-parse HEAD^{tree})" = 35edb418e9a52de8953c3e95eeba176a4628c8e4
+          git apply --check "$patch"
+          git apply "$patch"
+          git add src/buster/lib/compiler/object/object.c src/buster/tests/compiler/object/object_test.c
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 2
+          test "$(git write-tree)" = "$expected_tree"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'object: stop ELF reader work after validation failure (#145)'
+          commit=$(git rev-parse HEAD)
+          # An empty expected value permits creation only, never overwriting an existing branch.
+          git push --force-with-lease="refs/heads/$branch:" origin "$commit:refs/heads/$branch"
+          printf 'PUBLISHED_COMMIT=%s\nPUBLISHED_TREE=%s\n' "$commit" "$expected_tree"
+          printf 'Published branch: %s\n\nCommit: %s\n\nTree: %s\n\nThis job verifies source identity and publishes the branch; it does not run compiler tests.\n' "$branch" "$commit" "$expected_tree" >> "$GITHUB_STEP_SUMMARY"
