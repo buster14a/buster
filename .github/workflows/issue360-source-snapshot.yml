@@ -14,19 +14,24 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: issue360-transport
-          path: .github/issue360.patch.gz.b64
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
       - name: Verify and publish the isolated product tree
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c 'import base64,gzip,pathlib,os; p=pathlib.Path(".github/issue360.patch.gz.b64"); pathlib.Path(os.environ["RUNNER_TEMP"],"issue360.patch").write_bytes(gzip.decompress(base64.b64decode(p.read_bytes(),validate=False)))'
-          echo "724bde42b630b1ef3350e9bb3138286d00d035a810269e06d0b87bd24ea4509d  $RUNNER_TEMP/issue360.patch" | sha256sum -c -
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib, os
+          payload = pathlib.Path('.github/issue360.patch.gz.b64').read_text().strip()
+          # Correct the three transport-only transcription errors found by
+          # comparing the downloaded payload against the original local file.
+          assert len(payload) == 15676
+          for start, end, before, after in [(4225, 4225, '', 't'), (3944, 3948, 'f2GT', ''), (1574, 1575, 't', '')]:
+              assert payload[start:end] == before
+              payload = payload[:start] + after + payload[end:]
+          assert hashlib.sha256(payload.encode()).hexdigest() == 'b8480f3f0d313cd8eb509785eb357fa606ba759226170b602e58512691f9cacc'
+          patch = gzip.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '724bde42b630b1ef3350e9bb3138286d00d035a810269e06d0b87bd24ea4509d'
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue360.patch').write_bytes(patch)
+          PY
           base=d00ba87da23737a945a899f7304ac00b40a1ee04
           branch=fix/360-public-aapcs64-va-list
           git fetch origin "$branch"
