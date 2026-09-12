@@ -34,7 +34,9 @@
   `UEFI firmware boot` lane executes both firmware targets in every allocator
   and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
   Require the
-  aggregate `CI complete` result, not just the desktop names. The separate
+  aggregate `CI complete` result, not just the desktop names. It also requires
+  the independent `Clang analyzer shards` job and its coverage/failure controls;
+  see [analyzer sharding](../clang-analyze-shards.md). The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
@@ -102,6 +104,12 @@ uses it. It copies the symbol/relocation view before remapping indices, preservi
 the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
+
+The native driver's `compiler_discovery_self_test` runs before every combination
+matrix and covers real Clang identity, platform/override selection, and failed
+GCC requests preserving existing configurations. The GCC row selects Homebrew
+`gcc-15` on macOS; see [build policy](build.md) for `BUSTER_GCC` overrides and
+the logged compiler provenance.
 
 For the user-level GCC workflow, with the selected build directory idle:
 
@@ -201,3 +209,11 @@ registered assertion/module counts. It covers nested and empty scopes, retained
 scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
 failure diagnostics surviving a rewind and overwrite. Observation uses separate
 arena header storage in test-enabled builds and adds no allocation-path work.
+
+
+Fatal-output regressions in `os_tests` run raw and formatted reporters in
+isolated children. A working stream must preserve the full diagnostic; closed
+streams, and `/dev/full` on Linux, must still terminate normally with status 1
+within the existing deadline. Fatal reporters use recoverable output attempts
+so an output failure cannot recursively report itself. These are unsuccessful
+process controls, not successful compiler or missing-evidence observations.

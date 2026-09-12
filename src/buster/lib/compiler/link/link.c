@@ -2349,29 +2349,7 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
 
 BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes)
 {
-    OsFileDescriptor* file = os_file_open(path,
-                                          (OpenFlags){
-                                              .write = 1,
-                                              .create = 1,
-                                              .truncate = 1,
-                                          },
-                                          (OpenPermissions){
-                                              .read = 1,
-                                              .write = 1,
-                                              .execute = 1,
-                                          });
-    bool result;
-    if (!file)
-    {
-        result = false;
-    }
-    else
-    {
-        os_file_write(file, bytes);
-        result = os_file_close(file);
-    }
-
-    return result;
+    return !file_write_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1}).error.v;
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)

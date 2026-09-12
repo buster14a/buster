@@ -67,11 +67,24 @@ struct TTF_Bitmap
     s32 y_offset;
 };
 
+// Per-glyph policy for the retained UI rasterizer. Each pixel is one byte;
+// the pixel budget also bounds the 4 by 4 coverage grid to 16,777,216 samples.
+#define BUSTER_TTF_MAX_SCALE 65536.0f
+#define BUSTER_TTF_MAX_BITMAP_WIDTH 4096u
+#define BUSTER_TTF_MAX_BITMAP_HEIGHT 4096u
+#define BUSTER_TTF_MAX_BITMAP_PIXELS 1048576u
+#define BUSTER_TTF_MAX_RASTER_EDGE_STEPS 67108864u
+
 BUSTER_F_DECL TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index);
 BUSTER_F_DECL f32 truetype_scale_for_pixel_height(const TTF_FontInformation* information, f32 height);
 BUSTER_F_DECL TTF_VerticalMetrics truetype_get_font_vertical_metrics(const TTF_FontInformation* information);
 BUSTER_F_DECL TTF_HorizontalMetrics truetype_get_codepoint_horizontal_metrics(const TTF_FontInformation* information, u32 codepoint);
 BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation* information, u32 codepoint_left, u32 codepoint_right);
+// Scales must be finite and in [0, BUSTER_TTF_MAX_SCALE]. A zero scale on
+// either axis, an empty glyph, invalid bounds/scales, or an exceeded bitmap
+// or raster-work budget returns an all-zero bitmap. Bounds and dimensions
+// are checked before allocating outline or pixel storage. The edge-search
+// work budget is checked after outline extraction, before rasterization.
 BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint);
 
 #if BUSTER_INCLUDE_TESTS

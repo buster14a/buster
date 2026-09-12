@@ -954,6 +954,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mas
     {
         best = dead;
     }
+    BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
     machine_fast_spill(state, best);
     return best;
 }

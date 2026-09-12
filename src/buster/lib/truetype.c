@@ -3,8 +3,12 @@
 // extraction, and scanline coverage rasterization into byte bitmaps.
 // Input fonts are untrusted files — offsets and counts are checked before
 // use.
+// truetype_font_initialize owns table discovery; truetype_get_codepoint_bitmap
+// admits scales and ttf_bitmap_box bounds before outline allocation, then
+// ttf_bitmap_work_is_valid limits scanline edge searches before rasterization.
 
 #include <buster/lib/truetype.h>
+#include <buster/lib/truetype_internal.h>
 #include <buster/lib/float.h>
 #include <buster/lib/string.h>
 
@@ -1211,31 +1215,89 @@ bool truetype_rasterizers_match_for_test(Arena* arena, const TTF_RasterTestPoint
 }
 #endif
 
-TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint)
+BUSTER_GLOBAL_LOCAL TTF_Bitmap ttf_bitmap_box(const TTF_FontInformation* information, TTF_GlyphRange range, f32 scale_x, f32 scale_y)
 {
     TTF_Bitmap result = {0};
-    u32 glyph = truetype_glyph_index_from_codepoint(information, codepoint);
-    TTF_GlyphRange range = truetype_glyph_range(information, glyph);
-    if (range.length != 0 && ttf_range_is_valid(information->data, range.offset, 10))
+    if (range.length >= 10 && ttf_range_is_valid(information->data, range.offset, range.length))
     {
         s32 x_min = (s32)ttf_s16(information->data, range.offset + 2u);
         s32 y_min = (s32)ttf_s16(information->data, range.offset + 4u);
         s32 x_max = (s32)ttf_s16(information->data, range.offset + 6u);
         s32 y_max = (s32)ttf_s16(information->data, range.offset + 8u);
 
-        s32 x0 = (s32)floor_f32((f32)x_min * scale_x);
-        s32 y0 = (s32)floor_f32(-(f32)y_max * scale_y);
-        s32 x1 = (s32)ceil_f32((f32)x_max * scale_x);
-        s32 y1 = (s32)ceil_f32(-(f32)y_min * scale_y);
-        s32 width = x1 - x0;
-        s32 height = y1 - y0;
+        if (x_min < x_max && y_min < y_max)
+        {
+            f32 bounds[] = {
+                floor_f32((f32)x_min * scale_x),
+                floor_f32(-(f32)y_max * scale_y),
+                ceil_f32((f32)x_max * scale_x),
+                ceil_f32(-(f32)y_min * scale_y),
+            };
+            bool valid = true;
+            for (u32 bound = 0; bound < BUSTER_ARRAY_LENGTH(bounds); bound += 1)
+            {
+                // f32 rounds INT32_MAX up to 2^31. Widen the bound instead
+                // so this check cannot admit that out-of-range conversion.
+                f64 value = (f64)bounds[bound];
+                valid = valid && value >= (f64)INT32_MIN && value <= (f64)INT32_MAX;
+            }
+            if (valid)
+            {
+                s32 x0 = (s32)bounds[0];
+                s32 y0 = (s32)bounds[1];
+                s32 x1 = (s32)bounds[2];
+                s32 y1 = (s32)bounds[3];
+                // Widen before subtraction; individually valid endpoints
+                // can span more than INT32_MAX pixels.
+                s64 width = (s64)x1 - (s64)x0;
+                s64 height = (s64)y1 - (s64)y0;
+                if (width > 0 && width <= BUSTER_TTF_MAX_BITMAP_WIDTH && height > 0 && height <= BUSTER_TTF_MAX_BITMAP_HEIGHT &&
+                    (u64)height <= BUSTER_TTF_MAX_BITMAP_PIXELS / (u64)width)
+                {
+                    result = (TTF_Bitmap){.width = (s32)width, .height = (s32)height, .x_offset = x0, .y_offset = y0};
+                }
+            }
+        }
+    }
+    return result;
+}
 
-        result.x_offset = x0;
-        result.y_offset = y0;
-        result.width = width > 0 ? width : 0;
-        result.height = height > 0 ? height : 0;
+BUSTER_GLOBAL_LOCAL bool ttf_bitmap_work_is_valid(u32 width, u32 height, u32 point_count)
+{
+    // Each point contributes at most one edge. Conservatively assume every
+    // edge is active on every sampled row, with a full binary search in x.
+    u64 sample_width = (u64)width * TTF_RASTER_SUBSAMPLES;
+    u64 sample_height = (u64)height * TTF_RASTER_SUBSAMPLES;
+    u32 search_steps = 0;
+    for (u64 remaining = sample_width; remaining != 0; remaining /= 2u)
+    {
+        search_steps += 1;
+    }
+    bool result = sample_height != 0 && search_steps != 0 &&
+                  point_count <= BUSTER_TTF_MAX_RASTER_EDGE_STEPS / sample_height / search_steps;
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool truetype_bitmap_work_is_valid_for_test(u32 width, u32 height, u32 point_count)
+{
+    bool result = ttf_bitmap_work_is_valid(width, height, point_count);
+    return result;
+}
+#endif
+
+TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint)
+{
+    TTF_Bitmap result = {0};
+    // Ordered comparisons reject NaN as well as negative and infinite scales.
+    if (scale_x > 0.0f && scale_x <= BUSTER_TTF_MAX_SCALE && scale_y > 0.0f && scale_y <= BUSTER_TTF_MAX_SCALE)
+    {
+        u32 glyph = truetype_glyph_index_from_codepoint(information, codepoint);
+        TTF_GlyphRange range = truetype_glyph_range(information, glyph);
+        result = ttf_bitmap_box(information, range, scale_x, scale_y);
         if (result.width != 0 && result.height != 0)
         {
+            u64 position = arena->position;
             u32 max_points = (u32)information->max_points + (u32)information->max_composite_points;
             u32 max_contours = (u32)information->max_contours + (u32)information->max_composite_contours;
             if (max_points < 256u)
@@ -1255,11 +1317,20 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
             };
 
             TTF_Transform identity = {.m00 = 1.0f, .m11 = 1.0f};
-            if (ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, x0, y0, 0, &path) && !path.overflowed)
+            if (ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, result.x_offset, result.y_offset, 0, &path) &&
+                !path.overflowed && path.point_count != 0 &&
+                ttf_bitmap_work_is_valid((u32)result.width, (u32)result.height, path.point_count))
             {
+                // ttf_bitmap_box checked this product against the pixel
+                // budget. One byte per pixel makes it the byte count too.
                 u64 pixel_count = (u64)(u32)result.width * (u64)(u32)result.height;
                 result.pixels = arena_allocate(arena, u8, pixel_count);
                 ttf_rasterize_path(arena, &path, result.pixels, (u32)result.width, (u32)result.height);
+            }
+            else
+            {
+                arena_set_position(arena, position);
+                result = (TTF_Bitmap){0};
             }
         }
     }

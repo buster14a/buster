@@ -2420,11 +2420,16 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
 
         if (bound)
         {
+            // Each emission bound is a window position or its length (64 max).
+            BUSTER_CHECK(bound <= 64);
             // Starts and ends compress through the token-boundary masks, one
             // byte subtract yields every length in the window, and the kind
             // and punctuator vectors ride the same starts mask.
             u64 start_mask = token_starts & emitted;
-            u64 end_mask = ((boundary >> 1) | ((u64)1 << (bound - 1))) & token_span & emitted;
+            // `emitted` is a contiguous low-bit mask. Its highest bit marks
+            // the final lane without a variable shift at the 64-byte edge.
+            u64 final_lane = emitted & ~(emitted >> 1);
+            u64 end_mask = ((boundary >> 1) | final_lane) & token_span & emitted;
             u32 count = (u32)__builtin_popcountll(start_mask);
             BUSTER_CHECK(count == (u32)__builtin_popcountll(end_mask));
 
@@ -3730,6 +3735,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         // so an index of that size covers this symbol and every earlier one;
         // the first definition builds it, and a definition whose id lies
         // past it (the table doubled since) regrows it from the list.
+        BUSTER_CHECK(*first); // The first/last list endpoints are published together.
         if (symbol >= (*first)->by_symbol_capacity)
         {
             c_macro_index_rebuild(arena, *first, symbols->name_capacity);
@@ -6311,6 +6317,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
+            BUSTER_CHECK(!spelling.length || copy); // Counted in foreign_length above.
             for (u64 byte_index = 0; byte_index < spelling.length; byte_index += 1)
             {
                 copy[byte_index] = spelling.pointer[byte_index];
@@ -7448,6 +7455,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
         u32 root_row = c_source_metrics_file_row(arena, &metrics_files, options.source_path);
+        BUSTER_CHECK(metrics_files.rows && root_row < metrics_files.count);
         if (metrics_files.rows[root_row].lex_count == 0)
         {
             c_source_metrics_add(&result.detail->source_unique, &root_lex.metrics);

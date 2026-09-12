@@ -129,6 +129,11 @@
   The private `register_allocator_quality_internal.h` helpers are shared with
   bounded arithmetic/ordering tests. The 24-byte interval, 8-byte traffic cells
   and corresponding diagnostic clear/copy accounting are checked together.
+  Pin planning records assigned value IDs in a bounded touched list (eight spans
+  per target register). Retries clear only those IDs; endpoints are initialized
+  on assignment and read only after the pin-map membership check. Instruction
+  masks and final pin counts use the same list. The global pin-map bridge is
+  scratch-owned and is not retained by the returned placement.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
@@ -229,16 +234,31 @@
   joins use the existing pair mapping, allocated only when a vector participates
   in an edge. Baseline wider local vector images can also use frame copies;
   this does not admit missing vector arithmetic or split wide signatures.
-  `compiler_driver_test_x64_frame_vectors` preserves four whole original
+  `compiler_driver_test_native_frame_vectors` preserves four whole original
   fixtures and a new conditional/loop/cross-compiler fixture over all six x86
   targets, four allocators, both frontend forms, both PIC forms and baseline,
-  Haswell and Zen 5 CPU models. Only matching native baseline objects execute.
+  Haswell and Zen 5 CPU models. Frame-boundary inputs execute matching native baseline objects; the vector
+  arithmetic inputs additionally execute supported Haswell/Zen 5 profiles.
   Its complete independent observer uses Clang: GCC 13 uses a different hidden
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
   narrow signature and vector-load refusals are strict successes; the separate
   `basic_c_machine_fallback_wide_signature.c` retains an explicit 32-byte
   signature refusal for telemetry and artifact-failure checks.
+- X86 vector arithmetic keeps native EVEX rows for their encodable operations
+  and expands the remaining integer/floating operations into ordinary scalar
+  MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
+  signed narrow lanes extend before division, remainder, comparisons and right
+  shifts. Comparison results expand to all-ones masks, and floating negation
+  changes only the sign bit. ZMM operands/results use explicit owned frame
+  snapshots around scalar expansion. Wide vector members store through their
+  exact subobject address. This does not complete model-dependent wide ABI
+  signatures or general assembly.
+  `basic_c_vector.c` and `basic_c_vector_lane_edges.c` remain whole strict inputs.
+  The registered matrix includes baseline/Haswell/Zen 5 object generation and
+  executes matching host CPU profiles. `host_vector_arithmetic.c` independently
+  computes scalar expectations and checks adjacent bytes over 8/16/32/64-byte
+  images; no vector arithmetic is used in that observer.
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete
@@ -352,6 +372,27 @@
   the scalar arithmetic rules. Keep the entire vector fixture strict in
   MIR_STACK, FAST and QUALITY; scalar expansion must remain visible to MIR
   validation and register allocation.
+- AArch64 vectors through sixteen bytes use the existing two-general-register
+  canonical edge mapping at joins. Every incoming value is snapshotted at its
+  definition; destination stores restore its frame image. Short images that
+  enter a pair receive sixteen bytes of owned storage for both limb reads.
+  One-, two- and four-byte arguments use W registers. Results use the vector
+  file; two- and four-byte multi-lane integer vectors expand their elements
+  across D0's ABI lanes and compact again on receipt, matching Clang on ELF,
+  Mach-O and PE. The native frame-vector matrix retains the original fixture
+  and adds three-value rotation cycles, calls inside loops, independent host
+  observers and adjacent-byte sentinels. Native child execution is bounded so
+  an ABI regression fails instead of wedging CI.
+- AArch64 binary32/64 to binary128 widening constructs an exact frame image
+  through scalar MIR: CLZ normalization, exponent rebiasing, sign and payload
+  transport. A consumed floating multiply quiets special inputs and raises
+  invalid for signaling NaNs; finite inputs are masked to zero before that row,
+  preserving subnormals even with flush-to-zero enabled. No libcall or direct
+  emitter is used. `compiler_driver_test_aarch64_float_to_f128` retains the
+  original created-NaN fixture and tests independent binary128 byte cases.
+  Native Linux AArch64 exchanges producer/consumer roles with the configured
+  host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
+  Binary128 scalar signatures, arithmetic and truncation are separate gaps.
 - AArch64 128-bit multiplication combines the low-limb product, its generated
   UMULH high half, and the two cross products. Negation propagates the low
   limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress

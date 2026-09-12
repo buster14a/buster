@@ -20,6 +20,7 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+#include <buster/lib/time.h>
 #include <buster/lib/x86_64.h>
 
 // Size census for the hot records the register-allocator project depends
@@ -4785,9 +4786,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_bank(UnitTestArguments
     return result;
 }
 
+// Preserve the live value order while moving every value above a dead-ID gap.
+// The pressure corpus has no value-bearing opcode payloads or VA_ARG side rows.
+// Compare complete ordered placement and encoding, then reuse dirty scratch on
+// another function/target. This catches stale pins and uninitialized span reads.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_sparse_pins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool benchmark = os_get_environment_variable(S8("BUSTER_QUALITY_SCRATCH_BENCH")).length != 0;
+#if BUSTER_BENCH_ALLOCATIONS
+    u64 observed_resets = 0;
+#endif
+    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_register_pressure.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    BUSTER_TEST(arguments, source.length != 0);
+    for (u32 target_index = 0; source.length && target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            Target target = targets[target_index];
+            IrProgram* program = machine_test_compile_c_with_options(arguments->arena, S8("quality-sparse-pins.c"), source, target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* ir_function = module->functions + function_index;
+                    if (ir_function->state == IR_FUNCTION_DECLARATION) continue;
+                    TemporalArena function_temporary = arena_begin_temporal(arguments->arena);
+                    MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, ir_function, target);
+                    BUSTER_TEST(arguments, selected.supported && !selected.function.va_arg_count);
+                    if (selected.supported && !selected.function.va_arg_count)
+                    {
+                        MachineFunction* original = &selected.function;
+#if BUSTER_BENCH_ALLOCATIONS
+                        MachineQualityCensus reference_before = machine_quality_census_snapshot();
+#endif
+                        MachineStackPlacement reference = machine_quality_placement_build(arguments->arena, original);
+#if BUSTER_BENCH_ALLOCATIONS
+                        MachineQualityCensus reference_after = machine_quality_census_snapshot();
+#endif
+                        BUSTER_TEST(arguments, reference.valid);
+                        MachineEncodeResult reference_code = target.cpu_arch == CPU_ARCH_X86_64
+                            ? machine_encode_x86_64(arguments->arena, original, &reference)
+                            : machine_encode_aarch64(arguments->arena, original, &reference);
+                        BUSTER_TEST(arguments, reference_code.valid);
+                        u32 gaps[] = {4096, 0, 65536};
+                        bool measure = benchmark && target_index == 0 && memory_form == 0 &&
+                            string_equal(ir_function->name, S8("wide_live_loop"));
+                        for (u32 gap_index = 0; gap_index < (measure ? 3u : 2u); gap_index += 1)
+                        {
+                            TemporalArena variant_temporary = arena_begin_temporal(arguments->arena);
+                            u32 gap = gaps[gap_index];
+                            MachineFunction variant = *original;
+                            variant.virtual_register_count += gap;
+                            variant.virtual_registers = arena_allocate(arguments->arena, MachineVirtualRegister, variant.virtual_register_count);
+                            for (u32 value = 0; value < gap; value += 1)
+                            {
+                                variant.virtual_registers[value] = (MachineVirtualRegister){
+                                    .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                    .typed_origin = IR_ID_UNDERLYING_INVALID};
+                            }
+                            memcpy(variant.virtual_registers + gap, original->virtual_registers,
+                                   (u64)original->virtual_register_count * sizeof(MachineVirtualRegister));
+                            variant.instructions = arena_allocate(arguments->arena, MachineInstruction, original->instruction_count);
+                            memcpy(variant.instructions, original->instructions, (u64)original->instruction_count * sizeof(MachineInstruction));
+                            for (u32 row = 0; row < variant.instruction_count; row += 1)
+                            {
+                                MachineInstruction* instruction = variant.instructions + row;
+                                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                                {
+                                    MachineRef ref = instruction->operands[slot];
+                                    if (machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                                        instruction->operands[slot] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, machine_ref_payload(ref) + gap);
+                                }
+                            }
+                            variant.block_parameters = arena_allocate(arguments->arena, MachineBlockParameter, original->block_parameter_count);
+                            for (u32 index = 0; index < original->block_parameter_count; index += 1)
+                            {
+                                variant.block_parameters[index] = original->block_parameters[index];
+                                variant.block_parameters[index].virtual_register += gap;
+                            }
+                            variant.edge_copy_sources = arena_allocate(arguments->arena, MachineRef, original->edge_copy_source_count);
+                            for (u32 index = 0; index < original->edge_copy_source_count; index += 1)
+                            {
+                                MachineRef ref = original->edge_copy_sources[index];
+                                variant.edge_copy_sources[index] = machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER
+                                    ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, machine_ref_payload(ref) + gap) : ref;
+                            }
+                            for (u32 repeat = 0; repeat < (measure ? 8u : 2u); repeat += 1)
+                            {
+                                TemporalArena placement_temporary = arena_begin_temporal(arguments->arena);
+#if BUSTER_BENCH_ALLOCATIONS
+                                MachineQualityCensus before = machine_quality_census_snapshot();
+#endif
+                                TimeDataType start = timestamp_take();
+                                MachineStackPlacement placement = machine_quality_placement_build(arguments->arena, &variant);
+                                u64 ns = timestamp_ns_between(start, timestamp_take());
+                                u64 retained = arguments->arena->position - placement_temporary.position;
+#if BUSTER_BENCH_ALLOCATIONS
+                                MachineQualityCensus after = machine_quality_census_snapshot();
+                                u64 assignments = after.whole_assignments - before.whole_assignments + after.split_assignments - before.split_assignments;
+                                BUSTER_TEST(arguments, after.pin_span_write_bytes - before.pin_span_write_bytes == assignments * 2 * sizeof(u32));
+                                BUSTER_TEST(arguments, after.pin_reset_values - before.pin_reset_values <= assignments);
+                                observed_resets += after.pin_reset_values - before.pin_reset_values;
+                                BUSTER_TEST(arguments, after.attempt_reset_bytes - before.attempt_reset_bytes ==
+                                    reference_after.attempt_reset_bytes - reference_before.attempt_reset_bytes);
+                                BUSTER_TEST(arguments, after.pin_mask_values - before.pin_mask_values == assignments);
+#endif
+                                BUSTER_TEST(arguments, placement.valid && placement.edit_count == reference.edit_count &&
+                                    placement.frame_size == reference.frame_size && placement.callee_saved_mask == reference.callee_saved_mask &&
+                                    placement.pinned_register_count == reference.pinned_register_count &&
+                                    placement.split_register_count == reference.split_register_count &&
+                                    placement.reload_count == reference.reload_count && placement.spill_count == reference.spill_count);
+                                if (placement.valid && placement.edit_count == reference.edit_count)
+                                {
+                                    for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+                                    {
+                                        MachineEdit left = reference.edits[edit_index];
+                                        MachineEdit right = placement.edits[edit_index];
+                                        if (right.kind == MACHINE_EDIT_SPILL || right.kind == MACHINE_EDIT_RELOAD) right.subject -= gap;
+                                        BUSTER_TEST(arguments, left.point == right.point && left.kind == right.kind && left.flags == right.flags &&
+                                            left.subject == right.subject && left.location == right.location);
+                                    }
+                                    BUSTER_TEST(arguments, memcmp(reference.operand_registers, placement.operand_registers,
+                                        (u64)variant.instruction_count * 4) == 0);
+                                    MachineEncodeResult encoded = target.cpu_arch == CPU_ARCH_X86_64
+                                        ? machine_encode_x86_64(arguments->arena, &variant, &placement)
+                                        : machine_encode_aarch64(arguments->arena, &variant, &placement);
+                                    BUSTER_TEST(arguments, encoded.valid && encoded.byte_count == reference_code.byte_count);
+                                    if (encoded.valid && encoded.byte_count == reference_code.byte_count)
+                                        BUSTER_TEST(arguments, memcmp(encoded.bytes, reference_code.bytes, encoded.byte_count) == 0);
+                                }
+                                if (measure && repeat)
+                                {
+                                    string_print(S8("BENCH_QUALITY_SCRATCH gap={u32} values={u32} rows={u32} sample={u32} ns={u64} retained={u64} pins={u32}\n"),
+                                        gap, variant.virtual_register_count, variant.instruction_count, repeat - 1, ns,
+                                        retained, placement.pinned_register_count);
+                                }
+                                scratch_end(placement_temporary);
+                            }
+                            scratch_end(variant_temporary);
+                        }
+                    }
+                    scratch_end(function_temporary);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    BUSTER_TEST(arguments, observed_resets > 0);
+#endif
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);

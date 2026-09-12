@@ -7879,6 +7879,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     u32 width_index = 0;
     if (plan->machine_fast_data_width_count)
     {
+        BUSTER_CHECK(query.operands); // A width binding requires a validated physical operand.
         u8 binding_index = plan->machine_fast_data_width_bindings[0];
         BusterX86MetadataPhysicalOperand physical = query.operands[binding_index];
         u16 width = physical.width;
@@ -9490,7 +9491,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
         return result;
     }
     if (scratch.byte_count) memory_copy_small(query.output, scratch.bytes, scratch.byte_count);
-    if (scratch.relocation_count) memcpy(query.relocations, scratch.relocations, scratch.relocation_count * sizeof(*scratch.relocations));
+    if (scratch.relocation_count)
+    {
+        BUSTER_CHECK(query.relocations); // Nonzero count passed the output-capacity check.
+        memcpy(query.relocations, scratch.relocations, scratch.relocation_count * sizeof(*scratch.relocations));
+    }
     result.byte_count = scratch.byte_count;
     result.relocation_count = scratch.relocation_count;
     result.status = BUSTER_X86_METADATA_ENCODE_SUCCESS;

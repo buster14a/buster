@@ -883,7 +883,7 @@ static IrInstruction* ebpf_fe_definition(EbpfFunctionEmitter* emitter, IrValueId
 static IrType* ebpf_fe_value_type(EbpfFunctionEmitter* emitter, IrValueId value)
 {
     IrType* result;
-    if (value.value >= emitter->function->value_count)
+    if (!emitter->function->values || value.value >= emitter->function->value_count)
     {
         result = 0;
     }
@@ -934,7 +934,7 @@ static EbpfGlobalRecord* ebpf_global_for_symbol(EbpfContext* context, IrSymbolId
 
 static void ebpf_fe_normalize(EbpfFunctionEmitter* emitter, u8 reg, IrType* type, bool signed_value)
 {
-    if (ebpf_type_is_integer(type))
+    if (type && ebpf_type_is_integer(type))
     {
         u32 bits = ebpf_type_bits(type);
         if (type->kind == IR_TYPE_BOOLEAN)

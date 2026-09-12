@@ -97,6 +97,10 @@ BUSTER_F_DECL u32 machine_quality_region_next(MachineQualityTraffic const* traff
     X(prefix_rows_built) \
     X(prefix_cells_written) \
     X(attempt_reset_bytes) \
+    X(pin_initial_clear_bytes) \
+    X(pin_reset_values) \
+    X(pin_span_write_bytes) \
+    X(pin_mask_values) \
     X(pin_mask_clear_bytes) \
     X(placement_probes) \
     X(placement_cost_rejections) \
