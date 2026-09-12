@@ -90,10 +90,18 @@ shell, CMake, and utility subprocesses.
 `test_timing_summary_self_test`, `musl_directory_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
+`native_retirement_census`,
 `x86_64_completion_census`,
 `test_all_combinations`,
-`test_all_combinations_ci`; `self_host_from_existing` is an internal
+`test_all_combinations_ci`, `test_uefi`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`native_retirement_census` freezes the tracked C regression inputs and the full
+native target/allocator/frontend/PIC object matrix before running any selected
+groups. It supports an independently pinned direct compiler, fixture/target
+filters and deterministic shards without removing unexecuted rows from its
+manifest. See the [census contract](../native-retirement-census.md) for retained
+evidence, strict failure accounting and its explicit object/per-function limits.
 
 `musl_directory_self_test` checks complete, unique directory inventories through
 two capacity growths, opposite creation orders, manifest sorting and architecture
@@ -280,3 +288,11 @@ available for opt-in `test_differential --jobs N`. The default remains one case
 worker; other build workflows never dispatch a lane gang. TCC still defines
 `BUSTER_SINGLE_THREADED=1` for its bootstrap headers/atomics. An explicit
 `-DBUSTER_SINGLE_THREADED=1` preserves the same worker loop in serial builds.
+## UEFI firmware execution
+
+`build/build test_uefi <built-ide> <fresh-output-directory>` boots both UEFI
+targets in all four allocators against pinned QEMU/EDK2, with bounded children
+and retained evidence. Run `build/build test_uefi --self-test <fresh-directory>`
+first. Missing firmware or mismatched pins fail explicitly. See
+[the reference lane](../uefi-target.md#reference-firmware-execution-gate) for
+prerequisites, negative controls, pins and the runtime success contract.

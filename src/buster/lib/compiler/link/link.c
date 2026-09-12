@@ -1365,23 +1365,43 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
         TemporalArena temporary = scratch_begin(&arena, 1);
         u32* order = arena_allocate(temporary.arena, u32, entries);
         u8* bytes = arena_allocate(temporary.arena, u8, section->data.length);
-        // Insertion sort, which is stable and which this population is the
-        // shape for: a program registers a handful of initializers, they
-        // arrive as one already-ascending run per input object, and equal
-        // priorities have to keep the order the inputs were given in.
+        // Stable least-significant-byte radix passes keep reverse-priority
+        // inputs linear. Forward scattering preserves link order for ties.
+        // Reuse the inverse-permutation storage as the second index buffer;
+        // sorting needs no additional allocation proportional to entries.
+        u32* destination = arena_allocate(temporary.arena, u32, entries);
         for (u64 entry = 0; entry < entries; entry += 1)
         {
-            u64 position = entry;
-            while (position && priorities[order[position - 1]] > priorities[entry])
+            order[entry] = (u32)entry;
+        }
+        enum { INITIALIZER_RADIX_BITS = 8, INITIALIZER_RADIX_BUCKETS = 1 << INITIALIZER_RADIX_BITS };
+        for (u32 byte_index = 0; byte_index < sizeof(*priorities); byte_index += 1)
+        {
+            u64 offsets[INITIALIZER_RADIX_BUCKETS] = {0};
+            u32 shift = byte_index * INITIALIZER_RADIX_BITS;
+            for (u64 entry = 0; entry < entries; entry += 1)
             {
-                order[position] = order[position - 1];
-                position -= 1;
+                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                offsets[bucket] += 1;
             }
-            order[position] = (u32)entry;
+            u64 offset = 0;
+            for (u32 bucket = 0; bucket < INITIALIZER_RADIX_BUCKETS; bucket += 1)
+            {
+                u64 count = offsets[bucket];
+                offsets[bucket] = offset;
+                offset += count;
+            }
+            for (u64 entry = 0; entry < entries; entry += 1)
+            {
+                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                destination[offsets[bucket]++] = order[entry];
+            }
+            u32* swap = order;
+            order = destination;
+            destination = swap;
         }
         // The inverse permutation, which is what the relocations and the
         // symbols are rewritten through.
-        u32* destination = arena_allocate(temporary.arena, u32, entries);
         for (u64 entry = 0; entry < entries; entry += 1)
         {
             memcpy(bytes + entry * OBJECT_INITIALIZER_ENTRY_SIZE, section->data.pointer + (u64)order[entry] * OBJECT_INITIALIZER_ENTRY_SIZE,

@@ -226,9 +226,16 @@ class EvidencePackTests(unittest.TestCase):
         script = self.source / "differential/case/reproduce.sh"
         script.write_bytes(b"#!/bin/sh\n")
         script.chmod(0o755)
+        directory = script.parent
+        directory.chmod(0o750)
+        stamp = 1700000000.125
+        os.utime(directory, (stamp, stamp))
         ci_pack_evidence.pack(self.source, self.output)
         with tarfile.open(self.output / ci_pack_evidence.ARCHIVE, "r:gz") as bundle:
             self.assertEqual(bundle.getmember("buster-ci/differential/case/reproduce.sh").mode, 0o755)
+            member = bundle.getmember("buster-ci/differential/case")
+            self.assertEqual(member.mode, 0o750)
+            self.assertEqual(member.mtime, stamp)
 
     def test_missing_input_overlapping_output_links_and_special_files_are_refused(self):
         with self.assertRaisesRegex(ValueError, "missing evidence"):
@@ -255,6 +262,20 @@ class EvidencePackTests(unittest.TestCase):
             ci_pack_evidence.pack(self.source, self.output)
         self.assertFalse((self.output / ci_pack_evidence.ARCHIVE).exists())
 
+    def test_linked_roots_are_refused_but_system_ancestor_aliases_work(self):
+        alias = self.root / "source-link"
+        try:
+            alias.symlink_to(self.source, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable to this user")
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            ci_pack_evidence.pack(alias, self.output)
+        parent_alias = self.root / "parent-link"
+        parent_alias.symlink_to(self.source.parent, target_is_directory=True)
+        ci_pack_evidence.pack(parent_alias / self.source.name, self.output)
+        files, _ = self.members()
+        self.assertEqual(set(files), {"buster-ci/" + name for name in self.KEEP})
+
     def test_failed_write_leaves_no_stale_or_partial_upload(self):
         self.output.mkdir(parents=True)
         for name in (ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES:
@@ -263,6 +284,59 @@ class EvidencePackTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "disk full"):
                 ci_pack_evidence.pack(self.source, self.output)
         self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_summary_write_close_verify_and_publish_failures_leave_no_bundle(self):
+        original_write = Path.write_bytes
+        original_close = ci_pack_evidence.tarfile.TarFile.close
+
+        def fail_summary(path, data):
+            if path.name == "summary.md":
+                raise OSError("summary close failed")
+            return original_write(path, data)
+
+        def fail_close(bundle):
+            writing = bundle.mode == "w" and not bundle.closed
+            original_close(bundle)
+            if writing:
+                raise OSError("archive close failed")
+
+        failures = (
+            mock.patch.object(Path, "write_bytes", fail_summary),
+            mock.patch.object(ci_pack_evidence.tarfile.TarFile, "close", fail_close),
+            mock.patch.object(ci_pack_evidence, "verify", side_effect=ValueError("verify failed")),
+            mock.patch.object(ci_pack_evidence.os, "replace", side_effect=OSError("publish failed")),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure), failure, self.assertRaises((OSError, ValueError)):
+                ci_pack_evidence.pack(self.source, self.output)
+            self.assertFalse((self.output / ci_pack_evidence.ARCHIVE).exists())
+            self.assertEqual(list(self.root.glob("native-ci-upload.partial-*")), [])
+            for name, data in self.KEEP.items():
+                self.assertEqual((self.source / name).read_bytes(), data)
+
+    def test_missing_summary_and_missing_source_remove_stale_success(self):
+        ci_pack_evidence.pack(self.source, self.output)
+        (self.source / "summary.md").unlink()
+        with self.assertRaisesRegex(ValueError, "missing evidence summaries"):
+            ci_pack_evidence.pack(self.source, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+        for name in (ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES:
+            (self.output / name).write_bytes(b"stale")
+        with self.assertRaisesRegex(ValueError, "missing evidence directory"):
+            ci_pack_evidence.pack(self.root / "absent", self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_summary_copies_match_the_archived_snapshot(self):
+        original_verify = ci_pack_evidence.verify
+
+        def change_source_after_archive(*args):
+            original_verify(*args)
+            (self.source / "result.json").write_bytes(b"changed after archive verification")
+
+        with mock.patch.object(ci_pack_evidence, "verify", change_source_after_archive):
+            ci_pack_evidence.pack(self.source, self.output)
+        files, _ = self.members()
+        self.assertEqual((self.output / "result.json").read_bytes(), files["buster-ci/result.json"])
 
     def test_verification_rejects_changed_missing_and_extra_members(self):
         ci_pack_evidence.pack(self.source, self.output)
@@ -283,8 +357,8 @@ class EvidencePackTests(unittest.TestCase):
 
     def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
         steps = self.native_steps()
-        self.assertEqual(list(steps)[-4:], ["Native result and reproduction", "Pack native logs",
-                                            "Retain native logs", "Retain unpacked native logs"])
+        self.assertEqual(list(steps)[-5:], ["Native result and reproduction", "Pack native logs",
+                                            "Retain native logs", "Record native packaging failure", "Retain unpacked native logs"])
         pack, packed, unpacked = (steps[name] for name in (
             "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
         self.assertIn("id: pack\n", pack)
@@ -302,6 +376,13 @@ class EvidencePackTests(unittest.TestCase):
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program\n", unpacked)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o\n", unpacked)
         self.assertEqual(ci_pack_evidence.GENERATED, frozenset(("program", "subject.o")))
+        failed_summary = steps["Record native packaging failure"]
+        self.assertIn("steps.pack.outcome != 'success'", failed_summary)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential pack", failed_summary)
+        self.assertIn("run: python3 tools/ci_summary.py", failed_summary)
+        outcomes = {"modes": {"outcome": "success"}, "differential": {"outcome": "success"},
+                    "pack": {"outcome": "failure"}}
+        self.assertEqual(ci_summary.assess(outcomes, ["modes", "differential", "pack"]), ["pack"])
 
     @unittest.skipIf(os.name == "nt", "Native lanes run only on Unix")
     def test_actual_workflow_command_packs_runner_evidence(self):
@@ -326,7 +407,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("./android/test_ci.sh --all", text)
         self.assertIn("./ios/test_ci.sh --all", text)
         self.assertNotRegex(text, r"(?m)^\s*continue-on-error:")
-        self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text)
+        self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text.split("\n  uefi:", 1)[0])
 
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
@@ -353,7 +434,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
         self.assertNotIn("needs:", mobile)
-        self.assertIn("needs: [lint, test, native, mobile]", text)
+        self.assertIn("needs: [lint, test, native, mobile, uefi]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_windows_runs_native_worker_controls_before_the_combination_matrix(self):
@@ -478,11 +559,11 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile, uefi]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
-        # predicate. Subshells contain its exit statements; all 625 outcomes
-        # include empty/missing dependency results as well as terminal states.
+        # predicate. Exercise all 625 existing shard outcomes with UEFI green,
+        # then independently reject each unavailable/unsuccessful UEFI result.
         body = aggregate.split("        run: |\n", 1)[1]
         body = textwrap.dedent(body)
         with tempfile.TemporaryDirectory() as temporary:
@@ -493,6 +574,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             script = r"""
 set -eu
 checked=0
+UEFI_RESULT=success
+export UEFI_RESULT
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
     for NATIVE_RESULT in success failure cancelled skipped ''; do
@@ -510,6 +593,15 @@ for LINT_RESULT in success failure cancelled skipped ''; do
     done
   done
 done
+LINT_RESULT=success DESKTOP_RESULT=success NATIVE_RESULT=success MOBILE_RESULT=success
+export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT MOBILE_RESULT
+for UEFI_RESULT in failure cancelled skipped ''; do
+  export UEFI_RESULT
+  actual=0
+  ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+  [[ "$actual" -ne 0 ]] || exit 1
+  checked=$((checked + 1))
+done
 printf '%s\n' "$checked"
 """
             # Windows CreateProcess can choose System32/bash.exe (WSL)
@@ -526,7 +618,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "625")
+            self.assertEqual(result.stdout.strip(), "629")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):

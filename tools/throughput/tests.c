@@ -401,6 +401,157 @@ static void test_compile_options(void)
     CHECK(!tp_options(3, missing_artifact, &config));
 }
 
+static void test_workload_selection(void)
+{
+    TpConfig config;
+    char* defaults[] = {"throughput", "run", NULL};
+    CHECK(tp_options(2, defaults, &config));
+    CHECK(config.workload_mask == TP_DEFAULT_WORKLOAD_MASK);
+    unsigned count;
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 24);
+    char* selected[] = {"throughput", "run", "--no-guard", "--workload", "aggregate-abi",
+                        "--workload", "macros", "--workload", "macros", NULL};
+    CHECK(tp_options(9, selected, &config));
+    CHECK(config.workload_mask == (TP_ALL_WORKLOAD_MASK ^ TP_DEFAULT_WORKLOAD_MASK));
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 8);
+    selected[4] = "default";
+    CHECK(tp_options(9, selected, &config));
+    CHECK(config.workload_mask == (TP_DEFAULT_WORKLOAD_MASK | (1u << 6)));
+    selected[4] = "all";
+    CHECK(tp_options(9, selected, &config));
+    CHECK(config.workload_mask == TP_ALL_WORKLOAD_MASK);
+    char* invalid[] = {"throughput", "run", "--workload", "macros", NULL};
+    CHECK(!tp_options(4, invalid, &config)); /* Custom corpus cannot alter the CI guard. */
+    invalid[1] = "generate";
+    invalid[3] = "";
+    CHECK(!tp_options(4, invalid, &config));
+    invalid[3] = "macro";
+    CHECK(!tp_options(4, invalid, &config));
+    CHECK(!tp_options(3, invalid, &config));
+}
+
+static void test_job_capacity(void)
+{
+    TpConfig config = {0};
+    TpWorkload* workloads = (TpWorkload*)calloc(TP_CASES, sizeof(TpWorkload));
+    TpJob* jobs = (TpJob*)calloc(TP_MAX_JOBS + 1, sizeof(TpJob));
+    CHECK(workloads && jobs);
+    if (workloads && jobs)
+    {
+        for (unsigned kind = 0; kind < TP_CASES; ++kind)
+            strcpy(workloads[kind].name, tp_case_names[kind]);
+        /* Every nonempty subset, mode subset and optional stage pair. This
+         * exercises counts above the former 32-job limit with real writes. */
+        for (unsigned mask = 1; mask <= TP_ALL_WORKLOAD_MASK; ++mask)
+        {
+            config.workload_mask = mask;
+            for (unsigned modes = 1; modes <= TP_ALL_MODE_MASK; ++modes)
+            {
+                config.mode_mask = modes;
+                for (unsigned self = 0; self < 2; ++self)
+                {
+                    config.self_host_root = self ? "frozen" : NULL;
+                    config.assembly = (int)(mask & 1u);
+                    unsigned count = 0;
+                    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count));
+                    unsigned expected = 0;
+                    for (unsigned kind = 0; kind < TP_CASES; ++kind)
+                        for (unsigned mode = 0; mode < TP_MODES; ++mode)
+                            expected += !!(mask & (1u << kind)) && !!(modes & (1u << mode));
+                    expected += self * 2;
+                    CHECK(count == expected);
+                    unsigned rejected = 99;
+                    /* Null storage proves rejection precedes even the first write. */
+                    CHECK(!tp_prepare_jobs(&config, NULL, NULL, count - 1, &rejected) && rejected == 0);
+                    jobs[count].stage = 99;
+                    CHECK(tp_prepare_jobs(&config, workloads, jobs, count, &count));
+                    CHECK(count == expected && jobs[count].stage == 99);
+                    unsigned next = 0;
+                    for (unsigned kind = 0; kind < TP_CASES; ++kind)
+                    {
+                        for (unsigned mode = 0; mode < TP_MODES; ++mode)
+                        {
+                            if ((mask & (1u << kind)) && (modes & (1u << mode)))
+                            {
+                                CHECK(!strcmp(jobs[next].workload.name, tp_case_names[kind]) &&
+                                      jobs[next].mode == mode && !jobs[next].stage && jobs[next].assembly == config.assembly);
+                                ++next;
+                            }
+                        }
+                    }
+                    for (unsigned stage = 1; self && stage <= 2; ++stage)
+                    {
+                        CHECK(jobs[next].stage == stage && jobs[next].mode == 2 && !jobs[next].assembly &&
+                              !strcmp(jobs[next].workload.path, "frozen/src/buster/apps/ide/ide.c"));
+                        ++next;
+                    }
+                    CHECK(next == count);
+                }
+            }
+        }
+        unsigned count;
+        config.workload_mask = 0;
+        CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count) && !count);
+        config.workload_mask = TP_ALL_WORKLOAD_MASK + 1;
+        CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count) && !count);
+        config.workload_mask = TP_ALL_WORKLOAD_MASK;
+        config.mode_mask = 0;
+        CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count) && !count);
+        config.mode_mask = TP_ALL_MODE_MASK + 1;
+        CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count) && !count);
+    }
+    free(jobs);
+    free(workloads);
+}
+
+static void test_optional_inputs(char const* root)
+{
+    static char const* const profiles[] = {"smoke", "ci", "full"};
+    /* Independently reconstructed from the documented transport recipes plus
+     * the input-schema comment and unsigned arithmetic adaptation. */
+    static char const* const hashes[3][2] = {
+        {"995792800d47ecf3edc45291dafc0600e9675404fc7a7b9787ae05c8d308c7d4", "487e98d97fd5d16bac9852df20083baa2d2ff22e41b5aa385bc2ca3521b927af"},
+        {"de53fc669bce964500dea92194c9bf4a0edae1513de22a60c121e998528c9fb1", "31820c423f224ea2c5edd5b779ccf1ea59ba2c3519f4b3997cb5ee9351355054"},
+        {"a99ada929f75c22fb6a4d11d927e60f181f14d6abc4bcd73ab1a53bae5919c4d", "3fc9c9514492a0142d40d2402003782a85c62be7cc0a9b5a9fe090712f41a4d2"}};
+    static uint64_t const bytes[3][2] = {{2721, 13874}, {21686, 114343}, {185768, 953001}};
+    static uint64_t const functions[3][2] = {{256, 128}, {2048, 1024}, {16384, 8192}};
+    char a[TP_PATH_CAP], b[TP_PATH_CAP];
+    CHECK(tp_path(a, root, "optional-a") && tp_path(b, root, "optional-b") && tp_mkdirs(a) && tp_mkdirs(b));
+    char* options[] = {"throughput", "generate", "--workload", "aggregate-abi", "--workload", "macros", NULL};
+    TpConfig config;
+    CHECK(tp_options(6, options, &config));
+    TpWorkload first[TP_CASES] = {0}, second[TP_CASES] = {0};
+    for (unsigned profile = 0; profile < 3; ++profile)
+    {
+        config.profile = profiles[profile];
+        config.scale = 1;
+        CHECK(tp_generate(&config, a, first));
+        for (unsigned recipe = 0; recipe < 2; ++recipe)
+        {
+            unsigned kind = TP_DEFAULT_CASES + recipe;
+            CHECK(!strcmp(first[kind].hash, hashes[profile][recipe]));
+            CHECK(first[kind].bytes == bytes[profile][recipe] && first[kind].functions == functions[profile][recipe]);
+            CHECK(first[kind].lines == functions[profile][recipe] + (recipe ? 1 : 6));
+            TpConfig single = config;
+            single.workload_mask = 1u << kind;
+            CHECK(tp_generate(&single, b, second));
+            CHECK(!strcmp(first[kind].hash, second[kind].hash));
+        }
+        config.scale = 2;
+        CHECK(tp_generate(&config, b, second));
+        for (unsigned kind = TP_DEFAULT_CASES; kind < TP_CASES; ++kind)
+            CHECK(second[kind].functions == 2 * first[kind].functions && strcmp(second[kind].hash, first[kind].hash));
+    }
+    for (unsigned kind = 0; kind < TP_DEFAULT_CASES; ++kind)
+    {
+        char path[TP_PATH_CAP], leaf[128];
+        snprintf(leaf, sizeof(leaf), "%s.c", tp_case_names[kind]);
+        CHECK(tp_path(path, a, leaf));
+        struct stat info;
+        CHECK(stat(path, &info) != 0 && errno == ENOENT);
+    }
+}
+
 static void test_sample_paths(char const* executable, char const* root)
 {
     char commands_path[TP_PATH_CAP], capabilities_path[TP_PATH_CAP];
@@ -443,11 +594,18 @@ static void test_inputs(char const* root)
     CHECK(tp_options(4, options, &config));
     TpWorkload first[TP_CASES], second[TP_CASES];
     CHECK(tp_generate(&config, a, first) && tp_generate(&config, b, second));
-    for (unsigned i = 0; i < TP_CASES; ++i)
+    for (unsigned i = 0; i < TP_DEFAULT_CASES; ++i)
         CHECK(!strcmp(first[i].hash, second[i].hash) && first[i].bytes && first[i].lines && first[i].functions);
-    /* Pin the specified seed's corpus across host compilers, including which
-     * successive random draw belongs to each backend initializer operand. */
-    CHECK(!strcmp(first[5].hash, "e1148b330b3d11a02937cbb0c474e203dd7a988608595f300d36b3965a5be9ee"));
+    /* Pin all default inputs: opt-in coverage must not expand the CI corpus
+     * or change which random draw belongs to each backend operand. */
+    static char const* const default_hashes[TP_DEFAULT_CASES] = {
+        "ba2d69c491960aeb405d9379ee9e938f8703367d61577d8e9ada16187d284c40",
+        "6b2c0a8094e7c1eb64c4ccb8b86d8d982d25141bcabe54e029011a7bd310bd0e",
+        "1fdddb874b78b52c47898df53873b50af0de52a7669b62781a26c4fbd53b2ecf",
+        "d10004c51b1b88f386843fa629139a06965fcc77729e14210bf038063d536f79",
+        "cd5f16811fdb7c542dcc26c3454d1e3fe7762104a19b8968fdd2e46a25c13a2e",
+        "e1148b330b3d11a02937cbb0c474e203dd7a988608595f300d36b3965a5be9ee"};
+    for (unsigned kind = 0; kind < TP_DEFAULT_CASES; ++kind) CHECK(!strcmp(first[kind].hash, default_hashes[kind]));
     CHECK(tp_hash_tree(a, hash_a) && tp_hash_tree(b, hash_b) && !strcmp(hash_a, hash_b));
     config.seed++;
     CHECK(tp_generate(&config, b, second));
@@ -460,6 +618,10 @@ static void test_inputs(char const* root)
     CHECK(!tp_hash_tree(b, hash_b));
     CHECK(remove(link) == 0);
 #endif
+    --config.seed;
+    config.workload_mask = TP_ALL_WORKLOAD_MASK;
+    CHECK(tp_generate(&config, b, second));
+    for (unsigned kind = 0; kind < TP_DEFAULT_CASES; ++kind) CHECK(!strcmp(first[kind].hash, second[kind].hash));
     char metrics[TP_PATH_CAP];
     CHECK(tp_path(metrics, root, "test.metrics"));
     TpRow row = {0};
@@ -473,6 +635,42 @@ static void test_inputs(char const* root)
     CHECK(!tp_read_metrics(metrics, &row));
     CHECK(test_text(root, "test.metrics", "lexed.translated_bytes=42\n"));
     CHECK(!tp_read_metrics(metrics, &row));
+}
+
+static void test_maximum_jobs(char const* root)
+{
+    char directory[TP_PATH_CAP], path[TP_PATH_CAP];
+    int ok = tp_path(directory, root, "maximum-jobs") && test_bundle(directory, 0);
+    CHECK(ok);
+    TpRow* rows = (TpRow*)calloc(TP_ROUNDS * 2 * 20, sizeof(TpRow));
+    CHECK(rows != NULL);
+    ok = ok && rows && tp_load_samples(directory, "samples.csv", 1, 20, 0, rows);
+    CHECK(ok);
+    FILE* manifest = ok && tp_path(path, directory, "jobs.tsv") ? fopen(path, "wb") : NULL;
+    FILE* samples = ok && tp_path(path, directory, "samples.csv") ? fopen(path, "wb") : NULL;
+    CHECK(manifest && samples);
+    ok = ok && manifest && samples;
+    if (ok)
+    {
+        fputs(TP_RAW_HEADER, samples);
+        for (unsigned job = 0; job < TP_MAX_JOBS; ++job)
+        {
+            fprintf(manifest, "%u\tfixture-%u/fast\n", job, job);
+            for (unsigned round = 0; round < TP_ROUNDS; ++round)
+                for (unsigned pair = 0; pair < 20; ++pair)
+                    for (unsigned variant = 0; variant < 2; ++variant)
+                        CHECK(tp_sample_csv(samples, round, pair, variant ^ (pair & 1), variant, job,
+                                            rows + tp_row_index(0, round, variant, pair, 20)));
+        }
+    }
+    if (manifest) CHECK(fclose(manifest) == 0);
+    if (samples) CHECK(fclose(samples) == 0);
+    if (ok)
+    {
+        CHECK(tp_completion(directory, TP_MAX_JOBS, 20, 0, 1));
+        CHECK(tp_compare(directory) == 0);
+    }
+    free(rows);
 }
 
 static void test_summaries(char const* root, int expected)
@@ -577,11 +775,18 @@ int main(int argc, char** argv)
         test_diagnostic_probes(root);
         test_legacy_schema(executable, root);
         test_compile_options();
+        test_workload_selection();
+        test_job_capacity();
+        test_optional_inputs(root);
         test_host_qualification(executable, root);
         test_sample_paths(executable, root);
         test_inputs(root);
+        test_maximum_jobs(root);
         test_processes(executable, root);
-        printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu\n", sizeof(TpProcess), sizeof(TpRow));
+        printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
+               sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,
+               TP_MAX_JOBS * (sizeof(TpJob) + 2 * sizeof(TpRow)),
+               (size_t)TP_MAX_JOBS * TP_ROUNDS * 2 * (TP_MAX_PAIRS + 3) * sizeof(TpRow));
         fprintf(stdout, "THROUGHPUT_INTEGRATION_TEST assertions=%u failures=%u\n", test_assertions, test_failures);
         result = test_failures ? 1 : 0;
     }
