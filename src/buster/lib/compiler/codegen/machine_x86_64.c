@@ -4785,7 +4785,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                 (MachineInlineAssemblyOperand*)machine_stream_append(selector->arena, &selector->inline_assembly_operands);
             bool vector = (operand_flags[index] & MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR) != 0;
             *row = (MachineInlineAssemblyOperand){.stack_slot = slots[index],
-                                                  .physical_register = (u8)(vector ? MACHINE_X64_ZMM0 + vector_registers[index] : registers[index]),
+                                                  .physical_register = vector ? (u8)(MACHINE_X64_ZMM0 + vector_registers[index])
+                                                                              : (u8)registers[index],
                                                   .byte_size = sizes[index],
                                                   .constraint_class = (u8)(instruction->immediates[index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK),
                                                   .flags = operand_flags[index]};
