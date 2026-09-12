@@ -262,6 +262,20 @@ class EvidencePackTests(unittest.TestCase):
             ci_pack_evidence.pack(self.source, self.output)
         self.assertFalse((self.output / ci_pack_evidence.ARCHIVE).exists())
 
+    def test_linked_roots_are_refused_but_system_ancestor_aliases_work(self):
+        alias = self.root / "source-link"
+        try:
+            alias.symlink_to(self.source, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable to this user")
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            ci_pack_evidence.pack(alias, self.output)
+        parent_alias = self.root / "parent-link"
+        parent_alias.symlink_to(self.source.parent, target_is_directory=True)
+        ci_pack_evidence.pack(parent_alias / self.source.name, self.output)
+        files, _ = self.members()
+        self.assertEqual(set(files), {"buster-ci/" + name for name in self.KEEP})
+
     def test_failed_write_leaves_no_stale_or_partial_upload(self):
         self.output.mkdir(parents=True)
         for name in (ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES:

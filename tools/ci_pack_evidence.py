@@ -87,7 +87,9 @@ def pack(source, output):
     source = Path(source).absolute()
     output = Path(output).absolute()
     for path in (source, output):
-        if any(part.is_symlink() for part in (path, *path.parents)):
+        # System temporary directories may have an expected ancestor alias
+        # (macOS /var -> /private/var); the supplied roots must be real trees.
+        if path.is_symlink():
             raise ValueError(f"refusing symbolic link in evidence path: {path}")
     source = source.resolve()
     output = output.resolve()
