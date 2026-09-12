@@ -3223,8 +3223,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                             if (supported && selected.supported)
                             {
                                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
-                                u16 barrier_opcode = architectures[architecture] == CPU_ARCH_X86_64 ? MACHINE_X64_COMPILER_BARRIER
-                                                                                                   : MACHINE_A64_COMPILER_BARRIER;
+                                u32 effect_index = string_equal(description, S8("compiler_barrier_memory")) ? 1u
+                                                 : string_equal(description, S8("compiler_barrier_cc")) ? 2u
+                                                 : string_equal(description, S8("compiler_barrier_memory_cc")) ||
+                                                           string_equal(description, S8("compiler_barrier_cc_memory"))
+                                                       ? 3u
+                                                       : 0u;
+                                u16 barrier_opcode = (u16)((architectures[architecture] == CPU_ARCH_X86_64
+                                                               ? MACHINE_X64_INLINE_EFFECTS_NONE
+                                                               : MACHINE_A64_INLINE_EFFECTS_NONE) + effect_index);
                                 if (fixtures[fixture].identity)
                                 {
                                     barrier_opcode = architectures[architecture] == CPU_ARCH_X86_64 ? MACHINE_X64_ASM_IDENTITY : MACHINE_A64_ASM_IDENTITY;
@@ -3236,9 +3243,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                                 }
                                 BUSTER_TEST_RAW(arguments, barrier_count == 1, description);
                                 MachineOpcodeInfo const* info = machine_opcode_info(barrier_opcode);
-                                u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE;
+                                u16 required = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
+                                               ((effect_index & 2u) || fixtures[fixture].identity ? MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE : 0);
+                                MachineMemoryEffect memory = (effect_index & 1u) || fixtures[fixture].identity
+                                                                 ? MACHINE_MEMORY_EFFECT_BARRIER
+                                                                 : MACHINE_MEMORY_EFFECT_NONE;
                                 BUSTER_TEST(arguments, info && (info->attributes & required) == required &&
-                                                           machine_opcode_memory_effect(info) == MACHINE_MEMORY_EFFECT_BARRIER);
+                                                           !(info->attributes & (MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE & ~required)) &&
+                                                           machine_opcode_memory_effect(info) == memory);
                                 if (fixtures[fixture].identity)
                                 {
                                     BUSTER_TEST(arguments, machine_opcode_operand_is_tied(info, 0, 1));
