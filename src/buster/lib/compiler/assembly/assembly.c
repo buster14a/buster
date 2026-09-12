@@ -471,6 +471,7 @@ typedef enum AssemblyEncodingKind
 {
     ASSEMBLY_ENCODING_HANDWRITTEN,
     ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+    ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS,
     ASSEMBLY_ENCODING_AARCH64_M1_GPR,
     ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
     ASSEMBLY_ENCODING_AARCH64_CONTROL,
@@ -4000,6 +4001,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         else if (assembly_word_equal(mnemonic, S8("bl")))
         {
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_AARCH64_BL, .operand_count = 1};
+        }
+        else if (assembly_word_equal(mnemonic, S8("mov")))
+        {
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS};
         }
         else
         {
@@ -10153,7 +10159,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             text.pointer += 1;
             text.length -= 1;
         }
-        if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
+        if (target.cpu_arch == CPU_ARCH_AARCH64 &&
+            (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR ||
+             instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS))
         {
             if (!assembly_aarch64_gpr_register_parse(text, &operand->reg))
             {
@@ -10215,7 +10223,20 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         return;
     }
     instruction.operand_count = parsed_operand_count;
-    if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
+    if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS)
+    {
+        AssemblyRegister destination = instruction.operands[0].reg;
+        AssemblyRegister source = instruction.operands[1].reg;
+        if (parsed_operand_count != 2 || destination.class != ASSEMBLY_REGISTER_GPR || source.class != ASSEMBLY_REGISTER_GPR ||
+            destination.width != source.width || (destination.width != 32 && destination.width != 64) ||
+            destination.stack_pointer || source.stack_pointer)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid instruction operands"));
+            return;
+        }
+    }
+    else if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
     {
         A64GprOperand gpr_operands[4] = {0};
         if (parsed_operand_count > BUSTER_ARRAY_LENGTH(gpr_operands))
@@ -10530,6 +10551,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     {
         instruction.size = 4;
         if (instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_M1_GPR &&
+            instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS &&
             instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_CONTROL && instruction.operand_count &&
             instruction.operands[0].kind != ASSEMBLY_OPERAND_EXPRESSION)
         {
@@ -13943,6 +13965,15 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_FIXED_WORD)
         {
             assembly_emit_u32(builder, instruction->fixed_word);
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS)
+        {
+            AssemblyRegister destination = instruction->operands[0].reg;
+            AssemblyRegister source = instruction->operands[1].reg;
+            u32 word = (destination.width == 64 ? UINT32_C(0xaa0003e0) : UINT32_C(0x2a0003e0)) |
+                       ((u32)source.index << 16) | destination.index;
+            assembly_emit_u32(builder, word);
             continue;
         }
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
