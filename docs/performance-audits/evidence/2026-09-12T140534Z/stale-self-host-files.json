@@ -1,0 +1,50 @@
+[
+  {
+    "path": "build/self-host/Release/ide-stage2-machine.metrics",
+    "bytes": 993,
+    "mtime": 1789219724.9109879,
+    "sha256": "3f5855f9d4e956850bb5c53898b04821c5d0dff15c0c6286e09e682f6b95bc96"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage2-machine",
+    "bytes": 48965504,
+    "mtime": 1789219724.686989,
+    "sha256": "705e487c7a96103e569c8a758226c75b30c66505b4dfa0e47ef2ec3817cef26c"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage1",
+    "bytes": 38167160,
+    "mtime": 1789219646.9354112,
+    "sha256": "97e7ecf8b6d4ab01f82c9dbdfe29a9ca1b4374d18be45881ebe31fa130e55d40"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage2.metrics",
+    "bytes": 993,
+    "mtime": 1789221214.3320675,
+    "sha256": "5094d8b679e9f537f8d01ec1cceba026e24542923dc7a9634fa04f5b70378601"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage1.metrics",
+    "bytes": 993,
+    "mtime": 1789219647.2274096,
+    "sha256": "4a4adf668dbe45a56a3abaa8fd0930763d6a83c56d42d8a22c3a2cde5ee013e5"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage2-none",
+    "bytes": 47076048,
+    "mtime": 1789219775.8778362,
+    "sha256": "0a2c6fef8c9bd9c5f6adfcca46cfcf0bfd18b8aa4153fcef10b9a2321e6764fc"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage2-none.metrics",
+    "bytes": 993,
+    "mtime": 1789219776.0667102,
+    "sha256": "3f5855f9d4e956850bb5c53898b04821c5d0dff15c0c6286e09e682f6b95bc96"
+  },
+  {
+    "path": "build/self-host/Release/ide-stage2",
+    "bytes": 38172336,
+    "mtime": 1789221214.0987625,
+    "sha256": "f4226b06f8d5074761da4ea8e1462c22a976a51db41f8cac898fdeffff940e22"
+  }
+]

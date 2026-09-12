@@ -1,0 +1,18 @@
+Process [936]: Time (user): 0:123775 s,us, (system): 0:30663 s,us. Max RSS: 700604 KB. PF (soft): 9815, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 82, (invol): 30
+Launched [944]: "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node tests/wasm_integer_opcodes_execution.js /tmp/buster-tests-273-1-82329686723341/buster-wasm64-integer-opcodes-273.wasm" 
+3254/3254 scalar integer Wasm64 engine checks passed
+Process [944]: Time (user): 0:116352 s,us, (system): 0:31021 s,us. Max RSS: 700604 KB. PF (soft): 10209, (hard): 0. Block (input): 8, (output): 0. CTX SW (vol): 90, (invol): 22
+Launched [952]: "/usr/bin/clang -target x86_64-unknown-linux-gnu -nostdinc -fno-pic -fno-pie -g0 -c -o /tmp/buster-tests-273-1-82329686723341/buster-c-host-no-pic-273.o tests/basic_c_pic.c" 
+Process [952]: Time (user): 0:11369 s,us, (system): 0:19425 s,us. Max RSS: 700604 KB. PF (soft): 4254, (hard): 0. Block (input): 0, (output): 8. CTX SW (vol): 1, (invol): 4
+Launched [953]: "/usr/bin/clang -target x86_64-unknown-linux-gnu -nostdinc -fPIC -g0 -c -o /tmp/buster-tests-273-1-82329686723341/buster-c-host-pic-273.o tests/basic_c_pic.c" 
+Process [953]: Time (user): 0:22486 s,us, (system): 0:18704 s,us. Max RSS: 700604 KB. PF (soft): 4245, (hard): 0. Block (input): 0, (output): 8. CTX SW (vol): 1, (invol): 11
+Launched [954]: "/tmp/buster-tests-273-1-82329686723341/buster-c-host-no-pic-273" 
+Process [954]: Time (user): 0:221 s,us, (system): 0:0 s,us. Max RSS: 700604 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+Launched [955]: "/tmp/buster-tests-273-1-82329686723341/buster-c-host-pic-273" 
+Process [955]: Time (user): 0:231 s,us, (system): 0:0 s,us. Max RSS: 700604 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+TEST_MODULE_TIMING index=44 module=compiler_driver_tests duration_ns=63495604864 passed=7679 failed=0 assertions=7679 status=pass
+TEST_MODULE_TIMING index=45 module=compiler_driver_object_path_tests duration_ns=43662404 passed=22 failed=0 assertions=22 status=pass
+TEST_MODULE_TIMING index=46 module=x86_64_tests duration_ns=18821638 passed=18 failed=0 assertions=18 status=pass
+[1931139/1931139] Unit tests
+[47/47] Module tests
+[0/0] External tests
