@@ -190,7 +190,7 @@ jobs:
         run: |
           set -euo pipefail
           clang --version
-          gcc --version
+          # build.c selects and reports the actual GCC row before configuration.
           zig version
 
       - name: Combination matrix (Linux, macOS)

@@ -10,6 +10,7 @@
 // Regions, in file order; each anchor is a definition to search for:
 //   instruction_counter_open                     STEP_INSTRUCTIONS hardware
 //                                                counters (Linux only)
+//   build_gcc_*, build_compiler_discovery_*      GCC selection and identity checks
 //   build_artifact_fanout_*, self_host_*         self-host stages, stage
 //                                                comparison, and the
 //                                                provenance-checked artifact
@@ -80,6 +81,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY,
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
+    BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_SYSREG,
@@ -880,6 +882,123 @@ BUSTER_GLOBAL_LOCAL void generic_tool_run_add_end(GenericRun r)
     };
 }
 
+// The macOS portability row deliberately uses Homebrew GCC 15, not Apple's
+// unversioned gcc shim. Keep the supported major explicit instead of silently
+// changing compiler coverage when a runner image installs another major.
+BUSTER_GLOBAL_LOCAL String8 build_gcc_default_name(bool macos)
+{
+    String8 result = macos ? S8("gcc-15") : S8("gcc");
+    return result;
+}
+
+typedef struct BuildCompilerIdentity BuildCompilerIdentity;
+struct BuildCompilerIdentity
+{
+    String8 executable;
+    String8 identity;
+    String8 target;
+    String8 version;
+};
+
+BUSTER_GLOBAL_LOCAL String8 build_compiler_output_trim(String8 output)
+{
+    u64 start = 0;
+    while (start < output.length && (u8)output.pointer[start] <= ' ')
+    {
+        start += 1;
+    }
+    while (output.length > start && (u8)output.pointer[output.length - 1] <= ' ')
+    {
+        output.length -= 1;
+    }
+    String8 result = string_slice(output, start, output.length);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_identity_is_gcc(String8 identity)
+{
+    bool result = string_equal(build_compiler_output_trim(identity), S8("BUSTER_BUILD_COMPILER_GNU"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 arguments, String8* output)
+{
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    bool result = spawn.handle != 0;
+    if (result)
+    {
+        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30 * 1000000);
+        result = wait.result == PROCESS_RESULT_SUCCESS;
+        if (result)
+        {
+            *output = build_compiler_output_trim(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
+            result = output->length != 0;
+        }
+        else if (wait.streams[STANDARD_STREAM_ERROR].length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), wait.streams[STANDARD_STREAM_ERROR]);
+        }
+    }
+    if (!result)
+    {
+        string_print(S8("error: compiler discovery query failed: {[]S8}\n"), arguments);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_inspect(Arena* arena, String8 executable, BuildCompilerIdentity* info)
+{
+    *info = (BuildCompilerIdentity){.executable = executable};
+    String8 identity_arguments[] = {executable, S8("-E"), S8("-P"), S8("-x"), S8("c"), S8("tests/build_compiler_identity.c")};
+    String8 target_arguments[] = {executable, S8("-dumpmachine")};
+    String8 version_arguments[] = {executable, S8("--version")};
+    bool result = executable.length &&
+                  build_compiler_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(identity_arguments), &info->identity) &&
+                  build_compiler_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_arguments), &info->target) &&
+                  build_compiler_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments), &info->version);
+    if (result)
+    {
+        string_print(S8("BUSTER_COMPILER_EXECUTABLE: {S8}\nBUSTER_COMPILER_IDENTITY: {S8}\nBUSTER_COMPILER_TARGET: {S8}\nBUSTER_COMPILER_VERSION: {S8}\n"),
+                     info->executable, info->identity, info->target, info->version);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 build_gcc_requested_name(bool macos, String8 override)
+{
+    String8 result = override.length ? override : build_gcc_default_name(macos);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_gcc_prepare(Arena* arena)
+{
+    String8 requested = build_gcc_requested_name(BUSTER_MACOS != 0, os_get_environment_variable(S8("BUSTER_GCC")));
+    bool explicit_path = string_first_code_unit(requested, '/') != BUSTER_STRING_NO_MATCH ||
+                         string_first_code_unit(requested, '\\') != BUSTER_STRING_NO_MATCH;
+    String8 resolved = explicit_path ? os_path_absolute_lexical(arena, requested, true) : executable_resolve_in_path(arena, requested);
+    BuildCompilerIdentity info;
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (!resolved.length)
+    {
+        string_print(S8("error: requested GCC executable '{S8}' was not found; install it or set BUSTER_GCC to a real GCC executable\n"), requested);
+    }
+    else if (build_compiler_inspect(arena, resolved, &info))
+    {
+        if (build_compiler_identity_is_gcc(info.identity))
+        {
+            gcc_path = resolved;
+            result = PROCESS_RESULT_SUCCESS;
+        }
+        else
+        {
+            string_print(S8("error: requested GCC row resolved to {S8} at {S8}; Clang (including Apple's gcc shim) cannot satisfy GCC coverage\n"),
+                         info.identity, resolved);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 cmake_cc(Arena* arena, BuildCompiler compiler)
 {
     switch (compiler)
@@ -892,7 +1011,7 @@ BUSTER_GLOBAL_LOCAL String8 cmake_cc(Arena* arena, BuildCompiler compiler)
         return get_resolved_path(arena, &clang_path, S8("clang"));
         break;
     case BUILD_COMPILER_GCC:
-        return get_resolved_path(arena, &gcc_path, S8("gcc"));
+        return get_resolved_path(arena, &gcc_path, build_gcc_default_name(BUSTER_MACOS != 0));
         break;
     case BUILD_COMPILER_ZIG:
     {
@@ -1104,10 +1223,87 @@ BUSTER_GLOBAL_LOCAL void remove_path_recursive(Arena* arena, String8 path)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, String8 compiler, String8 expected_error)
+{
+    String8 directory = string_format(arena, S8("build/compiler discovery test-{u64}"), os_now_microseconds());
+    make_directory_recursive(arena, directory);
+    String8 sentinel = path_join(arena, directory, S8("preserve.txt"));
+    bool success = file_write(sentinel, BUSTER_SLICE_TO_BYTE_SLICE(S8("preserve existing configuration")));
+    u64 capacity = program_state->input.environment_keys.length + 1;
+    String8* keys = arena_allocate(arena, String8, capacity);
+    String8* values = arena_allocate(arena, String8, capacity);
+    u64 count = 0;
+    for (u64 i = 0; i < program_state->input.environment_keys.length; i += 1)
+    {
+        String8 key = program_state->input.environment_keys.pointer[i];
+        if (!string_equal_ascii_case_insensitive(key, S8("BUSTER_GCC")))
+        {
+            keys[count] = key;
+            values[count++] = program_state->input.environment_values.pointer[i];
+        }
+    }
+    keys[count] = S8("BUSTER_GCC");
+    values[count++] = compiler;
+    String8 arguments[] = {program_state->input.arguments.pointer[0], S8("generate"), S8("--cc"), S8("gcc"),
+                           S8("--build-directory"), directory};
+    if (success)
+    {
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+            (SliceString8){.pointer = keys, .length = count}, (SliceString8){.pointer = values, .length = count},
+            (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
+        success = spawn.handle != 0;
+        if (success)
+        {
+            ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 60 * 1000000);
+            String8 output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+            success = wait.result != PROCESS_RESULT_SUCCESS && !wait.timed_out &&
+                      string_first_sequence(output, expected_error) != BUSTER_STRING_NO_MATCH && path_exists(arena, sentinel);
+            if (!success)
+            {
+                string_print(S8("error: GCC rejection regression failed for {S8}: {S8}\n"), compiler, output);
+            }
+        }
+    }
+    remove_path_recursive(arena, directory);
+    return success;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_compiler_discovery_self_test(Arena* arena)
+{
+    bool success = build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU\n")) &&
+                   build_compiler_identity_is_gcc(S8(" \r\nBUSTER_BUILD_COMPILER_GNU\r\n")) &&
+                   !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_CLANG\n")) &&
+                   !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_UNKNOWN\n")) &&
+                   !build_compiler_identity_is_gcc(S8("")) &&
+                   !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU extra")) &&
+                   string_equal(build_gcc_requested_name(true, (String8){0}), S8("gcc-15")) &&
+                   string_equal(build_gcc_requested_name(false, (String8){0}), S8("gcc")) &&
+                   string_equal(build_gcc_requested_name(true, S8("/tools with spaces/gcc")), S8("/tools with spaces/gcc"));
+    // Clang also defines __GNUC__. Exercise the real preprocessor probe so
+    // checking that macro before __clang__ cannot turn this regression green.
+    BuildCompilerIdentity clang;
+    success = build_compiler_inspect(arena, get_resolved_path(arena, &clang_path, S8("clang")), &clang) &&
+              string_equal(clang.identity, S8("BUSTER_BUILD_COMPILER_CLANG")) && !build_compiler_identity_is_gcc(clang.identity) && success;
+#if BUSTER_MACOS
+    // Record the runner's unversioned gcc discovery independently of the GCC
+    // row. This remains valid if a future image stops shipping Apple's shim.
+    BuildCompilerIdentity unversioned;
+    success = build_compiler_inspect(arena, executable_resolve_in_path(arena, S8("gcc")), &unversioned) && success;
+#endif
+    success = build_compiler_discovery_rejection_test(arena, clang.executable, S8("Clang (including Apple's gcc shim) cannot satisfy GCC coverage")) && success;
+    success = build_compiler_discovery_rejection_test(arena, S8("buster-missing-gcc-discovery-fixture"), S8("was not found")) && success;
+    string_print(S8("COMPILER_DISCOVERY_SELF_TEST: {S8}\n"), success ? S8("pass") : S8("fail"));
+    ProcessResult result = success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 generate_cc(Arena* arena, Generate generate)
 {
-    BUSTER_UNUSED(arena);
     String8 result = generate.cc_set ? generate.cc : build_compilers[generate.compiler];
+    if (string_equal(result, S8("gcc")))
+    {
+        result = cmake_cc(arena, BUILD_COMPILER_GCC);
+    }
     if (string_equal(result, S8("zig cc")) || string_equal(result, S8("zig;cc")))
     {
         result = S8("zig");
@@ -34250,6 +34446,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
+        [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_SYSREG] = S8_INITIALIZER("import_arm_a64_sysregs"),
@@ -35289,6 +35486,36 @@ ProcessResult process_arguments(void)
         }
     }
 
+    bool combination_matrix = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS || command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
+    if (result == PROCESS_RESULT_SUCCESS && combination_matrix)
+    {
+        result = build_compiler_discovery_self_test(arena);
+    }
+    bool requested_gcc = command == BUILD_COMMAND_GENERATE && string_equal(generate.cc, S8("gcc"));
+    if (result == PROCESS_RESULT_SUCCESS && (requested_gcc || (combination_matrix && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64))))
+    {
+        // Reject conflicting CMake overrides before any generate command can
+        // remove its tree. BUSTER_GCC selects an explicit GCC path for this row.
+        for (String8Node* node = generate_cmake_arguments.first; node && result == PROCESS_RESULT_SUCCESS; node = node->next)
+        {
+            String8 argument = node->string;
+            if (string_equal(argument, S8("-D")) && node->next)
+            {
+                argument = string_format(arena, S8("-D{S8}"), node->next->string);
+            }
+            String8 override = {0};
+            if (build_cmake_definition_value(argument, S8("CMAKE_C_COMPILER"), &override))
+            {
+                string_print(S8("error: --cc gcc cannot be combined with a CMAKE_C_COMPILER override; use BUSTER_GCC to select the GCC executable\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        if (result == PROCESS_RESULT_SUCCESS)
+        {
+            result = build_gcc_prepare(arena);
+        }
+    }
+
     if (result == PROCESS_RESULT_SUCCESS)
     {
         switch (command)
@@ -35358,6 +35585,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST:
         {
             result = test_timing_summary_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST:
+        {
+            result = build_compiler_discovery_self_test(arena);
         }
         break;
         case BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST:
