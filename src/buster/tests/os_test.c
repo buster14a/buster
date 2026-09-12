@@ -228,7 +228,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #if BUSTER_WINDOWS
                 BUSTER_TEST(arguments, wait.platform_status == 1);
 #else
-                BUSTER_TEST(arguments, WIFEXITED((int)wait.platform_status) && WEXITSTATUS((int)wait.platform_status) == 1);
+                // Darwin's wait macros take the address of their argument.
+                int native_status = (int)wait.platform_status;
+                BUSTER_TEST(arguments, WIFEXITED(native_status) && WEXITSTATUS(native_status) == 1);
 #endif
                 String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
                 BUSTER_TEST(arguments, index < 2 ? string_equal(error, S8("fatal-output-37 at os-fail-regression.c:19 in child\n")) : !error.length);
