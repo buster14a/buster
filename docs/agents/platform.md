@@ -23,10 +23,15 @@
   bounds/scales and exceeded budgets return an all-zero bitmap. Admission
   checks ordered glyph bounds, rounded integer endpoints, dimensions of at
   most 4096 per axis and at most 1,048,576 one-byte pixels before allocating
-  outline or bitmap storage. After outline extraction, a conservative limit
-  of 67,108,864 scanline edge-search steps bounds raster work. The headless
-  `truetype_tests` module covers these contracts, including a deterministic
-  malformed-parameter sweep in sanitizer and fuzz-enabled CI configurations.
+  outline or bitmap storage. Quadratic outlines are flattened iteratively in
+  device space: every ordinary chord has at most 0.25 pixel geometric error,
+  while ten subdivision levels cap one source curve at 1,024 segments. A
+  count-then-emit pass allocates the exact path and rejects more than 1,048,576
+  raster points; a conservative limit of 67,108,864 scanline edge-search steps
+  further bounds raster work. The headless `truetype_tests` module covers these
+  contracts, including scale-sensitive curve goldens, the subdivision cap and
+  a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
+  configurations.
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
