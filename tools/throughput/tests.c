@@ -154,6 +154,10 @@ static int test_child(int argc, char** argv)
 
 static void test_processes(char const* executable, char const* root)
 {
+    // Foundation-only tools have no application entry-point clock prewarm.
+    u64 clock_before = os_now_microseconds();
+    test_delay(1);
+    CHECK(os_now_microseconds() > clock_before);
     char log[TP_PATH_CAP];
     CHECK(tp_path(log, root, "child.log"));
     char* fail[] = {(char*)executable, "child", "fail", NULL};

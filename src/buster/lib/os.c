@@ -1521,7 +1521,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     if (pipe_result)
     {
         PROCESS_INFORMATION process_information = {0};
-        STARTUPINFOW startup_info = {sizeof(startup_info)};
+        STARTUPINFOW startup_info = {.cb = sizeof(startup_info)};
 
         if (any_capture)
         {
@@ -2921,6 +2921,23 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
 #endif
 }
 
+#if defined(_WIN32)
+u64 os_performance_counter_frequency(void)
+{
+    // The application entry point prewarms this value. Foundation-only tools
+    // may use clocks earlier; querying without publishing is safe on any lane.
+    u64 frequency = os_state.frequency;
+    if (!frequency)
+    {
+        LARGE_INTEGER native_frequency;
+        BOOL success = QueryPerformanceFrequency(&native_frequency);
+        BUSTER_VALIDATE(success && native_frequency.QuadPart > 0);
+        frequency = (u64)native_frequency.QuadPart;
+    }
+    return frequency;
+}
+#endif
+
 u64 os_now_microseconds(void)
 {
 #if defined(_WIN32)
@@ -2931,7 +2948,7 @@ u64 os_now_microseconds(void)
         // Split the conversion so counter * 1e6 cannot overflow 64 bits
         // (a 10 MHz counter would overflow after ~10 days of uptime).
         u64 counter = (u64)os_counter.QuadPart;
-        u64 frequency = os_state.frequency;
+        u64 frequency = os_performance_counter_frequency();
         u64 whole_seconds = counter / frequency;
         u64 remainder_ticks = counter % frequency;
         result = whole_seconds * (1000 * 1000) + (remainder_ticks * (1000 * 1000)) / frequency;

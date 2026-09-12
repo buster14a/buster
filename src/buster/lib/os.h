@@ -364,6 +364,10 @@ BUSTER_F_DECL void os_thread_set_name(String8 thread_name);
 
 BUSTER_COLD BUSTER_F_DECL bool is_debugger_present(void);
 
+#if defined(_WIN32)
+// Safe before application entry-point initialization; does not mutate a cache.
+BUSTER_F_DECL u64 os_performance_counter_frequency(void);
+#endif
 BUSTER_F_DECL u64 os_now_microseconds(void);
 
 BUSTER_F_DECL ThreadContext* thread_context_allocate(void);
