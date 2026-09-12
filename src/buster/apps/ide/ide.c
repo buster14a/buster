@@ -862,6 +862,34 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
+BUSTER_GLOBAL_LOCAL String8 compiler_census_hex(Arena* arena, String8 text)
+{
+    String8 result = S8("-");
+    if (text.length)
+    {
+        char8* hex = arena_allocate(arena, char8, text.length * 2);
+        char8 const digits[] = "0123456789abcdef";
+        for (u64 index = 0; index < text.length; index += 1)
+        {
+            u8 byte = (u8)text.pointer[index];
+            hex[index * 2] = digits[byte >> 4];
+            hex[index * 2 + 1] = digits[byte & 15];
+        }
+        result = (String8){.pointer = hex, .length = text.length * 2};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_census_stage(CodegenFallbackReason reason)
+{
+    String8 stage = codegen_fallback_reason_string(reason);
+    if (reason == CODEGEN_FALLBACK_SIGNATURE || reason == CODEGEN_FALLBACK_OPCODE || reason == CODEGEN_FALLBACK_SELECTION_OTHER)
+    {
+        stage = S8("selection");
+    }
+    return stage;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -962,7 +990,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("IR_LOCAL_PROMOTION_WORK parameter_sweeps={u64} block_visits={u64} parameter_visits={u64} incoming_visits={u64}\n"),
                      p.parameter_sweeps, p.parameter_block_visits, p.parameter_visits, p.parameter_incoming_visits);
     }
-    if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
+    // Retain the complete aggregate census when strict MIR rejects an object.
+    // Its structured diagnostic names the first refused function; the counters
+    // below account for every fallback reason without another permissive run.
+    if (invocation.verbose && (compile.error == COMPILER_DRIVER_ERROR_NONE || compile.error == COMPILER_DRIVER_ERROR_CODEGEN))
     {
         string_print(S8("CODEGEN cpu={S8} vector_bits={u32} functions={u32} instructions={u64} values={u64} stack_value_bytes={u64} stack_frame_bytes={u64} "
                         "max_stack_frame_bytes={u32} code_bytes={u64} forwarded_wide_vector_loads={u64} native_vector_operations={u64} "
@@ -1013,6 +1044,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         {
             string_print(S8("CODEGEN_FALLBACK_STAGES verify={u32} placement={u32} encode={u32}\n"), compile.codegen_statistics.fallback_verify_count,
                          compile.codegen_statistics.fallback_placement_count, compile.codegen_statistics.fallback_encode_count);
+        }
+    }
+    if (invocation.record_codegen_fallbacks)
+    {
+        string_print(S8("CODEGEN_FALLBACK_CENSUS version=1 records={u32}\n"), compile.fallback_record_count);
+        for (u32 index = 0; index < compile.fallback_record_count; index += 1)
+        {
+            CompilerDriverFallbackRecord record = compile.fallback_records[index];
+            string_print(S8("CODEGEN_FALLBACK_FUNCTION version=1 target={S8}-{S8} allocator={S8} function_id={u32} "
+                            "reason={S8} stage={S8} opcode_id={u32} line={u32} column={u32} source_hex={S8} function_hex={S8}\n"),
+                         cpu_arch_to_string_os(invocation.target.cpu_arch), operating_system_to_string_os(invocation.target.os),
+                         codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator),
+                         record.codegen.function.value, codegen_fallback_reason_string(record.codegen.reason), compiler_census_stage(record.codegen.reason),
+                         record.codegen.opcode < IR_OPCODE_COUNT ? (u32)record.codegen.opcode : UINT32_MAX, record.line, record.column,
+                         compiler_census_hex(arena, record.source), compiler_census_hex(arena, record.function));
         }
     }
     arena_destroy(arena, 1);

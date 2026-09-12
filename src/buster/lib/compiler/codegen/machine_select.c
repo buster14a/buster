@@ -11,6 +11,134 @@
 // provenance before the selector's canonical-to-machine row spans are remapped.
 // machine_selection_address memoizes only demanded canonical address chains;
 // both native selectors consume its field/index shapes and normalized bases.
+// machine_selection_is_compiler_barrier recognizes operand-free empty assembly;
+// target selectors publish its ordering effects through their barrier rows.
+// machine_selection_is_operand_free_assembly shares its clobber contract with
+// literal hint selectors, while each target owns the admitted spellings.
+// machine_selection_assembly_identity_plan binds empty generic-register
+// outputs to their read/write value or matching input before target lowering.
+// machine_selection_finish_canonical_edges prunes unexecuted assembly targets
+// and remaps canonical edges after target-specific block expansion.
+
+bool machine_selection_is_operand_free_assembly(IrFunction* function, IrInstruction* instruction)
+{
+    bool selected = instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && !instruction->operand_count &&
+                    !instruction->immediate_count && !instruction->target_count;
+    if (selected)
+    {
+        IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+        selected = !extra.clobber_count || extra.clobbers;
+        for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
+        {
+            selected = string_equal(extra.clobbers[index], S8("memory")) || string_equal(extra.clobbers[index], S8("cc"));
+        }
+    }
+    return selected;
+}
+
+bool machine_selection_is_compiler_barrier(IrFunction* function, IrInstruction* instruction)
+{
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+    return !extra.literal.length && machine_selection_is_operand_free_assembly(function, instruction);
+}
+
+bool machine_selection_assembly_identity_plan(IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                              String8 jump_prefix, MachineAssemblyIdentityPlan* plan)
+{
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+    *plan = (MachineAssemblyIdentityPlan){.target_index = UINT32_MAX};
+    bool selected = instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                    (instruction->operand_count || instruction->target_count) &&
+                    instruction->operand_count <= MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS &&
+                    instruction->operand_count == instruction->immediate_count;
+    if (selected && instruction->target_count)
+    {
+        plan->target_index = 0;
+        selected = jump_prefix.length && (!extra.literal.length ||
+                   ir_inline_assembly_jump_target(function, instruction, extra.literal, jump_prefix, &plan->target_index));
+    }
+    else
+    {
+        selected = selected && !extra.literal.length;
+    }
+    for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
+    {
+        selected = string_equal(extra.clobbers[index], S8("memory")) || string_equal(extra.clobbers[index], S8("cc"));
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        IrValueId operand = instruction->operands[index];
+        u64 constraint = instruction->immediates[index];
+        selected = operand.value < function->value_count &&
+                   (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R &&
+                   !(constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK);
+        IrType* type = selected ? ir_type_from_id(&program->types, function->values[operand.value].canonical_type) : 0;
+        selected = selected && type && type->layout.resolved &&
+                   (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_BOOLEAN) &&
+                   (type->layout.size == 1 || type->layout.size == 2 || type->layout.size == 4 || type->layout.size == 8);
+        if (selected)
+        {
+            bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+            bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+            bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+            plan->sizes[index] = (u8)type->layout.size;
+            plan->source_operands[index] = (u8)(output && !read_write ? UINT8_MAX : index);
+            plan->outputs |= (u16)((u32)output << index);
+            plan->read_write |= (u16)((u32)read_write << index);
+            plan->matching_inputs |= (u16)((u32)matching << index);
+            selected = (!read_write || output) && (!matching || !output);
+            if (selected && matching)
+            {
+                u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+                selected = match < index && ((plan->outputs >> match) & 1u) && !((plan->read_write >> match) & 1u) &&
+                           plan->source_operands[match] == UINT8_MAX && plan->sizes[match] == type->layout.size;
+                if (selected)
+                {
+                    IrType* output_type = ir_type_from_id(&program->types, function->values[instruction->operands[match].value].canonical_type);
+                    selected = output_type && output_type->kind == type->kind;
+                    plan->source_operands[match] = (u8)index;
+                }
+            }
+        }
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        selected = plan->source_operands[index] != UINT8_MAX;
+    }
+    return selected;
+}
+
+void machine_selection_finish_canonical_edges(MachineFunction* machine, IrFunction* source, u32 canonical_edge_offset,
+                                               u32 const* block_entries, u32 const* block_exits)
+{
+    if (block_entries || ir_function_may_contain_opcodes(source, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)))
+    {
+        u32 kept_edges = canonical_edge_offset;
+        for (u32 edge_index = canonical_edge_offset; edge_index < machine->edge_count; edge_index += 1)
+        {
+            MachineEdge edge = machine->edges[edge_index];
+            IrInstruction* canonical_terminator = source->instructions + source->blocks[edge.source_block].last_instruction.value;
+            edge.source_block = block_exits ? block_exits[edge.source_block] : edge.source_block;
+            edge.destination_block = block_entries ? block_entries[edge.destination_block] : edge.destination_block;
+            bool keep = true;
+            if (canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+            {
+                // These selected templates have one executable successor.
+                // Other canonical asm-goto destinations must not assign their
+                // joins before the emitted unconditional branch.
+                MachineBlock* block = machine->blocks + edge.source_block;
+                MachineInstruction* branch = machine->instructions + block->first_instruction + block->instruction_count - 1u;
+                keep = machine_ref_payload(branch->operands[0]) == edge.destination_block;
+            }
+            if (keep)
+            {
+                machine->edges[kept_edges] = edge;
+                kept_edges += 1;
+            }
+        }
+        machine->edge_count = kept_edges;
+    }
+}
 
 #define MACHINE_SELECTION_ADDRESS_CACHE_CAPACITY 64u
 #define MACHINE_SELECTION_ADDRESS_CHAIN_LIMIT 64u

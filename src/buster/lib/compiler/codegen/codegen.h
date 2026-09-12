@@ -341,6 +341,17 @@ typedef enum CodegenFallbackReason
     CODEGEN_FALLBACK_REASON_COUNT,
 } CodegenFallbackReason;
 
+// Optional source-order attribution, independent of the aggregate counters.
+// The array exists only when record_fallbacks is requested. Function IDs refer
+// to the retained canonical module; a retry discards the entire attempt array.
+typedef struct CodegenFallbackRecord CodegenFallbackRecord;
+struct CodegenFallbackRecord
+{
+    IrFunctionId function;
+    IrOpcode opcode;
+    CodegenFallbackReason reason;
+};
+
 typedef struct CodegenStatistics CodegenStatistics;
 struct CodegenStatistics
 {
@@ -452,6 +463,8 @@ struct CodegenModule
     IrFunctionId first_fallback_function;
     IrOpcode first_fallback_opcode;
     CodegenFallbackReason first_fallback_reason;
+    CodegenFallbackRecord* fallback_records;
+    u32 fallback_record_count;
     // Where a module-level assembly block failed. `failed_assembly` indexes
     // IrModule.assemblies and `failed_assembly_line` is the one-based line
     // inside that block's own text, both meaningful only while
@@ -519,7 +532,10 @@ struct CodegenModuleOptions
     bool assume_validated;
     // Test/audit mode: validate certified IR and selected/scheduled MIR too;
     // verifier/placement failures must not disappear into canonical fallback.
-    bool verify_invariants;
+    bool verify_invariants : 1;
+    // Share the existing verification byte so the options record stays six
+    // bytes. Both fields are diagnostic opt-ins, not production mode changes.
+    bool record_fallbacks : 1;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
     // thread-local block, and a symbol another object could interpose is

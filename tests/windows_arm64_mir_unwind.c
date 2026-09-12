@@ -48,6 +48,19 @@ static U64 small_frame(U64 a, U64 b, U64 c, U64 d, U64 e, U64 f, U64 g, U64 h, U
     return a + b + c + d + e + f + g + h + i + j + opaque(a);
 }
 
+static U64 variadic_frame(int count, ...)
+{
+    __builtin_va_list arguments;
+    __builtin_va_start(arguments, count);
+    U64 result = opaque(1);
+    for (int index = 0; index < count; index += 1)
+    {
+        result += __builtin_va_arg(arguments, U64);
+    }
+    __builtin_va_end(arguments);
+    return result;
+}
+
 static U64 large_frame(U64 seed)
 {
     volatile unsigned char bytes[524304];
@@ -255,6 +268,8 @@ int main(void)
     valid = check_function((void*)small_frame, 0) && valid;
     valid = check_function((void*)large_frame, 1) && valid;
     valid = check_function((void*)dynamic_frame, 0) && valid;
+    valid = variadic_frame(10, 1ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull) == 59 && valid;
+    valid = check_function((void*)variadic_frame, 0) && valid;
     report.success = valid;
     U32 written = 0;
     WriteFile(GetStdHandle(-11), &report, sizeof(report), &written, 0);

@@ -28,7 +28,21 @@ including a spill that closes the floating register file before a smaller
 following argument. Machine unit tests select and verify the fixture for ELF
 AArch64 as well as x86-64 and execute it when the host ABI matches.
 
-On ELF AArch64, fourteen additional relations exchange actual public `va_list`
+The registered driver suite runs strict MIR platform variadic tests on native
+Darwin and Windows AArch64, outside the direct-emitter comparison matrix.
+Its separately compiled callers and callees cover named floating arguments,
+mixed anonymous integer/floating arguments, integer register exhaustion,
+Darwin's packed narrow named stack arguments, copied lists, and scalar,
+homogeneous-floating and integer aggregates up to sixteen bytes. Public
+`va_list` objects cross the compiler boundary in both directions: copying a
+by-value list preserves the producer's cursor, while advancing through a
+pointer changes it. The standalone source also serves the cross-target driver
+checks; writing a Darwin or Windows object on another host is not native
+execution evidence. The former direct emitter has independently reproduced
+public-list and Darwin named-stack ABI defects, so agreement with it does not
+serve as the oracle for these new public-ABI cases.
+
+On ELF AArch64, twenty-two additional relations exchange actual public `va_list`
 objects, rather than only calling variadic functions compiled by the other
 compiler. Independent producers and consumers check the three-pointer/two-offset
 layout, pointer and by-value list parameters, original-versus-copy independence,
@@ -36,12 +50,16 @@ canaries, mixed named register/stack arguments, i128 register/stack alignment,
 HFA overflow and independent GP/FP exhaustion. By-value calls pass a separate
 `va_copy`, end that consumed copy before any further use, and continue through
 an independent original list. The consumer checks distinct caller/callee storage;
-no check relies on reusing the consumed by-value list. These relations use the
-existing scalar and at-most-sixteen-byte aggregate subset; larger HFAs, indirect
-aggregate reads and vector/HVA reads are not claimed. The existing native
-configuration matrix runs them on Linux AArch64; other hosts do not count the
-guarded relations as executed. QEMU cross-compiler checks are separate emulator
-evidence.
+no check relies on reusing the consumed by-value list. The extended caller/reader cases cover 24/32-byte
+HFAs, 17-byte and over-aligned indirect composites, 64/128-bit short vectors,
+and two/four-part HVAs, including mixed vector lane types. They exhaust both
+register files and check sixteen-byte overflow alignment after a double-sized
+stack slot, including named vector/HVA parameters before the anonymous tail.
+Direct V-register staging retains preceding X arguments in every
+allocator mode. Quad-precision floats and vectors wider than sixteen bytes
+remain outside these read fixtures. The existing native configuration matrix
+runs them on Linux AArch64; other hosts do not count the guarded relations as
+executed. QEMU cross-compiler checks are separate emulator evidence.
 
 The native aggregate case covers Windows indirect arguments in both call
 directions, including 3/5/7-byte values, 12/16/24/32-byte values, aligned

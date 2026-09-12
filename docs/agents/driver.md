@@ -59,8 +59,8 @@ diagnostic callers may select `none`, `mir-stack`, `fast`, or `quality` with
 present, the last one wins.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
 including ordinary Windows/UEFI functions with validated compact MIR frame
-and unwind records. Windows AArch64 variadic signatures and calls still fall
-back per function; the target is no longer excluded wholesale. Win64 differs
+and unwind records. Windows and Darwin AArch64 variadic definitions and calls
+use MIR with their platform argument placement and pointer lists. Win64 differs
 from System V in the file it allocates — RSI and RDI are
 callee-saved there, so the allocator has seven callee-saved registers instead
 of five and the vector class keeps only the volatile ZMMs — and in how a call
@@ -73,8 +73,9 @@ reason. Windows/UEFI variadic definitions and calls use the positional home
 area and float-register duplication described in the [machine guide](machine.md).
 Win64 indirect aggregate arguments use private caller copies with up to
 sixteen-byte alignment, as described in the [machine guide](machine.md).
-Shapes the Win64 subset does not build yet — 128-bit integer signatures,
-vector signatures, and over-aligned aggregate arguments — fall back per function,
+Win64 128-bit integer signatures pass arguments indirectly and return in XMM0.
+Shapes the Win64 subset does not build yet — vector signatures and
+aggregate arguments aligned above sixteen bytes — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
 stable reason name for every fallback. Its disjoint counts sum to
@@ -150,8 +151,8 @@ For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-f
 control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
 Linux, macOS and Windows, under all three machine allocators and both explicit
 frontend forms in `test_all`, including CI. Its 396 object-compilation rows
-require 372 non-empty strict successes and 24 explicit refusals: two variadic
-fixtures on Windows/Darwin AArch64. Refusals require exact fallback-function, reason and opcode counts, preserve an
+require 396 non-empty strict successes, including the two variadic fixtures on
+Windows/Darwin AArch64. Any future explicit refusals require exact fallback-function, reason and opcode counts, preserve an
 existing output, and still compile through the direct fallback. They are not
 skips; implementing a gap must replace its refusal expectation with strict
 success. Every target/allocator/frontend cohort emits a `MIR_COVERAGE` row
@@ -161,8 +162,13 @@ integer-pair and sixteen-byte atomic load/store tests, unsupported signature
 controls, Windows/UEFI large-frame tests, and native Windows ARM64
 unwind-boundary execution remain registered. The atomic lane is strict across
 all AArch64 desktop targets, allocators and frontend forms; its broader
-aggregate census retains exactly one compare-exchange fallback, while the
-i128 census advances to its one remaining read-modify-write fallback.
+aggregate and i128 censuses both require zero fallback, including exchange,
+arithmetic/bitwise updates and compare-exchange. The separate nine-function
+atomic-update fixture covers all three AArch64 desktop targets, four allocator
+modes and both frontend forms; MIR legs reject fallback, and only the matching
+native desktop executes the result. This adds 24 object-compilation cases
+outside the eleven-fixture floor above. The direct backend remains its
+semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
@@ -293,3 +299,11 @@ selected-function and scheduled-function counts and the effective allocator.
 Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
+
+With `-v`, aggregate `CODEGEN` and fallback reason/opcode/stage counters are also
+printed after codegen errors, including strict fallback rejection. The optional
+`-fcodegen-fallback-census` retains and reports every observed fallback's function
+ID/name, source coordinates, reason/stage and opcode; normal compilation allocates
+no record array. The first strict diagnostic remains unchanged. The
+[retirement object census](../native-retirement-census.md) validates and retains
+both aggregate and function records, including records before a fatal stop.

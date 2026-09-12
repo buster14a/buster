@@ -179,13 +179,17 @@
   discovery. Predicate pressure has its own seven-register scheduler budget.
   `basic_c_predicate_bank.c` and the machine module cover source selection,
   independent residency, spills, calls, widths, fixed operands and edge cycles.
-- System V x86-64 machine callers use a sixteen-aligned push area. A stack
-  argument needing greater alignment falls back per function to the canonical
-  caller, even when its offset is zero: an aligned offset does not align the
-  area's base. Apply this check to both cached fixed parameters and variadic
-  tails. The canonical caller saves and realigns RSP, then restores it after
-  the call. Cross-link alignment tests with another compiler; a Buster caller
-  and callee can otherwise share the same wrong assumption.
+- System V x86-64 machine callers retain the sixteen-aligned push area for
+  tightly packed arguments. A padding gap or greater base alignment selects
+  a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete
+  outgoing area. Copies use the classified argument offsets; fixed parameters
+  and anonymous variadic tails share the same rule. Capture call results before
+  restoring RSP so a reload of the saved value cannot overwrite RAX/RDX/XMM0.
+  This preserves any live alloca and permits repeated calls without leaking
+  stack space. The registered over-aligned stack fixtures require strict
+  scalar MIR objects on ELF/Mach-O and execute mixed host/Buster calls in both
+  directions on supported ELF hosts; the vector module also requires its
+  ninth-ZMM caller to select and encode without fallback.
 - Instruction-cache clearing preserves argument side effects on every target.
   The x86 selector emits no cache operation. AArch64 selects one constrained
   barrier row with begin/end in X9/X10, X9/X11 clobbered, and NZCV defined. Its
@@ -199,8 +203,22 @@
   half, arms the monitor with LDXP or LDAXP, and retries STXP/STLXP until the
   replacement lands whole. The rows
   preserve the direct emitter's memory-order strengths on every desktop ABI.
-  Sixteen-byte exchange, arithmetic RMW and compare-exchange still fall back
-  to that direct oracle.
+  Sixteen-byte exchange, arithmetic/bitwise RMW and compare-exchange use
+  constrained update rows with full-width integer input/result frame slots.
+  RMW reloads its unchanged operand on each retry and propagates carry/borrow
+  across both limbs. CAS compares both halves, selects the observed pair on
+  mismatch, and still completes STXP/STLXP before returning: an unvalidated
+  LDXP may be a torn read. The direct oracle follows the same corrected rule.
+  Every frame load precedes LDXP on each retry; only register operations
+  occur before STXP, preserving the exclusive-loop progress guarantee.
+  Both rows declare X9/X11-X14 clobbers and flag definitions; CAS additionally
+  stages desired in X15/X17. X10 is the constrained address, and X16 remains
+  reserved frame scratch.
+  `basic_c_aarch64_atomic_update_pair.c` checks both-limb results, boundary
+  arithmetic, strong/weak CAS, promoted padding and a large native frame.
+  The machine tests independently check complete retry windows and invalid
+  payload/frame contracts; the mnemonic oracle is
+  `tests/aarch64_atomic_update_pair_oracle.s`.
 - Windows/UEFI x86-64 variadic definitions home RCX/RDX/R8/R9 before any
   argument capture can reuse those registers. The caller-owned homes adjoin
   the overflow arguments; both homing and `LEA_INCOMING` include placement's
@@ -208,23 +226,42 @@
   parameter consumes one slot, and a hidden return pointer consumes the first.
   Pointer-sized `va_list` copies use eight bytes and `va_end` emits no write.
   Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
-  aggregates according to the canonical ABI classification. Reads remain
-  limited to sixteen bytes; vector and 128-bit integer signatures remain excluded.
+  aggregates and 128-bit integers according to the canonical ABI classification.
+  Indirect reads copy the complete value, including aggregates above sixteen
+  bytes; vector signatures remain excluded.
   Variadic callers duplicate scalar float bits into positional GPRs during the
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
 - Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
-  Callers copy exact value bytes into storage aligned to sixteen bytes after
-  their shadow and stack-argument area; every call site reuses the maximum outgoing
-  reservation. Fixed and variadic arguments share this ABI placement. Callees
+  Callers copy exact value bytes after their shadow and stack-argument area.
+  Copies meet both the sixteen-byte floor and the declared type alignment;
+  stronger alignments reserve bounded slack and round the copy pointer through
+  ordinary MIR address arithmetic. Fixed frames reuse the maximum outgoing
+  reservation, while calls below a live dynamic allocation reserve their own
+  area. Fixed and variadic arguments share this ABI placement. Callees
   capture incoming register pointers before floating bridges, capture stack
   pointers next, and materialize parameter objects after all incoming captures.
   Parameter writes affect the private value copy. Complete outgoing sizes are
-  checked before narrowing frame displacements. Alignment requirements above
-  sixteen bytes remain outside this subset. Cross-compiler tests cover odd
+  checked before narrowing frame displacements. Cross-compiler tests cover odd
   sizes, larger aggregates, hidden returns, indirect calls, large anonymous
-  arguments, mixed floating parameters and caller-value preservation.
+  arguments, mixed floating parameters and caller-value preservation. The
+  `win64_aligned.c` regression exercises 32/64/128-byte argument alignments
+  across host/MIR boundaries, including raw variadic argument pointers and
+  every sixteen-byte dynamic-stack residue modulo 128. Fixed calls also execute
+  through the direct backend; wide variadic reads use all three MIR allocators.
+- Windows/UEFI x86-64 128-bit integer arguments use the same one-pointer
+  placement and sixteen-aligned private copies as indirect aggregates. A
+  128-bit integer result travels whole in XMM0, without a hidden result
+  pointer. The frame transfer rows use metadata-selected MOVDQU, publish
+  their memory and implicit vector effects, and verify sixteen-byte storage.
+  The registered `tests/differential/win64_wide.c` fixture covers all MIR
+  allocators and both frontend forms. On x86-64 Clang hosts, `ms_abi` JIT
+  calls cross the host/MIR boundary in both directions without a PE loader;
+  they cover register and stack arguments, indirect calls, copied lists,
+  high limbs, private parameter writes, and forty-byte variadic aggregates.
+  The direct backend still lacks wide variadic reads, so this fixture's
+  complete module is a MIR gate rather than a NONE differential gate.
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
   `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
@@ -250,7 +287,7 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
-- AArch64 signed/unsigned i128 division and remainder use a bounded restoring
+- Native signed/unsigned i128 division and remainder use a bounded restoring
   loop over ordinary scalar MIR. Five block parameters carry the evolving
   quotient/dividend, remainder and bit count; parallel edge copies keep the
   loop in SSA. Signed magnitudes and results use explicit low-limb borrow.
@@ -261,7 +298,13 @@
   parameters on the entry. The registered division fixture checks exact results
   against an independent scalar-limb reference and exercises surrounding CFG
   edges. It and the unchanged wide-integer fixture require zero fallback on
-  all desktop AArch64 targets and all MIR allocators with both frontend forms.
+  all desktop AArch64 and all six x86-64 targets and all MIR allocators with
+  both frontend forms. x86-64 uses the existing constrained scalar shift rows;
+  variable wide shifts select straight-line limb masks with the cross term
+  disabled at count zero, and negation propagates the low-limb borrow. The
+  independent shift-edge fixture checks counts across the 64-bit boundary.
+  A separate direct-oracle fixture retains zero-divisor and signed-overflow
+  bit results; those inputs are excluded from Clang differential checks.
 - Native Windows TLS addresses read the module index and the TEB's TLS array,
   then add the object's thread offset. Constrained rows define RAX/X9 and
   declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
@@ -318,8 +361,26 @@
   allocations. The native `windows_arm64_mir_unwind.c` test derives synthetic
   boundary contexts from instruction effects and checks RtlVirtualUnwind's
   restored registers; object-only checks are not native unwind acceptance.
-  Windows variadic signatures and calls remain explicit signature/opcode
-  misses pending their distinct integer-register and pointer-list ABI.
+  Windows variadic definitions extend the prefix with a 64-byte X0-X7 image
+  ending at the incoming SP. A constrained entry row homes the registers
+  before parameter captures. Ordinary cursor arithmetic then crosses from
+  register homes to caller stack arguments, including lists consumed in a
+  separately compiled function. The allocation action includes the complete
+  prefix and the native unwind fixture covers a variadic frame.
+- Windows AArch64 variadic callers and definitions use the integer argument
+  image for named and anonymous values, including floating-point bits and
+  homogeneous aggregates. A composite may span X7 and the incoming stack;
+  sixteen-aligned integer pairs skip odd slots. Darwin keeps independent
+  register files for named arguments, packs named stack arguments at their
+  natural alignment, and places anonymous arguments in aligned stack slots.
+  Both platforms use public eight-byte pointer lists. `va_copy` copies eight
+  bytes; `va_arg` selects ordinary MIR loads, alignment, cursor stores and
+  exact aggregate copies for the supported values through sixteen bytes.
+  `compiler_driver_test_aarch64_platform_variadic` requires zero fallback
+  for every MIR allocator and frontend form, then executes native standalone
+  and mixed-compiler callers, callees and public-list consumers on matching
+  desktop hosts. ELF wrapper execution of target object code is useful ABI
+  evidence but does not replace native loading or Windows unwind checks.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. The public 32-byte, eight-aligned list
   holds `__stack`, `__gr_top`, `__vr_top`, then independent signed 32-bit
@@ -332,19 +393,61 @@
   following arguments. `va_copy` copies all 32 bytes; `va_end` emits no write.
   Lists passed by value use the existing AAPCS64 indirect aggregate argument
   plan and a private callee copy, not the original producer's cursor.
-  The direct oracle and MIR retain the existing scalar/small-aggregate
-  `va_arg` subset (at most sixteen bytes, including supported HFAs and i128).
-  Windows/Darwin pointer-list conventions are unchanged. The existing native
-  variadic differential exchanges actual list objects in both directions with
-  the host compiler, including by-value calls, copied cursors, canaries,
-  named stack arguments and independent GP/FP exhaustion. Larger HFAs,
-  indirect aggregate reads and vector/HVA reads, plus the remaining full
-  acceptance gates, stay tracked by [#360](https://github.com/buster14a/buster/issues/360).
-- Empty inline assembly with no operands or targets and exactly one `memory`
-  clobber selects a zero-byte compiler-barrier row on x86-64 and AArch64. The
-  row is a scheduler and memory barrier even though it emits no instruction.
-  Templates, operands, register/flags clobbers and asm-goto remain outside
-  this deliberately narrow #70 slice.
+  The direct oracle and MIR also reconstruct three/four-double HFAs,
+  64/128-bit short vectors and up to four-vector HVAs from independent V
+  slots. An ordinary composite above sixteen bytes consumes one GP pointer
+  and copies exactly the object size, including a short tail. Its pointed-to
+  alignment does not align that pointer's GP/stack slot. Direct floating/vector
+  stack arguments round to at most sixteen-byte alignment. Short-vector
+  homogeneity compares vector width, independent of lane type, as specified
+  by [AAPCS64 5.10.5](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst#homogeneous-aggregates).
+  HFA/HVA ABI edges transfer directly between frame slots and V registers:
+  creating GP bounce values after integer argument staging could overwrite
+  an already staged X argument in FAST/QUALITY. The native variadic fixture
+  exchanges public lists and actual anonymous arguments with the host compiler
+  in both directions, including larger HFAs, odd-sized and over-aligned indirect
+  objects, mixed-lane HVAs, copied cursors and GP/FP exhaustion. Wider vectors,
+  quad-precision floats and platform acceptance gates are separate from this
+  supported read subset. Windows/Darwin pointer-list conventions are unchanged.
+- Empty inline assembly with no operands or targets accepts an empty clobber
+  list or any combination of `memory` and `cc` on x86-64 and AArch64. Both
+  selectors consume `machine_selection_is_compiler_barrier` and emit their
+  existing zero-byte compiler-barrier row. Its static metadata conservatively
+  imposes a scheduler/memory barrier and defines condition codes even when the
+  source omits either clobber; it is not a hardware memory fence. Other
+  templates and physical register clobbers remain outside this #70 slice,
+  apart from the operand transport, literal branches/hints and fixed CPU-query
+  forms below. The strict driver corpus
+  covers the accepted forms; selector tests also require explicit rejection of
+  each unsupported class on both targets and in both frontend forms.
+- Empty generic `r` operands select zero-byte `ASM_IDENTITY` rows with a real
+  tied definition/use pair. Scalar integer, boolean and pointer inputs,
+  read/write outputs, and numeric/named matching inputs transport 1/2/4/8-byte
+  values through allocation. Every input is captured before outputs are
+  stored, so swaps and overlapping places preserve simultaneous asm semantics.
+  Pure outputs require one matching input; fixed registers, memory/vector
+  constraints and more than 16 operands remain outside this subset. The strict fixture checks ties, swaps, input side effects,
+  pointers and adjacent byte/halfword/word/doubleword sentinels in both forms.
+- Literal AArch64 `b %lN` / `b %l[name]` and x86 `jmp %lN` /
+  `jmp %l[name]` asm-goto, plus empty-template fallthrough, reuse the same
+  generic-register transport before an ordinary `B`/`JMP` terminator. The shared canonical resolver accounts for read/write
+  operands in GNU numeric label positions. Selection keeps only the executed
+  MIR edge and that destination's canonical argument copies through the
+  shared `machine_selection_finish_canonical_edges`; it also remaps AArch64
+  edges through blocks split by wide division. This prevents unreachable asm
+  destinations from assigning other joins during allocation. The strict
+  six-target corpus requires zero fallbacks for these forms; MIR tests
+  inspect the actual branch/edge pair on both architectures and runtime checks
+  cover named/numeric labels, swapped outputs, fallthrough, joins, loops and
+  a branch after an i128 divide splits the source block.
+- Operand-free literal `nop` and x86 `pause` / AArch64 `yield` select distinct
+  MIR rows and emit their architectural instructions. They accept the same
+  `memory`/`cc` clobber contract as empty barriers, retain scheduling/memory
+  effects, and expose no physical-register clobbers. x86 emission uses checked
+  instruction metadata; PAUSE preserves the direct emitter's baseline policy.
+  This also keeps `_mm_pause` and `__builtin_ia32_pause` in the machine path.
+  Selector tests check instruction bytes at MIR row offsets, and the strict
+  six-target driver corpus covers both frontend forms and every MIR allocator.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and

@@ -18,6 +18,8 @@
 // (AGENTS.md). CompilerDriverDiagnosticCollector and the private adapters in
 // driver_diagnostic.c publish stable records into the result arena;
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
+// Optional fallback_records retain source/function attribution across TU arena
+// destruction; no per-function recording is allocated in ordinary compilation.
 // compiler_driver_unit_lane owns one private TU arena/collector per stable
 // input slot. Opt-in native C link batches publish in input order only after
 // the gang returns; assembly and archive selection remain serial boundaries.
@@ -1284,6 +1286,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.reject_machine_fallback = string_equal(argument, S8("-fno-machine-fallback"));
             continue;
         }
+        if (string_equal(argument, S8("-fcodegen-fallback-census")) || string_equal(argument, S8("-fno-codegen-fallback-census")))
+        {
+            invocation.record_codegen_fallbacks = string_equal(argument, S8("-fcodegen-fallback-census"));
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-O")))
         {
             struct { String8 flag; u8 level; } levels[] = {
@@ -1521,6 +1528,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("-fsysv-unnamed-bitfields requires native System V x86-64 code generation");
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.record_codegen_fallbacks &&
+        (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+         (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
+         invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-fcodegen-fallback-census requires native x86-64 or AArch64 code generation");
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.reject_machine_fallback &&
         (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
@@ -3471,6 +3486,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
                                                                .verify_invariants = invocation.verify_codegen,
+                                                               .record_fallbacks = invocation.record_codegen_fallbacks,
                                                                .position_independent = invocation.position_independent,
                                                                .register_allocator = invocation.register_allocator,
                                                                .assembly_syntax = (u8)invocation.assembly_syntax,
@@ -3493,6 +3509,21 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
     }
     result.codegen_statistics = code.statistics;
+    if (code.fallback_record_count)
+    {
+        result.fallback_records = arena_allocate(arena, CompilerDriverFallbackRecord, code.fallback_record_count);
+        result.fallback_record_count = code.fallback_record_count;
+        for (u32 index = 0; index < code.fallback_record_count; index += 1)
+        {
+            CodegenFallbackRecord record = code.fallback_records[index];
+            CompilerDiagnosticLocation location = compiler_driver_backend_location(lowered.program, module, record.function, IR_INSTRUCTION_ID_INVALID);
+            result.fallback_records[index] = (CompilerDriverFallbackRecord){
+                .source = string_duplicate_arena(arena, location.path.length ? location.path : invocation.input_paths[0], false),
+                .function = string_duplicate_arena(arena, module->functions[record.function.value].name, false), .codegen = record,
+                .line = location.position.line, .column = location.position.column,
+            };
+        }
+    }
     result.codegen_error = code.error;
     if (code.error != CODEGEN_ERROR_NONE && code.failed_in_assembly)
     {
@@ -3798,6 +3829,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         .suppress_records = invocation.suppress_diagnostic_records,
     };
     CompilerDriverResult result = {.compilation_workers = 1};
+    u32 fallback_record_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
     if (!arena)
@@ -4218,6 +4250,37 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.fast.instructions_before += unit.fast.instructions_before;
         result.fast.instructions_after += unit.fast.instructions_after;
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
+        if (unit.fallback_record_count)
+        {
+            u64 needed = (u64)result.fallback_record_count + unit.fallback_record_count;
+            if (needed > UINT32_MAX)
+            {
+                result.error = COMPILER_DRIVER_ERROR_CODEGEN;
+                result.codegen_error = CODEGEN_ERROR_CAPACITY;
+                result.diagnostic = S8("native fallback census exceeds its record limit");
+                if (task) { task->arena = 0; }
+                arena_destroy(unit_arena, 1);
+                goto finish;
+            }
+            if (needed > fallback_record_capacity)
+            {
+                u64 grown_capacity = BUSTER_MAX(needed, (u64)fallback_record_capacity * 2);
+                fallback_record_capacity = (u32)BUSTER_MIN(grown_capacity, UINT32_MAX);
+                CompilerDriverFallbackRecord* records = arena_allocate(arena, CompilerDriverFallbackRecord, fallback_record_capacity);
+                if (result.fallback_record_count)
+                {
+                    memcpy(records, result.fallback_records, sizeof(*records) * result.fallback_record_count);
+                }
+                result.fallback_records = records;
+            }
+            for (u32 index = 0; index < unit.fallback_record_count; index += 1)
+            {
+                CompilerDriverFallbackRecord record = unit.fallback_records[index];
+                record.source = string_duplicate_arena(arena, record.source, false);
+                record.function = string_duplicate_arena(arena, record.function, false);
+                result.fallback_records[result.fallback_record_count++] = record;
+            }
+        }
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
             if (unit.diagnostic.length)

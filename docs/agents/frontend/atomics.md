@@ -155,10 +155,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   that access at are one, two, four and eight bytes on both targets, plus
   sixteen on x86-64 where `cx16` gives them `CMPXCHG16B`, and on AArch64
   through exclusive-pair loops -- the sequences `_Atomic __int128` already
-  uses, which also take aggregates promoted into that width. The machine
-  selectors decline the aggregate shapes and the function falls back to the canonical emitter, which
-  the fallback statistics already count, so all four allocators answer the same
-  bytes. Anything wider would need a `libatomic` lock and there is none here,
+  uses, which also take aggregates promoted into that width. The
+  AArch64 selector now handles the promoted aggregate loads/stores through
+  sixteen bytes as well as full-width integer exchange/RMW/CAS. Its pair
+  update rows consume the integer images described below; they do not widen
+  arbitrary smaller frame objects. Any other target-specific selection miss
+  remains visible in fallback statistics pending native-backend retirement.
+  Anything wider would need a `libatomic` lock and there is none here,
   so lowering refuses it with a diagnostic naming the width rather than leaving
   code generation to fail internally (#762). The refusal is
   `c_ir_atomic_aggregate_accesses_lowerable` in `c_gen.c`, and it runs over the

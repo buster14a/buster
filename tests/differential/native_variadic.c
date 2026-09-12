@@ -103,6 +103,18 @@ double native_va_hfa_overflow(double a, double b, double c, double d, double e, 
 
 
 #if (defined(__aarch64__) && !defined(__APPLE__) && !defined(_WIN32)) || defined(BUSTER_MACHINE_VA_ELF_AARCH64)
+struct NativeVaHfa3d { double a; double b; double c; };
+struct NativeVaHfa4d { double a; double b; double c; double d; };
+struct NativeVaLarge { long long a; long long b; long long c; };
+struct NativeVaOdd { unsigned char bytes[17]; };
+struct NativeVaAligned { _Alignas(32) long long a; long long b; long long c; };
+typedef int NativeVaVector8 __attribute__((vector_size(8)));
+typedef int NativeVaVector16 __attribute__((vector_size(16)));
+typedef float NativeVaVector16f __attribute__((vector_size(16)));
+struct NativeVaMixedHva { NativeVaVector16 a; NativeVaVector16f b; };
+struct NativeVaHva2 { NativeVaVector16 a; NativeVaVector16 b; };
+struct NativeVaHva4 { NativeVaVector8 a; NativeVaVector8 b; NativeVaVector8 c; NativeVaVector8 d; };
+
 // These lists cross an independently compiled translation-unit boundary.
 // A self-consistent private producer/consumer representation cannot pass.
 typedef int NativeVaListReader(void*, int);
@@ -132,11 +144,12 @@ int native_va_list_read(void* storage, int scenario)
     unsigned char* source = (unsigned char*)storage;
     for (unsigned long index = 0; index < sizeof(image); index += 1) { bytes[index] = source[index]; }
     int named_stack = scenario & 256;
+    int named_vector = scenario & 512;
     int bad = sizeof(va_list) != 32 || _Alignof(va_list) != 8;
     bad |= (unsigned long)image.stack < 4096 || ((unsigned long)image.stack & 7) != 0;
     if (!named_stack) { bad |= (unsigned long)image.gr_top < 4096 || ((unsigned long)image.gr_top & 7) != 0; }
-    if (!named_stack) { bad |= (unsigned long)image.vr_top < 4096 || ((unsigned long)image.vr_top & 15) != 0; }
-    bad |= image.gr_offs != (named_stack ? 0 : -48) || image.vr_offs != (named_stack ? 0 : -128);
+    if (!named_stack && !named_vector) { bad |= (unsigned long)image.vr_top < 4096 || ((unsigned long)image.vr_top & 15) != 0; }
+    bad |= image.gr_offs != (named_stack ? 0 : -48) || image.vr_offs != (named_stack || named_vector ? 0 : -128);
     scenario &= 255;
     if (!bad)
     {
@@ -192,6 +205,48 @@ int native_va_list_read(void* storage, int scenario)
             bad |= __builtin_va_arg(*ap, long long) != 8;
             bad |= __builtin_va_arg(*ap, double) != 9.5;
         }
+        else if (scenario == 5)
+        {
+            bad |= __builtin_va_arg(*ap, long long) != 1;
+            struct NativeVaHfa3d a = __builtin_va_arg(*ap, struct NativeVaHfa3d);
+            struct NativeVaHfa4d b = __builtin_va_arg(*ap, struct NativeVaHfa4d);
+            struct NativeVaHfa3d c = __builtin_va_arg(*ap, struct NativeVaHfa3d);
+            bad |= a.a != 2 || a.b != 3 || a.c != 4;
+            bad |= b.a != 5 || b.b != 6 || b.c != 7 || b.d != 8;
+            bad |= c.a != 2 || c.b != 3 || c.c != 4;
+            bad |= __builtin_va_arg(*ap, double) != 9.5;
+        }
+        else if (scenario == 6)
+        {
+            bad |= __builtin_va_arg(*ap, long long) != 1;
+            struct NativeVaLarge a = __builtin_va_arg(*ap, struct NativeVaLarge);
+            bad |= a.a != 17 || a.b != 18 || a.c != 19;
+            for (int index = 2; index <= 6; index += 1) { bad |= __builtin_va_arg(*ap, long long) != index; }
+            struct NativeVaOdd odd = __builtin_va_arg(*ap, struct NativeVaOdd);
+            struct NativeVaAligned aligned = __builtin_va_arg(*ap, struct NativeVaAligned);
+            bad |= odd.bytes[0] != 31 || odd.bytes[16] != 47;
+            bad |= aligned.a != 21 || aligned.b != 22 || aligned.c != 23;
+            bad |= __builtin_va_arg(*ap, double) != 9.5;
+        }
+        else if (scenario == 7)
+        {
+            bad |= __builtin_va_arg(*ap, long long) != 1;
+            NativeVaVector8 a = __builtin_va_arg(*ap, NativeVaVector8);
+            NativeVaVector16 b = __builtin_va_arg(*ap, NativeVaVector16);
+            struct NativeVaHva2 c = __builtin_va_arg(*ap, struct NativeVaHva2);
+            struct NativeVaHva4 d = __builtin_va_arg(*ap, struct NativeVaHva4);
+            bad |= a[0] != 2 || a[1] != 3;
+            bad |= b[0] != 4 || b[1] != 5 || b[2] != 6 || b[3] != 7;
+            bad |= c.a[0] != 4 || c.a[3] != 7 || c.b[0] != 8 || c.b[3] != 11;
+            bad |= d.a[0] != 2 || d.a[1] != 3 || d.b[0] != 12 || d.b[1] != 13;
+            bad |= d.c[0] != 14 || d.c[1] != 15 || d.d[0] != 16 || d.d[1] != 17;
+            bad |= __builtin_va_arg(*ap, double) != 9.5;
+            struct NativeVaHva2 spill = __builtin_va_arg(*ap, struct NativeVaHva2);
+            bad |= spill.a[0] != 4 || spill.a[3] != 7 || spill.b[0] != 8 || spill.b[3] != 11;
+            bad |= __builtin_va_arg(*ap, double) != 10.5;
+            struct NativeVaMixedHva mixed = __builtin_va_arg(*ap, struct NativeVaMixedHva);
+            bad |= mixed.a[0] != 4 || mixed.a[3] != 7 || mixed.b[0] != 18.5 || mixed.b[3] != 21.5;
+        }
         else { bad = 1; }
     }
     return bad;
@@ -214,6 +269,33 @@ int native_va_list_produce(int scenario, NativeVaListReader* reader, ...)
     return bad;
 }
 
+
+struct NativeVaHva2 native_va_hva_identity(struct NativeVaHva2 value)
+{
+    return value;
+}
+
+int native_va_list_call_extended(NativeVaListReader* reader)
+{
+    struct NativeVaHfa3d hfa3 = {2, 3, 4};
+    struct NativeVaHfa4d hfa4 = {5, 6, 7, 8};
+    struct NativeVaLarge large = {17, 18, 19};
+    struct NativeVaOdd odd = {{31}};
+    odd.bytes[16] = 47;
+    struct NativeVaAligned aligned = {21, 22, 23};
+    NativeVaVector8 v8 = {2, 3};
+    NativeVaVector16 v16 = {4, 5, 6, 7};
+    struct NativeVaHva2 hva2 = {{4, 5, 6, 7}, {8, 9, 10, 11}};
+    hva2 = native_va_hva_identity(hva2);
+    struct NativeVaHva4 hva4 = {{2, 3}, {12, 13}, {14, 15}, {16, 17}};
+    struct NativeVaMixedHva mixed = {{4, 5, 6, 7}, {18.5, 19.5, 20.5, 21.5}};
+    int bad = native_va_list_produce(5, reader, 1ll, hfa3, hfa4, hfa3, 9.5, 99ll);
+    bad |= native_va_list_produce(6, reader, 1ll, large, 2ll, 3ll, 4ll, 5ll, 6ll, odd, aligned, 9.5, 99ll);
+    bad |= native_va_list_produce(7, reader, 1ll, v8, v16, hva2, hva4, 9.5, hva2, 10.5, mixed, 99ll);
+    bad |= odd.bytes[0] != 31 || odd.bytes[16] != 47 || aligned.c != 23;
+    return bad;
+}
+
 // Seven named GP scalars leave only X7. The named pair does not fit and
 // closes the file; the marker and reader must not reuse X7 afterwards.
 int native_va_list_named(long long a, long long b, long long c, long long d,
@@ -227,6 +309,22 @@ int native_va_list_named(long long a, long long b, long long c, long long d,
     bad |= pair.first != 8 || pair.second != 9 || marker != 10;
     bad |= f0 != 1 || f1 != 2 || f2 != 3 || f3 != 4 || f4 != 5 || f5 != 6 || f6 != 7 || f7 != 8 || f8 != 9;
     bad |= reader(&ap, 256);
+    bad |= __builtin_va_arg(ap, long long) != 99;
+    __builtin_va_end(ap);
+    return bad;
+}
+
+// Eight named vectors fill the V file. The ninth double occupies eight
+// stack bytes, then the named HVA must align before the anonymous tail.
+int native_va_list_named_vector(NativeVaVector16 v0, NativeVaVector16 v1, NativeVaVector16 v2, NativeVaVector16 v3,
+    NativeVaVector16 v4, NativeVaVector16 v5, NativeVaVector16 v6, NativeVaVector16 v7,
+    double first_stack, struct NativeVaHva2 pair, NativeVaListReader* reader, int marker, ...)
+{
+    va_list ap;
+    __builtin_va_start(ap, marker);
+    int bad = v0[0] != 4 || v1[1] != 5 || v2[2] != 6 || v3[3] != 7 || v4[0] != 4 || v5[1] != 5 || v6[2] != 6 || v7[3] != 7;
+    bad |= first_stack != 22.5 || pair.a[0] != 4 || pair.a[3] != 7 || pair.b[0] != 8 || pair.b[3] != 11 || marker != 23;
+    bad |= reader(&ap, 512);
     bad |= __builtin_va_arg(ap, long long) != 99;
     __builtin_va_end(ap);
     return bad;

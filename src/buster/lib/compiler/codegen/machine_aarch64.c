@@ -8,16 +8,19 @@
 // scalar float bodies (arithmetic, comparison, negation, and conversions
 // over the bit-image model, riding V0/V1 internally), scalar stack
 // arguments through a fixed outgoing area at the frame bottom, ELF
-// variadic definitions using the public ELF AAPCS64 va_list
-// (Darwin and Windows variadic conventions stay canonical),
+// variadic definitions using the public ELF AAPCS64 va_list and platform
+// pointer lists on Darwin and Windows,
 // sixteen-byte short-vector arguments and results as slot-backed values
 // touching the V file only at the ABI edges, indirect arguments — any
 // aggregate or vector past sixteen bytes — behind a caller-side defensive
 // copy, over-aligned locals as runtime-aligned pointers into padded raw
 // slots, and rvalue array/vector INDEX bases through their storage
 // snapshot. Wide division expands into scalar MIR blocks before placement.
+// Sixteen-byte atomics use constrained pair rows, including readback on a
+// failed compare-exchange so the returned old image is single-copy atomic.
 // Everything else is an explicit unsupported result, never a
 // silent misselection.
+// machine_a64_select_inline_hint selects the fixed NOP/YIELD literal rows.
 //
 // Register conventions: values live zero-extended in X registers exactly
 // like the x86-64 register model. X28 is the frame base (the canonical
@@ -85,13 +88,12 @@ MachineTargetDescription const* machine_target_aarch64(void)
 
 // How one AAPCS64 signature value travels: one integer part for the scalar
 // subset, one float part for a float scalar, one or two integer parts for a
-// register aggregate, up to four float parts for an HFA, one sixteen-byte
-// V-register part for a short vector, or indirect — a large result through
+// register aggregate, up to four V-register parts for an HFA/HVA,
+// one V-register part for a short vector, or indirect — a large result through
 // the X8 pointer, or a large argument (any aggregate or vector past
 // sixteen bytes) through a pointer in the integer file, which the machine
-// caller points at a defensive copy. A supported aligned integer pair follows
-// the same register/stack simulation; other aggregate/HFA stack arguments stay
-// outside the subset.
+// caller points at a defensive copy. Integer pairs and floating/vector
+// aggregates retain their ABI stack alignment after register exhaustion.
 typedef struct MachineA64ValueShape MachineA64ValueShape;
 struct MachineA64ValueShape
 {
@@ -109,8 +111,9 @@ struct MachineA64ValueShape
     // Indirect result: returned through the caller's buffer named by X8.
     // Indirect argument: passed as a pointer riding the integer file.
     bool indirect;
-    // One whole-value V-register part; the value itself stays slot-backed.
+    // Short vectors and homogeneous floating/vector aggregates use direct V transfers.
     bool vector;
+    bool stack_aligned;
     // AAPCS64 starts a sixteen-byte integer pair at an even X argument
     // register.  The bare integer-128 shape deliberately remains outside the
     // machine body subset, but wrapped integer pairs use this bit at the ABI
@@ -128,9 +131,10 @@ struct MachineA64ArgumentPlacement
 {
     u16 first_integer;
     u16 first_float;
-    u16 first_stack_part;
+    u16 first_stack_offset;
     u8 on_stack;
-    u8 reserved;
+    // Windows variadics may split an integer composite between X7 and SP.
+    u8 split_register_parts;
 };
 
 // A conditional branch whose condition chain folded into the branch: the
@@ -196,6 +200,9 @@ struct MachineA64Selector
     u32 hidden_return_slot;
     // Frame slot of the 64-byte X0-X7 variadic save area, or UINT32_MAX.
     u32 va_register_save_slot;
+    u32 named_integer_count;
+    u32 named_stack_part_count;
+    bool pointer_va_list;
     // The fixed outgoing stack-argument area, appended at the first call
     // that needs one and pinned by placement to the frame bottom, so its
     // base is exactly the stack pointer a call sees.
@@ -263,16 +270,18 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
             .part_sizes = {8},
             .part_count = 1,
             .byte_size = 8,
+            .exact_byte_size = (u32)type->layout.size,
         };
         return true;
     }
     if (machine_a64_type_is_float_scalar(type))
     {
         *shape = (MachineA64ValueShape){
-            .part_is_float = {1},
+            .part_is_float = {(u8)!(target.os == OPERATING_SYSTEM_WINDOWS && use == IR_ABI_USE_VARIADIC_ARGUMENT)},
             .part_sizes = {(u8)(type->bit_width / 8)},
             .part_count = 1,
             .byte_size = 8,
+            .exact_byte_size = (u32)type->layout.size,
         };
         return true;
     }
@@ -295,7 +304,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
     }
     if (!type || !type->layout.resolved ||
         (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_SLICE && type->kind != IR_TYPE_VECTOR &&
-         !(type->kind == IR_TYPE_VA_LIST && type->layout.size == 32 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64)))
+         !(type->kind == IR_TYPE_VA_LIST && (type->layout.size == 8 ||
+           (type->layout.size == 32 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64)))))
     {
         return false;
     }
@@ -322,6 +332,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
             .byte_size = (abi.parts[0].size + 7u) & ~7u,
             .aggregate = true,
             .vector = true,
+            .stack_aligned = type->layout.alignment > 8,
         };
         return true;
     }
@@ -361,13 +372,17 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
         .part_count = abi.part_count,
         .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
         .aggregate = true,
+        .vector = abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR || abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT,
+        .stack_aligned = type->layout.alignment > 8,
         .even_integer_pair = ir_abi_value_is_aarch64_even_integer_pair(program, type_id, ir_abi_convention_for_target(target), use),
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
     {
-        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT;
+        bool part_vector = abi.parts[part_index].abi_class == IR_ABI_CLASS_VECTOR;
+        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT || part_vector;
         if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
-            abi.parts[part_index].size > 8 || (part_float && abi.parts[part_index].size != 4 && abi.parts[part_index].size != 8))
+            (part_vector ? (abi.parts[part_index].size != 8 && abi.parts[part_index].size != 16)
+                         : (abi.parts[part_index].size > 8 || (part_float && abi.parts[part_index].size != 4 && abi.parts[part_index].size != 8))))
         {
             return false;
         }
@@ -379,16 +394,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
     return true;
 }
 
-// One V-register frame transfer row for a vector shape's ABI edge: the q
+// One V-register frame transfer row for a homogeneous ABI part: the q
 // form for sixteen bytes, the sized form carrying its log2 in the payload
 // otherwise. The shape gate has already restricted part sizes to
 // 1/2/4/8/16.
-BUSTER_GLOBAL_LOCAL MachineInstruction machine_a64_vector_transfer_row(MachineA64ValueShape* shape, u32 slot, u32 vector_register, bool store)
+BUSTER_GLOBAL_LOCAL MachineInstruction machine_a64_vector_transfer_row(MachineA64ValueShape* shape, u32 slot, u32 part_index, u32 vector_register, bool store)
 {
-    u32 size = shape->part_sizes[0];
+    u32 size = shape->part_sizes[part_index];
     MachineInstruction row = {
         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
-        .payload = vector_register << 24,
+        .payload = (vector_register << 24) | shape->part_offsets[part_index],
     };
     if (size == 16)
     {
@@ -443,7 +458,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         // the integer file, takes the next sequential eight-byte stack
         // part — the pointer is an ordinary integer part to the placement.
         placement->on_stack = 1;
-        placement->first_stack_part = (u16)*stack_part_count;
+        placement->first_stack_offset = (u16)(*stack_part_count * 8u);
         *stack_part_count += 1;
     }
     else if (float_parts == shape->part_count)
@@ -453,8 +468,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         // behind it, so no later float argument may take a register the
         // skipped value did not. The integer file has no such rule.
         *float_count = 8;
+        if (shape->stack_aligned) { *stack_part_count = (*stack_part_count + 1u) & ~1u; }
         placement->on_stack = 1;
-        placement->first_stack_part = (u16)*stack_part_count;
+        placement->first_stack_offset = (u16)(*stack_part_count * 8u);
         *stack_part_count += shape->byte_size / 8;
     }
     else if (integer_parts == shape->part_count)
@@ -466,17 +482,79 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         // both the pair and the trailing scalar on the stack.
         *integer_count = 8;
         placement->on_stack = 1;
-        placement->first_stack_part = (u16)*stack_part_count;
+        placement->first_stack_offset = (u16)(*stack_part_count * 8u);
         if (shape->even_integer_pair)
         {
             *stack_part_count = (*stack_part_count + 1u) & ~1u;
-            placement->first_stack_part = (u16)*stack_part_count;
+            placement->first_stack_offset = (u16)(*stack_part_count * 8u);
         }
         *stack_part_count += shape->byte_size / 8;
     }
     else
     {
         placed = false;
+    }
+    return placed;
+}
+
+// Windows allocates its variadic integer image as one conceptual stack;
+// Darwin places only anonymous arguments on the stack. Named Darwin arguments
+// retain the ordinary independent register files.
+BUSTER_GLOBAL_LOCAL bool machine_a64_place_variadic_argument(MachineA64ValueShape* shape, IrType* type, bool windows, bool anonymous_darwin,
+                                                             u32* packed_stack_bytes,
+                                                             u32* integer_count, u32* float_count, u32* stack_part_count,
+                                                             MachineA64ArgumentPlacement* placement)
+{
+    bool placed = true;
+    if (packed_stack_bytes && !anonymous_darwin)
+    {
+        // Apple does not require an even X register for named integer pairs.
+        shape->even_integer_pair = false;
+    }
+    if (windows)
+    {
+        u32 first = *integer_count;
+        if (shape->even_integer_pair)
+        {
+            first = (first + 1u) & ~1u;
+        }
+        u32 parts = shape->indirect ? 1u : shape->byte_size / 8u;
+        u32 register_parts = first < 8 ? BUSTER_MIN(parts, 8u - first) : 0u;
+        *placement = (MachineA64ArgumentPlacement){
+            .first_integer = (u16)BUSTER_MIN(first, 8u),
+            .first_stack_offset = (u16)((first > 8 ? first - 8u : 0u) * 8u),
+            .on_stack = (u8)(register_parts < parts),
+            .split_register_parts = (u8)(register_parts < parts ? register_parts : 0u),
+        };
+        *integer_count = first + parts;
+        *stack_part_count = *integer_count > 8 ? *integer_count - 8u : 0u;
+    }
+    else if (anonymous_darwin)
+    {
+        if (shape->even_integer_pair)
+        {
+            *stack_part_count = (*stack_part_count + 1u) & ~1u;
+        }
+        *placement = (MachineA64ArgumentPlacement){.on_stack = 1, .first_stack_offset = (u16)(*stack_part_count * 8u)};
+        *stack_part_count += shape->indirect ? 1u : shape->byte_size / 8u;
+    }
+    else
+    {
+        placed = machine_a64_place_argument(shape, integer_count, float_count, stack_part_count, placement);
+    }
+    if (placed && packed_stack_bytes && placement->on_stack)
+    {
+        u32 alignment = shape->indirect ? 8u : (u32)BUSTER_MIN(type->layout.alignment, 16u);
+        u32 size = shape->indirect ? 8u : (u32)type->layout.size;
+        if (anonymous_darwin)
+        {
+            alignment = BUSTER_MAX(alignment, 8u);
+            size = (size + 7u) & ~7u;
+        }
+        *packed_stack_bytes = (*packed_stack_bytes + alignment - 1u) & ~(alignment - 1u);
+        placement->first_stack_offset = (u16)*packed_stack_bytes;
+        *packed_stack_bytes += size;
+        *stack_part_count = (*packed_stack_bytes + 7u) / 8u;
     }
     return placed;
 }
@@ -2832,7 +2910,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_va_named_cursors(MachineA64Selector* select
         IrTypeId parameter_type_id = function_type->parameter_types[parameter_index];
         IrType* parameter = ir_type_from_id(&selector->program->types, parameter_type_id);
         IrAbiValue abi = ir_type_abi_value(selector->program, parameter_type_id, ir_abi_convention_for_target(selector->target), IR_ABI_USE_ARGUMENT);
-        if (abi.part_count && abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT)
+        if (abi.part_count && (abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT || abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR))
         {
             if (*fp_count + abi.part_count <= 8)
             {
@@ -2841,6 +2919,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_va_named_cursors(MachineA64Selector* select
             else
             {
                 *fp_count = 8;
+                if (parameter->layout.alignment > 8) { *stack_parts = (*stack_parts + 1u) & ~1u; }
                 *stack_parts += (u32)((parameter->layout.size + 7) / 8);
             }
             continue;
@@ -2884,7 +2963,22 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_start(MachineA64Selector* selecto
     IrFunction* function = selector->function;
     u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
     bool selected = false;
-    if (result_slot != UINT32_MAX && selector->va_register_save_slot != UINT32_MAX)
+    if (result_slot != UINT32_MAX && selector->pointer_va_list)
+    {
+        u32 pointer = machine_a64_synthesize_register(selector);
+        s32 offset = (s32)selector->named_stack_part_count * 8;
+        if (target_uses_pe_unwind(selector->target) && selector->named_integer_count < 8)
+        {
+            offset = (s32)selector->named_integer_count * 8 - (s32)MACHINE_A64_VA_GP_SAVE_BYTES;
+        }
+        machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer)},
+            .payload = (u32)offset, .opcode = MACHINE_A64_LEA_INCOMING,
+        });
+        machine_a64_select_frame_store64(selector, result_slot, 0, pointer);
+        selected = true;
+    }
+    else if (result_slot != UINT32_MAX && selector->va_register_save_slot != UINT32_MAX)
     {
         u32 gp_count;
         u32 fp_count;
@@ -2892,10 +2986,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_start(MachineA64Selector* selecto
         machine_a64_va_named_cursors(selector, &gp_count, &fp_count, &stack_parts);
         u32 overflow_register = machine_a64_synthesize_register(selector);
         machine_a64_select_row(selector, (MachineInstruction){
-            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register),
-                         machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X29)},
-            .payload = 16u + stack_parts * 8u,
-            .opcode = MACHINE_A64_LEA_OFFSET,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register)},
+            .payload = stack_parts * 8u,
+            .opcode = MACHINE_A64_LEA_INCOMING,
         });
         machine_a64_select_row(selector, (MachineInstruction){
             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
@@ -2958,7 +3051,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_copy(MachineA64Selector* selector
         machine_a64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
                                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                             .payload = 32,
+                                             .payload = selector->pointer_va_list ? 8u : MACHINE_A64_VA_LIST_BYTES,
                                              .opcode = MACHINE_A64_COPY_FRAME_FROM_PTR,
                                          });
         selected = true;
@@ -2974,11 +3067,73 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_end(MachineA64Selector* selector,
     return selected;
 }
 
-// Translates the canonical VA_ARG gate into VA_ARG side data: scalars and
-// integer-part aggregates of at most sixteen bytes. Scalar floats use
-// the independent Q cursor; integer parts use the X cursor. The canonical emitter
-// errors the module on anything else, so the machine path must fall back
-// on exactly the same set rather than shape a value canonical cannot.
+// A public pointer list advances through one contiguous argument image. Keep
+// its loads, cursor store and aggregate copy as ordinary MIR so allocation and
+// memory scheduling observe each effect. Windows homes join the incoming stack.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_pointer_va_arg(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    bool selected = false;
+    u32 list;
+    IrType* type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (type && type->layout.resolved && type->layout.size && type->layout.size <= 16 && instruction->operand_count &&
+        instruction->result.value < selector->function->value_count &&
+        machine_a64_operand_register(selector, instruction->operands[0], &list))
+    {
+        u32 slot = selector->value_stack_slots[instruction->result.value];
+        bool frame = result_register == UINT32_MAX && slot != UINT32_MAX;
+        bool scalar = result_register != UINT32_MAX &&
+                      (machine_a64_type_is_scalar_register(type) || machine_a64_type_is_float_scalar(type));
+        if (frame || scalar)
+        {
+            u32 cursor = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list)},
+                .opcode = MACHINE_A64_LOAD_PTR64,
+            });
+            bool aligned_pair = ir_abi_value_is_aarch64_even_integer_pair(selector->program, instruction->canonical_type,
+                ir_abi_convention_for_target(selector->target), IR_ABI_USE_VARIADIC_ARGUMENT);
+            if (aligned_pair)
+            {
+                u32 padding = machine_a64_select_immediate_register(selector, 15);
+                u32 rounded = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, cursor, padding);
+                u32 mask = machine_a64_select_immediate_register(selector, ~UINT64_C(15));
+                cursor = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, rounded, mask);
+            }
+            u32 next = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                .payload = (u32)((type->layout.size + 7u) & ~(u64)7), .opcode = MACHINE_A64_LEA_OFFSET,
+            });
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next)},
+                .opcode = MACHINE_A64_STORE_PTR64,
+            });
+            if (frame)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .payload = (u32)type->layout.size, .opcode = MACHINE_A64_COPY_FRAME_FROM_PTR,
+                });
+            }
+            else
+            {
+                u16 opcode = (u16)(type->layout.size == 1 ? MACHINE_A64_LOAD_PTR8 : type->layout.size == 2 ? MACHINE_A64_LOAD_PTR16 :
+                                  type->layout.size == 4 ? MACHINE_A64_LOAD_PTR32 : MACHINE_A64_LOAD_PTR64);
+                u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .opcode = opcode,
+                });
+                machine_a64_define(selector, result_register, row);
+            }
+            selected = true;
+        }
+    }
+    return selected;
+}
+
+// Preserve the ABI classification in bounded VA_ARG side data. A large
+// ordinary composite consumes a GP pointer; HFAs and HVAs consume up to four
+// independent V slots and are reconstructed into their contiguous value slot.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_arg(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -2986,7 +3141,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_arg(MachineA64Selector* selector,
 
     bool selected = false;
     u32 source_register;
-    if (instruction->operand_count >= 1 && instruction->result.value < function->value_count &&
+    if (selector->pointer_va_list)
+    {
+        selected = machine_a64_select_pointer_va_arg(selector, instruction, result_register);
+    }
+    else if (instruction->operand_count >= 1 && instruction->result.value < function->value_count &&
         machine_a64_operand_register(selector, instruction->operands[0], &source_register))
     {
         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -2995,9 +3154,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_arg(MachineA64Selector* selector,
         u32 part_count = 1;
         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &part_count);
         IrAbiValue abi = ir_type_abi_value(program, instruction->canonical_type, ir_abi_convention_for_target(selector->target), IR_ABI_USE_VARIADIC_ARGUMENT);
-        bool floating = abi.part_count && abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT;
-        if (floating) { part_count = abi.part_count; }
-        bool shaped = value_type && value_type->layout.resolved && value_type->layout.size && value_type->layout.size <= 16 &&
+        bool floating = abi.part_count && (abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT || abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR);
+        bool indirect = aggregate && abi.indirect;
+        if (floating || indirect) { part_count = abi.part_count; }
+        bool shaped = value_type && value_type->layout.resolved && value_type->layout.size && value_type->layout.size <= UINT32_MAX - 7u &&
+                      !abi.memory && (aggregate || value_type->layout.size <= 8) &&
                       (aggregate || value_type->kind == IR_TYPE_INTEGER || value_type->kind == IR_TYPE_BOOLEAN ||
                        value_type->kind == IR_TYPE_POINTER || value_type->kind == IR_TYPE_FLOAT) &&
                       part_count && part_count <= MACHINE_VA_ARG_PART_LIMIT;
@@ -3007,13 +3168,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_arg(MachineA64Selector* selector,
             MachineVaArg* metadata_row = (MachineVaArg*)machine_stream_append(selector->arena, &selector->va_args);
             *metadata_row = (MachineVaArg){
                 .size = (u32)value_type->layout.size,
-                .alignment = ir_abi_value_is_aarch64_even_integer_pair(program, instruction->canonical_type,
-                    ir_abi_convention_for_target(selector->target), IR_ABI_USE_VARIADIC_ARGUMENT) ? 16u : 8u,
-                .stack_size = (u32)((value_type->layout.size + 7) & ~(u64)7),
+                .alignment = !indirect && value_type->layout.alignment > 8 ? 16u : 8u,
+                .stack_size = indirect ? 8u : (u32)((value_type->layout.size + 7) & ~(u64)7),
                 .part_count = part_count,
                 .result_slot = result_slot,
                 .result_is_frame = result_is_frame,
                 .scalar_size = 8,
+                .indirect = indirect,
             };
             for (u32 part_index = 0; part_index < part_count; part_index += 1)
             {
@@ -3072,12 +3233,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     {
         plan->argument_count = instruction->operand_count - 1;
         bool variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
-        // Darwin's anonymous stack arguments and Windows' integer-only
-        // variadic register file need distinct placement. ELF variadic
-        // scalars travel in the same registers as named ones.
-        bool separate_variadic_abi = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS ||
-                                     target_uses_pe_unwind(selector->target);
-        planned = !(variadic_call && separate_variadic_abi) && callee_type && callee_type->kind == IR_TYPE_FUNCTION &&
+        planned = callee_type && callee_type->kind == IR_TYPE_FUNCTION &&
                   (variadic_call ? plan->argument_count >= callee_type->parameter_count : callee_type->parameter_count == plan->argument_count) &&
                   plan->argument_count <= MACHINE_A64_MAX_ARGUMENTS;
     }
@@ -3105,14 +3261,22 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     {
         u32 call_integer_count = 0;
         u32 call_float_count = 0;
+        u32 packed_stack_bytes = 0;
+        bool darwin = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS;
         for (u32 argument_index = 0; argument_index < plan->argument_count && planned; argument_index += 1)
         {
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
-            planned = machine_a64_value_shape(program, argument_type_id, selector->target, IR_ABI_USE_ARGUMENT, plan->argument_shapes + argument_index) &&
-                      machine_a64_place_argument(plan->argument_shapes + argument_index, &call_integer_count, &call_float_count, &plan->stack_part_count,
-                                                 plan->argument_placements + argument_index);
+            bool windows_variadic = callee_type->is_variadic && selector->target.os == OPERATING_SYSTEM_WINDOWS;
+            bool anonymous_darwin = callee_type->is_variadic && argument_index >= callee_type->parameter_count &&
+                (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS);
+            IrAbiUse use = windows_variadic || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
+            planned = machine_a64_value_shape(program, argument_type_id, selector->target, use, plan->argument_shapes + argument_index) &&
+                      machine_a64_place_variadic_argument(plan->argument_shapes + argument_index,
+                          ir_type_from_id(&program->types, argument_type_id), windows_variadic, anonymous_darwin,
+                          darwin ? &packed_stack_bytes : 0,
+                          &call_integer_count, &call_float_count, &plan->stack_part_count, plan->argument_placements + argument_index);
             if (planned)
             {
                 plan->argument_registers[argument_index] = UINT32_MAX;
@@ -3196,7 +3360,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
                 // fresh vregs from the value's slot — the pre-pass runs
                 // before any register staging, so the bounces are free to
                 // land anywhere.
-                for (u32 part_index = 0; part_index < stack_shape->byte_size / 8; part_index += 1)
+                for (u32 part_index = argument_placement->split_register_parts; part_index < stack_shape->byte_size / 8; part_index += 1)
                 {
                     u32 bounce_register = machine_a64_synthesize_register(selector);
                     machine_a64_select_row(selector, (MachineInstruction){
@@ -3208,7 +3372,8 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
                     machine_a64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
-                                                         .payload = ((u32)argument_placement->first_stack_part + part_index) * 8u,
+                                                         .payload = (u32)argument_placement->first_stack_offset + (part_index -
+                                                                     argument_placement->split_register_parts) * 8u,
                                                          .opcode = MACHINE_A64_STORE_FRAME64,
                                                      });
                 }
@@ -3217,8 +3382,10 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
             machine_a64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
-                                                 .payload = (u32)argument_placement->first_stack_part * 8u,
-                                                 .opcode = MACHINE_A64_STORE_FRAME64,
+                                                 .payload = (u32)argument_placement->first_stack_offset,
+                                                 .opcode = (u16)(stack_shape->exact_byte_size == 1 ? MACHINE_A64_STORE_FRAME8 :
+                                                                 stack_shape->exact_byte_size == 2 ? MACHINE_A64_STORE_FRAME16 :
+                                                                 stack_shape->exact_byte_size == 4 ? MACHINE_A64_STORE_FRAME32 : MACHINE_A64_STORE_FRAME64),
                                              });
         }
     }
@@ -3241,7 +3408,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
         MachineA64ValueShape* shape = plan->argument_shapes + argument_index;
         u32 next_integer = plan->argument_placements[argument_index].first_integer;
         u32 next_float = plan->argument_placements[argument_index].first_float;
-        if (plan->argument_placements[argument_index].on_stack)
+        if (plan->argument_placements[argument_index].on_stack && !plan->argument_placements[argument_index].split_register_parts)
         {
             // Already written into the outgoing area above.
             continue;
@@ -3259,16 +3426,21 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
         }
         if (shape->vector)
         {
-            // The vector image loads straight from the value's slot into
-            // its V argument register — the whole register or its low
-            // bytes per the shape's size; no general register moves.
-            machine_a64_select_row(selector,
-                                   machine_a64_vector_transfer_row(shape, plan->argument_slots[argument_index], next_float, false));
+            // Transfer each homogeneous part directly to V registers. A
+            // synthesized GP bounce here can be allocated to an X argument
+            // already staged above, overwriting it before the call.
+            for (u32 part = 0; part < shape->part_count; part += 1)
+            {
+                machine_a64_select_row(selector,
+                    machine_a64_vector_transfer_row(shape, plan->argument_slots[argument_index], part, next_float + part, false));
+            }
             continue;
         }
         if (shape->aggregate)
         {
-            for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+            u32 register_parts = plan->argument_placements[argument_index].split_register_parts;
+            u32 staged_parts = register_parts ? register_parts : shape->part_count;
+            for (u32 part_index = 0; part_index < staged_parts; part_index += 1)
             {
                 bool part_float = shape->part_is_float[part_index] != 0;
                 u16 part_load_opcode =
@@ -3336,7 +3508,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_receive_call_result(MachineA64Selector* sel
         received = result_slot != UINT32_MAX;
         if (received)
         {
-            machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, 0, true));
+            for (u32 part = 0; part < plan->return_shape.part_count; part += 1)
+            {
+                machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, part, part, true));
+            }
         }
     }
     else if (plan->return_shape.aggregate)
@@ -3608,16 +3783,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_store(MachineA64Selector* 
 
 // The scalar form: a promoted local takes a register copy, a direct local a
 // frame store, and anything address-shaped a sized pointer store.
-BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* selector, IrInstruction* instruction, u32 place_opcode, u64 size,
-                                                           u32 slot)
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_scalar_store(MachineA64Selector* selector, IrValueId place, u32 place_opcode, u64 size,
+                                                         u32 slot, u32 value_register)
 {
     bool selected = false;
-    u32 value_register;
     u32 size_index = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : size == 8 ? 3 : UINT32_MAX;
-    u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
-    if (size_index != UINT32_MAX && machine_a64_operand_register(selector, instruction->operands[1], &value_register))
+    u32 place_register = selector->value_virtual_registers[place.value];
+    if (size_index != UINT32_MAX)
     {
-        if (place_opcode == IR_OPCODE_LOCAL && place_register != UINT32_MAX && !machine_a64_local_is_indirect(selector, instruction->operands[0]))
+        if (place_opcode == IR_OPCODE_LOCAL && place_register != UINT32_MAX && !machine_a64_local_is_indirect(selector, place))
         {
             // Promoted local: the store is a full-width register copy —
             // the same 64-bit image a direct-slot store writes, since the
@@ -3644,10 +3818,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* s
             selected = true;
         }
         else if (place_opcode == IR_OPCODE_DEREFERENCE || place_opcode == IR_OPCODE_GLOBAL || place_opcode == IR_OPCODE_INDEX ||
-                 place_opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
+                 place_opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, place))
         {
             u32 address_register;
-            selected = machine_a64_operand_register(selector, instruction->operands[0], &address_register);
+            selected = machine_a64_operand_register(selector, place, &address_register);
             if (selected)
             {
                 machine_a64_select_row(selector, (MachineInstruction){
@@ -3657,6 +3831,18 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* s
                                                  });
             }
         }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* selector, IrInstruction* instruction, u32 place_opcode, u64 size,
+                                                           u32 slot)
+{
+    u32 value_register;
+    bool selected = machine_a64_operand_register(selector, instruction->operands[1], &value_register);
+    if (selected)
+    {
+        selected = machine_a64_select_scalar_store(selector, instruction->operands[0], place_opcode, size, slot, value_register);
     }
     return selected;
 }
@@ -4222,6 +4408,60 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* sel
     return selected;
 }
 
+// RMW and CAS consume complete integer representations. Aggregate C11
+// operations already convert through these bits in canonical IR; do not
+// reinterpret smaller record storage as a sixteen-byte input here.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_pair_update(MachineA64Selector* selector, IrInstruction* instruction, bool compare_exchange)
+{
+    IrFunction* function = selector->function;
+    IrType* value_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    u32 operand_count = compare_exchange ? 3u : 2u;
+    bool selected = value_type && value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128 &&
+                    value_type->layout.resolved && value_type->layout.size == 16 && instruction->operand_count == operand_count &&
+                    instruction->result.value < function->value_count && instruction->operands[0].value < function->value_count &&
+                    (compare_exchange || instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT);
+    MachineInstruction row = {
+        .opcode = compare_exchange ? MACHINE_A64_ATOMIC_CAS_PAIR : MACHINE_A64_ATOMIC_RMW_PAIR,
+    };
+    if (selected)
+    {
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        selected = result_slot != UINT32_MAX;
+        if (selected)
+        {
+            row.operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
+        }
+    }
+    for (u32 operand_index = 1; selected && operand_index < operand_count; operand_index += 1)
+    {
+        u32 value = instruction->operands[operand_index].value;
+        selected = value < function->value_count && selector->value_stack_slots[value] != UINT32_MAX;
+        if (selected)
+        {
+            row.operands[operand_index + 1] = machine_ref_make(MACHINE_REF_STACK_SLOT, selector->value_stack_slots[value]);
+        }
+    }
+    if (selected)
+    {
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            bool acquire = machine_a64_memory_order_acquires(instruction->memory_order) ||
+                           (compare_exchange && machine_a64_memory_order_acquires(instruction->failure_memory_order));
+            bool release = machine_a64_memory_order_releases(instruction->memory_order);
+            row.operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register);
+            row.payload = 16u | (acquire ? MACHINE_A64_ATOMIC_PAIR_ACQUIRE : 0) | (release ? MACHINE_A64_ATOMIC_PAIR_RELEASE : 0);
+            if (!compare_exchange)
+            {
+                row.payload |= (u32)instruction->atomic_operation << MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT;
+            }
+            machine_a64_select_row(selector, row);
+        }
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -4257,6 +4497,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64S
                                                        });
             machine_a64_define(selector, result_register, row);
         }
+    }
+    else if (result_register == UINT32_MAX)
+    {
+        selected = machine_a64_select_atomic_pair_update(selector, instruction, false);
     }
     return selected;
 }
@@ -4298,6 +4542,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_compare_exchange(MachineA64Se
             machine_a64_define(selector, result_register, row);
         }
     }
+    else if (result_register == UINT32_MAX)
+    {
+        selected = machine_a64_select_atomic_pair_update(selector, instruction, true);
+    }
     return selected;
 }
 
@@ -4331,13 +4579,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_fence(MachineA64Selector* sel
     return true;
 }
 
-// A GNU compiler barrier has no architectural instruction. Its machine row
-// exists solely so scheduling cannot move memory operations across it.
+// The zero-byte row conservatively orders memory and invalidates condition
+// codes, including accepted forms whose clobber list omits one or both.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_compiler_barrier(MachineA64Selector* selector, IrInstruction* instruction)
 {
-    IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
-    bool selected = !extra.literal.length && !instruction->operand_count && !instruction->target_count && extra.clobber_count == 1 &&
-                    string_equal(extra.clobbers[0], S8("memory"));
+    bool selected = machine_selection_is_compiler_barrier(selector->function, instruction);
     if (selected)
     {
         machine_a64_select_row(selector, (MachineInstruction){.opcode = MACHINE_A64_COMPILER_BARRIER});
@@ -4348,6 +4594,81 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_compiler_barrier(MachineA64Selector*
 BUSTER_GLOBAL_LOCAL u32 machine_a64_block_entry(MachineA64Selector* selector, u32 canonical_block)
 {
     return selector->block_entries ? selector->block_entries[canonical_block] : canonical_block;
+}
+
+// Empty/literal-branch assembly transports all inputs before publishing any
+// output, then selects the executable successor. Final edge publication below
+// drops the other canonical asm-goto destinations before allocation.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_assembly_identity(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    MachineAssemblyIdentityPlan plan;
+    bool selected = machine_selection_assembly_identity_plan(selector->program, selector->function, instruction, S8("b %l"), &plan);
+    u32 values[MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS];
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        if ((plan.matching_inputs >> index) & 1u)
+        {
+            continue;
+        }
+        IrValueId source = instruction->operands[plan.source_operands[index]];
+        u32 source_register;
+        if ((plan.read_write >> index) & 1u)
+        {
+            MachineSelectionAddress address = machine_a64_address(selector, source);
+            source_register = machine_a64_synthesize_register(selector);
+            IrInstruction load = {.opcode = IR_OPCODE_LOAD, .canonical_type = selector->function->values[source.value].canonical_type,
+                                  .operands = &source, .operand_count = 1, .result = source};
+            selected = machine_a64_select_register_load(selector, &load, address.opcode, selector->value_stack_slots[source.value], source_register);
+        }
+        else
+        {
+            selected = machine_a64_operand_register(selector, source, &source_register);
+        }
+        if (selected)
+        {
+            values[index] = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[index]),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                .opcode = MACHINE_A64_ASM_IDENTITY,
+            });
+        }
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        if ((plan.outputs >> index) & 1u)
+        {
+            IrValueId place = instruction->operands[index];
+            MachineSelectionAddress address = machine_a64_address(selector, place);
+            selected = machine_a64_select_scalar_store(selector, place, address.opcode, plan.sizes[index],
+                                                       selector->value_stack_slots[place.value], values[index]);
+        }
+    }
+    if (selected && plan.target_index != UINT32_MAX)
+    {
+        if (!instruction->operand_count)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){.opcode = MACHINE_A64_COMPILER_BARRIER});
+        }
+        machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[plan.target_index].value))},
+            .opcode = MACHINE_A64_B,
+        });
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_hint(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
+    bool nop = string_equal(extra.literal, S8("nop"));
+    bool yield = string_equal(extra.literal, S8("yield"));
+    bool selected = (nop || yield) && machine_selection_is_operand_free_assembly(selector->function, instruction);
+    if (selected)
+    {
+        machine_a64_select_row(selector, (MachineInstruction){.opcode = (u16)(nop ? MACHINE_A64_NOP : MACHINE_A64_YIELD)});
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch(MachineA64Selector* selector, IrInstruction* instruction)
@@ -4587,7 +4908,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
             selected = value_slot != UINT32_MAX;
             if (selected)
             {
-                machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, 0, false));
+                for (u32 part = 0; part < selector->return_shape.part_count; part += 1)
+                {
+                    machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, part, part, false));
+                }
             }
         }
         else if (selector->return_shape.aggregate)
@@ -4785,7 +5109,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             selected = machine_a64_select_atomic_fence(selector, instruction);
             break;
         case IR_OPCODE_INLINE_ASSEMBLY:
-            selected = machine_a64_select_compiler_barrier(selector, instruction);
+            selected = machine_a64_select_compiler_barrier(selector, instruction) || machine_a64_select_assembly_identity(selector, instruction) ||
+                       machine_a64_select_inline_hint(selector, instruction);
             break;
         case IR_OPCODE_BRANCH:
             selected = machine_a64_select_branch(selector, instruction);
@@ -4832,14 +5157,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         function->entry.value == 0)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
-        // Darwin and Windows variadic definition ABIs need distinct list
-        // storage and stay canonical even when the body ignores its tail;
-        // ELF AAPCS64 bodies continue through ordinary
-        // selection, so the first va_* the subset cannot shape (or any
-        // earlier unsupported operation) reports in true IR order.
-        bool separate_variadic_abi = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS || target_uses_pe_unwind(target);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
-        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || (function_type->is_variadic && separate_variadic_abi) ||
+        if (!function_type || function_type->kind != IR_TYPE_FUNCTION ||
             function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
         {
             return result;
@@ -4861,11 +5180,18 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32 signature_integer_count = 0;
         u32 signature_float_count = 0;
         u32 signature_stack_part_count = 0;
+        u32 packed_stack_bytes = 0;
+        bool darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+        bool windows_variadic = function_type->is_variadic && target.os == OPERATING_SYSTEM_WINDOWS;
         for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
         {
-            if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target, IR_ABI_USE_ARGUMENT,
+            if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target,
+                                         windows_variadic ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
                                          signature_parameter_shapes + parameter_index) ||
-                !machine_a64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
+                !machine_a64_place_variadic_argument(signature_parameter_shapes + parameter_index,
+                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_variadic, false,
+                                            darwin ? &packed_stack_bytes : 0,
+                                            &signature_integer_count, &signature_float_count,
                                             &signature_stack_part_count, signature_parameter_placements + parameter_index))
             {
                 return result;
@@ -4890,6 +5216,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         MachineSelectionValueFacts value_facts = machine_selection_value_facts_allocate(arena, function->value_count);
         selector.target = target;
+        selector.pointer_va_list = target.os == OPERATING_SYSTEM_WINDOWS || darwin;
         selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
         memset(selector.direct_call_uses, 0, function->value_count);
         machine_stream_initialize(&selector.immediates, sizeof(u64));
@@ -4903,11 +5230,13 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         selector.return_shape = signature_return_shape;
         selector.hidden_return_slot = UINT32_MAX;
         selector.va_register_save_slot = UINT32_MAX;
+        selector.named_integer_count = signature_integer_count;
+        selector.named_stack_part_count = signature_stack_part_count;
         if (signature_return_shape.indirect)
         {
             selector.hidden_return_slot = machine_a64_append_slot(&selector, 8, 8);
         }
-        if (function_type->is_variadic)
+        if (function_type->is_variadic && !selector.pointer_va_list)
         {
             // The canonical non-Darwin model saves X0-X7 and Q0-Q7 in a
             // 192-byte area; a dedicated frame slot keeps its displacement
@@ -5338,7 +5667,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.value_virtual_registers[instruction->result.value] = register_index;
                 }
                 else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
-                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_CALL ||
                           instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                           instruction->opcode == IR_OPCODE_VA_ARG || instruction->opcode == IR_OPCODE_CAST ||
                           instruction->opcode == IR_OPCODE_CONSTANT_INTEGER ||
@@ -5623,6 +5953,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
             if (block_index == 0)
             {
+                if (windows_variadic)
+                {
+                    machine_a64_select_row(&selector, (MachineInstruction){.opcode = MACHINE_A64_VA_HOME_WINDOWS});
+                }
                 // The variadic save snapshot reads the still-live incoming
                 // X0-X7, so it precedes every capture row — the captures
                 // also only read the argument registers, but a float
@@ -5681,11 +6015,12 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         // capture row ran (fast/quality wrong answer,
                         // mir-stack and canonical correct — the allocator-layer
                         // signature).
-                        if (stack_pass != (parameter_placement->on_stack != 0))
+                        if (stack_pass ? !parameter_placement->on_stack :
+                            (parameter_placement->on_stack && !parameter_placement->split_register_parts))
                         {
                             continue;
                         }
-                        if (parameter_placement->on_stack && shape->aggregate && !shape->indirect)
+                        if (stack_pass && shape->aggregate && !shape->indirect)
                         {
                             // A stack-passed aggregate, HFA, or vector: its
                             // eightbyte images read back from the caller's
@@ -5696,13 +6031,14 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                 machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
                                 break;
                             }
-                            for (u32 part_index = 0; part_index < shape->byte_size / 8; part_index += 1)
+                            for (u32 part_index = parameter_placement->split_register_parts; part_index < shape->byte_size / 8; part_index += 1)
                             {
                                 u32 incoming_register = machine_a64_synthesize_register(&selector);
                                 u32 incoming_row = machine_a64_select_row(
                                     &selector, (MachineInstruction){
                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
-                                                   .payload = 16u + ((u32)parameter_placement->first_stack_part + part_index) * 8u,
+                                                   .payload = 16u + (u32)parameter_placement->first_stack_offset + (part_index -
+                                                                     parameter_placement->split_register_parts) * 8u,
                                                    .opcode = MACHINE_A64_LOAD_INCOMING,
                                                });
                                 machine_a64_define(&selector, incoming_register, incoming_row);
@@ -5730,7 +6066,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                     machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
                                     break;
                                 }
-                                machine_a64_select_row(&selector, machine_a64_vector_transfer_row(shape, slot, next_float, true));
+                                for (u32 part = 0; part < shape->part_count; part += 1)
+                                {
+                                    machine_a64_select_row(&selector, machine_a64_vector_transfer_row(shape, slot, part, next_float + part, true));
+                                }
                             }
                             continue;
                         }
@@ -5757,7 +6096,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                     pointer_row = machine_a64_select_row(
                                         &selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register)},
-                                                       .payload = 16u + (u32)parameter_placement->first_stack_part * 8u,
+                                                       .payload = 16u + (u32)parameter_placement->first_stack_offset,
                                                        .opcode = MACHINE_A64_LOAD_INCOMING,
                                                    });
                                 }
@@ -5788,7 +6127,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                 machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
                                 break;
                             }
-                            for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                            u32 register_parts = parameter_placement->split_register_parts;
+                            u32 captured_parts = register_parts ? register_parts : shape->part_count;
+                            for (u32 part_index = 0; part_index < captured_parts; part_index += 1)
                             {
                                 bool part_float = shape->part_is_float[part_index] != 0;
                                 u32 part_integer = next_integer;
@@ -5845,7 +6186,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                 u32 incoming_row =
                                     machine_a64_select_row(&selector, (MachineInstruction){
                                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
-                                                                          .payload = 16u + (u32)parameter_placement->first_stack_part * 8u,
+                                                                          .payload = 16u + (u32)parameter_placement->first_stack_offset,
+                                                                          .flags = (u16)shape->exact_byte_size,
                                                                           .opcode = MACHINE_A64_LOAD_INCOMING,
                                                                       });
                                 machine_a64_define(&selector, incoming_register, incoming_row);
@@ -5975,17 +6317,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         result.function = machine_function_builder_finish(arena, &selector.builder);
-        if (selector.block_entries)
-        {
-            for (u32 edge_index = canonical_edge_offset; edge_index < result.function.edge_count; edge_index += 1)
-            {
-                MachineEdge* edge = result.function.edges + edge_index;
-                edge->source_block = selector.block_exits[edge->source_block];
-                edge->destination_block = selector.block_entries[edge->destination_block];
-            }
-        }
+        machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits);
         result.function.target = &machine_aarch64_description;
         result.function.windows_aarch64_frame = target_uses_pe_unwind(target);
+        result.function.windows_aarch64_variadic = windows_variadic;
         result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
         result.function.immediate_count = selector.immediates.total_count;
         machine_stream_flatten(&selector.immediates, result.function.immediates);
@@ -6824,6 +7159,41 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_frame_offset(u32 frame_area, u32 placement_o
     return frame_area - placement_offset;
 }
 
+// X12 names a saved ABI slot or an overflow slot; X9 is the row's data
+// scratch. Never read the padding past an indirectly supplied object.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_va_value(MachineA64Encoder* encoder, MachineVaArg* metadata,
+    MachineStackPlacement* placement, u32 frame_area, u32 result_register, bool from_registers)
+{
+    if (metadata->indirect)
+    {
+        machine_a64_emit_pointer_memory(encoder, MACHINE_A64_X12, MACHINE_A64_X12, 0, 8, false);
+    }
+    if (!metadata->result_is_frame)
+    {
+        machine_a64_emit_pointer_memory(encoder, result_register, MACHINE_A64_X12, 0, metadata->scalar_size, false);
+    }
+    else
+    {
+        u32 count = metadata->indirect ? 1u : metadata->part_count;
+        for (u32 part_index = 0; part_index < count; part_index += 1)
+        {
+            u32 offset = metadata->indirect ? 0u : metadata->parts[part_index].value_offset;
+            u32 source_offset = from_registers && !metadata->indirect ? metadata->parts[part_index].save_offset : offset;
+            u32 remaining = metadata->indirect ? metadata->size : metadata->parts[part_index].size;
+            u32 copied = 0;
+            while (remaining && !encoder->overflow && !encoder->error)
+            {
+                u32 chunk = remaining >= 8 ? 8u : remaining >= 4 ? 4u : remaining >= 2 ? 2u : 1u;
+                machine_a64_emit_pointer_memory(encoder, MACHINE_A64_X9, MACHINE_A64_X12, source_offset + copied, chunk, false);
+                u32 destination = machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[metadata->result_slot] - offset - copied);
+                machine_a64_emit_frame_memory(encoder, MACHINE_A64_X9, destination, chunk, true);
+                copied += chunk;
+                remaining -= chunk;
+            }
+        }
+    }
+}
+
 // Insert a four-byte-aligned relaxation sequence without invalidating any
 // function-relative metadata.  The insertion point is always immediately
 // after the original branch word, so the source row itself stays at the same
@@ -7296,6 +7666,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     u32 frame_area = (u32)frame_area64;
     bool windows_frame = function->windows_aarch64_frame;
     u32 windows_save_area = codegen_a64_windows_save_area_size(push_count);
+    windows_save_area += function->windows_aarch64_variadic ? MACHINE_A64_VA_GP_SAVE_BYTES : 0u;
     if (windows_frame && frame_area > UINT32_MAX - windows_save_area)
     {
         return result;
@@ -7347,6 +7718,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // Eight X and eight Q stores, each possibly using a large offset.
             capacity64 += 16 * 24;
             break;
+        case MACHINE_A64_VA_HOME_WINDOWS:
+            capacity64 += 8 * 4;
+            break;
         case MACHINE_A64_VLOAD_FRAME:
         case MACHINE_A64_VSTORE_FRAME:
         case MACHINE_A64_VLOAD_FRAME_SIZED:
@@ -7357,7 +7731,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         case MACHINE_A64_VA_ARG:
             // Two bounded part sequences around the cursor split, each
             // part possibly storing through the large-offset frame form.
-            capacity64 += 128 + 2u * ((u64)MACHINE_VA_ARG_PART_LIMIT * 32 + 12);
+            capacity64 += 128 + 2u * ((u64)MACHINE_VA_ARG_PART_LIMIT * 64 + 12);
+            if (capacity_row->payload < function->va_arg_count && function->va_args[capacity_row->payload].indirect)
+            {
+                capacity64 += 2u * (((u64)function->va_args[capacity_row->payload].size / 8u + 3u) * 32u + 4u);
+            }
             break;
         case MACHINE_A64_ATOMIC_LOAD_PAIR:
             // Exclusive pair read-back loop plus two result-slot stores.
@@ -7367,6 +7745,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // Two value-slot loads, a worst-case four-word high-half mask,
             // AND, and the exclusive pair replacement loop.
             capacity64 += 32 + 2u * (large_save_offset ? 16u : 4u);
+            break;
+        case MACHINE_A64_ATOMIC_RMW_PAIR:
+            // Two input loads, a pair loop with at most two arithmetic
+            // words, and two result stores. Every frame access may expand.
+            capacity64 += 20 + 4u * (large_save_offset ? 16u : 4u);
+            break;
+        case MACHINE_A64_ATOMIC_CAS_PAIR:
+            // Expected/desired loads, compare and conditional replacement,
+            // pair loop, and result stores; no mismatch escape from LDXP.
+            capacity64 += 28 + 6u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_RMW:
             // ld(a)xr, operation, st(l)xr, cbnz.
@@ -7818,11 +8206,41 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             }
             break;
             case MACHINE_A64_LOAD_INCOMING:
-                // The payload already carries the X29-relative byte offset,
+            {
+                // The payload already carries the X29-relative byte incoming_offset,
                 // sixteen bytes past the frame-pointer pair like the
                 // canonical parameter capture.
-                machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], MACHINE_A64_X29,
-                                                            instruction->payload + (windows_frame ? windows_save_area - 16u : 0u), 8, false);
+                u32 incoming_offset = instruction->payload + (windows_frame ? windows_save_area - 16u : 0u);
+                u32 size = instruction->flags ? instruction->flags : 8u;
+                u32 base = MACHINE_A64_X29;
+                if (incoming_offset % size || incoming_offset / size > A64_IMM12_MAX)
+                {
+                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X16, incoming_offset);
+                    u32 fields[] = {MACHINE_A64_X16, MACHINE_A64_X29, 0, MACHINE_A64_X16};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+                    base = MACHINE_A64_X16;
+                    incoming_offset = 0;
+                }
+                machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], base, incoming_offset, size, false);
+            }
+            break;
+            case MACHINE_A64_LEA_INCOMING:
+            {
+                s64 incoming_offset = (s64)(s32)instruction->payload + (windows_frame ? windows_save_area : 16u);
+                if (incoming_offset < 0 || incoming_offset > A64_IMM12_MAX)
+                {
+                    return result;
+                }
+                u32 fields[] = {operand_registers[0], MACHINE_A64_X29, (u32)incoming_offset};
+                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+            }
+            break;
+            case MACHINE_A64_VA_HOME_WINDOWS:
+                for (u32 reg = 0; reg < 8; reg += 1)
+                {
+                    machine_a64_emit_generated_unsigned_memory(&encoder, reg, MACHINE_A64_X29,
+                        windows_save_area - MACHINE_A64_VA_GP_SAVE_BYTES + reg * 8u, 8, true);
+                }
                 break;
             case MACHINE_A64_VLOAD_FRAME:
             case MACHINE_A64_VSTORE_FRAME:
@@ -7911,6 +8329,84 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, 0x35000000u | (0x7fffeu << 5) | MACHINE_A64_X13);
             }
             break;
+            case MACHINE_A64_ATOMIC_RMW_PAIR:
+            case MACHINE_A64_ATOMIC_CAS_PAIR:
+            {
+                bool compare_exchange = instruction->opcode == MACHINE_A64_ATOMIC_CAS_PAIR;
+                u32 result_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
+                u32 input_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[2])];
+                u32 atomic_address = operand_registers[0];
+                u32 retry_offset = encoder.count;
+                // Reload operands before LDXP, not inside the exclusive
+                // window: ordinary memory accesses would forfeit the
+                // architecture's forward-progress guarantee. Retrying also
+                // restores X11/X12 after arithmetic or conditional selection.
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X11, machine_a64_frame_offset(frame_area, input_offset), 8, false);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X12, machine_a64_frame_offset(frame_area, input_offset - 8), 8, false);
+                if (compare_exchange)
+                {
+                    u32 desired_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[3])];
+                    machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X15, machine_a64_frame_offset(frame_area, desired_offset), 8, false);
+                    machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X17, machine_a64_frame_offset(frame_area, desired_offset - 8), 8, false);
+                }
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_ACQUIRE) ? UINT32_C(0xc87f8000)
+                                                                                                  : UINT32_C(0xc87f0000)) |
+                                               (MACHINE_A64_X14 << 10) | (atomic_address << 5) | MACHINE_A64_X9);
+                if (compare_exchange)
+                {
+                    machine_a64_emit(&encoder, UINT32_C(0xeb0b013f)); // cmp x9, x11
+                    machine_a64_emit(&encoder, UINT32_C(0xfa4c01c0)); // ccmp x14, x12, #0, eq
+                    // A mismatch still needs a successful STXP to validate
+                    // the pair read. Select the observed bits in that case.
+                    machine_a64_emit(&encoder, UINT32_C(0x9a8901eb)); // csel x11, x15, x9, eq
+                    machine_a64_emit(&encoder, UINT32_C(0x9a8e022c)); // csel x12, x17, x14, eq
+                }
+                else
+                {
+                    switch (instruction->payload >> MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT)
+                    {
+                        case IR_ATOMIC_ADD:
+                            machine_a64_emit(&encoder, UINT32_C(0xab0b012b)); // adds x11, x9, x11
+                            machine_a64_emit(&encoder, UINT32_C(0x9a0c01cc)); // adc x12, x14, x12
+                            break;
+                        case IR_ATOMIC_SUBTRACT:
+                            machine_a64_emit(&encoder, UINT32_C(0xeb0b012b)); // subs x11, x9, x11
+                            machine_a64_emit(&encoder, UINT32_C(0xda0c01cc)); // sbc x12, x14, x12
+                            break;
+                        case IR_ATOMIC_BITWISE_AND:
+                            machine_a64_emit(&encoder, UINT32_C(0x8a0b012b));
+                            machine_a64_emit(&encoder, UINT32_C(0x8a0c01cc));
+                            break;
+                        case IR_ATOMIC_BITWISE_OR:
+                            machine_a64_emit(&encoder, UINT32_C(0xaa0b012b));
+                            machine_a64_emit(&encoder, UINT32_C(0xaa0c01cc));
+                            break;
+                        case IR_ATOMIC_BITWISE_XOR:
+                            machine_a64_emit(&encoder, UINT32_C(0xca0b012b));
+                            machine_a64_emit(&encoder, UINT32_C(0xca0c01cc));
+                            break;
+                        case IR_ATOMIC_EXCHANGE:
+                            break;
+                        default:
+                            encoder.error = true;
+                            break;
+                    }
+                }
+                machine_a64_emit(&encoder, ((instruction->payload & MACHINE_A64_ATOMIC_PAIR_RELEASE) ? UINT32_C(0xc8208000)
+                                                                                                  : UINT32_C(0xc8200000)) |
+                                               (MACHINE_A64_X13 << 16) | (MACHINE_A64_X12 << 10) | (atomic_address << 5) | MACHINE_A64_X11);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                    .operands = {{.value = MACHINE_A64_X13, .kind = A64_MC_OPERAND_REGISTER},
+                                 {.value = (s64)retry_offset - (s64)encoder.count, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+                    .opcode = A64_OPCODE_CBNZ_W,
+                    .operand_count = 2,
+                });
+                // No frame store occurs before the successful exclusive
+                // store, and the returned old value includes both limbs.
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, machine_a64_frame_offset(frame_area, result_offset), 8, true);
+                machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X14, machine_a64_frame_offset(frame_area, result_offset - 8), 8, true);
+            }
+            break;
             case MACHINE_A64_ATOMIC_LOAD:
             case MACHINE_A64_ATOMIC_STORE:
             {
@@ -7996,6 +8492,13 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, 0xd5033fdfu); // isb
                 break;
             case MACHINE_A64_COMPILER_BARRIER:
+            case MACHINE_A64_ASM_IDENTITY:
+                break;
+            case MACHINE_A64_NOP:
+                machine_a64_emit(&encoder, 0xd503201fu);
+                break;
+            case MACHINE_A64_YIELD:
+                machine_a64_emit(&encoder, 0xd503203fu);
                 break;
             case MACHINE_A64_ATOMIC_FENCE:
                 // dmb ish, the canonical thread-fence word.
@@ -8138,20 +8641,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X12, list,
                     floating ? MACHINE_A64_VA_VR_TOP_OFFSET : MACHINE_A64_VA_GR_TOP_OFFSET, 8, false);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_ADD64, MACHINE_A64_X12, MACHINE_A64_X12, MACHINE_A64_X11, 0);
-                for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
-                {
-                    if (metadata->result_is_frame)
-                    {
-                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X9, MACHINE_A64_X12, metadata->parts[part_index].save_offset, metadata->parts[part_index].size, false);
-                        u32 part_offset = machine_a64_frame_offset(
-                            frame_area, placement->stack_slot_offsets[metadata->result_slot] - metadata->parts[part_index].value_offset);
-                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, part_offset, metadata->parts[part_index].size, true);
-                    }
-                    else
-                    {
-                        machine_a64_emit_pointer_memory(&encoder, operand_registers[1], MACHINE_A64_X12, 0, 8, false);
-                    }
-                }
+                machine_a64_emit_va_value(&encoder, metadata, placement, frame_area, operand_registers[1], true);
                 u32 end_patch = encoder.count;
                 machine_a64_emit_mc(&encoder, (A64MCInst){
                     .operands = {{.kind = A64_MC_OPERAND_PC_RELATIVE}},
@@ -8168,24 +8658,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     machine_a64_emit_immediate(&encoder, MACHINE_A64_X9, ~UINT64_C(15));
                     machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_AND64, MACHINE_A64_X12, MACHINE_A64_X12, MACHINE_A64_X9, 0);
                 }
-                for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
-                {
-                    if (metadata->result_is_frame)
-                    {
-                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X9, MACHINE_A64_X12, metadata->parts[part_index].value_offset, metadata->parts[part_index].size, false);
-                        u32 part_offset = machine_a64_frame_offset(
-                            frame_area, placement->stack_slot_offsets[metadata->result_slot] - metadata->parts[part_index].value_offset);
-                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, part_offset, metadata->parts[part_index].size, true);
-                    }
-                    else
-                    {
-                        machine_a64_emit_pointer_memory(&encoder, operand_registers[1], MACHINE_A64_X12, 0, 8, false);
-                    }
-                }
-                u32 overflow_fields[] = {MACHINE_A64_X12, MACHINE_A64_X12, metadata->stack_size};
+                u32 overflow_fields[] = {MACHINE_A64_X9, MACHINE_A64_X12, metadata->stack_size};
                 machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, overflow_fields,
                                                 BUSTER_ARRAY_LENGTH(overflow_fields));
-                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X12, list, MACHINE_A64_VA_STACK_OFFSET, 8, true);
+                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X9, list, MACHINE_A64_VA_STACK_OFFSET, 8, true);
+                machine_a64_emit_va_value(&encoder, metadata, placement, frame_area, operand_registers[1], false);
                 u32 end_offset = encoder.count;
                 if (!encoder.overflow && !encoder.error)
                 {

@@ -671,8 +671,8 @@ typedef enum MachineOpcode
     MACHINE_X64_TLS_DARWIN,  // descriptor call; address returned in RAX
     MACHINE_A64_TLS_WINDOWS, // def fixed X9; clobber X10; payload = call-target index
     MACHINE_A64_TLS_DARWIN,  // descriptor call; address returned in X0
-    // Empty inline assembly with only a memory clobber is a scheduling
-    // barrier, but contributes no target bytes.
+    // Operand-free empty assembly with only memory/cc clobbers (or none)
+    // conservatively orders memory and defines flags, but emits no bytes.
     MACHINE_X64_COMPILER_BARRIER,
     MACHINE_A64_COMPILER_BARRIER,
     // Predicate-bank forms preserve the legacy replay identities above.
@@ -695,6 +695,26 @@ typedef enum MachineOpcode
     // bit 9 = release.
     MACHINE_A64_ATOMIC_LOAD_PAIR,
     MACHINE_A64_ATOMIC_STORE_PAIR,
+    // Address X10, result frame, input frame(s). Values are full integer
+    // representations, including the frontend's promoted aggregate padding.
+    // RMW adds IrAtomicOperation at MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT.
+    MACHINE_A64_ATOMIC_RMW_PAIR,
+    MACHINE_A64_ATOMIC_CAS_PAIR,
+    // Win64 i128 returns use an unaligned-safe whole XMM0/frame transfer.
+    MACHINE_X64_LOAD_XMM0_FRAME128,  // frame source; defines XMM0
+    MACHINE_X64_STORE_XMM0_FRAME128, // frame destination; reads XMM0
+    // Architectural instructions retained for literal inline-assembly hints.
+    MACHINE_X64_NOP,
+    MACHINE_X64_PAUSE,
+    MACHINE_A64_NOP,
+    MACHINE_A64_YIELD,
+    // Empty scalar asm: def and use share one physical register, no bytes.
+    MACHINE_X64_ASM_IDENTITY,
+    MACHINE_A64_ASM_IDENTITY,
+    // Incoming-SP-relative address; signed payload admits Windows' X homes.
+    MACHINE_A64_LEA_INCOMING,
+    // Snapshot X0-X7 to the 64-byte image immediately below incoming SP.
+    MACHINE_A64_VA_HOME_WINDOWS,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1105,11 +1125,13 @@ typedef struct MachineFunction MachineFunction;
 #define MACHINE_A64_VA_VR_TOP_OFFSET 16u
 #define MACHINE_A64_VA_GR_OFFS_OFFSET 24u
 #define MACHINE_A64_VA_VR_OFFS_OFFSET 28u
+#define MACHINE_A64_VA_LIST_BYTES 32u
 #define MACHINE_A64_VA_GP_SAVE_BYTES 64u
 #define MACHINE_A64_VA_FP_SAVE_BYTES 128u
 #define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)
 #define MACHINE_A64_ATOMIC_PAIR_ACQUIRE 0x100u
 #define MACHINE_A64_ATOMIC_PAIR_RELEASE 0x200u
+#define MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT 16u
 typedef struct MachineVaArgPart MachineVaArgPart;
 struct MachineVaArgPart
 {
@@ -1132,7 +1154,8 @@ struct MachineVaArg
     u32 result_slot;
     u8 result_is_frame;
     u8 scalar_size;
-    u8 reserved[2];
+    u8 indirect; // AAPCS64 consumes one pointer, then copies size bytes.
+    u8 reserved;
 };
 
 struct MachineFunction
@@ -1189,10 +1212,11 @@ struct MachineFunction
     // PE AArch64 uses a compact frame-chain/save area above the ordinary
     // placement slots. Keep the platform fact through allocation/scheduling.
     bool windows_aarch64_frame;
+    bool windows_aarch64_variadic;
     // Fresh selectors certify predicate-free functions so ordinary scalar
     // placement does not rescan them. A rewrite adding MASK refs clears it.
     bool predicate_absence_certified;
-    u8 reserved[5];
+    u8 reserved[4];
     // One flag byte per stack slot, or null. Volatile canonical lowering
     // taints every frame object it touches. Object identities do not change
     // during CFG/SSA/scheduling rewrites, so this immutable table is shared.

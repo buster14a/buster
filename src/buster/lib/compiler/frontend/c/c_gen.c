@@ -991,7 +991,7 @@ struct CIrSignature
 BUSTER_C_INTERNAL bool c_ir_va_list_parameter_decays(Target target)
 {
     return target.os != OPERATING_SYSTEM_UEFI &&
-           (target.cpu_arch == CPU_ARCH_X86_64 || target.os == OPERATING_SYSTEM_WINDOWS);
+           target.cpu_arch == CPU_ARCH_X86_64;
 }
 
 typedef enum CIrWideFloatState
