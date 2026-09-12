@@ -161,24 +161,7 @@ Local check on that complete retained 52,072-file tree (Linux, Python 3.14):
 the archive is 898,450 bytes, 93.9% below the ZIP; packing plus verification
 took 5.0-5.3 s in warm repeated runs; GNU tar and libarchive `bsdtar` both
 extract a tree identical to the source under `diff -r`. This is not a hosted
-macOS measurement. Accept the change only after comparing `Pack native logs`
-plus `Retain native logs` with the previous upload step in matched runs.
-
-## Remaining bottlenecks
-
-The differential loop is now the largest independent lane. Profile its existing
-per-command evidence before changing it. A follow-up should use bounded native
-case-level concurrency with isolated arenas, evidence and deterministic reports;
-keep both independent oracles and every configuration comparison. The oracles
-already run once per case, not once per configuration. Repeated compilation of
-the unchanged ABI host translation unit inside candidate links is a separate
-work-elimination candidate, requiring full source/flags identity and controls.
-
-Case-level parallelism (#408) is not implemented here; per-case caller-object
-reuse is proposed separately in #412. Evidence packaging is described above
-(#409). Internal combination sharding (#333), analyzer partitioning (#92) and
-full coverage manifests (#335) remain separately tracked; no issue is closed
-by the suite split alone.
+macOS measurement. The hosted campaign below supplies the matched comparison.
 
 ### Complete evidence publication
 
@@ -195,5 +178,90 @@ If packaging fails, `Record native packaging failure` regenerates the fallback
 `result.json` and `summary.md` with `pack` required before the original diagnostic
 tree is uploaded. Thus passing tests cannot label a packaging failure successful.
 Cancellation keeps the existing workflow conditions. This publication fix makes
-no hosted package/upload speedup claim; the matched timing acceptance in #409
-remains separate.
+no hosted package/upload speedup claim by itself; the matched timing acceptance
+is recorded below.
+
+### Hosted timing acceptance (2026-09-12)
+
+The accepted campaign compares candidate `7efd6c7ef203cc2ff590c8cb233ee50d335474ba`
+(workflow blob `33dd5020578d02f83d0eaedac36a0c1a55bc73e4`) with control
+`c9879553afa56a62d9fbdf93640fc70073f3b22b` (workflow blob
+`5a04fce32d3af5fd9f542d3c1db49248db9dafdd`). The control is based directly on
+the candidate and changes only the native upload block plus the policy assertion
+that validates that deliberate historical layout. Native commands, inputs,
+runner labels, exclusions, artifact names and retention are identical.
+
+Each side has three complete, successful, first-attempt 17-job runs. Candidate
+runs are [34718208639](https://github.com/buster14a/buster/actions/runs/34718208639),
+[34718396947](https://github.com/buster14a/buster/actions/runs/34718396947) and
+[34718426123](https://github.com/buster14a/buster/actions/runs/34718426123);
+control runs are [34719693093](https://github.com/buster14a/buster/actions/runs/34719693093),
+[34719694756](https://github.com/buster14a/buster/actions/runs/34719694756) and
+[34719696476](https://github.com/buster14a/buster/actions/runs/34719696476).
+All six runs report warm, verified Zig archives on every desktop job. Native
+jobs have no cache restore or save step and start from fresh hosted-runner
+filesystems. Three earlier control attempts (34718209726, 34718398334 and
+34718427915) are excluded because the unchanged policy test rejected the
+deliberate unpacked layout; none is pooled into these results.
+
+Times are GitHub's step intervals in seconds, in the linked run order; the value
+in parentheses is the median. Artifact sizes are the median of GitHub's final
+artifact ZIP metadata.
+
+| Native runner | Unpacked upload samples | Pack + upload samples | Median tail reduction | Median artifact bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x86-64 (`ubuntu-26.04`) | 24 / 39 / 27 (**27**) | 10 / 11 / 10 (**10**) | **63.0%** | 15,191,739 -> 2,028,783 (**86.6% smaller**) |
+| Linux AArch64 (`ubuntu-26.04-arm`) | 29 / 31 / 30 (**30**) | 7 / 8 / 7 (**7**) | **76.7%** | 14,231,001 -> 1,891,471 (**86.7% smaller**) |
+| macOS x86-64 (`macos-26-intel`) | 107 / 112 / 149 (**112**) | 33 / 21 / 22 (**22**) | **80.4%** | 15,691,058 -> 2,239,416 (**85.7% smaller**) |
+| macOS AArch64 (`macos-26`) | 22 / 42 / 25 (**25**) | 19 / 10 / 11 (**11**) | **56.0%** | 14,648,795 -> 2,052,587 (**86.0% smaller**) |
+
+The complete native-job intervals and queueing remain separate from the changed
+tail. They demonstrate hosted workload variance instead of implying that every
+second in a job came from packaging.
+
+| Native runner | Control job median | Candidate job median | Control queue median | Candidate queue median |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x86-64 | 754 s | 851 s | 4 s | 6 s |
+| Linux AArch64 | 539 s | 512 s | 7 s | 6 s |
+| macOS x86-64 | 1,713 s | 1,470 s | 4 s | 5 s |
+| macOS AArch64 | 561 s | 738 s | 7 s | 10 s |
+
+`tools/github_ci_time.py` validated all required jobs and key coverage steps.
+The whole-workflow observations likewise include queueing and every runner, not
+only the four favorable lanes:
+
+| Variant | Elapsed samples (median) | Execution-span samples (median) | Initial queue samples (median) | Runner-second samples (median) |
+| --- | ---: | ---: | ---: | ---: |
+| Unpacked control | 1,684 / 1,721 / 1,871 (**1,721**) | 1,681 / 1,718 / 1,868 (**1,718**) | 3 / 3 / 3 (**3**) | 10,821 / 11,728 / 10,600 (**10,821**) |
+| Packed candidate | 1,954 / 1,900 / 1,609 (**1,900**) | 1,942 / 1,897 / 1,605 (**1,897**) | 12 / 3 / 4 (**4**) | 11,615 / 11,870 / 11,036 (**11,615**) |
+
+The candidate's whole-workflow medians are higher because independent compiler,
+analyzer and simulator work varied; no end-to-end workflow or whole-job speedup
+is claimed. The supported conclusion is narrower: on every changed runner label,
+the measured package-plus-upload tail is lower than the old upload alone.
+
+Artifact `native-linux-aarch64-34718208639-1` (ID 10304937788) was downloaded
+and checked independently. Its ZIP SHA-256
+`c2c16e7ad4ef497e002a0a0bb76afd521e7075581aad3c884c9cce9969fabc01`
+matches GitHub metadata and contains exactly the archive plus the two direct
+summaries. The archive SHA-256 is
+`9931f2476349f554ddd00202c95b2bdf73c3f4d744bbd166c5c1a3b72ddedb0b`;
+its 59,565 members contain 52,160 regular files. All 17,352 `.argv` members
+remain NUL-terminated, both direct summaries match their archived bytes, no
+unexpected member types exist, and neither excluded generated output appears.
+
+## Remaining bottlenecks
+
+The differential loop is now the largest independent lane. Profile its existing
+per-command evidence before changing it. A follow-up should use bounded native
+case-level concurrency with isolated arenas, evidence and deterministic reports;
+keep both independent oracles and every configuration comparison. The oracles
+already run once per case, not once per configuration. Repeated compilation of
+the unchanged ABI host translation unit inside candidate links is a separate
+work-elimination candidate, requiring full source/flags identity and controls.
+
+Case-level parallelism (#408) is not implemented here; per-case caller-object
+reuse is proposed separately in #412. Evidence packaging is described above
+(#409). Internal combination sharding (#333), analyzer partitioning (#92) and
+full coverage manifests (#335) remain separately tracked; no issue is closed
+by the suite split alone.
