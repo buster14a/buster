@@ -18753,32 +18753,28 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
-                        a64_emit_constant(&buffer, 9, gp_count * 8);
-                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                        codegen_canonical_a64_base_address(&buffer, 9, 29, 16 + stack_parts * 8);
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + MACHINE_A64_VA_STACK_OFFSET, 8, true, false))
                         {
                             result.error = CODEGEN_ERROR_CAPACITY;
                             return result;
                         }
-                        u32 overflow_offset = 16 + stack_parts * 8;
-                        if (overflow_offset > A64_IMM12_MAX)
+                        codegen_canonical_a64_base_address(&buffer, 9, 28, aarch64_va_save_offset + MACHINE_A64_VA_GP_SAVE_BYTES);
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + MACHINE_A64_VA_GR_TOP_OFFSET, 8, true, false))
                         {
                             result.error = CODEGEN_ERROR_CAPACITY;
                             return result;
                         }
-                        codegen_emit_u32(&buffer, 0x910003a9 | (overflow_offset << 10));
-                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + 8, 8, true, false))
+                        codegen_canonical_a64_base_address(&buffer, 9, 28, aarch64_va_save_offset + MACHINE_A64_VA_SAVE_BYTES);
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + MACHINE_A64_VA_VR_TOP_OFFSET, 8, true, false))
                         {
                             result.error = CODEGEN_ERROR_CAPACITY;
                             return result;
                         }
-                        codegen_canonical_a64_base_address(&buffer, 9, 28, aarch64_va_save_offset);
-                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + 16, 8, true, false))
-                        {
-                            result.error = CODEGEN_ERROR_CAPACITY;
-                            return result;
-                        }
-                        a64_emit_constant(&buffer, 9, fp_count * 16);
-                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + 24, 8, true, false))
+                        s32 gp_offset = (s32)gp_count * 8 - (s32)MACHINE_A64_VA_GP_SAVE_BYTES;
+                        s32 fp_offset = (s32)fp_count * 16 - (s32)MACHINE_A64_VA_FP_SAVE_BYTES;
+                        a64_emit_constant(&buffer, 9, (u64)(u32)gp_offset | ((u64)(u32)fp_offset << 32));
+                        if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + MACHINE_A64_VA_GR_OFFS_OFFSET, 8, true, false))
                         {
                             result.error = CODEGEN_ERROR_CAPACITY;
                             return result;
@@ -18894,29 +18890,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrAbiValue va_abi = ir_type_abi_value(program, instruction->canonical_type, codegen_canonical_ir_abi_convention(result.abi), IR_ABI_USE_VARIADIC_ARGUMENT);
                         bool floating = va_abi.part_count && va_abi.parts[0].abi_class == IR_ABI_CLASS_FLOAT;
                         if (floating) { part_count = va_abi.part_count; }
-                        u32 cursor_offset = floating ? 24u : 0u;
-                        codegen_emit_u32(&buffer, 0xf940014b | ((cursor_offset / 8) << 10));
+                        u32 cursor_offset = floating ? MACHINE_A64_VA_VR_OFFS_OFFSET : MACHINE_A64_VA_GR_OFFS_OFFSET;
+                        codegen_canonical_a64_memory_operation_base(&buffer, 11, cursor_offset, 4, false, true, 10);
+                        codegen_emit_u32(&buffer, 0xf100017f); // cmp x11, #0
+                        u32 empty_patch = (u32)buffer.count;
+                        codegen_emit_u32(&buffer, 0x5400000a); // b.ge: already exhausted
                         if (even_integer_pair)
                         {
-                            // The register-save cursor is measured in bytes;
-                            // unlike a scalar, a pair may not begin at the
-                            // odd eightbyte immediately before the boundary.
                             codegen_emit_u32(&buffer, 0x91003d6b);
                             a64_emit_constant(&buffer, 9, ~UINT64_C(15));
                             codegen_emit_u32(&buffer, 0x8a09016b);
                         }
                         u32 increment = part_count * (floating ? 16u : 8u);
-                        u32 cursor_limit = floating ? MACHINE_A64_VA_FP_SAVE_BYTES : MACHINE_A64_VA_GP_SAVE_BYTES;
-                        u32 limit = cursor_limit - increment;
-                        codegen_emit_u32(&buffer, 0xf100017f | (limit << 10));
+                        codegen_emit_u32(&buffer, 0x91000169 | (increment << 10)); // add x9, x11, #increment
+                        codegen_canonical_a64_memory_operation_base(&buffer, 9, cursor_offset, 4, true, false, 10);
+                        codegen_emit_u32(&buffer, 0xf100013f); // cmp x9, #0
                         u32 overflow_patch = (u32)buffer.count;
-                        codegen_emit_u32(&buffer, 0x54000008);
-                        codegen_emit_u32(&buffer, 0xf940094c);
+                        codegen_emit_u32(&buffer, 0x5400000c); // b.gt: this value does not fit
+                        codegen_canonical_a64_memory_operation_base(&buffer, 12,
+                            floating ? MACHINE_A64_VA_VR_TOP_OFFSET : MACHINE_A64_VA_GR_TOP_OFFSET, 8, false, false, 10);
                         codegen_emit_u32(&buffer, 0x8b0b018c);
-                        if (floating)
-                        {
-                            codegen_emit_u32(&buffer, 0x9101018c); // add x12, x12, #64 (Q save image)
-                        }
                         for (u32 part_index = 0; part_index < part_count; part_index += 1)
                         {
                             u32 part_offset = floating ? va_abi.parts[part_index].value_offset : part_index * 8u;
@@ -18928,14 +18921,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                         }
-                        codegen_emit_u32(&buffer, 0x9100016b | (increment << 10));
-                        codegen_emit_u32(&buffer, 0xf900014b | ((cursor_offset / 8) << 10));
                         u32 end_patch = (u32)buffer.count;
                         codegen_emit_u32(&buffer, 0x14000000);
                         u32 overflow_offset = (u32)buffer.count;
-                        a64_emit_constant(&buffer, 11, cursor_limit);
-                        codegen_emit_u32(&buffer, 0xf900014b | ((cursor_offset / 8) << 10));
-                        codegen_emit_u32(&buffer, 0xf940054c);
+                        codegen_canonical_a64_memory_operation_base(&buffer, 12, MACHINE_A64_VA_STACK_OFFSET, 8, false, false, 10);
                         if (even_integer_pair)
                         {
                             codegen_emit_u32(&buffer, 0x91003d8c);
@@ -18955,9 +18944,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         u32 stack_increment = (u32)((value_type->layout.size + 7) & ~(u64)7);
                         codegen_emit_u32(&buffer, 0x9100018c | (stack_increment << 10));
-                        codegen_emit_u32(&buffer, 0xf900054c);
+                        codegen_canonical_a64_memory_operation_base(&buffer, 12, MACHINE_A64_VA_STACK_OFFSET, 8, true, false, 10);
                         u32 end_offset = (u32)buffer.count;
-                        u32 conditional = 0x54000008 | (((overflow_offset - overflow_patch) / 4) << 5);
+                        u32 empty = 0x5400000a | (((overflow_offset - empty_patch) / 4) << 5);
+                        memcpy(buffer.bytes + empty_patch, &empty, sizeof(empty));
+                        u32 conditional = 0x5400000c | (((overflow_offset - overflow_patch) / 4) << 5);
                         memcpy(buffer.bytes + overflow_patch, &conditional, sizeof(conditional));
                         u32 branch = 0x14000000 | ((end_offset - end_patch) / 4);
                         memcpy(buffer.bytes + end_patch, &branch, sizeof(branch));

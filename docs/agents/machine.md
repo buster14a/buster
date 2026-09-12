@@ -312,17 +312,25 @@
   Windows variadic signatures and calls remain explicit signature/opcode
   misses pending their distinct integer-register and pointer-list ABI.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
-  save area before argument capture. Named parameters consume their ABI's
-  independent integer and floating-point register files. The existing private
-  four-word list stores the integer cursor, overflow pointer, save pointer,
-  and floating-point cursor; `va_copy` copies all four words and `va_end`
-  emits no write. Scalar and homogeneous floating aggregates advance the Q
-  cursor, while integer reads advance the X cursor; both use the shared overflow pointer after
-  register exhaustion. A composite that cannot fit closes its register file
-  before smaller following arguments. The direct oracle and MIR use the same
-  image. Passing lists between Buster and another compiler still requires the
-  public AAPCS64 `va_list` representation; that work is
-  tracked in [#360](https://github.com/buster14a/buster/issues/360).
+  save area before argument capture. The public 32-byte, eight-aligned list
+  holds `__stack`, `__gr_top`, `__vr_top`, then independent signed 32-bit
+  `__gr_offs` and `__vr_offs`. Initial offsets are minus the remaining save
+  bytes. Read a register argument from its top plus its negative offset;
+  update only that file's four-byte cursor. A nonnegative cursor or an
+  argument that cannot fit uses the shared overflow pointer. Integer pairs
+  requiring sixteen-byte alignment round both the GP cursor and stack address.
+  Named aggregates that cannot fit close their register file before smaller
+  following arguments. `va_copy` copies all 32 bytes; `va_end` emits no write.
+  Lists passed by value use the existing AAPCS64 indirect aggregate argument
+  plan and a private callee copy, not the original producer's cursor.
+  The direct oracle and MIR retain the existing scalar/small-aggregate
+  `va_arg` subset (at most sixteen bytes, including supported HFAs and i128).
+  Windows/Darwin pointer-list conventions are unchanged. The existing native
+  variadic differential exchanges actual list objects in both directions with
+  the host compiler, including by-value calls, copied cursors, canaries,
+  named stack arguments and independent GP/FP exhaustion. Larger HFAs,
+  indirect aggregate reads and vector/HVA reads, plus the remaining full
+  acceptance gates, stay tracked by [#360](https://github.com/buster14a/buster/issues/360).
 - Empty inline assembly with no operands or targets and exactly one `memory`
   clobber selects a zero-byte compiler-barrier row on x86-64 and AArch64. The
   row is a scheduler and memory barrier even though it emits no instruction.

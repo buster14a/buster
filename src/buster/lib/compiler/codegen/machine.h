@@ -581,15 +581,12 @@ typedef enum MachineOpcode
     // caller's outgoing area starts sixteen bytes above it, exactly the
     // canonical parameter capture's base.
     MACHINE_A64_LOAD_INCOMING, // def; payload = X29-relative byte offset
-    // Non-Darwin AArch64 variadic machinery, the canonical emitter's own
-    // model: a four-word va_list [register cursor, overflow pointer,
-    // save-area base, end flag] over a 64-byte X0-X7 save area — floats
-    // and HFAs count against the same file in this model, so no V
-    // registers are saved. VA_SAVE snapshots the incoming X registers
-    // into that area; VA_ARG performs the register/overflow split against
-    // one va_list value, with its payload indexing MachineVaArg side data
-    // and its operand slots fixed to X10 (list pointer) and X13 (scalar
-    // result) beside the X9/X11/X12 sequence scratches.
+    // ELF AAPCS64 variadic machinery. VA_SAVE captures X0-X7 and Q0-Q7
+    // in a 192-byte area. The public 32-byte va_list holds the stack pointer,
+    // GP/FP save-area tops and independent signed 32-bit offsets. VA_ARG
+    // selects that file or the stack through its MachineVaArg side row.
+    // Operand slots remain fixed to X10 (list pointer) and X13 (scalar result),
+    // with X9/X11/X12 as sequence scratches. Windows/Darwin lists are separate.
     MACHINE_A64_VA_SAVE, // slot ref; payload unused
     MACHINE_A64_VA_ARG,  // use list pointer, define scalar/slot result
     // Sixteen-byte V-register frame transfer for the AAPCS64 vector ABI
@@ -1101,6 +1098,13 @@ typedef struct MachineFunction MachineFunction;
 // the row use the overflow path directly.
 // System V x86-64 needs two parts; an AArch64 HFA can contain four.
 #define MACHINE_VA_ARG_PART_LIMIT 4
+// ELF AAPCS64: three pointers followed by two independent signed 32-bit offsets.
+// Darwin and Windows use their separate one-pointer va_list representations.
+#define MACHINE_A64_VA_STACK_OFFSET 0u
+#define MACHINE_A64_VA_GR_TOP_OFFSET 8u
+#define MACHINE_A64_VA_VR_TOP_OFFSET 16u
+#define MACHINE_A64_VA_GR_OFFS_OFFSET 24u
+#define MACHINE_A64_VA_VR_OFFS_OFFSET 28u
 #define MACHINE_A64_VA_GP_SAVE_BYTES 64u
 #define MACHINE_A64_VA_FP_SAVE_BYTES 128u
 #define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)

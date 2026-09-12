@@ -2908,7 +2908,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArgument
         for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("native-variadic.c"), source, target,
+            // This helper does not synthesize target predefines. Require the
+            // guarded public-list cases explicitly for the ELF AArch64 target.
+            String8 target_source = target.cpu_arch == CPU_ARCH_AARCH64
+                ? string_format(temporary.arena, S8("#define BUSTER_MACHINE_VA_ELF_AARCH64 1\n{S8}"), source) : source;
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("native-variadic.c"), target_source, target,
                                                                      (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
             BUSTER_TEST(arguments, program && program->module_count == 1);
             if (program && program->module_count == 1)
@@ -2960,6 +2964,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArgument
                                     BUSTER_TEST(arguments, row->opcode != MACHINE_X64_VA_ARG && row->opcode != MACHINE_X64_VA_SAVE);
                                 }
                                 BUSTER_TEST(arguments, homes == 1 && starts == 1);
+                            }
+                        }
+                    }
+                }
+                if (target.cpu_arch == CPU_ARCH_AARCH64)
+                {
+                    String8 public_names[] = {S8("native_va_list_read"), S8("native_va_list_produce"), S8("native_va_list_named"),
+                                              S8("native_va_list_value"), S8("native_va_list_pass_value")};
+                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(public_names); name += 1)
+                    {
+                        IrFunction* function = machine_test_ir_function_find(module, public_names[name]);
+                        BUSTER_TEST_RAW(arguments, function != 0, public_names[name]);
+                        if (function)
+                        {
+                            MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                            BUSTER_TEST_RAW(arguments, selected.supported, public_names[name]);
+                            if (selected.supported)
+                            {
+                                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                                if (name == 0)
+                                {
+                                    bool aligned_pair = false;
+                                    bool floating = false;
+                                    for (u32 index = 0; index < selected.function.va_arg_count; index += 1)
+                                    {
+                                        MachineVaArg* value = selected.function.va_args + index;
+                                        aligned_pair |= value->alignment == 16 && value->part_count == 2 && !value->parts[0].is_float;
+                                        floating |= value->parts[0].is_float != 0;
+                                    }
+                                    BUSTER_TEST(arguments, aligned_pair && floating);
+                                }
                             }
                         }
                     }
@@ -5407,10 +5442,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    va_list arguments; __builtin_va_start(arguments, first); return __builtin_va_arg(arguments, int); }\n"
                                   "#endif\n");
     // The AArch64 variadic segment, appended only to the stage-11 source:
-    // the typedef's name alone selects the va_list type, exactly like the
-    // x86-64 segment's. Eleven anonymous parts against eight registers
-    // exercise both the register path and the overflow tail of the
-    // canonical four-word va_list model the machine subset mirrors.
+    // the alias preserves the builtin va_list identity. Eleven anonymous
+    // parts against eight registers exercise both the register path and
+    // the overflow tail of the public ELF AAPCS64 representation.
     String8 machine_c_source_a64_variadic = S8(
                                   "typedef __builtin_va_list va_list;\n"
                                   "long vsum(int count, ...) { va_list arguments; long total = 0; __builtin_va_start(arguments, count);\n"
@@ -8781,8 +8815,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     // X1-X6 under both AAPCS64 and the Darwin convention
                     // precisely because the host compiler does not know
                     // the callee is variadic, so the register path of the
-                    // four-word va_list model executes on either host. The
-                    // overflow tail stays with the qemu differential.
+                    // public ELF va_list executes on either host. This is
+                    // not Darwin list interoperability; the full overflow
+                    // and cross-compiler lists stay with the differential.
                     MachineTestA64Call7* none_call7 = 0;
                     MachineTestA64Call7* machine_call7 = 0;
                     memcpy(&none_call7, &none_address, sizeof(none_call7));
