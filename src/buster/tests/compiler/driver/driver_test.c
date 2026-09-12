@@ -2029,6 +2029,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
+                        S8("aarch64-android"), S8("aarch64-ios"), S8("aarch64-uefi")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 pics[] = {S8("-fno-pic"), S8("-fpic")};
+    String8 sources[] = {S8("tests/basic_c_aarch64_dynamic_calls.c"), S8("tests/basic_c_overaligned_stack_caller.c"),
+                         S8("tests/basic_c_overaligned_stack_callee.c")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < BUSTER_ARRAY_LENGTH(pics); pic += 1)
+                {
+                    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call"), S8(".o"));
+                        String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], pics[pic],
+                            mode ? S8("-fno-machine-fallback") : S8("-fverify-codegen"), S8("-fverify-codegen"), S8("-o"), output, sources[fixture]};
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        String8 description = string_format(temporary.arena, S8("dynamic calls {S8} {S8} {S8} {S8} {S8}: {S8}"),
+                            targets[target], modes[mode], frontends[frontend], pics[pic], sources[fixture], compiled.diagnostic);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count > 0 &&
+                            compiled.codegen_statistics.fallback_function_count == 0, description);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+                        bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+                        // NONE remains an object/control observation. Its frozen
+                        // native reference fails the new split-composite and
+                        // packed-Darwin boundaries; retained independent runs
+                        // must not be mistaken for a semantic oracle. This
+                        // regression gates all three MIR allocators against Clang.
+                        if (native_target && mode != 0 && !fixture && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), S8(".exe"));
+                            String8 link[10];
+                            u32 count = 0;
+                            link[count++] = S8(BUSTER_HOST_C_COMPILER);
+                            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                            link[count++] = S8("-O2");
+                            link[count++] = S8("tests/host_aarch64_dynamic_calls.c");
+                            link[count++] = output;
+                            link[count++] = S8("-o");
+                            link[count++] = executable;
+                            ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link, .length = count},
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            bool link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST(arguments, link_ok);
+                            if (link_ok) { BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description); }
+                        }
+#endif
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadic(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3429,6 +3496,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult many_arguments = compiler_driver_test_many_native_arguments(arguments);
     result.test_count += many_arguments.test_count;
     result.succeeded_test_count += many_arguments.succeeded_test_count;
+    UnitTestResult dynamic_calls = compiler_driver_test_aarch64_dynamic_calls(arguments);
+    result.test_count += dynamic_calls.test_count;
+    result.succeeded_test_count += dynamic_calls.succeeded_test_count;
     UnitTestResult platform_variadic = compiler_driver_test_aarch64_platform_variadic(arguments);
     result.test_count += platform_variadic.test_count;
     result.succeeded_test_count += platform_variadic.succeeded_test_count;

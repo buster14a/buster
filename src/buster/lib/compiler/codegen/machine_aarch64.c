@@ -227,11 +227,10 @@ struct MachineA64Selector
     IrOpcode failed_opcode;
     bool supported;
     bool returns_value;
-    // A selected dynamic allocation moves the stack pointer below the
-    // fixed outgoing argument area, whose base every call with stack
-    // parts reads as its own stack pointer — the finalize check rejects
-    // the pair whole.
-    bool stack_allocate_selected;
+    // Recorded by the canonical row walk before selection. Calls in these
+    // functions reserve their arguments below the current SP, not in the
+    // fixed frame whose base a dynamic allocation has already left behind.
+    bool dynamic_stack;
 };
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_scalar_register(IrType* type)
@@ -887,10 +886,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_restore(MachineA64Selector* se
 
 // Dynamic stack allocation as one constrained row: the size travels in
 // through X9 and the aligned pointer comes back in X10, with the
-// canonical page-probed loop expanded whole in the encoder. Whether the
-// function also stages outgoing stack arguments is only known once every
-// call has selected, so the outgoing-area collision is rejected at
-// finalize rather than here.
+// canonical page-probed loop expanded whole in the encoder. Calls reserve
+// a separate temporary area below the resulting SP.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_allocate(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     bool selected = false;
@@ -911,7 +908,6 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_allocate(MachineA64Selector* s
                                                            .opcode = MACHINE_A64_STACK_ALLOCATE,
                                                        });
             machine_a64_define(selector, result_register, row);
-            selector->stack_allocate_selected = true;
             selected = true;
         }
     }
@@ -2895,6 +2891,8 @@ struct MachineA64CallPlan
     u32 stack_part_count;
     u32 callee_register;
     u32 indirect_result_slot;
+    u32 saved_stack_register;
+    u32 outgoing_pointer_register;
     bool direct_call;
     bool returns_value;
 };
@@ -3216,7 +3214,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
-    *plan = (MachineA64CallPlan){.callee_register = UINT32_MAX, .indirect_result_slot = UINT32_MAX};
+    *plan = (MachineA64CallPlan){.callee_register = UINT32_MAX, .indirect_result_slot = UINT32_MAX,
+                               .saved_stack_register = UINT32_MAX, .outgoing_pointer_register = UINT32_MAX};
     plan->argument_registers = selector->call_argument_registers;
     plan->argument_slots = selector->call_argument_slots;
     plan->argument_shapes = selector->call_argument_shapes;
@@ -3321,6 +3320,41 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     return planned;
 }
 
+// Store one outgoing argument image before fixed-register staging. Ordinary
+// functions retain the reusable frame area; dynamic frames address the area
+// reserved below their current SP through an ordinary pointer vreg.
+BUSTER_GLOBAL_LOCAL void machine_a64_store_call_part(MachineA64Selector* selector, MachineA64CallPlan* plan,
+                                                      u32 value_register, u32 offset, u32 size)
+{
+    if (plan->outgoing_pointer_register != UINT32_MAX)
+    {
+        u32 address = plan->outgoing_pointer_register;
+        if (offset)
+        {
+            address = machine_a64_synthesize_register(selector);
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->outgoing_pointer_register)},
+                .payload = offset, .opcode = MACHINE_A64_LEA_OFFSET});
+            machine_a64_define(selector, address, row);
+        }
+        machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address),
+                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+            .opcode = (u16)(size == 1 ? MACHINE_A64_STORE_PTR8 : size == 2 ? MACHINE_A64_STORE_PTR16 :
+                            size == 4 ? MACHINE_A64_STORE_PTR32 : MACHINE_A64_STORE_PTR64)});
+    }
+    else
+    {
+        machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
+                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+            .payload = offset,
+            .opcode = (u16)(size == 1 ? MACHINE_A64_STORE_FRAME8 : size == 2 ? MACHINE_A64_STORE_FRAME16 :
+                            size == 4 ? MACHINE_A64_STORE_FRAME32 : MACHINE_A64_STORE_FRAME64)});
+    }
+}
+
 // Explicit fixed-register argument staging: integer parts load directly into
 // their X registers (never through a scratch that could disturb an already
 // placed argument), and float parts bridge into their V registers, which no
@@ -3361,20 +3395,33 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
         machine_a64_define(selector, pointer_register, pointer_row);
         plan->argument_registers[argument_index] = pointer_register;
     }
-    // Outgoing stack parts write into the frame's own area next — its base
-    // is where a call's stack pointer already points, so the stores are
-    // ordinary frame stores and the stack pointer never moves. Each part
-    // is one eight-byte image at its sequential offset, exactly the
-    // canonical caller's layout: a scalar's value or an indirect
-    // argument's copy address.
+    // Establish the call's stack area before staging any argument registers.
+    // A saved SP remains live across the call and result capture, so normal
+    // allocation preserves it through call clobbers. The temporary area is
+    // sixteen-aligned; packed Darwin offsets retain their individual widths.
     if (plan->stack_part_count)
     {
         u32 call_outgoing_bytes = (plan->stack_part_count * 8u + 15u) & ~15u;
-        if (selector->outgoing_slot == UINT32_MAX)
+        if (selector->dynamic_stack)
         {
-            selector->outgoing_slot = machine_a64_append_slot(selector, call_outgoing_bytes, 16);
+            plan->saved_stack_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_stack_save(selector, plan->saved_stack_register);
+            u32 size_register = machine_a64_select_immediate_register(selector, call_outgoing_bytes);
+            plan->outgoing_pointer_register = machine_a64_synthesize_register(selector);
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->outgoing_pointer_register),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
+                .payload = 16, .opcode = MACHINE_A64_STACK_ALLOCATE});
+            machine_a64_define(selector, plan->outgoing_pointer_register, row);
         }
-        selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, call_outgoing_bytes);
+        else
+        {
+            if (selector->outgoing_slot == UINT32_MAX)
+            {
+                selector->outgoing_slot = machine_a64_append_slot(selector, call_outgoing_bytes, 16);
+            }
+            selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, call_outgoing_bytes);
+        }
         for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
         {
             MachineA64ArgumentPlacement* argument_placement = plan->argument_placements + argument_index;
@@ -3399,24 +3446,13 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
                                                          .payload = part_index * 8u,
                                                          .opcode = MACHINE_A64_LOAD_FRAME,
                                                      });
-                    machine_a64_select_row(selector, (MachineInstruction){
-                                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
-                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
-                                                         .payload = (u32)argument_placement->first_stack_offset + (part_index -
-                                                                     argument_placement->split_register_parts) * 8u,
-                                                         .opcode = MACHINE_A64_STORE_FRAME64,
-                                                     });
+                    machine_a64_store_call_part(selector, plan, bounce_register,
+                        (u32)argument_placement->first_stack_offset + (part_index - argument_placement->split_register_parts) * 8u, 8);
                 }
                 continue;
             }
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
-                                                 .payload = (u32)argument_placement->first_stack_offset,
-                                                 .opcode = (u16)(stack_shape->exact_byte_size == 1 ? MACHINE_A64_STORE_FRAME8 :
-                                                                 stack_shape->exact_byte_size == 2 ? MACHINE_A64_STORE_FRAME16 :
-                                                                 stack_shape->exact_byte_size == 4 ? MACHINE_A64_STORE_FRAME32 : MACHINE_A64_STORE_FRAME64),
-                                             });
+            machine_a64_store_call_part(selector, plan, plan->argument_registers[argument_index],
+                (u32)argument_placement->first_stack_offset, stack_shape->indirect ? 8 : stack_shape->exact_byte_size);
         }
     }
     if (plan->return_shape.indirect)
@@ -3635,6 +3671,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_call(MachineA64Selector* selector, I
         if (plan.returns_value && instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
             selected = machine_a64_receive_call_result(selector, instruction, &plan, result_register);
+        }
+        if (plan.saved_stack_register != UINT32_MAX)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan.saved_stack_register)},
+                .opcode = MACHINE_A64_WRITE_SP});
         }
     }
     return selected;
@@ -5397,6 +5439,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 {
                     selector.call_argument_capacity = BUSTER_MAX(selector.call_argument_capacity, instruction->operand_count - 1u);
                 }
+                selector.dynamic_stack |= instruction->opcode == IR_OPCODE_STACK_ALLOCATE;
                 if (machine_a64_instruction_is_i128_divide(program, instruction))
                 {
                     if (!selector.block_entries)
@@ -6333,14 +6376,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             machine_builder_block_end(&selector.builder, selector.open_block);
-        }
-        // A dynamic allocation moves the stack pointer below the fixed
-        // outgoing argument area, whose base every call with stack parts
-        // reads as its own stack pointer — the pair cannot coexist, and
-        // which calls need the area is only known now.
-        if (selector.supported && selector.stack_allocate_selected && selector.outgoing_slot != UINT32_MAX)
-        {
-            machine_a64_reject(&selector, IR_OPCODE_STACK_ALLOCATE);
         }
         if (!selector.supported)
         {
