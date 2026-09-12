@@ -1,0 +1,44 @@
+[
+  {
+    "case": "continuation",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  {
+    "case": "ff",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  {
+    "case": "overlong",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  {
+    "case": "surrogate",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  {
+    "case": "range",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  {
+    "case": "truncated",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  {
+    "case": "valid",
+    "exit": 0,
+    "stderr": "",
+    "stdout": ""
+  }
+]

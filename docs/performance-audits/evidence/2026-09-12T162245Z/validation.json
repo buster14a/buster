@@ -1,0 +1,36 @@
+{
+  "baseline_release": {
+    "log_sha256": "c6397d228bff4c3ddaf41cacb8dcd5248b2c0064f48aa00055cd34b524ad97aa",
+    "log_bytes": 491485,
+    "summary_file": "baseline_release.txt"
+  },
+  "baseline_selfhost": {
+    "log_sha256": "d0a4d61f45b337fb9f26152c99da0e9e42cb11c5432f7d662969072ed3a12a8f",
+    "log_bytes": 27834,
+    "summary_file": "baseline_selfhost.txt"
+  },
+  "rebased_release": {
+    "log_sha256": "0e5e10c84c9a659422144294f57304429e0b721ef2db228ad453a8e03f8ec0ed",
+    "log_bytes": 499762,
+    "summary_file": "rebased_release.txt"
+  },
+  "rebased_sanitizers": {
+    "log_sha256": "2c2dec7ae0a5b3fd6451cb18b762395ef657111609bd67479348b8c2998e3da0",
+    "log_bytes": 278848,
+    "summary_file": "rebased_sanitizers.txt"
+  },
+  "rebased_selfhost": {
+    "log_sha256": "34a3cff03be0e466ce749b79799706729981213745dbd950780b06a54e9e3475",
+    "log_bytes": 18131,
+    "summary_file": "rebased_selfhost.txt"
+  },
+  "base": "42fd80096349a18dab128db5056afca17590ebc7",
+  "validated_tree": "e388a4f88ac3dcc0cd7a0b6be0d5e6fcf0766877",
+  "release": "Clang 18.1.3, -O3, split build, -march=native; CMAKE_BUILD_PARALLEL_LEVEL=2, BUSTER_TEST_JOBS=2",
+  "sanitizers": "Clang 18.1.3, Debug split, address/undefined/bounds; ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1",
+  "limitations": [
+    "Installed TCC 0.9.27 fails in unchanged string.c:991; documented Clang build-driver exception used.",
+    "Leak checking disabled because this container restricts LeakSanitizer /proc access; CI configuration unchanged.",
+    "Shared Intel VM, no physical Zen 5 acceptance or hardware PMU measurement."
+  ]
+}

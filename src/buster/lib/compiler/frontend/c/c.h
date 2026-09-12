@@ -252,6 +252,7 @@ typedef enum CDiagnosticKind
     // oversized escape, so the token is diagnosed and its length clamped.
     C_DIAGNOSTIC_TOKEN_TOO_LONG,
     C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
+    C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
