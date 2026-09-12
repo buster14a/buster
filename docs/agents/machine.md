@@ -376,9 +376,13 @@
   canonical edge mapping at joins. Every incoming value is snapshotted at its
   definition; destination stores restore its frame image. Short images that
   enter a pair receive sixteen bytes of owned storage for both limb reads.
-  ABI transfers still use their exact original widths. The native frame-vector
-  matrix retains the original fixture and adds three-value rotation cycles,
-  calls inside loops, independent host observers and adjacent-byte sentinels.
+  One-, two- and four-byte arguments use W registers. Results use the vector
+  file; two- and four-byte multi-lane integer vectors expand their elements
+  across D0's ABI lanes and compact again on receipt, matching Clang on ELF,
+  Mach-O and PE. The native frame-vector matrix retains the original fixture
+  and adds three-value rotation cycles, calls inside loops, independent host
+  observers and adjacent-byte sentinels. Native child execution is bounded so
+  an ABI regression fails instead of wedging CI.
 - AArch64 binary32/64 to binary128 widening constructs an exact frame image
   through scalar MIR: CLZ normalization, exponent rebiasing, sign and payload
   transport. A consumed floating multiply quiets special inputs and raises
