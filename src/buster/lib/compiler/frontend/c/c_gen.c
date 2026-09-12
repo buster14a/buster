@@ -32532,6 +32532,11 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     {
         result = builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
     }
+    else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) ||
+             IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+    {
+        result = builder->target.cpu_arch == CPU_ARCH_X86_64;
+    }
     else
     {
         result = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
