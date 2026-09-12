@@ -874,6 +874,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 compiler_driver_test_x64_restore_rbx_
         {
             return 7;
         }
+        // Allocated MIR records an ABI save as PUSH/POP instead of a frame
+        // MOV. The POP is the restoration point whose following edge or
+        // epilogue the caller is proving.
+        if (remaining && text.pointer[offset] == 0x5b)
+        {
+            return 1;
+        }
     }
 
     return 0;
@@ -8553,9 +8560,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     bool is_movk16 = (movk16 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2a00000) | offset_register);
                     bool is_movk32 = (movk32 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2c00000) | offset_register);
                     bool is_movk48 = (movk48 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2e00000) | offset_register);
-                    bool is_add = (add & UINT32_C(0xffe0ffff)) ==
-                                  (UINT32_C(0x8b000000) | (offset_register << 16) |
-                                   (address_register << 5) | address_register);
+                    bool is_add = (add & UINT32_C(0xffe0fc00)) == UINT32_C(0x8b000000) &&
+                                  (add & 31u) == address_register && ((add >> 5) & 31u) == address_register &&
+                                  ((add >> 16) & 31u) == offset_register;
                     long_label_sequence |= is_adr && is_movz && address_register != offset_register &&
                                            is_movk16 && is_movk32 && is_movk48 && is_add;
                 }
@@ -14363,10 +14370,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
-    // This audit checks the canonical emitter's exact frame/register sequence;
-    // the strict asm-identity corpus separately checks allocated MIR transport.
+    // This audit checks the selected AArch64 transaction's executable hint
+    // and tied-input transport independently in the linked image and object.
     String8 c_asm_aarch64_command_line[] = {
-        S8("-fregister-allocator=none"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
+        S8("-fregister-allocator=mir-stack"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+        S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
     };
     CompilerDriverResult c_asm_aarch64 = compiler_driver_execute_invocation(
         c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_aarch64_command_line)));
