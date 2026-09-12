@@ -103,8 +103,10 @@ monolithic, CPU-count-batched scheduler. On later revisions it measures whatever
 implementation that reference contains. A main/dispatch run uses its own revision
 as reference. No historical issue timing is presented as a current measurement.
 
-`ANALYZE_BASELINE` and `ANALYZE_RUN` record complete wall microseconds and process
-limits. `peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
+`ANALYZE_BASELINE` and `ANALYZE_RUN` record complete wall microseconds. The
+baseline reports host logical CPU capacity, not an inferred limit for an
+arbitrary reference driver; the candidate records its configured worker limit.
+`peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
 actual analyzer overlap can be lower, particularly for empty or tiny shards.
 On Linux, both runs also sample the coordinator and its descendants every
 25 ms: `peak_live_processes` and `sampled_peak_tree_rss_bytes` report observed
