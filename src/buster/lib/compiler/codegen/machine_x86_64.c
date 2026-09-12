@@ -23,6 +23,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
+#include <stdio.h>
 
 // The register shape of one argument or result under the subset: scalar
 // values occupy one integer register; small integer-class aggregates occupy
@@ -4449,6 +4450,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_compiler_barrier(MachineX64Selector*
 
 #define MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT 16u
 
+BUSTER_GLOBAL_LOCAL void machine_x64_inline_assembly_diagnostic(String8 phase, String8 source)
+{
+    FILE* output = fopen("/tmp/buster-inline-assembly-diagnostic.txt", "a");
+    if (output)
+    {
+        fprintf(output, "%.*s: %.*s\n", (int)phase.length, phase.pointer, (int)source.length, source.pointer);
+        fclose(output);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL u32 machine_x64_select_block_entry(MachineX64Selector* selector, u32 canonical_block);
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* selector, IrInstruction* instruction,
@@ -4492,6 +4503,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     {
         encoded = assembly_encode(selector->arena, (String8){.pointer = instructions, .length = instruction_length},
                                   (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        if (encoded.diagnostic_count)
+        {
+            machine_x64_inline_assembly_diagnostic(S8("encoder-source"),
+                                                   (String8){.pointer = instructions, .length = instruction_length});
+            for (u32 diagnostic_index = 0; diagnostic_index < encoded.diagnostic_count; diagnostic_index += 1)
+            {
+                AssemblyDiagnostic diagnostic = encoded.diagnostics[diagnostic_index];
+                machine_x64_inline_assembly_diagnostic(S8("encoder-message"), diagnostic.message);
+            }
+        }
         selected = encoded.diagnostic_count == 0;
     }
     if (selected)
@@ -4518,6 +4539,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                     extra.operand_name_count <= instruction->operand_count &&
                     (!instruction->operand_count || (instruction->operands && instruction->immediates)) &&
                     (!extra.operand_name_count || extra.operand_names);
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("initial"), extra.literal);
     X64Register registers[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u32 vector_registers[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT] = {0};
     u32 slots[MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT];
@@ -4553,6 +4575,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             effects |= MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP;
         }
     }
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("clobbers"), extra.literal);
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
         X64Register fixed = X64_REGISTER_RAX;
@@ -4563,6 +4586,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             reserved[fixed] = true;
         }
     }
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("fixed"), extra.literal);
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
         u64 constraint = instruction->immediates[index];
@@ -4649,6 +4673,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             effects |= memory ? MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY : 0;
         }
     }
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("operands"), extra.literal);
     // Stage every input image before any output is published. Matching inputs
     // initialize their output's shared frame slot and therefore preserve
     // permutations without sequential-register aliasing.
@@ -4702,12 +4727,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             });
         }
     }
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("staging"), extra.literal);
     String8 source = {0};
     AssemblyEncodeResult encoded = {0};
     if (selected && !simple_goto)
     {
         selected = machine_x64_inline_assembly_source(selector, instruction, extra, registers, vector_registers, &source, &encoded);
     }
+    if (!selected) machine_x64_inline_assembly_diagnostic(S8("source"), extra.literal);
     u32 first_relocation = selector->inline_assembly_relocations.total_count;
     for (u32 index = 0; selected && index < encoded.relocation_count; index += 1)
     {
