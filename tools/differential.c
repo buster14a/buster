@@ -17,7 +17,7 @@ BUSTER_GLOBAL_LOCAL String8 const d_optimizations[] = {{0}, BUSTER_CODEGEN_OPTIM
 typedef struct DConfig DConfig;
 struct DConfig { String8 name; u32 allocator; u32 optimization; u32 promotion; };
 typedef struct DCase DCase;
-struct DCase { String8 name; String8 source; String8 host; bool reject; String8 include; bool require_zero; };
+struct DCase { String8 name; String8 source; String8 host; bool reject; String8 include; bool require_zero; bool strict_mir; };
 BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
     {S8("warning"), S8("tests/differential/warning.c"), {0}, false},
     {S8("observables"), S8("tests/differential/observables.c"), {0}, false},
@@ -30,6 +30,9 @@ BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
     {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
     {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
     {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true, true},
+#endif
     {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
     {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
 };
@@ -62,8 +65,15 @@ struct DSettings
     u32 reduce_limit;
     bool verify;
     bool sanitize_oracle;
+    bool strict_mir;
     bool io_failed;
 };
+
+BUSTER_GLOBAL_LOCAL bool d_mir_config(DConfig config)
+{
+    String8 allocator = d_allocators[config.allocator];
+    return !string_equal(allocator, S8("none")) && !string_equal(allocator, S8("alias-none"));
+}
 
 BUSTER_GLOBAL_LOCAL bool d_contains(String8 text, String8 part)
 {
@@ -395,6 +405,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
         String8 allocator = d_allocators[config.allocator];
         if (string_equal(allocator, S8("alias-none"))) { argv[count++] = S8("-fno-register-allocator"); }
         else if (!string_equal(allocator, S8("default"))) { argv[count++] = string_format(arena, S8("-fregister-allocator={S8}"), allocator); }
+        if ((test.strict_mir || settings->strict_mir) && d_mir_config(config)) { argv[count++] = S8("-fno-machine-fallback"); }
         argv[count++] = (config.promotion & 1) ? S8("-fcanonical-local-promotion") : S8("-fno-canonical-local-promotion");
         argv[count++] = (config.promotion & 2) ? S8("-ftarget-local-promotion") : S8("-fno-target-local-promotion");
         argv[count++] = (config.promotion & 4) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa");
@@ -989,6 +1000,9 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     DConfig matrix[512];
     u32 count = d_matrix(matrix, BUSTER_ARRAY_LENGTH(matrix));
     errors += count != BUSTER_ARRAY_LENGTH(d_allocators) * BUSTER_ARRAY_LENGTH(d_optimizations) * 8;
+    u32 strict_rows = 0;
+    for (u32 index = 0; index < BUSTER_MIN(count, BUSTER_ARRAY_LENGTH(matrix)); index += 1) { strict_rows += d_mir_config(matrix[index]); }
+    errors += strict_rows != (BUSTER_ARRAY_LENGTH(d_allocators) - 2) * BUSTER_ARRAY_LENGTH(d_optimizations) * 8;
     errors += count > BUSTER_ARRAY_LENGTH(matrix);
     for (u32 left = 0; left < BUSTER_MIN(count, BUSTER_ARRAY_LENGTH(matrix)); left += 1)
     {
@@ -1121,6 +1135,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         String8 arg = arguments.pointer[index];
         if (string_equal(arg, S8("--no-verify"))) { settings.verify = false; }
         else if (string_equal(arg, S8("--sanitize-oracle"))) { settings.sanitize_oracle = true; }
+        else if (string_equal(arg, S8("--strict-mir"))) { settings.strict_mir = true; }
         else if (string_equal(arg, S8("--list-configurations"))) { list = true; }
         else if (string_equal(arg, S8("--self-test"))) { self_test = true; }
         else if (string_equal(arg, S8("--reject"))) { custom.reject = true; }
@@ -1154,7 +1169,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     u32 failures = 0;
     if (!valid)
     {
-        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--no-verify] [--list-configurations] [--self-test]\n"));
+        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
     }
     else if (self_test) { failures = d_self_test(arena); }
@@ -1185,8 +1200,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                 else
                 {
                     settings.io_failed |= fprintf(settings.report, "prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us\n") < 0;
-                    String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\n"),
-                        settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated, (u32)settings.verify, (u32)settings.sanitize_oracle);
+                    String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\nstrict_mir={u32}\n"),
+                        settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated,
+                        (u32)settings.verify, (u32)settings.sanitize_oracle, (u32)settings.strict_mir);
                     manifest = string_format(arena, S8("{S8}jobs_requested={u32} jobs_effective={u32} cases={u32}\n"), manifest, requested_jobs, jobs, total_cases);
                     u64 ide_hash = 0, ide_size = 0, cc_hash = 0, cc_size = 0;
                     settings.io_failed |= !build_artifact_fanout_hash_file(arena, settings.ide, &ide_hash, &ide_size);

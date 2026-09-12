@@ -342,6 +342,43 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += call_validation.succeeded_test_count;
     result.test_count += call_validation.test_count;
 
+    // SSEUP shares the preceding register. Union merging can either keep
+    // that pair, replace the upper class, or orphan it from an integer head.
+    {
+        IrProgram fixture = ir_program_initialize(arguments->arena, 0, 16, 0, 0);
+        IrTypeId integer = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 64,
+            .layout = {.size = 8, .alignment = 8, .resolved = true}});
+        IrTypeId floating = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+            .layout = {.size = 8, .alignment = 8, .resolved = true}});
+        IrTypeId vector = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_VECTOR, .element_type = integer, .element_count = 2,
+            .layout = {.size = 16, .alignment = 16, .resolved = true}});
+        IrTypeId floats = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_ARRAY, .element_type = floating, .element_count = 2,
+            .layout = {.size = 16, .alignment = 8, .resolved = true}});
+        IrTypeId integers = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_ARRAY, .element_type = integer, .element_count = 2,
+            .layout = {.size = 16, .alignment = 8, .resolved = true}});
+        IrTypeId overlays[] = {vector, floats, integers, integer};
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(overlays); shape += 1)
+        {
+            IrField* fields = arena_allocate(arguments->arena, IrField, 2);
+            fields[0] = (IrField){.type = vector};
+            fields[1] = (IrField){.type = overlays[shape]};
+            IrTypeId record = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_UNION, .fields = fields, .field_count = 2,
+                .layout = {.size = 16, .alignment = 16, .resolved = true}});
+            for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+            {
+                IrAbiValue abi = ir_type_abi_value(&fixture, record, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+                BUSTER_TEST(arguments, !abi.indirect && !abi.memory && abi.part_count == (shape ? 2u : 1u));
+                BUSTER_TEST(arguments, abi.parts[0].abi_class == (shape == 0 ? IR_ABI_CLASS_VECTOR : shape == 1 ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER));
+                BUSTER_TEST(arguments, abi.parts[0].size == (shape ? 8u : 16u));
+                if (shape)
+                {
+                    BUSTER_TEST(arguments, abi.parts[1].abi_class == (shape == 2 ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT));
+                    BUSTER_TEST(arguments, abi.parts[1].value_offset == 8 && abi.parts[1].size == 8);
+                }
+            }
+        }
+    }
+
     // A large unrelated type table must not turn a two-field ABI query into
     // a type-table-sized scratch request. Use fresh scratch arenas so an old
     // high-water mark cannot conceal an allocation regression. The ABI-context

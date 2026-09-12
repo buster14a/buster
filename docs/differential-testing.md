@@ -19,6 +19,13 @@ runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
 not a shell command containing flags. On Windows specify the `.exe` path.
 
+Desktop SysV x86-64 hosts additionally run `sysv-sseup`: an independently
+compiled observer checks sixteen-byte vector wrappers, nested wrappers, union
+class merging, stack/register exhaustion, copied variadic lists and calls in
+both directions. Every MIR leg is strict; NONE is a separately checked direct
+oracle. This case checks actual payloads against the host compiler, so matching
+Buster outputs cannot conceal a shared ABI-classification defect.
+
 The native variadic case also exercises ELF AArch64's independent integer
 and floating-point argument files. Its ten-float call exhausts the floating
 registers, and its mixed named parameters check the anonymous integer cursor.
@@ -88,6 +95,10 @@ remains on the include path during reduction. `--generated N`, `--seed N`,
 `--timeout N`, and `--minimize N` are validated bounded integers; zero reduction
 trials disables automatic reduction. `--no-verify` exists for testing older
 compiler binaries that lack the verification flag, and is recorded explicitly.
+`--strict-mir` requires `-fno-machine-fallback` for every MIR allocator and the
+default mode, retaining NONE and its alias as direct controls. It is recorded in
+the manifest and exact child arguments. The built-in `sysv-sseup` case always
+requires this strict policy, including reductions, without an extra option.
 
 ## Configuration authority
 
