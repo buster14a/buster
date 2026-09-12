@@ -4980,6 +4980,32 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
             selected = false;
         }
     }
+    // A literal register in the template is outside the operand list, but it
+    // is still an allocator-visible interference point.  Keep generic
+    // operands out of every xN/wN token the admitted AArch64 text spells.
+    for (u64 index = 0; selected && index < extra.literal.length; index += 1)
+    {
+        bool boundary = !index || !((extra.literal.pointer[index - 1] >= 'a' && extra.literal.pointer[index - 1] <= 'z') ||
+                                    (extra.literal.pointer[index - 1] >= 'A' && extra.literal.pointer[index - 1] <= 'Z') ||
+                                    (extra.literal.pointer[index - 1] >= '0' && extra.literal.pointer[index - 1] <= '9') ||
+                                    extra.literal.pointer[index - 1] == '_');
+        if (boundary && (extra.literal.pointer[index] == 'x' || extra.literal.pointer[index] == 'w'))
+        {
+            u64 end = index + 1;
+            while (end < extra.literal.length && extra.literal.pointer[end] >= '0' && extra.literal.pointer[end] <= '9')
+            {
+                end += 1;
+            }
+            String8 token = {.pointer = extra.literal.pointer + index, .length = end - index};
+            u32 literal_register = UINT32_MAX;
+            if (token.length > 1 && machine_a64_inline_assembly_register(token, &literal_register))
+            {
+                reserved[literal_register] = true;
+                exact_clobbers |= UINT64_C(1) << literal_register;
+                index = end - 1;
+            }
+        }
+    }
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
         u64 constraint = instruction->immediates[index];
@@ -7521,7 +7547,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_store(MachineA64Encoder* encoder
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, u32* row_offsets,
                                                     u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                    MachineBuilderStream* epilogs);
+                                                    MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations);
 
 #if BUSTER_INCLUDE_TESTS
 bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity, u32 register_number, u32 base_register, u32 offset, u32 size,
@@ -7675,7 +7701,7 @@ bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSp
         .capacity = UINT32_MAX,
         .sparse = true,
     };
-    bool valid = machine_a64_relax_branches(&encoder, block_offsets, fixup_count, row_offsets, fixup_count, &fixups, &call_sites, &epilogs);
+    bool valid = machine_a64_relax_branches(&encoder, block_offsets, fixup_count, row_offsets, fixup_count, &fixups, &call_sites, &epilogs, 0);
     if (!valid)
     {
         return false;
@@ -7760,7 +7786,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_va_value(MachineA64Encoder* encoder, M
 BUSTER_GLOBAL_LOCAL bool machine_a64_insert_relaxation_bytes(MachineA64Encoder* encoder, u32 insertion_offset, u32 insertion_bytes,
                                                              u32* block_offsets, u32 block_count, u32* row_offsets, u32 row_count,
                                                              MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                             MachineBuilderStream* epilogs)
+                                                             MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations)
 {
     if (!encoder || !insertion_bytes || encoder->count > encoder->capacity || insertion_offset > encoder->count ||
         insertion_bytes > encoder->capacity - encoder->count)
@@ -7841,12 +7867,28 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_insert_relaxation_bytes(MachineA64Encoder* 
             }
         }
     }
+    for (MachineBuilderChunk* chunk = inline_relocations ? inline_relocations->first : 0; chunk; chunk = chunk->next)
+    {
+        MachineInlineAssemblyRelocation* rows = (MachineInlineAssemblyRelocation*)(chunk + 1);
+        for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
+        {
+            if (rows[row_index].offset >= insertion_offset)
+            {
+                if (UINT32_MAX - rows[row_index].offset < insertion_bytes)
+                {
+                    return false;
+                }
+                rows[row_index].offset += insertion_bytes;
+            }
+        }
+    }
     return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_expand_fixup(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u32* block_offsets,
                                                         u32 block_count, u32* row_offsets, u32 row_count, MachineBuilderStream* fixups,
-                                                        MachineBuilderStream* call_sites, MachineBuilderStream* epilogs, u8 expansion_kind)
+                                                        MachineBuilderStream* call_sites, MachineBuilderStream* epilogs,
+                                                        MachineBuilderStream* inline_relocations, u8 expansion_kind)
 {
     if (!encoder || !fixup || fixup->label_address || !expansion_kind || expansion_kind > 2 || fixup->expanded >= expansion_kind || encoder->count < 4 ||
         fixup->patch_offset > encoder->count - 4 || fixup->opcode == A64_OPCODE_INVALID)
@@ -7876,7 +7918,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_expand_fixup(MachineA64Encoder* encod
         insertion_offset += 4u;
     }
     if (!machine_a64_insert_relaxation_bytes(encoder, insertion_offset, insertion_bytes, block_offsets, block_count, row_offsets, row_count, fixups,
-                                             call_sites, epilogs))
+                                             call_sites, epilogs, inline_relocations))
     {
         return false;
     }
@@ -7948,7 +7990,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_word(MachineA64Encoder* encoder, Mach
 // convergence bound, and metadata update callback.
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, u32* row_offsets,
                                                     u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                    MachineBuilderStream* epilogs)
+                                                    MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations)
 {
     if (!encoder || !fixups || (block_count && !block_offsets) || (row_count && !row_offsets))
     {
@@ -7999,7 +8041,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
                     {
                         if (++relaxation_steps > relaxation_limit ||
                             !machine_a64_relax_expand_fixup(encoder, fixup, block_offsets, block_count, row_offsets, row_count, fixups, call_sites,
-                                                            epilogs, 2))
+                                                            epilogs, inline_relocations, 2))
                         {
                             return false;
                         }
@@ -8048,7 +8090,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
                     {
                         if (++relaxation_steps > relaxation_limit ||
                             !machine_a64_relax_expand_fixup(encoder, fixup, block_offsets, block_count, row_offsets, row_count, fixups, call_sites,
-                                                            epilogs, desired))
+                                                            epilogs, inline_relocations, desired))
                         {
                             return false;
                         }
@@ -9656,7 +9698,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     if (!encoder.overflow && !encoder.error)
     {
         if (!machine_a64_relax_branches(&encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,
-                                        &call_sites, &epilogs))
+                                        &call_sites, &epilogs, &inline_assembly_relocations))
         {
             return result;
         }
