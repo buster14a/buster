@@ -1,0 +1,1418 @@
+[
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "none",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-none-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "none",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-none-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-unknown-linux",
+    "mode": "none",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-none-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-none.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "804211cc7f2482597f7f03ed9d1997f5ca6152ffe37ca6075a971a404563896a"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "mir-stack",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-mir-stack-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "mir-stack",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-mir-stack-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-unknown-linux",
+    "mode": "mir-stack",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-mir-stack-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-mir-stack.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "f5a313254efcc3931f9e0cee8ca981989e13ef02cd99f70becdfa6c4b363e7c6"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "fast",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-fast-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "fast",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-fast-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-unknown-linux",
+    "mode": "fast",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-fast-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-fast.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "bd65c10ecdb11859e840043d61703ef240438ac093aa5a43c3d72f715263ffb0"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "quality",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-quality-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-unknown-linux",
+    "mode": "quality",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-unknown-linux",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-quality-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-unknown-linux",
+    "mode": "quality",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-quality-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-unknown-linux-quality.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "bd65c10ecdb11859e840043d61703ef240438ac093aa5a43c3d72f715263ffb0"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "none",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-none-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "none",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-none-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "none",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-none-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-none.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "c0ff3e09e43594c21232a42c32e8b537eae8d5a8328d099d524a7e80b7423360"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-mir-stack-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-mir-stack-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-mir-stack-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-mir-stack.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "740a38ab79fbddafa1b1683ddd6ef89491f25b532e16ace3916890612d9151b9"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "fast",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-fast-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "fast",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-fast-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "fast",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-fast-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-fast.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "141c99ba7d693baa7f15afe329d64ee3e9b7273f02f022596b82fbe6768a4956"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "quality",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-quality-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "quality",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-quality-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "quality",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-quality-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-pc-windows-msvc-quality.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "141c99ba7d693baa7f15afe329d64ee3e9b7273f02f022596b82fbe6768a4956"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "none",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-none-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "none",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-none-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-apple-macos",
+    "mode": "none",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-none-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-none.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "3abcb761caf7e759abdc15706ce0649739bdf6f4383114b7210cefc686403234"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "mir-stack",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-mir-stack-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "mir-stack",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-mir-stack-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-apple-macos",
+    "mode": "mir-stack",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-mir-stack-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-mir-stack.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "20c948354bba23a8922e4135413325099ec655e9c85d1010190599599cf27938"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "fast",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-fast-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "fast",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-fast-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-apple-macos",
+    "mode": "fast",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-fast-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-fast.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "38284c5da87254d3d4c8a62272eedefaca541c157b7565bb6e00173c75bea5f5"
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "quality",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-quality-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "x86_64-apple-macos",
+    "mode": "quality",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "x86_64-apple-macos",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-quality-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "x86_64-apple-macos",
+    "mode": "quality",
+    "argv": [
+      "clang",
+      "-target",
+      "x86_64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-quality-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/x86_64-apple-macos-quality.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "38284c5da87254d3d4c8a62272eedefaca541c157b7565bb6e00173c75bea5f5"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "none",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-none-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "none",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-none-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-unknown-linux",
+    "mode": "none",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-none-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-none.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "1f345af6a70a31703cc005a5ca4c724f84f6698f68bc6739064043f724a1cafd"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "mir-stack",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-mir-stack-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "mir-stack",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-mir-stack-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-unknown-linux",
+    "mode": "mir-stack",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-mir-stack-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-mir-stack.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "163e0d06ae24a2a853c779e5ae9fa3ebbd56f23a934d265b9679ba8a80783bc0"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "fast",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-fast-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "fast",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-fast-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-unknown-linux",
+    "mode": "fast",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-fast-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-fast.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "3881d2feb3c53eaa54a1464d54bc33fc6892e61949c8d13839325326a9a4a878"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "quality",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-quality-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-unknown-linux",
+    "mode": "quality",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-unknown-linux",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-quality-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-unknown-linux",
+    "mode": "quality",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-unknown-linux",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-quality-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-unknown-linux-quality.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "3881d2feb3c53eaa54a1464d54bc33fc6892e61949c8d13839325326a9a4a878"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "none",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-none-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "none",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-none-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "none",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-none-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-none.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "4b191d6e6413f5ad138bc1fc59d340060a46eca013fb2977143f73fd4af7d8c9"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-mir-stack-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-mir-stack-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-mir-stack-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-mir-stack.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "92302722d3127d45b8530dabd069863a9695feee6ea83fc833318a1e69bc2563"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "fast",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-fast-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "fast",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-fast-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "fast",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-fast-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-fast.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "722dec202ff590bb93ba150df68bd28c892f5301f2f2382bae174cbe095fe5bf"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "quality",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-quality-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "quality",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-quality-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "quality",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-pc-windows-msvc",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-quality-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-pc-windows-msvc-quality.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "722dec202ff590bb93ba150df68bd28c892f5301f2f2382bae174cbe095fe5bf"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "none",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-none-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "none",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=none",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-none-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-apple-macos",
+    "mode": "none",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-none-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-none.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "c53b02967d7d138cc6ce06e8bf84fa3b343c2f4befd3e0ca0af537b5e843319f"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "mir-stack",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-mir-stack-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "mir-stack",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=mir-stack",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-mir-stack-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-apple-macos",
+    "mode": "mir-stack",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-mir-stack-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-mir-stack.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "2cbfa9bdeda4c001da545382b663e9e5dcec8331781e8bb1723b042c90fc1ed2"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "fast",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-fast-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "fast",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=fast",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-fast-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-apple-macos",
+    "mode": "fast",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-fast-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-fast.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "46674697f577f6d45a9dc710dad346fc79d1b24061a3b9723e49dde2a3e955ae"
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "quality",
+    "variant": 0,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/baseline-ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-quality-0.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "compile",
+    "target": "aarch64-apple-macos",
+    "mode": "quality",
+    "variant": 1,
+    "argv": [
+      "/workspace/scratch/5fcde73c0ee9/buster/build/Release/ide",
+      "cc",
+      "-g0",
+      "-O0",
+      "-target",
+      "aarch64-apple-macos",
+      "-fregister-allocator=quality",
+      "-S",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/probe.c",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-quality-1.s"
+    ],
+    "exit": 0,
+    "log": ""
+  },
+  {
+    "kind": "assembler",
+    "target": "aarch64-apple-macos",
+    "mode": "quality",
+    "argv": [
+      "clang",
+      "-target",
+      "aarch64-apple-macos",
+      "-c",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-quality-1.s",
+      "-o",
+      "/workspace/scratch/5fcde73c0ee9/buster/build/assembly-modes/aarch64-apple-macos-quality.o"
+    ],
+    "exit": 0,
+    "log": "",
+    "assembly_sha256": "46674697f577f6d45a9dc710dad346fc79d1b24061a3b9723e49dde2a3e955ae"
+  }
+]
