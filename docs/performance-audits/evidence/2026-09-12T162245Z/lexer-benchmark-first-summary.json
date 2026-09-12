@@ -1,0 +1,19 @@
+{
+  "0": {
+    "baseline": 1376042.5,
+    "candidate": 1421688.0,
+    "median_paired_ratio": 1.0340886200603476
+  },
+  "1": {
+    "baseline": 6867320.0,
+    "candidate": 6719256.0,
+    "median_paired_ratio": 0.9818904652385366
+  },
+  "binaries": {
+    "baseline": "b16e88ccf951f01ac05ab5548cd78a53d1ac624ee37a79e5e1131640b45f8326",
+    "candidate": "fed82196cc0f2101671151c2cc7d3d5bd7a17c09335122cfc3490ce3e46387e6"
+  },
+  "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+  "input_bytes": 1346688,
+  "cpu": 0
+}
