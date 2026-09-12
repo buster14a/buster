@@ -28,7 +28,7 @@ struct FileReadResult
     OsError error;
 };
 
-// Nonzero initial sizes use a bounded read-exact snapshot: later appended bytes
+// Nonzero initial sizes use a bounded read-exact size snapshot: later appended bytes
 // are excluded; premature EOF is failure. Zero-sized descriptors stream to EOF.
 // Success (including an empty file) has a nonnull pointer. Failure exposes no
 // prefix and restores the read allocation. Mappings require stable input files.

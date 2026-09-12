@@ -7296,8 +7296,8 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_artifacts(Arena* arena, String8 prefix)
 
 BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left, String8 right, bool allow_empty)
 {
-    // Open explicitly so two absent diagnostics are not mistaken for two
-    // legitimately empty diagnostics. file_read alone cannot distinguish them.
+    // Query both sizes before comparing mappings, including legitimately
+    // empty diagnostics. Missing files and failed stat queries fail the audit.
     OsFileDescriptor* left_fd = os_file_open(left, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
     OsFileDescriptor* right_fd = os_file_open(right, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
     bool valid = left_fd && right_fd;

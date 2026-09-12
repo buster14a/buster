@@ -61,7 +61,7 @@ The ambiguous count-only `os_file_read` API has been removed.
 
 `os_file_get_stats` exposes `valid` and a captured error. Its size convenience
 returns `UINT64_MAX` on failure; size consumers reject it. `file_read_checked`
-requires exactly the initial nonzero size. Growth after that snapshot is
+requires exactly the initial nonzero size. Growth after that size snapshot is
 excluded; truncation producing early EOF fails. Size-zero descriptors (including
 procfs and pipes) instead stream until clean EOF. Failure, including a delayed
 close failure, returns no bytes and rolls back the read's arena allocation;
