@@ -4608,13 +4608,26 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 header = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-header"), S8(".h"));
         String8 input = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-include"), S8(".c"));
         BUSTER_TEST(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(S8("// heading\r\nint pre\\\r\nfix\xFF;\n"))));
-        String8 source = string_format(utf8_arena, S8("#include \"{S8}\"\n"), header);
+        // Both files share a directory. Windows' temporary root is relative;
+        // including that whole path would repeat it relative to the input.
+        u64 header_name_offset = 0;
+        for (u64 index = 0; index < header.length; index += 1)
+        {
+            if (header.pointer[index] == '/' || header.pointer[index] == '\\') header_name_offset = index + 1;
+        }
+        String8 header_name = {header.pointer + header_name_offset, header.length - header_name_offset};
+        String8 source = string_format(utf8_arena, S8("#include \"{S8}\"\n"), header_name);
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
         String8 utf8_command_line[] = {S8("-fsyntax-only"), input};
         CompilerDriverResult refused = compiler_driver_execute_invocation(
             utf8_arena, compiler_driver_parse_arguments(utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(utf8_command_line)));
         BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_TOKENIZE);
         BUSTER_TEST(arguments, refused.tokenizer_error_count == 1);
+        BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+        if (refused.diagnostic_count)
+        {
+            BUSTER_STRING_TEST(arguments, refused.diagnostics[0].code, S8("c.invalid-utf8"));
+        }
         BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic,
             string_format(utf8_arena, S8("{S8}:3:4: invalid UTF-8 sequence in C source token"), header)) != BUSTER_STRING_NO_MATCH);
         scratch_end(utf8_temporary);
