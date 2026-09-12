@@ -649,7 +649,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_main(Arena* arena, SliceString8 
         {
             options.results = path_join(arena, path_parent(arena, options.database), string_format(arena, S8("analyze-{u64}"), os_now_microseconds()));
         }
-        options.results = os_path_absolute(arena, options.results, true);
+        options.results = os_path_absolute_lexical(arena, options.results, true);
         if (options.jobs > options.shards) options.jobs = options.shards;
         u64 cpus = os_get_logical_thread_count();
         if (cpus && options.jobs > cpus) options.jobs = cpus;
@@ -703,7 +703,7 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_test_check(bool condition, String8 name, 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 {
     u64 failures = 0;
-    String8 root = os_path_absolute(arena, string_format(arena, S8("build/analyzer-self-test-{u64}"), os_now_microseconds()), true);
+    String8 root = os_path_absolute_lexical(arena, string_format(arena, S8("build/analyzer-self-test-{u64}"), os_now_microseconds()), true);
     bool ready = clang_analyze_new_directory(arena, root);
     String8 fixture = path_join(arena, root, S8("fixture.exe"));
     String8 clang = get_resolved_path(arena, &clang_path, S8("clang"));
