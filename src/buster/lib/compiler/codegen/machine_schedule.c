@@ -470,7 +470,6 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
             }
             if (base_excess)
             {
-                MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
                 u32* definition_totals = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
                 for (u32 register_index = 0; register_index < register_count; register_index += 1)
                 {
@@ -624,7 +623,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     {
                         MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
                         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                        u8 flags = opcode_rows[instruction->opcode].schedule_flags;
+                        u8 flags = machine_instruction_opcode_row(function, instruction).schedule_flags;
                         for (u32 slot = 0; slot < info->operand_count; slot += 1)
                         {
                             flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
