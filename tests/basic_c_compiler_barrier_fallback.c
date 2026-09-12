@@ -1,6 +1,6 @@
-// Valid GNU assembly shapes which are deliberately NOT compiler-barrier
-// selections. The selector tests distinguish supported identity transport
-// from rejected constraints here; this file is outside the strict corpus.
+// Valid GNU assembly shapes which are not all zero-byte compiler barriers.
+// Selector tests distinguish exact effect rows, identity transport, and the
+// general inline-assembly transaction representation.
 void compiler_barrier_template(void)
 {
     __asm__ __volatile__("nop\nnop" : : : "memory");

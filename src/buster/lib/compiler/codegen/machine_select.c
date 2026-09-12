@@ -17,6 +17,8 @@
 // literal hint selectors, while each target owns the admitted spellings.
 // machine_selection_assembly_identity_plan binds empty generic-register
 // outputs to their read/write value or matching input before target lowering.
+// machine_selection_assembly_label_plan replaces asm-goto label operands with
+// private assembler symbols and retains their canonical target indices.
 // machine_selection_finish_canonical_edges prunes unexecuted assembly targets
 // and remaps canonical edges after target-specific block expansion.
 
@@ -109,8 +111,159 @@ bool machine_selection_assembly_identity_plan(IrProgram* program, IrFunction* fu
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_selection_assembly_label_reference(IrInstruction* instruction, IrInstructionExtra extra,
+                                                                     String8 source, u64 start, u32* target_out, u64* end_out)
+{
+    bool valid = instruction && target_out && end_out && start + 2 < source.length && source.pointer[start] == '%' &&
+                 source.pointer[start + 1] == 'l' && instruction->target_count >= 2;
+    u64 cursor = start + 2;
+    u32 target = UINT32_MAX;
+    if (valid && source.pointer[cursor] == '[')
+    {
+        u64 name_start = ++cursor;
+        while (cursor < source.length && source.pointer[cursor] != ']')
+        {
+            cursor += 1;
+        }
+        valid = cursor < source.length && cursor != name_start && extra.label_name_count == instruction->target_count - 1u &&
+                extra.label_names;
+        String8 name = valid ? (String8){.pointer = source.pointer + name_start, .length = cursor - name_start} : (String8){0};
+        for (u32 index = 0; valid && target == UINT32_MAX && index < extra.label_name_count; index += 1)
+        {
+            if (string_equal(name, extra.label_names[index]))
+            {
+                target = index + 1u;
+            }
+        }
+        valid = valid && target != UINT32_MAX;
+        cursor += valid ? 1u : 0u;
+    }
+    else if (valid)
+    {
+        u64 operand = 0;
+        u64 begin = cursor;
+        while (cursor < source.length && source.pointer[cursor] >= '0' && source.pointer[cursor] <= '9')
+        {
+            u8 digit = (u8)(source.pointer[cursor] - '0');
+            valid = valid && operand <= (UINT64_MAX - digit) / 10u;
+            operand = valid ? operand * 10u + digit : operand;
+            cursor += 1;
+        }
+        u32 base = ir_inline_assembly_label_operand_base(instruction);
+        valid = valid && cursor != begin && base != UINT32_MAX && operand >= base && operand - base < instruction->target_count - 1u;
+        target = valid ? 1u + (u32)(operand - base) : UINT32_MAX;
+    }
+    if (valid)
+    {
+        *target_out = target;
+        *end_out = cursor;
+    }
+    return valid;
+}
+
+bool machine_selection_assembly_label_plan(Arena* arena, IrFunction* function, IrInstruction* instruction,
+                                           IrInstructionExtra extra, MachineAssemblyLabelPlan* plan)
+{
+    bool valid = arena && function && instruction && plan && instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                 instruction->target_count >= 2 && instruction->targets &&
+                 extra.label_name_count == instruction->target_count - 1u && extra.label_names;
+    MachineAssemblyLabelPlan result = {.literal = extra.literal};
+    if (valid)
+    {
+        result.target_symbols = arena_allocate(arena, String8, instruction->target_count);
+        result.target_count = instruction->target_count;
+        for (u32 target = 1; valid && target < instruction->target_count; target += 1)
+        {
+            String8 symbol = string_format(arena, S8(".Lbuster.inline.asm.{u32}.{u32}"),
+                                           ir_instruction_self_id(function, instruction).value, target);
+            // A private spelling must not alias a symbol the original template
+            // deliberately names. Appending '$' remains a local assembler name
+            // and converges after at most source-length candidates.
+            while (symbol.length && string_first_sequence(extra.literal, symbol) != BUSTER_STRING_NO_MATCH)
+            {
+                symbol = string_format(arena, S8("{S8}$"), symbol);
+            }
+            valid = symbol.length != 0;
+            result.target_symbols[target] = symbol;
+        }
+    }
+    u64 output_length = extra.literal.length;
+    for (u64 read = 0; valid && read < extra.literal.length;)
+    {
+        if (extra.literal.pointer[read] == '%' && read + 1 < extra.literal.length && extra.literal.pointer[read + 1] == '%')
+        {
+            read += 2;
+        }
+        else if (extra.literal.pointer[read] == '%' && read + 1 < extra.literal.length && extra.literal.pointer[read + 1] == 'l')
+        {
+            u32 target = UINT32_MAX;
+            u64 end = 0;
+            valid = machine_selection_assembly_label_reference(instruction, extra, extra.literal, read, &target, &end);
+            u64 removed = valid ? end - read : 0;
+            valid = valid && result.target_symbols[target].length <= UINT64_MAX - (output_length - removed);
+            output_length = valid ? output_length - removed + result.target_symbols[target].length : output_length;
+            read = valid ? end : extra.literal.length;
+        }
+        else
+        {
+            read += 1;
+        }
+    }
+    char8* output = valid ? arena_allocate(arena, char8, output_length ? output_length : 1u) : 0;
+    u64 write = 0;
+    for (u64 read = 0; valid && read < extra.literal.length;)
+    {
+        if (extra.literal.pointer[read] == '%' && read + 1 < extra.literal.length && extra.literal.pointer[read + 1] == '%')
+        {
+            output[write++] = extra.literal.pointer[read++];
+            output[write++] = extra.literal.pointer[read++];
+        }
+        else if (extra.literal.pointer[read] == '%' && read + 1 < extra.literal.length && extra.literal.pointer[read + 1] == 'l')
+        {
+            u32 target = UINT32_MAX;
+            u64 end = 0;
+            valid = machine_selection_assembly_label_reference(instruction, extra, extra.literal, read, &target, &end);
+            if (valid)
+            {
+                String8 symbol = result.target_symbols[target];
+                memcpy(output + write, symbol.pointer, symbol.length);
+                write += symbol.length;
+                read = end;
+            }
+        }
+        else
+        {
+            output[write++] = extra.literal.pointer[read++];
+        }
+    }
+    if (valid)
+    {
+        result.literal = (String8){.pointer = output, .length = write};
+        *plan = result;
+    }
+    return valid;
+}
+
+bool machine_selection_assembly_label_target(MachineAssemblyLabelPlan const* plan, String8 symbol, u32* target_index_out)
+{
+    bool found = false;
+    if (plan && target_index_out && plan->target_symbols)
+    {
+        for (u32 target = 1; !found && target < plan->target_count; target += 1)
+        {
+            if (string_equal(symbol, plan->target_symbols[target]))
+            {
+                *target_index_out = target;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
 void machine_selection_finish_canonical_edges(MachineFunction* machine, IrFunction* source, u32 canonical_edge_offset,
-                                               u32 const* block_entries, u32 const* block_exits)
+                                               u32 const* block_entries, u32 const* block_exits,
+                                               u32 const* asm_goto_continuations)
 {
     if (block_entries || ir_function_may_contain_opcodes(source, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)))
     {
@@ -118,11 +271,28 @@ void machine_selection_finish_canonical_edges(MachineFunction* machine, IrFuncti
         for (u32 edge_index = canonical_edge_offset; edge_index < machine->edge_count; edge_index += 1)
         {
             MachineEdge edge = machine->edges[edge_index];
-            IrInstruction* canonical_terminator = source->instructions + source->blocks[edge.source_block].last_instruction.value;
-            edge.source_block = block_exits ? block_exits[edge.source_block] : edge.source_block;
+            u32 canonical_source = edge.source_block;
+            IrInstruction* canonical_terminator = source->instructions + source->blocks[canonical_source].last_instruction.value;
+            u32 continuation = asm_goto_continuations ? asm_goto_continuations[canonical_source] : UINT32_MAX;
+            if (canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY && continuation != UINT32_MAX)
+            {
+                u32 target_index = UINT32_MAX;
+                for (u32 index = 0; target_index == UINT32_MAX && index < canonical_terminator->target_count; index += 1)
+                {
+                    if (canonical_terminator->targets[index].value == edge.destination_block)
+                    {
+                        target_index = index;
+                    }
+                }
+                edge.source_block = target_index < canonical_terminator->target_count ? continuation + target_index : UINT32_MAX;
+            }
+            else
+            {
+                edge.source_block = block_exits ? block_exits[canonical_source] : canonical_source;
+            }
             edge.destination_block = block_entries ? block_entries[edge.destination_block] : edge.destination_block;
-            bool keep = true;
-            if (canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+            bool keep = edge.source_block < machine->block_count;
+            if (keep && canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY && continuation == UINT32_MAX)
             {
                 // These selected templates have one executable successor.
                 // Other canonical asm-goto destinations must not assign their
