@@ -67,6 +67,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
   both macros under all four allocators and
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+- `c_parse_direct_expression_type_core` resolves nested comma/prefix bases
+  with explicit continuations. Each frame keeps its prefix slice and postfix
+  range; all frames share one query-sized scratch allocation, released on
+  success and failure. Constructed types remain in the translation-unit arena.
+  Both this walk and `c_type_parse_sizeof_step` use the existing matching-
+  delimiter index to skip nested ranges. Consecutive unary tasks inherit a
+  completed operator scan until removing a parenthesis exposes a new range.
+  Comma results undergo value conversion (including array/function decay and
+  top-level unqualification); bare `typeof` operands retain their original type.
+  `c_test_typeof_expression_frames` checks geometric depths and scratch lifetime,
+  and `basic_c_typeof_expression_frames.c` checks observable type behavior under
+  all native allocators (GitHub #255).
 - **A failed call blames the call, not the declaration.** A direct call's
   callee token is not an identifier *use*: it resolves through the
   call-target index, so the parser records no binding for it and

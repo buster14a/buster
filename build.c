@@ -23,6 +23,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   native_retirement_census_main                frozen native coverage inventory
+//   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
 //   process_arguments, main                      command dispatch
 
@@ -101,6 +102,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
+    BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
     BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
@@ -34067,6 +34069,7 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 
 // Native semantic matrix and bounded reducer; policy stays in the build driver.
 #include "tools/differential.c"
+#include "tools/gpu_toolchains.c"
 #include "tools/native_retirement_census.c"
 #include "tools/uefi_boot.c"
 
@@ -34248,6 +34251,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
+        [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
@@ -34346,6 +34350,12 @@ ProcessResult process_arguments(void)
     else if (command == BUILD_COMMAND_TEST_UEFI)
     {
         result = uefi_boot_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i}, arguments.pointer[0]);
+        argument_i = arguments.length;
+    }
+
+    if (command == BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
+    {
+        result = gpu_tools_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
         argument_i = arguments.length;
     }
 
@@ -35235,7 +35245,7 @@ ProcessResult process_arguments(void)
     // Every parse-failure path above leaves argument_i on the offending
     // argument; report it here so no failure exits silently with code 1.
     // Differential execution has already emitted its own usage or result.
-    if (result != PROCESS_RESULT_SUCCESS && command != BUILD_COMMAND_TEST_DIFFERENTIAL && command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS)
+    if (result != PROCESS_RESULT_SUCCESS && command != BUILD_COMMAND_TEST_DIFFERENTIAL && command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS && command != BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
     {
         if (argument_i < arguments.length)
         {
@@ -35460,6 +35470,7 @@ ProcessResult process_arguments(void)
             test_cpython_action_add(arena, test_cpython_options);
         }
         break;
+        case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:

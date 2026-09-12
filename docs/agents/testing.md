@@ -125,3 +125,11 @@ matrix, optional engine discovery, explicit unexecuted rows, and grammar-aware
 failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
 transformation preconditions, reproducible seeds, strict execution mode and
 failure bundles. Cross-target compilation is not a behavioral pass.
+
+## External GPU consumers
+
+`./build.sh test_gpu_toolchains` exposes explicit optional status; each selected
+`--profile` is required and fails on missing tools, version drift, compiler or
+consumer errors. See [GPU toolchain acceptance](../gpu-toolchain-validation.md).
+Its native `--self-test` checks the evidence machinery without vendor tools;
+registered GPU planner tests remain fast and deterministic.

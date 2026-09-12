@@ -1,0 +1,18 @@
+Launched [1349]: "/tmp/buster-tests-20-1-83144947913551/buster-asm-unit-mixed-20" 
+Process [1349]: Time (user): 0:235 s,us, (system): 0:0 s,us. Max RSS: 612772 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 0, (invol): 0
+Launched [1350]: "/tmp/buster-tests-20-1-83144947913551/buster-asm-abs32-20" 
+Process [1350]: Time (user): 0:185 s,us, (system): 0:0 s,us. Max RSS: 612772 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1351]: "/tmp/buster-tests-20-1-83144947913551/buster-c-export-dynamic-20" 
+Process [1351]: Time (user): 0:1542 s,us, (system): 0:0 s,us. Max RSS: 612772 KB. PF (soft): 59, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+Launched [1352]: "/tmp/buster-tests-20-1-83144947913551/buster-c-multi-driver-20" 
+Process [1352]: Time (user): 0:216 s,us, (system): 0:0 s,us. Max RSS: 612772 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+Launched [1353]: "/tmp/buster-tests-20-1-83144947913551/buster-c-mixed-driver-20" 
+Process [1353]: Time (user): 0:270 s,us, (system): 0:0 s,us. Max RSS: 612772 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 0, (invol): 0
+Launched [1354]: "/tmp/buster-tests-20-1-83144947913551/buster-c-archive-driver-20" 
+Process [1354]: Time (user): 0:167 s,us, (system): 0:0 s,us. Max RSS: 612772 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+TEST_MODULE_TIMING index=44 module=compiler_driver_tests duration_ns=9174204864 passed=11053 failed=0 assertions=11053 status=pass
+TEST_MODULE_TIMING index=45 module=compiler_driver_object_path_tests duration_ns=5843353 passed=22 failed=0 assertions=22 status=pass
+TEST_MODULE_TIMING index=46 module=x86_64_tests duration_ns=224626 passed=18 failed=0 assertions=18 status=pass
+[1944030/1944030] Unit tests
+[47/47] Module tests
+[0/0] External tests

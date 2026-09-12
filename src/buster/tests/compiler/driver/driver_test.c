@@ -3290,6 +3290,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
 }
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
+#include <buster/tests/compiler/driver/archive_test.c>
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(UnitTestArguments* arguments)
@@ -3367,6 +3368,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(U
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult archives = compiler_driver_archive_tests(arguments);
+    result.test_count += archives.test_count;
+    result.succeeded_test_count += archives.succeeded_test_count;
     UnitTestResult fast = compiler_driver_test_fast(arguments);
     result.test_count += fast.test_count;
     result.succeeded_test_count += fast.succeeded_test_count;
@@ -11628,6 +11632,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_static_compound_literal.c"),
         S8("tests/basic_c_va_list_places.c"),
         S8("tests/basic_c_typeof_conditional.c"),
+        S8("tests/basic_c_typeof_expression_frames.c"),
         S8("tests/basic_c_qualified_aggregate_call.c"),
         S8("tests/basic_c_qualified_compound.c"),
         S8("tests/basic_c_fresh_binding_publication.c"),
@@ -11647,6 +11652,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-static-compound-literal"),
         S8("buster-c-va-list-places"),
         S8("buster-c-typeof-conditional"),
+        S8("buster-c-typeof-expression-frames"),
         S8("buster-c-qualified-aggregate-call"),
         S8("buster-c-qualified-compound"),
         S8("buster-c-fresh-binding-publication"),
