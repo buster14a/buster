@@ -2,6 +2,7 @@
 // transfer/close failures; file_read owns padded arena reads; file_map_read and
 // file_map_unmap own optional mappings; file_copy streams between descriptors.
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/arena.h>
@@ -63,7 +64,11 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #else
     // Padding and alignment requests cannot be served by a raw mapping.
-    if (!path.length || options.start_padding || options.end_padding || options.start_alignment || options.end_alignment)
+    bool mapping_unavailable = false;
+#if BUSTER_INCLUDE_TESTS
+    mapping_unavailable = os_file_test_map_unavailable(path);
+#endif
+    if (mapping_unavailable || !path.length || options.start_padding || options.end_padding || options.start_alignment || options.end_alignment)
     {
         if (!options.map_required)
         {
@@ -78,7 +83,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
         if (file)
         {
             u64 file_size = os_file_get_size(file);
-            if (file_size)
+            if (file_size && file_size != UINT64_MAX)
             {
                 HANDLE mapping = CreateFileMappingW((HANDLE)file, 0, PAGE_READONLY, (DWORD)(file_size >> 32), (DWORD)file_size, 0);
                 if (mapping)
@@ -159,9 +164,10 @@ void file_map_unmap(FileMapRead map)
 #endif
 }
 
-ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
+FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions options)
 {
-    ByteSlice result = {0};
+    FileReadResult result = {0};
+    u64 read_mark = arena->position;
 
     if (!options.start_alignment)
     {
@@ -196,11 +202,15 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
             if (file_size)
             {
                 const void* asset_buffer = AAsset_getBuffer(asset);
-                memcpy(file_buffer + options.start_padding, asset_buffer, file_size);
+                if (asset_buffer) memcpy(file_buffer + options.start_padding, asset_buffer, file_size);
+                else result.status = OS_FILE_READ_ERROR;
             }
-            memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+            if (result.status == OS_FILE_READ_OK)
+            {
+                memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+                result.bytes = (ByteSlice){file_buffer + options.start_padding, file_size};
+            }
             AAsset_close(asset);
-            result = (ByteSlice){file_buffer + options.start_padding, file_size};
             asset_resolved = true;
         }
     }
@@ -229,74 +239,89 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
     if (!asset_resolved)
 #endif
     {
-        OsFileDescriptor* fd = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-        if (fd)
+        OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        result.error = opened.error;
+        if (opened.file)
         {
-            u64 reported_size = os_file_get_size(fd);
-            u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-            u64 file_size;
-            u64 allocation_size;
-            u8* file_buffer;
-            if (reported_size)
+            FileStats stats = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1});
+            result.error = stats.error;
+            if (stats.valid)
             {
-                allocation_size = align_forward(reported_size + options.start_padding + options.end_padding, options.end_alignment);
-                allocation_size = BUSTER_MAX(allocation_size, 1);
-                file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-                file_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding, reported_size}, reported_size);
-            }
-            else
-            {
-                // Pipes, FIFOs, character devices and procfs descriptors report
-                // st_size == 0 even when data is waiting. Probe one byte so a
-                // genuinely empty regular file keeps its tiny allocation, then
-                // grow geometrically and read until the descriptor reaches EOF.
-                u64 allocation_mark = arena->position;
-                u64 capacity = 1;
-                allocation_size = align_forward(capacity + options.start_padding + options.end_padding, options.end_alignment);
-                allocation_size = BUSTER_MAX(allocation_size, 1);
-                file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-                file_size = 0;
-                for (;;)
+                u64 reported_size = stats.size;
+                u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+                u64 file_size;
+                u64 allocation_size;
+                u8* file_buffer;
+                if (reported_size)
                 {
-                    u64 available = capacity - file_size;
-                    u64 read_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding + file_size, available}, available);
-                    file_size += read_size;
-                    if (file_size < capacity)
-                    {
-                        break;
-                    }
-
-                    u64 next_capacity = capacity < BUSTER_KB(64) ? BUSTER_KB(64) : capacity * 2;
-                    if (next_capacity <= capacity)
-                    {
-                        arena_allocation_overflow();
-                    }
-                    capacity = next_capacity;
-                    arena_set_position(arena, allocation_mark);
+                    allocation_size = align_forward(reported_size + options.start_padding + options.end_padding, options.end_alignment);
+                    allocation_size = BUSTER_MAX(allocation_size, 1);
+                    file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+                    OsFileReadResult read = os_file_read_exact(opened.file, (ByteSlice){file_buffer + options.start_padding, reported_size});
+                    file_size = read.transferred;
+                    result.status = read.status;
+                    result.error = read.error;
+                }
+                else
+                {
+                    // Size-zero descriptors include procfs, pipes and empty
+                    // files. Read to EOF with bounded geometric allocations.
+                    u64 allocation_mark = arena->position;
+                    u64 capacity = 1;
                     allocation_size = align_forward(capacity + options.start_padding + options.end_padding, options.end_alignment);
                     allocation_size = BUSTER_MAX(allocation_size, 1);
-                    u8* grown_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-                    BUSTER_CHECK(grown_buffer == file_buffer);
-                    file_buffer = grown_buffer;
+                    file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+                    file_size = 0;
+                    bool ended = false;
+                    while (!ended)
+                    {
+                        u64 available = capacity - file_size;
+                        OsFileReadResult read = os_file_read_exact(opened.file, (ByteSlice){file_buffer + options.start_padding + file_size, available});
+                        file_size += read.transferred;
+                        result.error = read.error;
+                        ended = read.status != OS_FILE_READ_OK;
+                        if (read.status == OS_FILE_READ_ERROR) result.status = read.status;
+                        if (!ended)
+                        {
+                            u64 next_capacity = capacity < BUSTER_KB(64) ? BUSTER_KB(64) : capacity * 2;
+                            if (next_capacity <= capacity) arena_allocation_overflow();
+                            capacity = next_capacity;
+                            arena_set_position(arena, allocation_mark);
+                            allocation_size = align_forward(capacity + options.start_padding + options.end_padding, options.end_alignment);
+                            allocation_size = BUSTER_MAX(allocation_size, 1);
+                            u8* grown_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+                            BUSTER_CHECK(grown_buffer == file_buffer);
+                            file_buffer = grown_buffer;
+                        }
+                    }
+                    allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
+                    allocation_size = BUSTER_MAX(allocation_size, 1);
+                    u64 allocation_offset = (u64)(file_buffer - (u8*)arena);
+                    arena_set_position(arena, allocation_offset + allocation_size);
                 }
-
-                // Return the unused geometric tail to the arena while keeping
-                // the bytes in place. arena_set_position preserves the dirty
-                // high-water mark, so a later zeroed allocation still clears
-                // data read beyond the final logical end.
-                allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
-                allocation_size = BUSTER_MAX(allocation_size, 1);
-                u64 allocation_offset = (u64)(file_buffer - (u8*)arena);
-                arena_set_position(arena, allocation_offset + allocation_size);
+                if (result.status == OS_FILE_READ_OK)
+                {
+                    u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
+                    memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+                    result.bytes = (ByteSlice){file_buffer + options.start_padding, file_size};
+                }
             }
-            u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
-            memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
-            os_file_close(fd);
-            result = (ByteSlice){file_buffer + options.start_padding, file_size};
+            OsError close_error = os_file_close_checked(opened.file);
+            if (result.status == OS_FILE_READ_OK && !result.error.v) result.error = close_error;
         }
     }
-
+    if (result.error.v) result.status = OS_FILE_READ_ERROR;
+    if (result.status != OS_FILE_READ_OK)
+    {
+        result.bytes = (ByteSlice){0};
+        arena_set_position(arena, read_mark);
+    }
     return result;
+}
+
+ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
+{
+    return file_read_checked(arena, path, options).bytes;
 }
 
 bool file_copy(CopyFileArguments arguments)

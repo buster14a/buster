@@ -58,12 +58,20 @@ struct OpenPermissions
     u64 reserved : 61;
 };
 
+typedef struct OsError OsError;
+struct OsError
+{
+    u32 v;
+};
+
 typedef struct FileStats FileStats;
 struct FileStats
 {
     u64 modified_time_s;
     u64 modified_time_ns;
     u64 size;
+    OsError error;
+    bool valid;
 };
 
 typedef struct FileStatsOptions FileStatsOptions;
@@ -144,10 +152,20 @@ struct ProcessWaitResult
     u8 reserved[3];
 };
 
-typedef struct OsError OsError;
-struct OsError
+
+typedef enum OsFileReadStatus
 {
-    u32 v;
+    OS_FILE_READ_OK,
+    OS_FILE_READ_EOF,
+    OS_FILE_READ_ERROR,
+} OsFileReadStatus;
+
+typedef struct OsFileReadResult OsFileReadResult;
+struct OsFileReadResult
+{
+    u64 transferred;
+    OsFileReadStatus status;
+    OsError error;
 };
 
 // A zero error is success. Transfer counts remain valid on failure and never
@@ -196,10 +214,15 @@ BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_
 // durability. Close always consumes the descriptor, including on failure.
 BUSTER_F_DECL OsError os_file_flush(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL OsError os_file_close_checked(OsFileDescriptor* file_descriptor);
+// Legacy size convenience: UINT64_MAX denotes failure, never an empty file.
 BUSTER_F_DECL u64 os_file_get_size(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions options);
 BUSTER_F_DECL void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer);
-BUSTER_F_DECL u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_count);
+// Some performs one successful transfer (retrying interruptions); exact fills
+// the request or returns EOF/error with a preserved prefix count. Empty reads
+// succeed without touching the descriptor. EOF is never an OS error.
+BUSTER_F_DECL OsFileReadResult os_file_read_some(OsFileDescriptor* file_descriptor, ByteSlice buffer);
+BUSTER_F_DECL OsFileReadResult os_file_read_exact(OsFileDescriptor* file_descriptor, ByteSlice buffer);
 // Recoverable transfers: retry interrupted/partial IO without asserting or
 // printing. Read fills the buffer or reaches EOF; true with *read_count == 0
 // is EOF (or an empty request), false is an error, retaining any prefix count.

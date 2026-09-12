@@ -191,7 +191,7 @@ BUSTER_GLOBAL_LOCAL NrcInput* nrc_inventory(NrcSettings* settings, u64* count_ou
                 valid = source != 0;
                 if (source)
                 {
-                    valid = os_file_get_size(source) == bytes.length;
+                    valid = bytes.pointer && os_file_get_size(source) == bytes.length;
                     valid &= os_file_close(source);
                 }
                 if (valid) { d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes)); }
