@@ -209,3 +209,11 @@ registered assertion/module counts. It covers nested and empty scopes, retained
 scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
 failure diagnostics surviving a rewind and overwrite. Observation uses separate
 arena header storage in test-enabled builds and adds no allocation-path work.
+
+
+Fatal-output regressions in `os_tests` run raw and formatted reporters in
+isolated children. A working stream must preserve the full diagnostic; closed
+streams, and `/dev/full` on Linux, must still terminate normally with status 1
+within the existing deadline. Fatal reporters use recoverable output attempts
+so an output failure cannot recursively report itself. These are unsuccessful
+process controls, not successful compiler or missing-evidence observations.

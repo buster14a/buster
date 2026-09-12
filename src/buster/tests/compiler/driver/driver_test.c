@@ -1300,8 +1300,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
     String8 cpus[] = {S8("-march=baseline"), S8("-march=haswell"), S8("-march=znver5")};
     String8 sources[] = {S8("tests/basic_c_vector_argument_short.c"), S8("tests/basic_c_vector_initializer.c"),
-        S8("tests/basic_c_win64_narrow_abi.c"), S8("tests/basic_c_machine_fallback_signature.c"), S8("tests/basic_c_frame_vectors.c"), S8("tests/basic_c_vector_joins.c"), S8("tests/basic_c_signbit_images.c")};
-    u32 function_counts[] = {8, 2, 24, 1, 16, 8, 3};
+        S8("tests/basic_c_win64_narrow_abi.c"), S8("tests/basic_c_machine_fallback_signature.c"), S8("tests/basic_c_frame_vectors.c"), S8("tests/basic_c_vector_joins.c"), S8("tests/basic_c_signbit_images.c"), S8("tests/basic_c_vector.c"), S8("tests/basic_c_vector_lane_edges.c"), S8("tests/basic_c_vector_arithmetic.c")};
+    u32 function_counts[] = {8, 2, 24, 1, 16, 8, 3, 4, 1, 6};
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     // Single-lane float vectors retain the established Clang ABI. GCC 13
     // uses a hidden result pointer for those extension types, so it cannot
@@ -1309,13 +1309,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
     bool configured_clang = string_first_sequence(S8(BUSTER_HOST_C_COMPILER_ID), S8("Clang")) < S8(BUSTER_HOST_C_COMPILER_ID).length;
     String8 host_compiler = configured_clang ? S8(BUSTER_HOST_C_COMPILER) : executable_resolve_in_path(arguments->arena, S8("clang"));
     BUSTER_TEST(arguments, host_compiler.length != 0);
-    String8 host_objects[3];
-    bool host_compiled[3];
-    String8 host_sources[] = {S8("tests/host_frame_vectors.c"), S8("tests/host_vector_joins.c"), S8("tests/host_signbit_images.c")};
+    String8 host_objects[4];
+    bool host_compiled[4];
+    String8 host_sources[] = {S8("tests/host_frame_vectors.c"), S8("tests/host_vector_joins.c"), S8("tests/host_signbit_images.c"), S8("tests/host_vector_arithmetic.c")};
     for (u32 observer = 0; observer < BUSTER_ARRAY_LENGTH(host_sources); observer += 1)
     {
         host_objects[observer] = buster_test_temporary_path(arguments->arena,
-            observer == 2 ? S8("buster-signbit-host") : observer ? S8("buster-vector-join-host") : S8("buster-frame-vector-host"), S8(".o"));
+            observer == 3 ? S8("buster-vector-arithmetic-host") : observer == 2 ? S8("buster-signbit-host") : observer ? S8("buster-vector-join-host") : S8("buster-frame-vector-host"), S8(".o"));
         String8 host_command[12];
         u32 host_count = 0;
         host_command[host_count++] = host_compiler;
@@ -1366,7 +1366,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             u32 native_base = BUSTER_CPU_ARCH_AARCH64 ? 6u : 0u;
                             bool native_target = (target == native_base && BUSTER_LINUX) || (target == native_base + 1 && BUSTER_MACOS) ||
                                                  (target == native_base + 2 && BUSTER_WINDOWS);
-                            if (native_target && cpu == 0 && fixture != 3 && compiled.error == COMPILER_DRIVER_ERROR_NONE && (fixture < 4 || host_compiled[fixture - 4]))
+                            u32 observer = fixture == 9 ? 3u : fixture >= 4 && fixture <= 6 ? fixture - 4 : UINT32_MAX;
+                            bool executable_cpu = cpu == 0 || (fixture >= 7 &&
+                                (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                                          : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
+                            if (native_target && executable_cpu && fixture != 3 && compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                (observer == UINT32_MAX || host_compiled[observer]))
                             {
                                 String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-frame-vector-run"), S8(".exe"));
                                 String8 link_command[10];
@@ -1377,7 +1382,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                 link_command[link_count++] = S8("-no-pie");
 #endif
                                 link_command[link_count++] = object;
-                                if (fixture >= 4) { link_command[link_count++] = host_objects[fixture - 4]; }
+                                if (observer != UINT32_MAX) { link_command[link_count++] = host_objects[observer]; }
 #if !BUSTER_WINDOWS
                                 if (fixture == 6) { link_command[link_count++] = S8("-lm"); }
 #endif
@@ -8812,7 +8817,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #else
                                                        S8(""));
 #endif
+    // These counters describe the frozen direct emitter's packing/forwarding
+    // choices. Keep that reference explicit; the strict MIR execution matrix
+    // above checks the same whole fixture in every machine allocator.
     String8 c_vector_command_line[] = {
+        S8("-fregister-allocator=none"),
         S8("-o"),
         c_vector_path,
         S8("tests/basic_c_vector.c"),
@@ -8824,6 +8833,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Keep c_vector and its path through the CPU-model comparisons below.
     String8 c_vector_baseline_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-baseline"), S8(".o"));
     String8 c_vector_baseline_command_line[] = {
+        S8("-fregister-allocator=none"),
         S8("-c"), S8("--target=x86_64-linux"), S8("-o"), c_vector_baseline_path, S8("tests/basic_c_vector.c"),
     };
     Arena* c_vector_target_arena = arena_create((ArenaCreation){0});
@@ -8838,6 +8848,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, arena_destroy(c_vector_target_arena, 1));
     String8 c_vector_avx2_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-avx2"), S8(".o"));
     String8 c_vector_avx2_command_line[] = {
+        S8("-fregister-allocator=none"),
         S8("-c"), S8("--target=x86_64-linux"), S8("-march=haswell"), S8("-o"), c_vector_avx2_path, S8("tests/basic_c_vector.c"),
     };
     c_vector_target_arena = arena_create((ArenaCreation){0});
@@ -8853,6 +8864,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, arena_destroy(c_vector_target_arena, 1));
     String8 c_vector_avx512_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-avx512"), S8(".o"));
     String8 c_vector_avx512_command_line[] = {
+        S8("-fregister-allocator=none"),
         S8("-c"), S8("--target=x86_64-linux"), S8("-march=znver5"), S8("-o"), c_vector_avx512_path, S8("tests/basic_c_vector.c"),
     };
     c_vector_target_arena = arena_create((ArenaCreation){0});
