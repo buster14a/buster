@@ -485,4 +485,190 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    u32 lengths[] = {8, 300, 600};
+    u64 inputs[] = {0, 1, 127, UINT64_MAX, UINT64_C(1) << 63};
+    for (u32 ssa = 0; ssa < 2; ssa += 1)
+    {
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(lengths); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            u32 count = lengths[sample];
+            String8* parts = arena_allocate(arena, String8, count + 2);
+            parts[0] = S8("unsigned long probe(unsigned long x, unsigned long y) {\n");
+            for (u32 index = 0; index < count; index += 1) parts[index + 1] = S8("x = x + y;\n");
+            parts[count + 1] = S8("return x; }\n");
+            String8 source = string_join_arena(arena, (SliceString8){parts, count + 2}, false);
+            CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
+            CParseResult parse = c_parse(arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-chain.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            if (lowered.program && lowered.diagnostic_count == 0)
+            {
+                EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+                if (!artifact.success) arguments->show(arguments, S8("eBPF chain {u32}, SSA {u32}: {S8}\n"), count, ssa, artifact.error.message);
+                BUSTER_TEST(arguments, artifact.success);
+                if (artifact.success)
+                {
+                    // Both direct SSA and local-load/store lowering use a fixed
+                    // frame independent of the number of sequential operations.
+                    BUSTER_TEST(arguments, artifact.stats.max_stack_bytes <= 64);
+                    EbpfArtifact repeated = ebpf_emit_program(arena, lowered.program);
+                    BUSTER_TEST(arguments, repeated.success && repeated.bytes.length == artifact.bytes.length &&
+                                           memory_compare(repeated.bytes.pointer, artifact.bytes.pointer, artifact.bytes.length));
+                    for (u32 first = 0; first < BUSTER_ARRAY_LENGTH(inputs); first += 1)
+                    {
+                        for (u32 second = 0; second < BUSTER_ARRAY_LENGTH(inputs); second += 1)
+                        {
+                            u64 observed = 0;
+                            bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[first], inputs[second], &observed);
+                            BUSTER_TEST(arguments, ran && observed == inputs[first] + (u64)count * inputs[second]);
+                        }
+                    }
+                    u32 reloads = 0;
+                    for (u32 index = 1; index < artifact.stats.section_count; index += 1)
+                    {
+                        ByteSlice header = codegen_test_ebpf_section(artifact.bytes, index);
+                        if (header.length && (codegen_test_ebpf_read(header.pointer + 8, 8) & 4))
+                        {
+                            ByteSlice code = codegen_test_ebpf_section_data(artifact.bytes, index);
+                            for (u64 offset = 0; offset + 8 <= code.length; offset += 8)
+                            {
+                                reloads += code.pointer[offset] == 0x79 && (code.pointer[offset + 1] >> 4) == 10;
+                            }
+                        }
+                    }
+                    // In SSA form the carried result stays in a register until
+                    // the next add; only y and the first x need stack reloads.
+                    if (ssa) BUSTER_TEST(arguments, reloads <= count + 1);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 sources[] = {
+        // The first multiplication stays live through several younger results.
+        S8("unsigned long probe(unsigned long x, unsigned long y) { unsigned long saved=x*3; x=(x+y)^17; x=x*5+y; x=(x^y)+7; return saved+x; }"),
+        // The index is consumed by a delayed, nested rematerialized address.
+        S8("unsigned long probe(unsigned long x, unsigned long y) { unsigned long a[2]={x,y}; unsigned long *p=&a[(x+1)&1]; unsigned long saved=*p; x=x*3+y; x=x*7+y; return *p+saved+x; }"),
+        // Swapped block parameters on a backedge require simultaneous copies.
+        S8("unsigned long probe(unsigned long x, unsigned long y) { for(unsigned i=0;i<4;i+=1) { unsigned long saved=x; x=y; y=saved+y; } return x+y; }"),
+        // A value used only after a diamond cannot be recycled inside a branch.
+        S8("unsigned long probe(unsigned long x, unsigned long y) { unsigned long saved=x*3; if(y&1) x=(x+7)*5; else x=(x+11)*9; return saved+x; }"),
+        // Inputs live across rematerialized constants and differing result widths.
+        S8("unsigned long probe(unsigned long x, unsigned long y) { unsigned long saved=x+y; unsigned char small=(unsigned char)(x*7); return saved+small+0x123456789abcdef0UL; }"),
+    };
+    for (u32 ssa = 0; ssa < 2; ssa += 1)
+    {
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(sources); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            CPreprocessResult tokens = c_preprocess(arena, sources[sample], (CPreprocessOptions){0});
+            CParseResult parse = c_parse(arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-liveness.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            if (lowered.program && lowered.diagnostic_count == 0)
+            {
+                EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+                if (!artifact.success) arguments->show(arguments, S8("eBPF liveness {u32}, SSA {u32}: {S8}\n"), sample, ssa, artifact.error.message);
+                BUSTER_TEST(arguments, artifact.success);
+                for (u32 first = 0; artifact.success && first < BUSTER_ARRAY_LENGTH(inputs); first += 1)
+                {
+                    for (u32 second = 0; second < BUSTER_ARRAY_LENGTH(inputs); second += 1)
+                    {
+                        u64 x = inputs[first], y = inputs[second], expected = 0;
+                        switch (sample)
+                        {
+                        case 0: expected = x*3 + (((((x+y)^17)*5+y)^y)+7); break;
+                        case 1: expected = 2 * (((x+1)&1) ? y : x) + (x*3+y)*7+y; break;
+                        case 2:
+                            for (u32 index = 0; index < 4; index += 1) { u64 saved=x; x=y; y=saved+y; }
+                            expected=x+y;
+                            break;
+                        case 3: expected=x*3 + ((y&1) ? (x+7)*5 : (x+11)*9); break;
+                        case 4: expected=x+y+(u8)(x*7)+UINT64_C(0x123456789abcdef0); break;
+                        default: break;
+                        }
+                        u64 observed = 0;
+                        bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[first], inputs[second], &observed);
+                        if (!ran || observed != expected) arguments->show(arguments, S8("eBPF liveness {u32}, SSA {u32}, input {u64}/{u64}: observed {u64}, expected {u64}\n"), sample, ssa, inputs[first], inputs[second], observed, expected);
+                        BUSTER_TEST(arguments, ran && observed == expected);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    ByteSlice fixture = file_read(arguments->arena, S8("tests/basic_c_ebpf_stack_liveness.c"), (FileReadOptions){0});
+    BUSTER_TEST(arguments, fixture.length != 0);
+    for (u32 ssa = 0; fixture.length && ssa < 2; ssa += 1)
+    {
+        for (u32 dead = 0; dead < 2; dead += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 source = string_format(arena, S8("#define EBPF_DEAD_BRANCH {u32}\n{S8}"), dead,
+                                           (String8){(char8*)fixture.pointer, fixture.length});
+            CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
+            CParseResult parse = c_parse(arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-metamorphic-stack.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            if (lowered.program && lowered.diagnostic_count == 0)
+            {
+                EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+                if (!artifact.success) arguments->show(arguments, S8("eBPF dead branch {u32}, SSA {u32}: {S8}\n"), dead, ssa, artifact.error.message);
+                BUSTER_TEST(arguments, artifact.success);
+                for (u32 index = 0; artifact.success && index < BUSTER_ARRAY_LENGTH(inputs); index += 1)
+                {
+                    u64 observed = 0;
+                    bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[index], 0, &observed);
+                    BUSTER_TEST(arguments, ran && observed == (u32)((u32)inputs[index] * 7u + 4u));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    for (u32 sample = 0; sample < 3; sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source;
+        if (sample < 2)
+        {
+            source = string_format(arena, S8("unsigned long probe(void) {{ volatile unsigned char data[{u32}]; return 0UL; }}"), 512 + sample);
+        }
+        else
+        {
+            enum { pressure = 65 };
+            String8 parts[2 * pressure + 3];
+            parts[0] = S8("unsigned long probe(unsigned long x) {\n");
+            for (u32 index = 0; index < pressure; index += 1) parts[index + 1] = string_format(arena, S8("unsigned long a{u32}=x+{u32};\n"), index, index);
+            parts[pressure + 1] = S8("return 0");
+            for (u32 index = 0; index < pressure; index += 1) parts[pressure + 2 + index] = string_format(arena, S8("+a{u32}"), index);
+            parts[2 * pressure + 2] = S8("; }");
+            source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        }
+        CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(arena, S8("ebpf-pressure.c"), tokens, parse, target);
+        BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+        if (lowered.program && lowered.diagnostic_count == 0)
+        {
+            EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+            if (sample == 0) BUSTER_TEST(arguments, artifact.success && artifact.stats.max_stack_bytes == 512);
+            else BUSTER_TEST(arguments, !artifact.success && artifact.error.code == EBPF_ERROR_STACK_LIMIT && artifact.bytes.length == 0);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 #endif
