@@ -18,6 +18,13 @@ SHA-256 `0351edbcd30062fb72790559396bf771c17b6364b16a408ee83b7c157dbf9670`.
 The source snapshots keep the validation workflow, candidate, and removed
 direct backend outside ordinary production build targets.
 
+The original census Actions ZIP omitted `tests/.gitignore` from each shard
+because `actions/upload-artifact` was invoked with its hidden-file default. The
+input is still bound by each `inputs.tsv` ledger and is present in the verified
+candidate source snapshot. Replay restores exactly those four copies and fails
+if any other input is absent. Failed pre-repair round trips remain in runs
+34726417493 and 34726824515 rather than being described as passes.
+
 The `Native retirement durable archive` workflow downloads these release
 assets into fresh GitHub-hosted runners. Its census job reconstructs and checks
 every archive byte, rebuilds the direct oracle, reruns the join and byte
