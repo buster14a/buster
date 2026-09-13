@@ -1,4 +1,16 @@
 #include <stdio.h>
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
+// LLVM's hosted Windows Arm64 package does not ship the compiler-rt builtins
+// library that normally owns this helper. The differential checks argument
+// evaluation and register liveness, not executable-code modification, so the
+// independent host/caller object supplies the no-op runtime boundary needed by
+// both linked programs.
+void __clear_cache(void *begin, void *end)
+{
+    (void)begin;
+    (void)end;
+}
+#endif
 void clear_range(char *, char *);
 int clear_arguments(char *, int, int *, int *);
 unsigned long long clear_live(char *, unsigned long long, unsigned long long, unsigned long long,
