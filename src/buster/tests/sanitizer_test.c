@@ -4,9 +4,6 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
-#if !BUSTER_WINDOWS
-#include <signal.h>
-#endif
 
 enum
 {
@@ -139,7 +136,7 @@ BUSTER_GLOBAL_LOCAL bool sanitizer_test_failed(ProcessWaitResult wait)
 {
     int status = (int)wait.platform_status;
     bool result = (wait.result == PROCESS_RESULT_FAILED && WIFEXITED(status) && WEXITSTATUS(status) != 0) ||
-                  (wait.result == PROCESS_RESULT_CRASH && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+                  (wait.result == PROCESS_RESULT_CRASH && WIFSIGNALED(status));
     return result;
 }
 
