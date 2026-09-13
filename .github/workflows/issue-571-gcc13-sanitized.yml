@@ -1,0 +1,140 @@
+name: Issue 571 GCC 13 sanitized validation (temporary)
+
+# Throwaway validation for buster14a/buster issue 571 and PR 596. It runs only
+# on a push to its own branch, which is never merged and is deleted after the
+# run. Build and sanitizer policy stay in build.c; nothing here changes flags.
+on:
+  push:
+    branches: [claude/issue-571-gcc13-sanitized-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  gcc13-sanitized:
+    name: GCC 13 sanitized Debug (Linux x86-64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_GCC: /usr/bin/gcc-13
+      BUSTER_TEST_JOBS: '1'
+      OBJECT_CODEGEN: CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/codegen.c.o
+      OBJECT_MACHINE: CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/machine.c.o
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+
+      - name: Provenance and tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/logs"
+          echo "validation commit: $(git rev-parse HEAD)"
+          echo "fix commit:        $(git rev-parse HEAD~1)"
+          echo "base commit:       $(git rev-parse HEAD~2)"
+          # The validation commit may add only this workflow, so HEAD builds
+          # exactly the fix commit's sources.
+          test "$(git diff --name-only HEAD~1 HEAD)" = ".github/workflows/issue-571-gcc13-sanitized.yml"
+          grep -E '^(NAME|VERSION)=' /etc/os-release
+          uname -r
+          if ! command -v ninja >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes ninja-build
+          fi
+          clang_path="$(command -v clang || command -v clang-18)"
+          echo "CLANG=$clang_path" >> "$GITHUB_ENV"
+          "$BUSTER_GCC" --version
+          dpkg-query -W -f='${Package} ${Version}\n' gcc-13
+          "$clang_path" --version
+          cmake --version
+          echo "ninja $(ninja --version)"
+          bits="$(sysctl -n vm.mmap_rnd_bits)"
+          echo "vm.mmap_rnd_bits=$bits"
+          if [ "$bits" -gt 28 ]; then
+            # Runner kernel setting only: older libasan runtimes can fail to
+            # place shadow memory under 32-bit mmap entropy. No sanitizer
+            # option, recovery setting or build flag is touched.
+            sudo sysctl -w vm.mmap_rnd_bits=28
+          fi
+
+      - name: Control - base reproduces the diagnostics
+        id: base_objects
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/base"
+          git worktree add --detach "$base" HEAD~2
+          cd "$base"
+          "$CLANG" -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/driver-base"
+          "$RUNNER_TEMP/driver-base" generate --sanitize --cc gcc --ci --linker DEFAULT -- \
+            -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON 2>&1 | tee "$RUNNER_TEMP/logs/base-generate.log"
+          set +e
+          ninja -C build -k 0 "$OBJECT_CODEGEN" "$OBJECT_MACHINE" > "$RUNNER_TEMP/logs/base-objects.log" 2>&1
+          status=$?
+          set -e
+          grep -E 'error: .*\[-Werror=(sign-)?conversion\]' "$RUNNER_TEMP/logs/base-objects.log" || true
+          count="$(grep -c -E 'error: .*\[-Werror=(sign-)?conversion\]' "$RUNNER_TEMP/logs/base-objects.log" || true)"
+          echo "BASE_OBJECTS ninja_status=$status conversion_diagnostics=$count"
+          rm -rf "$base/build"
+          test "$status" -ne 0
+
+      - name: Reproduction - both objects on the fix
+        id: head_objects
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          "$CLANG" -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/driver"
+          "$RUNNER_TEMP/driver" generate --sanitize --cc gcc --ci --linker DEFAULT -- \
+            -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON 2>&1 | tee "$RUNNER_TEMP/logs/head-generate.log"
+          set +e
+          ninja -C build -k 0 "$OBJECT_CODEGEN" "$OBJECT_MACHINE" > "$RUNNER_TEMP/logs/head-objects.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/logs/head-objects.log"
+          count="$(grep -c -E 'error: .*\[-Werror=(sign-)?conversion\]' "$RUNNER_TEMP/logs/head-objects.log" || true)"
+          echo "HEAD_OBJECTS ninja_status=$status conversion_diagnostics=$count"
+          test "$status" -eq 0
+
+      - name: Full ide link
+        id: ide_link
+        if: ${{ !cancelled() && steps.head_objects.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/driver" build --config Debug -t ide -- -k 0 2>&1 | tee "$RUNNER_TEMP/logs/ide-build.log"
+          ls -l build/Debug/ide
+
+      - name: Registered suite (build --config Debug -t test_all)
+        id: test_all
+        if: ${{ !cancelled() && steps.ide_link.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/driver" build --config Debug -t test_all 2>&1 | tee "$RUNNER_TEMP/logs/test-all.log"
+
+      - name: Result summary
+        if: ${{ always() }}
+        env:
+          BASE_OUTCOME: ${{ steps.base_objects.outcome }}
+          HEAD_OUTCOME: ${{ steps.head_objects.outcome }}
+          LINK_OUTCOME: ${{ steps.ide_link.outcome }}
+          TEST_OUTCOME: ${{ steps.test_all.outcome }}
+        run: |
+          set -uo pipefail
+          echo "base control (expected failure): $BASE_OUTCOME"
+          echo "fix objects: $HEAD_OUTCOME"
+          echo "ide link: $LINK_OUTCOME"
+          echo "test_all: $TEST_OUTCOME"
+          if [ -f "$RUNNER_TEMP/logs/test-all.log" ]; then
+            echo "---- module totals and non-passing modules"
+            grep -n -E 'Module tests' "$RUNNER_TEMP/logs/test-all.log"
+            grep -c -E '^TEST_MODULE_TIMING ' "$RUNNER_TEMP/logs/test-all.log"
+            grep -n -E '^TEST_MODULE_TIMING ' "$RUNNER_TEMP/logs/test-all.log" | grep -v -E 'failed=0 ' | head -60
+            echo "---- sanitizer policy and failure lines"
+            grep -n -i -E 'sanitizer|policy' "$RUNNER_TEMP/logs/test-all.log" | head -40
+            grep -n -E ' failed at |status=failed|ERROR' "$RUNNER_TEMP/logs/test-all.log" | head -200
+            echo "---- tail"
+            tail -n 120 "$RUNNER_TEMP/logs/test-all.log"
+          fi
