@@ -11235,6 +11235,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
     bool scratch_lifetime_arena_destroyed = arena_destroy(scratch_lifetime_arena, 1);
     BUSTER_TEST(arguments, scratch_lifetime_arena_destroyed);
     TemporalArena hardening_temporary = scratch_begin(0, 0);
+    Target hardening_target = target_native;
+    hardening_target.cpu_arch = CPU_ARCH_X86_64;
     CPreprocessResult hardening_tokens = c_preprocess(hardening_temporary.arena,
                                                       S8("typedef unsigned long Word;"
                                                          " typedef enum Kind"
@@ -11355,9 +11357,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                                          " int no_return(void)"
                                                          " { do { __builtin_unreachable();"
                                                          " } while (0); }"),
-                                                      (CPreprocessOptions){0});
+                                                      (CPreprocessOptions){
+                                                          .target = hardening_target,
+                                                          .data_layout = target_data_layout(hardening_target),
+                                                      });
     CParseResult hardening_parse = c_parse(hardening_temporary.arena, hardening_tokens);
-    CIRLowerResult hardening_ir = c_lower_to_ir(hardening_temporary.arena, S8("frontend-hardening.c"), hardening_tokens, hardening_parse, target_native);
+    CIRLowerResult hardening_ir =
+        c_lower_to_ir(hardening_temporary.arena, S8("frontend-hardening.c"), hardening_tokens, hardening_parse, hardening_target);
     BUSTER_TEST(arguments, hardening_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, hardening_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, hardening_ir.diagnostic_count == 0);
@@ -18017,6 +18023,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     {
         TemporalArena label_flow_temporary = scratch_begin(0, 0);
+        Target label_flow_target = target_native;
+        label_flow_target.cpu_arch = CPU_ARCH_X86_64;
         String8 label_flow_source = S8("int conditional_labels(int selector) {"
                                        " goto *(selector ? &&one : &&zero);"
                                        "zero: return 13;"
@@ -18073,12 +18081,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                        "}\n");
         CPreprocessResult label_flow_tokens = c_preprocess(label_flow_temporary.arena, label_flow_source,
                                                            (CPreprocessOptions){
-                                                               .target = target_native,
-                                                               .data_layout = target_data_layout(target_native),
+                                                               .target = label_flow_target,
+                                                               .data_layout = target_data_layout(label_flow_target),
                                                                .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                            });
         CParseResult label_flow_parse = c_parse(label_flow_temporary.arena, label_flow_tokens);
-        CIRLowerResult label_flow_lowered = c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, label_flow_parse, target_native);
+        CIRLowerResult label_flow_lowered =
+            c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, label_flow_parse, label_flow_target);
         BUSTER_TEST(arguments, label_flow_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_flow_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_flow_lowered.diagnostic_count == 0);
@@ -18883,17 +18892,20 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     {
         TemporalArena conflicting_fixed_asm_temporary = scratch_begin(0, 0);
+        Target conflicting_fixed_asm_target = target_native;
+        conflicting_fixed_asm_target.cpu_arch = CPU_ARCH_X86_64;
         CPreprocessResult conflicting_fixed_asm_tokens = c_preprocess(
             conflicting_fixed_asm_temporary.arena,
             S8("int conflicting_fixed_asm(int left, int right) { __asm__(\"\" : \"+a\"(left) : \"a\"(right)); return left; }\n"),
             (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
+                .target = conflicting_fixed_asm_target,
+                .data_layout = target_data_layout(conflicting_fixed_asm_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
         CParseResult conflicting_fixed_asm_parse = c_parse(conflicting_fixed_asm_temporary.arena, conflicting_fixed_asm_tokens);
         CIRLowerResult conflicting_fixed_asm_lowered = c_lower_to_ir(conflicting_fixed_asm_temporary.arena, S8("conflicting-fixed-asm.c"),
-                                                                       conflicting_fixed_asm_tokens, conflicting_fixed_asm_parse, target_native);
+                                                                       conflicting_fixed_asm_tokens, conflicting_fixed_asm_parse,
+                                                                       conflicting_fixed_asm_target);
         BUSTER_TEST(arguments, conflicting_fixed_asm_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, conflicting_fixed_asm_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, conflicting_fixed_asm_lowered.diagnostic_count == 1);
@@ -18927,17 +18939,19 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     {
         TemporalArena same_fixed_asm_temporary = scratch_begin(0, 0);
+        Target same_fixed_asm_target = target_native;
+        same_fixed_asm_target.cpu_arch = CPU_ARCH_X86_64;
         CPreprocessResult same_fixed_asm_tokens = c_preprocess(
             same_fixed_asm_temporary.arena,
             S8("int same_fixed_asm(int value) { __asm__(\"\" : \"+a\"(value) : \"a\"(value)); return value; }\n"),
             (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
+                .target = same_fixed_asm_target,
+                .data_layout = target_data_layout(same_fixed_asm_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
         CParseResult same_fixed_asm_parse = c_parse(same_fixed_asm_temporary.arena, same_fixed_asm_tokens);
         CIRLowerResult same_fixed_asm_lowered = c_lower_to_ir(same_fixed_asm_temporary.arena, S8("same-fixed-asm.c"), same_fixed_asm_tokens,
-                                                               same_fixed_asm_parse, target_native);
+                                                               same_fixed_asm_parse, same_fixed_asm_target);
         BUSTER_TEST(arguments, same_fixed_asm_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, same_fixed_asm_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, same_fixed_asm_lowered.diagnostic_count == 1);
