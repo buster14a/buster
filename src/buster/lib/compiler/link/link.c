@@ -2871,18 +2871,24 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         // 35 MB per self-host link and was 3,03% of the compile's fills from DRAM
         // (audit 2026-08-22T084855Z). The copying form stays for the case where
         // something else has allocated since — it is the same block either way.
+        //
+        // The tail's own allocation zeroes it. A reused arena can hand back old
+        // bytes only below its dirty high-water mark, and arena_allocate_zeroed
+        // clears exactly that part of the tail; above the mark the storage is
+        // still the operating system's zero. The copying form takes the prefix
+        // unzeroed and then the tail as a second byte-aligned allocation directly
+        // after it, so the prefix memcpy overwrites is never cleared first.
+        // Nothing below writes the padding before the section table, the null
+        // section header, the string table's separators or the unused fields of
+        // its header; they are zero from here.
         u8* bytes = result->executable.pointer;
-        if (link_arena_block_on_top(arena, bytes, result->executable.length))
+        if (!link_arena_block_on_top(arena, bytes, result->executable.length))
         {
-            arena_allocate(arena, u8, total_size - result->executable.length);
-        }
-        else
-        {
-            bytes = arena_allocate(arena, u8, total_size);
+            bytes = arena_allocate(arena, u8, result->executable.length);
             memcpy(bytes, result->executable.pointer, result->executable.length);
         }
-        // The tail is arena bytes, which a reused arena hands back dirty.
-        memset(bytes + result->executable.length, 0, total_size - result->executable.length);
+        u8* tail = arena_allocate_zeroed(arena, u8, total_size - result->executable.length);
+        BUSTER_CHECK(tail == bytes + result->executable.length);
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
         {
             ByteSlice data = object->sections[link_elf_debug_kinds[index]].data;
@@ -10978,6 +10984,14 @@ NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* tempora
     TemporalArena scope = arena_begin_temporal(temporary);
     NativeExecutableLinkResult result = link_native_executable_with_scratch(arena, temporary, object, options);
     scratch_end(scope);
+    return result;
+}
+
+NativeExecutableLinkResult link_elf_test_section_table_append(Arena* arena, ByteSlice image, ObjectFile* object)
+{
+    NativeExecutableLinkResult result = {.executable = image};
+    u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+    link_elf_section_table_append(arena, &result, object, ELF_IMAGE_BASE, section_offsets, (LinkElfSectionTableLayout){0});
     return result;
 }
 #endif
