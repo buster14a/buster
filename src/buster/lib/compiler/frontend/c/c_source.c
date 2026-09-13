@@ -8743,6 +8743,13 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 CPreprocessConditionalDirective directive_kind = c_preprocess_conditional_directive_kind(space->base, directive);
                 if (directive_kind == C_PREPROCESS_CONDITIONAL_COUNT)
                 {
+                    if (!c_preprocess_is_active(conditional))
+                    {
+                        directive_index += 1;
+                        logical_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
+                                                 : c_preprocess_line_end(lex, directive_index);
+                        continue;
+                    }
                     break;
                 }
                 if (!source_conditionals)
