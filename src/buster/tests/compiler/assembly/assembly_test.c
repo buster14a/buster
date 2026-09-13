@@ -5400,6 +5400,22 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_inline_conditional.relocation_count == 1 &&
                                aarch64_inline_conditional.relocations[0].offset == 0 &&
                                aarch64_inline_conditional.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19);
+    AssemblyEncodeResult aarch64_inline_multiple = assembly_encode(
+        arguments->arena,
+        S8("cbz w9, .Lbuster.inline.asm.0.1\ncmp w9, #1\nb.eq .Lbuster.inline.asm.0.2\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    static u8 const expected_aarch64_inline_multiple[] = {
+        0x09, 0x00, 0x00, 0x34, 0x3f, 0x05, 0x00, 0x71, 0x00, 0x00, 0x00, 0x54,
+    };
+    BUSTER_TEST(arguments, aarch64_inline_multiple.diagnostic_count == 0 &&
+                               aarch64_inline_multiple.bytes.length == sizeof(expected_aarch64_inline_multiple) &&
+                               memcmp(aarch64_inline_multiple.bytes.pointer, expected_aarch64_inline_multiple,
+                                      sizeof(expected_aarch64_inline_multiple)) == 0);
+    BUSTER_TEST(arguments, aarch64_inline_multiple.relocation_count == 2 &&
+                               aarch64_inline_multiple.relocations[0].offset == 0 &&
+                               aarch64_inline_multiple.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 &&
+                               aarch64_inline_multiple.relocations[1].offset == 8 &&
+                               aarch64_inline_multiple.relocations[1].kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19);
 
     AssemblyEncodeResult aarch64_scalar_memory = assembly_encode(
         arguments->arena,
