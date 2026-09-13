@@ -1,0 +1,107 @@
+name: Issue 292 frozen diagnostic baseline
+
+on:
+  push:
+    branches: [astra/issue292-transport-20260912]
+    paths: [.github/workflows/issue292-baseline.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue292-diagnostic-baseline
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+          persist-credentials: false
+      - name: Record source, host and toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue292-baseline"
+          { git rev-parse HEAD HEAD^{tree}; uname -a; lscpu; free -m; clang --version; gcc --version; } > "$RUNNER_TEMP/issue292-baseline/provenance.txt"
+      - name: Build trusted baseline through the repository driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-baseline/build.log"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/issue292-baseline/compiler.sha256"
+      - name: Capture shared frontend corpus and independent reference results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-baseline'
+          cases = {
+              'valid-small': 'int f(int x) { return x * 3 + 1; }\n',
+              'valid-generic': 'int f(int x) { return _Generic(x, int: x, default: 0); }\n',
+              'valid-vla': 'int f(int n) { int a[n]; a[0] = n; return a[0]; }\n',
+              'valid-static': 'static int x; int *p = &x;\n',
+              'invalid-assignment': 'int f(void) { const int x = 1; x = 2; return x; }\n',
+              'invalid-return-void': 'void f(void) { return 1; }\n',
+              'invalid-return-value': 'int f(void) { return; }\n',
+              'invalid-static-assert': '_Static_assert(0, "frozen failure");\n',
+              'invalid-generic': 'int f(int x) { return _Generic(x, int: 1, int: 2); }\n',
+              'invalid-vla-initializer': 'int f(int n) { int a[n] = {1}; return a[0]; }\n',
+              'invalid-switch': 'int f(int n) { switch(n) { case 1: return 1; case 1: return 2; } return 0; }\n',
+              'invalid-direct-call': 'int f(int); int g(void) { return f(); }\n',
+              'invalid-sizeof-call': 'int f(int); int g(void) { return sizeof(f()); }\n',
+              'invalid-sizeof-pointer': 'int g(int (*p)(int)) { return sizeof(p()); }\n',
+              'invalid-sizeof-void-call': 'int f(void); int g(void) { return sizeof(f(1)); }\n',
+              'invalid-sizeof-variadic': 'int f(int, ...); int g(void) { return sizeof(f()); }\n',
+              'valid-sizeof-call': 'int f(int); int g(void) { return sizeof(f(1)); }\n',
+              'valid-sizeof-pointer': 'int g(int (*p)(int)) { return sizeof(p(1)); }\n',
+              'valid-sizeof-variadic': 'int f(int, ...); int g(void) { return sizeof(f(1, 2)); }\n',
+              'legacy-sizeof-unprototyped': 'int f(); int g(void) { return sizeof(f(1, 2)); }\n',
+          }
+          records = []
+          for name, source in cases.items():
+              path = root / (name + '.c')
+              path.write_text(source)
+              for dialect in ['c17', 'c23']:
+                  for frontend in ['-ffrontend-ssa', '-fno-frontend-ssa']:
+                      for action in ['syntax', 'object']:
+                          command = ['build/Release/ide', 'cc', '-g0', '-std=' + dialect, frontend]
+                          command += ['-fsyntax-only'] if action == 'syntax' else ['-c', '-o', str(root / (name + '.o'))]
+                          command.append(str(path))
+                          run = subprocess.run(command, capture_output=True, text=True, timeout=120)
+                          records.append({'case': name, 'source_sha256': hashlib.sha256(source.encode()).hexdigest(), 'command': command,
+                                          'dialect': dialect, 'frontend': frontend, 'action': action,
+                                          'returncode': run.returncode, 'stdout': run.stdout, 'stderr': run.stderr})
+                  for reference in ['clang', 'gcc']:
+                      command = [reference, '-std=' + dialect, '-pedantic-errors', '-fsyntax-only', str(path)]
+                      run = subprocess.run(command, capture_output=True, text=True, timeout=120)
+                      records.append({'case': name, 'reference': reference, 'dialect': dialect, 'command': command,
+                                      'returncode': run.returncode, 'stdout': run.stdout, 'stderr': run.stderr})
+          (root / 'diagnostics.json').write_text(json.dumps(records, indent=2) + '\n')
+          for name in cases:
+              buster = [r for r in records if r['case'] == name and 'reference' not in r]
+              refs = [r for r in records if r['case'] == name and 'reference' in r]
+              print(name, 'buster:', [(r['dialect'], r['frontend'], r['action'], r['returncode']) for r in buster],
+                    'references:', [(r['reference'], r['dialect'], r['returncode']) for r in refs], flush=True)
+          if any(r['returncode'] < 0 for r in records):
+              raise SystemExit('A corpus process crashed; raw results retained')
+          PY
+      - name: Retain all baseline evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue292-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue292-baseline/
+          if-no-files-found: error
+          retention-days: 7
