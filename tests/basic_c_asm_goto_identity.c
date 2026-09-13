@@ -114,9 +114,10 @@ nonzero:
 
 static int goto_repeated_target(int value)
 {
-    __asm__ goto(ASM_CONDITIONAL : : "r"(value) : "cc" : same, same);
+    __asm__ goto(ASM_CONDITIONAL : : "r"(value) : "cc" : first, second);
     return 60;
-same:
+first:
+second:
     return 61;
 }
 
