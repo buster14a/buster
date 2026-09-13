@@ -169,8 +169,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build/direct-ssa-census-evidence
-          exec > >(tee build/direct-ssa-census-evidence/build.log) 2>&1
+          # generate replaces build/, so keep the driver and evidence outside it.
+          mkdir -p direct-ssa-census-evidence
+          exec > >(tee direct-ssa-census-evidence/build.log) 2>&1
           set -x
           git rev-parse HEAD 'HEAD^{tree}'
           clang --version
@@ -179,39 +180,40 @@ jobs:
           uname -a
           lscpu
           free -b
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
-          ./build/build generate --config Release --cc clang --tu split --output-path build/direct-ssa-census-compiler -DBUSTER_CI=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
-          ./build/build build --config Release --output-path build/direct-ssa-census-compiler --jobs 2 -t ide
-          grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=ON' build/direct-ssa-census-compiler/CMakeCache.txt
-          sha256sum build/direct-ssa-census-compiler/Release/ide src/buster/apps/ide/ide.c > build/direct-ssa-census-evidence/inputs.sha256
-          find build/direct-ssa-census-compiler/generated -type f -print0 | sort -z | xargs -0 sha256sum > build/direct-ssa-census-evidence/generated.sha256
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-census-build"
+          "$RUNNER_TEMP/buster-census-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-census-build" build --config Release -t ide -- -j2
+          grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=ON' build/CMakeCache.txt
+          grep -Fx 'BUSTER_UNITY_BUILD:BOOL=OFF' build/CMakeCache.txt
+          sha256sum build/Release/ide src/buster/apps/ide/ide.c > direct-ssa-census-evidence/inputs.sha256
+          find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > direct-ssa-census-evidence/generated.sha256
           git diff --exit-code
       - name: Run registered compiler tests including geometric SSA work budgets
         id: tests
         shell: bash
         run: |
           set -euo pipefail
-          ./build/direct-ssa-census-compiler/Release/ide test --verbose=1 --ci=1 2>&1 | tee build/direct-ssa-census-evidence/tests.log
+          "$RUNNER_TEMP/buster-census-build" build --config Release -t test_all -- -j2 2>&1 | tee direct-ssa-census-evidence/tests.log
       - name: Census current unity input with direct SSA
         id: direct
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          BUSTER_ALLOCATION_CENSUS=1 ./build/direct-ssa-census-compiler/Release/ide cc -Isrc -Ibuild/direct-ssa-census-compiler/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -fsource-metrics=build/direct-ssa-census-evidence/direct.metrics src/buster/apps/ide/ide.c -o build/direct-ssa-census-compiler/unity-direct.o > build/direct-ssa-census-evidence/direct.stdout.log 2> build/direct-ssa-census-evidence/direct.stderr.log
-          test -s build/direct-ssa-census-evidence/direct.metrics
-          sha256sum build/direct-ssa-census-compiler/unity-direct.o > build/direct-ssa-census-evidence/direct-output.sha256
-          python3 tools/allocation_census.py --input build/direct-ssa-census-evidence/direct.stderr.log --output build/direct-ssa-census-evidence/direct-allocation --label 'current-head direct SSA; diagnostic only'
+          BUSTER_ALLOCATION_CENSUS=1 ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -fsource-metrics=direct-ssa-census-evidence/direct.metrics src/buster/apps/ide/ide.c -o build/unity-direct.o > direct-ssa-census-evidence/direct.stdout.log 2> direct-ssa-census-evidence/direct.stderr.log
+          test -s direct-ssa-census-evidence/direct.metrics
+          sha256sum build/unity-direct.o > direct-ssa-census-evidence/direct-output.sha256
+          python3 tools/allocation_census.py --input direct-ssa-census-evidence/direct.stderr.log --output direct-ssa-census-evidence/direct-allocation --label 'current-head direct SSA; diagnostic only'
       - name: Census the same unity input with shared local promotion
         id: reference
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          BUSTER_ALLOCATION_CENSUS=1 ./build/direct-ssa-census-compiler/Release/ide cc -Isrc -Ibuild/direct-ssa-census-compiler/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -fno-frontend-ssa -fsource-metrics=build/direct-ssa-census-evidence/reference.metrics src/buster/apps/ide/ide.c -o build/direct-ssa-census-compiler/unity-reference.o > build/direct-ssa-census-evidence/reference.stdout.log 2> build/direct-ssa-census-evidence/reference.stderr.log
-          test -s build/direct-ssa-census-evidence/reference.metrics
-          sha256sum build/direct-ssa-census-compiler/unity-reference.o > build/direct-ssa-census-evidence/reference-output.sha256
-          python3 tools/allocation_census.py --input build/direct-ssa-census-evidence/reference.stderr.log --output build/direct-ssa-census-evidence/reference-allocation --label 'current-head shared local promotion; diagnostic only'
+          BUSTER_ALLOCATION_CENSUS=1 ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -fno-frontend-ssa -fsource-metrics=direct-ssa-census-evidence/reference.metrics src/buster/apps/ide/ide.c -o build/unity-reference.o > direct-ssa-census-evidence/reference.stdout.log 2> direct-ssa-census-evidence/reference.stderr.log
+          test -s direct-ssa-census-evidence/reference.metrics
+          sha256sum build/unity-reference.o > direct-ssa-census-evidence/reference-output.sha256
+          python3 tools/allocation_census.py --input direct-ssa-census-evidence/reference.stderr.log --output direct-ssa-census-evidence/reference-allocation --label 'current-head shared local promotion; diagnostic only'
       - name: Report census scope without a performance verdict
         if: always()
         shell: bash
@@ -226,8 +228,8 @@ jobs:
         with:
           name: direct-ssa-census-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/direct-ssa-census-evidence
-            build/direct-ssa-census-compiler/CMakeCache.txt
-            build/direct-ssa-census-compiler/compile_commands.json
+            direct-ssa-census-evidence
+            build/CMakeCache.txt
+            build/compile_commands.json
           retention-days: 14
           if-no-files-found: warn
