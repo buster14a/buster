@@ -8764,6 +8764,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                            : c_preprocess_line_end(lex, next_line_start);
             if (c_preprocess_is_active(conditional))
             {
+                if (conditional == source_frame->conditional_base)
+                {
+                    source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+                }
                 if (source_conditionals)
                 {
                     c_preprocess_source_segment_append(arena, &first_segment, &last_segment, next_line_start, next_line_end);
