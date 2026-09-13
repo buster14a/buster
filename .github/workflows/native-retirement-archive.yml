@@ -30,6 +30,24 @@ jobs:
         with:
           path: validation
           persist-credentials: false
+      - name: Check out pinned validation source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 38f150f7affdf458a9b394961709d659cc738bf3
+          path: replay-validation
+          persist-credentials: false
+      - name: Check out pinned candidate source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+          path: candidate
+          persist-credentials: false
+      - name: Check out pinned direct-oracle source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          path: reference
+          persist-credentials: false
       - name: Download published census and source assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,12 +65,6 @@ jobs:
           --assets "$RUNNER_TEMP/release-assets"
           --output "$RUNNER_TEMP/census"
           --cleanup
-      - name: Restore pinned source snapshots
-        run: |
-          mkdir candidate reference replay-validation
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-validation-source-38f150f.tar.gz" -C replay-validation --strip-components=1
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" -C candidate --strip-components=1
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-direct-oracle-source-3e912a3.tar.gz" -C reference --strip-components=1
       - name: Restore tracked input omitted by Actions hidden-file packaging
         run: >-
           python3 validation/tools/native_retirement_archive.py restore-census-inputs
@@ -106,6 +118,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out pinned candidate source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+          persist-credentials: false
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -128,7 +145,6 @@ jobs:
           --cleanup
       - name: Restore pinned candidate source
         run: |
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" --strip-components=1
           mkdir -p evidence/strict-binary
           cp "$RUNNER_TEMP/strict/archived-ide" evidence/strict-binary/ide
           chmod 555 evidence/strict-binary/ide
