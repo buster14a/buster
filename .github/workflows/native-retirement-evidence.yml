@@ -370,6 +370,8 @@ jobs:
       - name: Require census and every native strict result
         shell: bash
         run: |
+          # Backticks delimit literal Markdown code in the summary.
+          # shellcheck disable=SC2016
           printf '## Native retirement candidate `%s`\n\n' "$BUSTER_RETIREMENT_CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
           printf '| Gate | Result |\n|---|---|\n| Census | %s |\n| Six-host strict native differential | %s |\n' \
             "$CENSUS_RESULT" "$STRICT_RESULT" >> "$GITHUB_STEP_SUMMARY"
