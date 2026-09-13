@@ -1,0 +1,112 @@
+name: Issue 76 reference evidence
+on:
+  push:
+    branches:
+      - codex/issue76-cpython-validation
+permissions:
+  contents: read
+concurrency:
+  group: issue76-reference-evidence
+  cancel-in-progress: true
+jobs:
+  reference:
+    name: Pinned runner GCC and Clang tokens
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Emit independent semantic streams
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          Path("/tmp/issue76-reference.c").write_text("""#define ENABLED 1
+          #define MISSING_VALUE 0
+          #define ID(x) x
+          #define INNER(x,y) x y
+          #define STR(x) #x
+          #define CAT(a,b) a##b
+          #define VAR(first,...) first __VA_ARGS__
+          ID(
+          #if ENABLED
+          if_value
+          #endif
+          )
+          ID(
+          #ifdef ENABLED
+          ifdef_value
+          #endif
+          )
+          ID(
+          #ifndef ABSENT
+          ifndef_value
+          #endif
+          )
+          ID(
+          #if MISSING_VALUE
+          inactive_if, ), ((
+          #elif ENABLED
+          elif_value
+          #else
+          inactive_else, ), ((
+          #endif
+          )
+          ID(
+          #if MISSING_VALUE
+          inactive
+          #else
+          else_value
+          #endif
+          )
+          ID(
+          #if ENABLED
+          #if defined(ENABLED)
+          INNER(nested_a, (nested_b, nested_c))
+          #else
+          inactive_nested, )
+          #endif
+          #endif
+          )
+          ID(
+          #if ENABLED
+          #else
+          not_selected
+          #endif
+          ) after_empty
+          STR(
+          #if ENABLED
+          alpha beta
+          #else
+          wrong, )
+          #endif
+          )
+          CAT(
+          #if ENABLED
+          pre
+          #endif
+          ,
+          #if ENABLED
+          fix
+          #endif
+          )
+          VAR(head,
+          #if ENABLED
+          + tail
+          #else
+          , wrong, )
+          #endif
+          )
+          ID(
+          ordinary
+          )
+          """)
+          PY
+          clang --version | head -1
+          printf '%s\n' CLANG_BEGIN
+          clang -E -P -std=gnu17 /tmp/issue76-reference.c
+          printf '%s\n' CLANG_END
+          gcc --version | head -1
+          printf '%s\n' GCC_BEGIN
+          gcc -E -P -std=gnu17 /tmp/issue76-reference.c
+          printf '%s\n' GCC_END
