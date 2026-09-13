@@ -28,6 +28,7 @@
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -250,6 +251,35 @@ BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_language(CompilerDrive
     case COMPILER_DRIVER_LANGUAGE_COUNT: break;
     }
     return GPU_SOURCE_LANGUAGE_COUNT;
+}
+
+// Keep the native-language boundary independent of enum ordering. Assembly is
+// a native input even though its enum value follows the GPU source languages;
+// invalid values are not native and are rejected by the native resolver.
+bool compiler_driver_language_is_native(CompilerDriverLanguage language)
+{
+    bool result;
+    switch (language)
+    {
+    case COMPILER_DRIVER_LANGUAGE_AUTOMATIC:
+    case COMPILER_DRIVER_LANGUAGE_C:
+    case COMPILER_DRIVER_LANGUAGE_ASSEMBLY:
+        result = true;
+        break;
+    case COMPILER_DRIVER_LANGUAGE_OPENCL:
+    case COMPILER_DRIVER_LANGUAGE_CUDA:
+    case COMPILER_DRIVER_LANGUAGE_HIP:
+    case COMPILER_DRIVER_LANGUAGE_METAL:
+    case COMPILER_DRIVER_LANGUAGE_HLSL:
+    case COMPILER_DRIVER_LANGUAGE_LLVM_IR:
+    case COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY:
+    case COMPILER_DRIVER_LANGUAGE_METAL_AIR:
+    case COMPILER_DRIVER_LANGUAGE_COUNT:
+    default:
+        result = false;
+        break;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_effective_language(CompilerDriverInvocation invocation, String8 path)
@@ -593,7 +623,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
                       invocation->gpu_shader_model.length || invocation->metal_sdk.length || invocation->cuda_path.length || invocation->rocm_path.length ||
                       invocation->gpu_tools.clang_path.length || invocation->gpu_tools.llc_path.length || invocation->gpu_tools.spirv_link_path.length ||
                       invocation->gpu_tools.spirv_dis_path.length || invocation->gpu_tools.xcrun_path.length || invocation->gpu_tools.dxc_path.length ||
-                      invocation->gpu_argument_count || invocation->save_gpu_temporaries || invocation->language > COMPILER_DRIVER_LANGUAGE_C;
+                      invocation->gpu_argument_count || invocation->save_gpu_temporaries || !compiler_driver_language_is_native(invocation->language);
     if (gpu_option)
     {
         compiler_driver_argument_error(arena, invocation, S8("GPU option requires a GPU target: {S8}"),
