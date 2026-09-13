@@ -1,0 +1,53 @@
+name: Session GCC 13 byte-store validation
+
+on:
+  push:
+    branches: [astra/gcc13-byte-store-validation-20260912]
+    paths: [.github/workflows/session-gcc13-byte-store.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 72b336f3485f3d337b6a9280b79b8f611d381825
+          persist-credentials: false
+      - name: Read exact frozen source and registered coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 72b336f3485f3d337b6a9280b79b8f611d381825
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = 15899cf8917d60c1fad97b1e8b5635c543291da8
+          mkdir -p "$RUNNER_TEMP/gcc13-byte-store"
+          python3 - <<'PY' | tee "$RUNNER_TEMP/gcc13-byte-store/source-inspection.txt"
+          from pathlib import Path
+          path = Path('src/buster/lib/compiler/frontend/c/c_gen.c')
+          lines = path.read_text().splitlines()
+          for first, last in ((36935, 36990), (42935, 43005)):
+              print(f'=== {path}:{first}-{last} ===')
+              for index in range(first - 1, last):
+                  print(f'{index + 1}: {lines[index]}')
+          tests = Path('src/buster/tests/compiler/frontend/c/c_test.c')
+          lines = tests.read_text().splitlines()
+          for index, line in enumerate(lines):
+              if 'BUSTER_TEST' in line and any(key in line.lower() for key in ('endian', 'byte_order', 'initializer', 'constant')):
+                  print(f'=== {tests}:{index + 1} ===')
+                  print('\n'.join(f'{j + 1}: {lines[j]}' for j in range(max(0, index - 2), min(len(lines), index + 10))))
+          print('=== coverage symbol candidates ===')
+          for index, line in enumerate(lines):
+              if any(key in line for key in ('c_test_byte_order', 'c_test_big_endian', 'c_test_target_endian', 'c_test_global_initializer')):
+                  print(f'{index + 1}: {line}')
+          PY
+      - name: Preserve source inspection
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gcc13-byte-store-inspection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gcc13-byte-store
+          retention-days: 14
+          if-no-files-found: error
