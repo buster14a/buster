@@ -1,0 +1,210 @@
+name: Native retirement evidence
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/native-retirement-evidence.yml
+      - docs/performance-audits/evidence/2026-09-12-retirement/**
+  workflow_dispatch:
+
+
+concurrency:
+  group: retirement-evidence-with-strict-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Frozen compiler pair and complete census
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out evidence validation scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: validation
+          persist-credentials: false
+      - name: Check out candidate implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          path: candidate
+          persist-credentials: false
+      - name: Check out archived direct source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          path: reference
+          persist-credentials: false
+      - name: Bootstrap candidate build driver
+        working-directory: candidate
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/candidate-build"
+      - name: Build candidate with hosted Clang exception
+        working-directory: candidate
+        run: |
+          "$RUNNER_TEMP/candidate-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/candidate-build" build --config Release -t ide
+      - name: Bootstrap archived build driver
+        working-directory: reference
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/reference-build"
+      - name: Rebuild archived direct reference
+        working-directory: reference
+        run: |
+          "$RUNNER_TEMP/reference-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/reference-build" build --config Release -t ide
+      - name: Validate census harness
+        working-directory: candidate
+        run: '"$RUNNER_TEMP/candidate-build" native_retirement_census --self-test'
+      - name: Freeze manifest before execution
+        id: frozen_manifest
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --manifest-only --out evidence/manifest
+      - name: Execute complete assigned shard 0
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 0 --shard-count 4
+          --out evidence/census-integrated-0
+      - name: Execute complete assigned shard 1
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 1 --shard-count 4
+          --out evidence/census-integrated-1
+      - name: Execute complete assigned shard 2
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 2 --shard-count 4
+          --out evidence/census-integrated-2
+      - name: Execute complete assigned shard 3
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          --baseline-ide ../reference/build/Release/ide
+          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --shard-index 3 --shard-count 4
+          --out evidence/census-integrated-3
+      - name: Join and independently validate every census row
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: |
+          cp ../validation/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py evidence/
+          cp ../validation/docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py evidence/
+          clang -O2 -fPIC -shared -Isrc src/buster/lib/hash.c -o evidence/libcensus_hash.so
+          python3 "$PWD/evidence/join-census.py" census-integrated 4
+          python3 "$PWD/evidence/validate-census-v2.py" census-integrated 4
+      - name: Retain raw evidence and build recipes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-retirement-2bb4ce9-${{ github.run_id }}
+          path: |
+            candidate/evidence/
+            candidate/build/CMakeCache.txt
+            candidate/build/compile_commands.json
+            reference/build/CMakeCache.txt
+            reference/build/compile_commands.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 6
+
+  strict_differential:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Strict MIR differential with sanitized oracle
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+          persist-credentials: false
+      - name: Build and freeze hosted Clang compiler
+        id: strict_build
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/strict-build"
+          "$RUNNER_TEMP/strict-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/strict-build" build --config Release -t ide
+          mkdir -p evidence/strict-binary
+          cp build/Release/ide evidence/strict-binary/ide
+          chmod 555 evidence/strict-binary/ide
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/strict-binary/source.txt
+          sha256sum evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
+          cp build/CMakeCache.txt build/compile_commands.json evidence/strict-binary/
+      - name: Validate differential harness
+        id: strict_self_test
+        run: '"$RUNNER_TEMP/strict-build" test_differential --self-test'
+      - name: Execute every strict configuration with sanitizer enabled
+        id: strict_execute
+        run: >-
+          "$RUNNER_TEMP/strict-build" test_differential
+          --ide "$PWD/evidence/strict-binary/ide" --cc clang
+          --strict-mir --sanitize-oracle --out evidence/strict-differential
+      - name: Record strict outcome before packaging
+        if: ${{ !cancelled() }}
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_REQUIRED: strict_build strict_self_test strict_execute
+          BUSTER_CI_RUNNER: ubuntu-26.04
+          BUSTER_CI_REPRO: Check out 2bb4ce939d99c3956848ca7bc9c347f3ae8db231 and run build.c test_differential with --strict-mir --sanitize-oracle on an immutable Clang-built compiler.
+        run: python3 tools/ci_summary.py
+      - name: Bundle and verify full strict evidence
+        id: strict_bundle
+        if: ${{ !cancelled() }}
+        run: |
+          cp "$RUNNER_TEMP/buster-ci/result.json" "$RUNNER_TEMP/buster-ci/summary.md" evidence/
+          python3 tools/ci_pack_evidence.py --source evidence --output "$RUNNER_TEMP/strict-upload"
+      - name: Retain strict evidence
+        if: ${{ !cancelled() && steps.strict_bundle.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-retirement-2bb4ce9-${{ github.run_id }}
+          path: ${{ runner.temp }}/strict-upload/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain raw strict evidence after packaging failure
+        if: ${{ !cancelled() && steps.strict_bundle.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-retirement-2bb4ce9-raw-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
