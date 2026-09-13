@@ -1,0 +1,145 @@
+name: Issue 408 session worker proof
+# Session-only source transport and native controls. Not included in the implementation PR.
+on:
+  push:
+    branches: [astra/408-worker-admission-ci-15b1981]
+permissions:
+  contents: read
+concurrency:
+  group: issue408-session-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  proof:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/astra/408-worker-admission-ci-15b1981' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      BUSTER_TEST_JOBS: '4'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      BASE: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+      SOURCE_BRANCH: astra/408-worker-admission-controls-15b1981
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - name: Publish only the C controls and their guide
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          logs="$RUNNER_TEMP/issue408-proof"
+          mkdir -p "$logs"
+          cp .github/issue408-session-edit.py "$logs/edit.py"
+          git checkout --detach "$BASE"
+          python3 "$logs/edit.py"
+          git diff --check
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = 'docs/differential-testing.md tools/differential.c '
+          git add tools/differential.c docs/differential-testing.md
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'test: prove bounded differential worker admission and cleanup (#408)'
+          existing=$(git ls-remote --heads origin "$SOURCE_BRANCH")
+          if [[ -n "$existing" ]]; then
+            git fetch origin "$SOURCE_BRANCH"
+            test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse FETCH_HEAD^{tree})"
+            git checkout --detach FETCH_HEAD
+          else
+            git push origin "HEAD:refs/heads/$SOURCE_BRANCH"
+          fi
+          source_sha=$(git rev-parse HEAD)
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'base=%s\nsource=%s\ntree=%s\n' "$BASE" "$source_sha" "$(git rev-parse HEAD^{tree})" | tee "$logs/revisions.txt"
+          git format-patch -1 --stdout > "$logs/implementation.patch"
+          { uname -a; getconf _NPROCESSORS_ONLN; cat /proc/meminfo; clang --version; } > "$logs/host.txt"
+      - name: Baseline native controls
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          logs="$RUNNER_TEMP/issue408-proof"
+          git checkout --detach "$BASE"
+          for variant in normal single sanitized; do
+            flags=()
+            if [[ "$variant" == single ]]; then flags+=(-DBUSTER_SINGLE_THREADED=1); fi
+            if [[ "$variant" == sanitized ]]; then flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer); fi
+            driver="$RUNNER_TEMP/issue408-baseline-$variant"
+            printf '%s\n' "revision=$(git rev-parse HEAD)" > "$logs/baseline-$variant.log"
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g "${flags[@]}" build.c -o "$driver" 2>&1 | tee -a "$logs/baseline-$variant.log"
+            sha256sum "$driver" >> "$logs/binaries.sha256"
+            "$driver" test_differential --self-test 2>&1 | tee -a "$logs/baseline-$variant.log"
+          done
+      - name: Candidate native controls
+        id: candidate
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.publish.outputs.sha }}
+        run: |
+          set -euo pipefail
+          logs="$RUNNER_TEMP/issue408-proof"
+          git checkout --detach "$SOURCE_SHA"
+          for variant in normal single sanitized; do
+            flags=()
+            if [[ "$variant" == single ]]; then flags+=(-DBUSTER_SINGLE_THREADED=1); fi
+            if [[ "$variant" == sanitized ]]; then flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer); fi
+            driver="$RUNNER_TEMP/issue408-candidate-$variant"
+            printf '%s\n' "revision=$(git rev-parse HEAD)" > "$logs/candidate-$variant.log"
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g "${flags[@]}" build.c -o "$driver" 2>&1 | tee -a "$logs/candidate-$variant.log"
+            sha256sum "$driver" >> "$logs/binaries.sha256"
+            "$driver" test_differential --self-test 2>&1 | tee -a "$logs/candidate-$variant.log"
+          done
+      - name: Require admission and static-partition mutations to fail
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.publish.outputs.sha }}
+        run: |
+          set -euo pipefail
+          logs="$RUNNER_TEMP/issue408-proof"
+          test "$(getconf _NPROCESSORS_ONLN)" -ge 2
+          git checkout --detach "$SOURCE_SHA"
+          cp tools/differential.c "$logs/candidate.c"
+          trap 'cp "$logs/candidate.c" tools/differential.c' EXIT
+          for mutation in over-admission static-partition; do
+            cp "$logs/candidate.c" tools/differential.c
+            MUTATION="$mutation" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path('tools/differential.c')
+          text = p.read_text()
+          if os.environ['MUTATION'] == 'over-admission':
+              old = 'lane_run(worker_jobs, &d_case_lane, &work);'
+              new = 'lane_run(BUSTER_MIN(worker_jobs + 1, work.count), &d_case_lane, &work);'
+          else:
+              old = '    for (;;)\n    {\n        u64 index = atomic_u64_increment(&work->next);'
+              new = '    for (u64 index = lane_index(); index < work->count; index += lane_count())\n    {'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          PY
+            git diff -- tools/differential.c > "$logs/$mutation.patch"
+            driver="$RUNNER_TEMP/issue408-$mutation"
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$driver" 2>&1 | tee "$logs/$mutation-build.log"
+            set +e
+            "$driver" test_differential --self-test > "$logs/$mutation.log" 2>&1
+            result=$?
+            set -e
+            cat "$logs/$mutation.log"
+            printf '%s\texit=%s\n' "$mutation" "$result" | tee -a "$logs/mutations.tsv"
+            test "$result" -ne 0
+            grep -q 'DIFFERENTIAL_SELF_TEST_FAIL workers_pass=' "$logs/$mutation.log"
+            grep -q 'DIFFERENTIAL_WORKER_CONTROL version=1' "$logs/$mutation.log"
+          done
+      - name: Retain raw native self-test evidence
+        if: ${{ always() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/issue408-proof/self-test-cases.tar.gz" build/differential-self-test-*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: issue408-worker-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue408-proof/
+          if-no-files-found: error
+          retention-days: 7
