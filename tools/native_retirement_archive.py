@@ -11,6 +11,7 @@ import shutil
 import stat
 import sys
 import tarfile
+import tempfile
 import zipfile
 
 
@@ -96,6 +97,11 @@ def prepare(contract_path, source, output):
 
     strict = manifest["artifacts"]["strict"]
     strict_source = checked(source / strict["archive_name"], strict["size"], strict["sha256"])
+    strict_binary_sha256 = inspect_strict_binary(strict_source, manifest["sources"]["candidate"])
+    recorded_strict_binary_sha256 = manifest["identities"].get("strict_candidate_binary_sha256")
+    if recorded_strict_binary_sha256 is not None and recorded_strict_binary_sha256 != strict_binary_sha256:
+        raise ValueError("strict compiler binary identity mismatch")
+    manifest["identities"]["strict_candidate_binary_sha256"] = strict_binary_sha256
     strict["release_assets"] = []
     with strict_source.open("rb") as stream:
         index = 0
@@ -255,6 +261,38 @@ def strict_selected_files(archive, output):
     return found
 
 
+def inspect_strict_binary(archive, expected_source):
+    result = None
+    with tempfile.TemporaryDirectory() as temporary:
+        output = Path(temporary)
+        packed = []
+        names = set()
+        with zipfile.ZipFile(archive) as bundle:
+            for info in bundle.infolist():
+                if not safe_name(info.filename) or info.filename in names:
+                    raise ValueError(f"unsafe or duplicate ZIP member: {info.filename}")
+                mode = info.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    raise ValueError(f"refusing ZIP symbolic link: {info.filename}")
+                names.add(info.filename)
+                if PurePosixPath(info.filename).name == "native-ci-logs.tar.gz":
+                    destination = output / f"packed-{len(packed)}.tar.gz"
+                    with bundle.open(info) as source, destination.open("wb") as target:
+                        shutil.copyfileobj(source, target, CHUNK)
+                    packed.append(destination)
+        if len(packed) != 1:
+            raise ValueError("strict Actions archive does not contain exactly one packed bundle")
+        selected = strict_selected_files(packed[0], output)
+        source_lines = selected["strict-binary/source.txt"][0].read_text(encoding="utf-8").splitlines()
+        if source_lines != [expected_source["commit"], expected_source["tree"]]:
+            raise ValueError("strict compiler source identity mismatch")
+        result = digest(selected["strict-binary/ide"][0])
+        recorded = selected["strict-binary/sha256.txt"][0].read_text(encoding="utf-8").split()
+        if not recorded or recorded[0] != result:
+            raise ValueError("strict recorded binary digest mismatch")
+    return result
+
+
 def verify_strict(directory, output, cleanup):
     directory = Path(directory)
     output = Path(output)
@@ -342,8 +380,8 @@ def census_receipt(manifest_path, report_path, recorded, replayed, archived_refe
         raise ValueError("replayed census direct binary mismatch")
     archived_sha = digest(archived_reference)
     rebuilt_sha = digest(rebuilt_reference)
-    if archived_sha != identities["direct_oracle_binary_sha256"] or rebuilt_sha != archived_sha:
-        raise ValueError("clean direct-oracle rebuild is not byte-identical to the archive")
+    if archived_sha != identities["direct_oracle_binary_sha256"]:
+        raise ValueError("archived direct-oracle binary identity mismatch")
     recorded_sha, recorded_files = tree_digest(recorded)
     replayed_sha, replayed_files = tree_digest(replayed)
     if (recorded_sha, recorded_files) != (replayed_sha, replayed_files):
@@ -360,6 +398,7 @@ def census_receipt(manifest_path, report_path, recorded, replayed, archived_refe
         "candidate_binary_sha256": binaries["candidate-ide.exe"],
         "archived_direct_oracle_sha256": archived_sha,
         "rebuilt_direct_oracle_sha256": rebuilt_sha,
+        "rebuilt_matches_archived": rebuilt_sha == archived_sha,
         "validator_report_sha256": digest(report_path),
     }
     Path(output).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

@@ -27,7 +27,8 @@ if any other input is absent. Failed pre-repair round trips remain in runs
 
 The `Native retirement durable archive` workflow downloads these release
 assets into fresh GitHub-hosted runners. Its census job reconstructs and checks
-every archive byte, rebuilds the direct oracle, reruns the join and byte
+every archive byte, rebuilds the direct oracle from its exact Git identity,
+records both the archived and rebuilt binary hashes, reruns the join and byte
 validator, and compares the new joined tree with the recorded tree. Its strict
 job reconstructs and checks the original ZIP and packed evidence, then reruns
 the 7,776-configuration strict MIR differential with the archived compiler and
