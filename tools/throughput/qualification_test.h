@@ -159,9 +159,16 @@ static void test_host_qualification(char const* executable, char const* root)
          * shared lock and leave its contents untouched. */
         CHECK(chmod(path, 0640) == 0);
         CHECK(tp_host_lock_acquire(path, &lock) == EACCES && lock.descriptor == -1);
+        tp_host_read(&fact, path);
+        CHECK(!fact.error && !fact.truncated && !strcmp(fact.value, "persistent lock contents\n"));
         CHECK(chmod(path, 0600) == 0);
         CHECK(tp_host_lock_acquire(path, &lock) == 0);
         tp_host_lock_release(&lock);
+
+        char hardlink[TP_PATH_CAP];
+        CHECK(tp_path(hardlink, root, "qualification-hardlink") && link(path, hardlink) == 0);
+        CHECK(tp_host_lock_acquire(path, &lock) == EINVAL && lock.descriptor == -1);
+        CHECK(unlink(hardlink) == 0);
 
         int cpu = tp_first_allowed_cpu();
         CHECK(cpu >= 0);
