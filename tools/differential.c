@@ -61,12 +61,15 @@ struct DSettings
     FILE* report;
     FILE* log;
     OsMutexHandle* spawn_mutex;
+    SliceString8 environment_keys;
+    SliceString8 environment_values;
     u32 rows;
     u32 timeout_seconds;
     u32 reduce_limit;
     bool verify;
     bool sanitize_oracle;
     bool strict_mir;
+    bool explicit_environment;
     bool io_failed;
 };
 
@@ -201,8 +204,9 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
     // a concurrent child can inherit another child's writer and delay its EOF.
     // Child execution and deadline waits remain concurrent.
     if (settings->spawn_mutex) { os_mutex_lock(settings->spawn_mutex); }
-    ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    ProcessSpawnResult spawn = os_process_spawn(command, settings->environment_keys, settings->environment_values,
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                              .use_process_environment = !settings->explicit_environment});
     if (settings->spawn_mutex) { os_mutex_unlock(settings->spawn_mutex); }
     DObservation observation = {.kind = D_SPAWN};
     if (spawn.handle)
