@@ -64,13 +64,14 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                         "ID(\n#ifndef ABSENT\nifndef_value\n#endif\n)\n"
                         "ID(\n#if MISSING_VALUE\ninactive_if, ), ((\n#elif ENABLED\nelif_value\n#else\ninactive_else, ), ((\n#endif\n)\n"
                         "ID(\n#if MISSING_VALUE\ninactive\n#else\nelse_value\n#endif\n)\n"
+                        "ID(\n#if MISSING_VALUE\n#error inactive directive must be skipped\n#endif\nafter_inactive_directive\n)\n"
                         "ID(\n#if ENABLED\n#if defined(ENABLED)\nINNER(nested_a, (nested_b, nested_c))\n#else\ninactive_nested, )\n#endif\n#endif\n)\n"
                         "ID(\n#if ENABLED\n#else\nnot_selected\n#endif\n) after_empty\n"
                         "STR(\n#if ENABLED\nalpha beta\n#else\nwrong, )\n#endif\n)\n"
                         "CAT(\n#if ENABLED\npre\n#endif\n,\n#if ENABLED\nfix\n#endif\n)\n"
                         "VAR(head,\n#if ENABLED\n+ tail\n#else\n, wrong, )\n#endif\n)\n"
                         "ID(\nordinary\n)\n");
-    String8 expected_source = S8("if_value ifdef_value ifndef_value elif_value else_value "
+    String8 expected_source = S8("if_value ifdef_value ifndef_value elif_value else_value after_inactive_directive "
                                  "nested_a (nested_b, nested_c) after_empty \"alpha beta\" prefix head + tail ordinary");
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
     for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
