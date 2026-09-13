@@ -43,6 +43,25 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+      - name: Validate retired Vulkan installer boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          retired="install-vulkan""-sdk"
+          for suffix in sh ps1; do
+            test ! -e ".github/scripts/$retired.$suffix"
+          done
+          if rg --line-number "$retired" \
+            .github/workflows .github/scripts tools AGENTS.md \
+            docs/agents/build.md docs/agents/testing.md \
+            docs/ci-github-actions.md docs/ci-workflow-audit.md \
+            docs/gpu-toolchain-validation.md build.c build.sh build.ps1 CMakeLists.txt; then
+            exit 1
+          fi
+          rg --fixed-strings --quiet 'option(BUSTER_USE_VULKAN "Build optional Vulkan renderer support" OFF)' CMakeLists.txt
+          rg --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
+          rg --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
+          rg --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |

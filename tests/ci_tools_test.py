@@ -547,6 +547,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                     self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("restore-keys:", text)
+        self.assertNotIn("install-vulkan-sdk", text)
         self.assertIn("hashFiles('.github/zig.json')", text)
         workflow_environment = text.split("\njobs:", 1)[0]
         self.assertNotIn("UBSAN_OPTIONS:", workflow_environment)
@@ -555,34 +556,6 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('set(BUSTER_UBSAN_OPTIONS "halt_on_error=1:exitcode=87:print_stacktrace=1")', cmake)
         self.assertIn('list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")', cmake)
         self.assertNotIn("ENV{UBSAN_OPTIONS}", cmake)
-
-    def test_vulkan_sdk_installer_entrypoints_remain_retired(self):
-        installer_names = ("install-vulkan-sdk.sh", "install-vulkan-sdk.ps1")
-        for name in installer_names:
-            with self.subTest(installer=name):
-                self.assertFalse((ROOT / ".github/scripts" / name).exists())
-
-        live_references = list((ROOT / ".github/workflows").glob("*.yml"))
-        live_references.extend((ROOT / ".github/workflows").glob("*.yaml"))
-        live_references.extend((
-            ROOT / "AGENTS.md",
-            ROOT / "docs/agents/build.md",
-            ROOT / "docs/agents/testing.md",
-            ROOT / "docs/ci-github-actions.md",
-            ROOT / "docs/ci-workflow-audit.md",
-            ROOT / "docs/gpu-toolchain-validation.md",
-        ))
-        for path in live_references:
-            text = path.read_text()
-            with self.subTest(path=path.relative_to(ROOT)):
-                self.assertNotIn("install-vulkan-sdk", text)
-
-        cmake = (ROOT / "CMakeLists.txt").read_text()
-        self.assertIn('option(BUSTER_USE_VULKAN "Build optional Vulkan renderer support" OFF)', cmake)
-        self.assertIn("if (DEFINED ENV{VULKAN_SDK})", cmake)
-        gpu_workflow = (ROOT / ".github/workflows/gpu-toolchains.yml").read_text()
-        self.assertIn("test_gpu_toolchains --self-test", gpu_workflow)
-        self.assertIn("--profile spirv-dxc-2025.07", gpu_workflow)
 
     def test_independent_suites_are_not_guarded_by_prior_test_success(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
