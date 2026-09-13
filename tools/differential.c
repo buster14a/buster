@@ -4,6 +4,7 @@
 // bounded iterative line reduction against independent host-compiler oracles.
 // d_case_lane dynamically admits complete cases into the persistent lane gang;
 // d_cases_run validates and publishes case-owned evidence in registry order.
+// d_workers_self_test checks live admission, unequal cases and arena cleanup.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <signal.h>
 
@@ -705,6 +706,17 @@ struct DCaseWork
     u32 config_count;
     AtomicU64 next;
     bool self_test;
+    // Private self-test observations, protected by spawn_mutex while lanes run.
+    // Corpus runs neither update these counters nor wait on the test gates.
+    u32 test_jobs;
+    u32 test_active;
+    u32 test_peak;
+    u32 test_started;
+    u32 test_finished;
+    u32 test_lanes;
+    u32 test_arenas;
+    u32* test_completions;
+    bool test_skew;
 };
 
 BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32* jobs)
@@ -729,17 +741,61 @@ BUSTER_GLOBAL_LOCAL String8 d_case_record_text(Arena* arena, DCase test, DCaseRe
         test.name, count, record.rows, record.failures, (u32)record.io_failed, record.completed);
 }
 
+// Admit an initial full cohort before releasing its short cases. Case zero
+// then waits for every other case, proving that a free lane drains the dynamic
+// queue while a longer case remains active. This is an ordering control, not a
+// timing measurement. Its independent 30-second rendezvous deadline fails the
+// control without stranding lanes; child deadlines remain unchanged.
+BUSTER_GLOBAL_LOCAL bool d_worker_self_test_enter(DCaseWork* work, u64 index)
+{
+    os_mutex_lock(work->settings.spawn_mutex);
+    work->test_started += 1;
+    work->test_active += 1;
+    work->test_peak = BUSTER_MAX(work->test_peak, work->test_active);
+    os_mutex_unlock(work->settings.spawn_mutex);
+    bool ready = false;
+    u64 start = os_now_microseconds();
+    while (!ready && os_now_microseconds() - start < 30000000)
+    {
+        os_mutex_lock(work->settings.spawn_mutex);
+        ready = work->test_started >= work->test_jobs;
+        if (work->test_skew && work->test_jobs > 1 && index == 0)
+        {
+            ready &= work->test_finished + 1 == work->count;
+        }
+        os_mutex_unlock(work->settings.spawn_mutex);
+        if (!ready)
+        {
+#if BUSTER_WINDOWS
+            Sleep(1);
+#else
+            struct timespec delay = {.tv_nsec = 1000000};
+            nanosleep(&delay, 0);
+#endif
+        }
+    }
+    return ready;
+}
+
 BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
 {
     DCaseWork* work = argument;
     Arena* arena = arena_create((ArenaCreation){0});
     u64 start = arena->position;
+    if (work->self_test)
+    {
+        os_mutex_lock(work->settings.spawn_mutex);
+        work->test_lanes += 1;
+        work->test_arenas += 1;
+        os_mutex_unlock(work->settings.spawn_mutex);
+    }
     for (;;)
     {
         u64 index = atomic_u64_increment(&work->next);
         if (index >= work->count) { break; }
         DCase test = work->tests[index];
         DCaseRecord* record = work->records + index;
+        if (work->self_test) { record->failures += !d_worker_self_test_enter(work, index); }
         DSettings settings = work->settings;
         settings.arena = arena;
         settings.report = 0;
@@ -762,7 +818,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
                     String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"), S8("--self-test-child"), test.source};
                     if (test.host.length) { argv[0] = test.host; }
                     DObservation observed = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), path_join(arena, directory, S8("child")));
-                    record->failures = observed.kind != D_EXIT || observed.status != 7 ||
+                    record->failures += observed.kind != D_EXIT || observed.status != 7 ||
                         !string_equal(observed.output, S8("a\0b")) || !string_equal(observed.error, S8("child stderr\n"));
                     settings.rows = 1;
                     d_log(&settings, string_format(arena, S8("case={S8}\n"), test.name));
@@ -783,8 +839,24 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
             record->io_failed |= settings.io_failed;
         }
         record->io_failed |= !arena_set_position_and_decommit(arena, start);
+        if (work->self_test)
+        {
+            // A case is no longer active only after its children were waited,
+            // streams closed, completion written and scratch cleanup attempted.
+            os_mutex_lock(work->settings.spawn_mutex);
+            work->test_active -= 1;
+            work->test_finished += 1;
+            work->test_completions[index] = work->test_finished;
+            os_mutex_unlock(work->settings.spawn_mutex);
+        }
     }
     BUSTER_CHECK(arena_destroy(arena, 1));
+    if (work->self_test)
+    {
+        os_mutex_lock(work->settings.spawn_mutex);
+        work->test_arenas -= 1;
+        os_mutex_unlock(work->settings.spawn_mutex);
+    }
 }
 
 // Reopen and hash each completed stream before ordered publication. Missing,
@@ -868,9 +940,11 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
     errors += d_jobs(0, 8, S8(""), &jobs) || d_jobs(65, 8, S8(""), &jobs);
     errors += d_jobs(4, 8, S8("0"), &jobs) || d_jobs(4, 8, S8("2x"), &jobs);
     errors += d_jobs(4, 8, S8("4294967296"), &jobs);
-    for (u32 pass = 0; pass < 3; pass += 1)
+    u32 requested[] = {1, 2, 4, 4};
+    for (u32 pass = 0; pass < BUSTER_ARRAY_LENGTH(requested); pass += 1)
     {
-        u32 pass_errors = errors;
+        u32 pass_errors = errors, worker_jobs = 0;
+        bool failure_control = pass + 1 == BUSTER_ARRAY_LENGTH(requested);
         DCase tests[] = {{.name = S8("first"), .source = S8("exit")},
                          {.name = S8("second"), .source = S8("exit")},
                          {.name = S8("third"), .source = S8("exit")},
@@ -878,8 +952,10 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
                          {.name = S8("fifth"), .source = S8("exit")},
                          {.name = S8("sixth"), .source = S8("exit")}};
         DCaseRecord records[BUSTER_ARRAY_LENGTH(tests)] = {0};
+        u32 completions[BUSTER_ARRAY_LENGTH(tests)] = {0};
         DCaseWork work = {.settings = {.arena = arena, .timeout_seconds = 1}, .tests = tests, .records = records,
-                         .count = BUSTER_ARRAY_LENGTH(tests), .config_count = 1, .self_test = true};
+                         .count = BUSTER_ARRAY_LENGTH(tests), .config_count = 1, .self_test = true,
+                         .test_completions = completions, .test_skew = !failure_control};
         work.settings.out = path_join(arena, root, string_format(arena, S8("workers-{u32}"), pass));
         errors += !d_create_output(arena, work.settings.out);
         String8 report = string_format_z(arena, S8("{S8}/processes.tsv"), work.settings.out);
@@ -890,7 +966,7 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
         if (!work.settings.report || !work.settings.log || !work.settings.spawn_mutex) { errors += 1; }
         else
         {
-            if (pass == 2)
+            if (failure_control)
             {
                 tests[0].source = S8("timeout");
                 tests[1].source = S8("crash");
@@ -899,12 +975,15 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
                 // Both duplicate directory claims must not count as success.
                 tests[5].name = tests[4].name;
             }
-            u32 worker_jobs = 1;
-            errors += !d_jobs(pass ? 4 : 1, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &worker_jobs);
+            errors += !d_jobs(requested[pass], os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &worker_jobs);
+            work.test_jobs = worker_jobs;
             lane_run(worker_jobs, &d_case_lane, &work);
             u32 failures = d_cases_collect(&work);
-            errors += pass == 2 ? failures < 5 : failures != 0;
-            if (pass != 2 && failures)
+            errors += failure_control ? failures < 5 : failures != 0;
+            errors += work.test_lanes != worker_jobs || work.test_peak != worker_jobs;
+            errors += work.test_active != 0 || work.test_arenas != 0;
+            errors += work.test_started != work.count || work.test_finished != work.count;
+            if (!failure_control && failures)
             {
                 for (u32 index = 0; index < work.count; index += 1)
                 {
@@ -912,9 +991,18 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
                         pass, tests[index].name, records[index].rows, records[index].failures, (u32)records[index].io_failed, records[index].report_size, records[index].log_size);
                 }
             }
-            for (u32 index = 0; index < work.count; index += 1) { errors += records[index].completed != 1; }
-            if (pass != 2)
+            for (u32 index = 0; index < work.count; index += 1)
             {
+                errors += records[index].completed != 1;
+                errors += completions[index] == 0 || completions[index] > work.count;
+                for (u32 other = 0; other < index; other += 1) { errors += completions[index] == completions[other]; }
+                if (!failure_control && worker_jobs == 1) { errors += completions[index] != index + 1; }
+            }
+            if (!failure_control)
+            {
+                if (worker_jobs > 1) { errors += completions[0] != work.count; }
+                // Publication remains byte-identical to the one-lane order,
+                // even though the first case deliberately completed last.
                 // Inspect through the owning stream: a second OS open with
                 // read-only sharing conflicts with the live writer on Windows.
                 errors += fseek(work.settings.log, 0, SEEK_SET) != 0;
@@ -946,6 +1034,9 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
         if (work.settings.report) { errors += fclose(work.settings.report) != 0; }
         if (work.settings.log) { errors += fclose(work.settings.log) != 0; }
         if (work.settings.spawn_mutex) { os_mutex_destroy(work.settings.spawn_mutex); }
+        string_print(S8("DIFFERENTIAL_WORKER_CONTROL version=1 requested={u32} effective={u32} cases={u32} peak={u32} started={u32} finished={u32} active={u32} arenas={u32} failure_control={u32} errors={u32}\n"),
+            requested[pass], worker_jobs, work.count, work.test_peak, work.test_started, work.test_finished,
+            work.test_active, work.test_arenas, (u32)failure_control, errors - pass_errors);
         if (errors != pass_errors)
         {
             string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL workers_pass={u32} failures={u32}\n"), pass, errors - pass_errors);
