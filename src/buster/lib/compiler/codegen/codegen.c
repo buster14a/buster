@@ -3980,7 +3980,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_abi_is_f80_complex_result(IrProgr
 // in as many registers as it takes, which is the lowering clang emits for the
 // same declaration: xmm0 through xmm3 for a 64-byte vector without AVX, ymm0
 // and ymm1 with it. Zero means the target cannot carry the part at all.
-BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size)
+u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size)
 {
     // Every x86-64 target has a sixteen-byte vector register -- the psABI puts
     // one in the baseline -- so only a part wider than that has to ask the
@@ -4017,7 +4017,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_vector_part_registers(Target const
 // width exactly when the count is more than one. Zero pieces means the model
 // cannot split the width evenly, which no power-of-two signature type
 // produces.
-BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size)
+u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size)
 {
     *piece_size = 0;
     if (!type || type->kind != IR_TYPE_VECTOR || !type->layout.resolved || type->layout.size < 8 || type->layout.size > UINT32_MAX ||

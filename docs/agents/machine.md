@@ -242,10 +242,11 @@
   Its complete independent observer uses Clang: GCC 13 uses a different hidden
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
-  narrow signature and vector-load refusals are strict successes; the separate
-  `basic_c_machine_fallback_wide_signature.c` retains a Win64 baseline split-
-  reference signature refusal for telemetry and artifact-failure checks; its
-  System V and AVX-width signatures select through MIR.
+  narrow signature, vector-load and 32-byte Win64 baseline split-reference
+  refusals are strict successes. Fallback telemetry uses a valid canonical-only
+  inline-assembly transaction, while a malformed literal-register fixture owns
+  the artifact-preservation failure control; ABI retirement no longer doubles
+  as a negative test.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
@@ -253,8 +254,8 @@
   shifts. Comparison results expand to all-ones masks, and floating negation
   changes only the sign bit. ZMM operands/results use explicit owned frame
   snapshots around scalar expansion. Wide vector members store through their
-  exact subobject address. General assembly and the remaining model-dependent
-  wide ABI signatures are separate from this arithmetic lowering.
+  exact subobject address. General assembly remains separate from this
+  arithmetic lowering.
   `basic_c_vector.c` and `basic_c_vector_lane_edges.c` remain whole strict inputs.
   The registered matrix includes baseline/Haswell/Zen 5 object generation and
   executes matching host CPU profiles. `host_vector_arithmetic.c` independently
@@ -266,19 +267,31 @@
   its consecutive result pieces. An argument wider than one CPU register or
   exhausting the argument register file uses its aligned stack home. Unnamed
   wide vectors always use the overflow area; their MIR variadic reads retain
-  the target ABI alignment and advance by the complete value. Win64
-  32-byte arguments at AVX width use
-  the existing private-copy pointer transport; baseline split references
-  remain an unresolved retirement gap. The new part-width byte fits existing
-  padding in the 40-byte signature shape, with no additional per-value table.
+  the target ABI alignment and advance by the complete value. Win64 vector
+  arguments use one private, naturally aligned copy. A value wider than the
+  model's register width exposes one pointer per register-sized subobject: the
+  leading references occupy the remaining argument GPRs and the tail continues
+  in stack eightbytes. Callees capture every pointer before copying exact pieces
+  into their owned frame image, so exhaustion and a register/stack straddle
+  preserve both payload and by-value isolation. The part-width byte fits
+  existing padding in the 40-byte signature shape, with no additional
+  per-value table.
   XMM/YMM frame rows carry byte offsets checked against owned storage. YMM
   encodings use serially prepared AVX metadata tokens; a missing token remains
   an encoding failure. Return/call vector-live flags preserve upper lanes.
+  Direct Win64 results use up to four consecutive XMM/YMM/ZMM registers as the
+  CPU model permits and otherwise retain the hidden-pointer result; ZMM parts
+  reuse the ordinary pointer vector transfer through an explicit frame
+  subobject address.
   `basic_c_vector_argument_ymm.c` and `basic_c_wide_vector_argument.c` remain
   whole registered strict inputs. `basic_c_wide_vector_abi.c` adds indirect
   calls, a ninth vector argument, scalar expected lanes and sentinels. Its
   PROVIDER_ONLY/CONSUMER_ONLY configurations exchange 32-byte values, copied
-  variadic cursors and scalar tails with Clang and real GCC. Baseline Clang
+  variadic cursors and scalar tails with Clang and real GCC. The complete
+  `basic_c_vector_argument_wide.c` fixture adds 128/256-byte Win64 straddles,
+  exhaustion, indirect calls, private-copy mutation checks, sentinels, and
+  model-dependent direct/hidden returns. Its provider/consumer halves exchange
+  baseline objects with Clang under wine in both directions. Baseline Clang
   arguments use the same stack transport as Buster, with split XMM results;
   GCC uses a different hidden result pointer there. AVX-width results agree
   in all three compilers. An initial MIR baseline argument-placement defect
