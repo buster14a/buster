@@ -20523,7 +20523,8 @@ BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_di
 // Buster compile the source itself. The conditional directives inside its
 // macro argument are the compatibility surface this unit exercises (#76);
 // the remaining flags retain the independently tracked linker/debug policy.
-BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 ide, String8 source_directory, String8 tree_directory)
+BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 ide, String8 source_directory, String8 tree_directory,
+                                                          String8 allocator_flag)
 {
     make_directory_recursive(arena, path_join(arena, tree_directory, S8("Python")));
     String8 include_internal = path_join(arena, path_join(arena, source_directory, S8("Include")), S8("internal"));
@@ -20536,6 +20537,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),
         S8("-O3"),
+        allocator_flag,
         S8("-std=c11"),
         string_format(arena, S8("-I{S8}"), include_internal),
         string_format(arena, S8("-I{S8}"), path_join(arena, include_internal, S8("mimalloc"))),
@@ -20695,7 +20697,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
     // Only the Buster trees prebuild this unit. The Clang reference compiles
     // it through the generated make rules; Buster uses the same source and
     // preserves the established object-specific flags above.
-    if (prebuild_trampoline && !cpython_build_buster_trampoline(arena, trampoline_ide, source_directory, tree_directory))
+    if (prebuild_trampoline && !cpython_build_buster_trampoline(arena, trampoline_ide, source_directory, tree_directory, allocator_flag))
     {
         string_print(S8("error: test_cpython could not build perf_jit_trampoline.o with Buster for tree={S8}\n"), label);
         return false;
