@@ -3,13 +3,23 @@
 `build.c` owns `native_retirement_census`, implemented in
 `tools/native_retirement_census.c`. It freezes the complete tracked C test-input
 inventory before running a selected portion of the native object-compilation
-matrix. It complements the eleven-fixture strict coverage floor and the native
+matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
+
+The admitted input inventory is
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 547
+explicit SHA-256 rows bind every tracked test byte at the approval point: 402
+supported object subjects, 12 registered rejection controls, 69 support files
+and 64 dormant custom-language files. An added, removed, renamed, reclassified
+or byte-changed test input makes manifest generation fail. Updating the contract
+is therefore a reviewed support decision, not an automatic side effect of adding
+a fixture. Merging a contract change is the maintainer approval record.
 
 ```sh
 ./build.sh native_retirement_census --self-test
 ./build.sh native_retirement_census --manifest-only --out build/census-inventory
-./build.sh native_retirement_census --ide build/Release/ide --compiler-revision <40-hex-commit> --out build/census-full
+./build.sh native_retirement_census --ide build/Release/ide --compiler-revision <40-hex-commit> \
+  --resource-include "$(clang -print-resource-dir)/include" --out build/census-full
 ```
 
 Use a new output directory each time. Existing directories are atomically
@@ -22,7 +32,9 @@ copy, rather than the supplied string alone, identify what actually ran.
 An independently frozen earlier compiler can establish the support baseline:
 
 ```sh
-./build.sh native_retirement_census --ide build/Release/ide --compiler-revision <candidate-commit> --baseline-ide /path/to/reference-ide --baseline-revision <reference-commit> --out build/census-comparison
+./build.sh native_retirement_census --ide build/Release/ide --compiler-revision <candidate-commit> \
+  --baseline-ide /path/to/reference-ide --baseline-revision <reference-commit> \
+  --resource-include "$(clang -print-resource-dir)/include" --out build/census-comparison
 ```
 
 Without `--baseline-ide`, the same compiler supplies its direct `none` reference.
@@ -61,8 +73,8 @@ The driver tests explicitly require the last five inputs to fail, including
 their diagnostic wording. The literal-register assembly case is an intentional
 codegen rejection; it is not a supported native subject. Excluded source bytes
 remain in `inputs.tsv` and the snapshot. Counts are discovered afresh; newly
-tracked C fixtures automatically enter the next manifest. Nothing untracked
-silently enters a run.
+tracked C fixtures are rejected until a reviewed contract update explicitly
+classifies and hashes them. Nothing untracked silently enters a run.
 
 Known language requirements use these exact-path recipes on both compiler legs:
 
@@ -82,14 +94,23 @@ retain the pinned compiler's dialect default, including similarly named files.
 `inputs.tsv` freezes each recipe name and exact added flags; `rows.tsv` repeats
 the recipe name, and executed children retain every argument byte in `.argv`.
 
-The snapshot covers tracked `tests/` files and compiler executables. Host system
-headers, compiler resource headers such as `BUSTER_HOST_C_RESOURCE_INCLUDE`, and
-the inherited process environment remain external dependencies. The driver can
-read these outside the snapshot; their contents are neither copied nor hashed.
-`manifest.txt` records this limitation. A run using such dependencies is not a
-self-contained reproduction, and comparing it elsewhere requires the same
-host/resource-header setup. External fixtures needing additional setup remain
-unresolved subjects; the recipe list does not omit them or manufacture support.
+Executed rows require `--resource-include`. The harness refuses symbolic links,
+copies that complete tree into `dependencies/resource-include`, records every
+file's SHA-256 in `dependencies.tsv`, and hashes the ordered closure. Both
+compiler legs then receive `-nostdinc -isystem <frozen-copy>`; the resource path
+compiled into either executable and host include search paths are not used.
+Object rows intentionally have no sysroot or additional system include path.
+Fixtures needing libc, SDK, project or generated headers remain visible failing
+subjects until an explicit reviewed classification or existing harness supplies
+their setup; the census never manufactures a successful baseline for them.
+
+Compiler children receive a replacement environment recorded in
+`environment.tsv`: `LC_ALL=C`, `LANG=C`, and `TZ=UTC`, plus the minimal explicit
+Windows process/temp values on Windows. They do not inherit `PATH`, compiler or
+include flags, SDK variables, preload settings, sanitizer settings, or user
+configuration. The candidate, direct reference, support contract, tracked input
+files and resource-header closure all carry SHA-256 identities. Manifest-only
+runs state that dependency/environment capture was not executed.
 
 The full product is:
 
@@ -99,11 +120,28 @@ The full product is:
 - PIC enabled and disabled.
 
 Every row supplies `-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char
--fverify-codegen`, an explicit target, CPU model and allocator. The default CPU
+-fverify-codegen -nostdinc`, the frozen resource include, an explicit target,
+CPU model and allocator. The default CPU
 profile is `baseline`; `--cpu` selects another named profile for a separate
 manifest. MIR rows additionally require `-fno-machine-fallback`. Optimization and
 promotion defaults are those of the pinned compiler; there is no claim that one
 CPU profile covers every optional instruction feature.
+
+`rows.tsv` records the ABI convention and effective CPU feature set computed
+from the target/model contract. The child's `TARGET` telemetry must match both
+before its object can pass. Each row also names its C lowering configuration,
+PIC mode, compile obligation, separate link/native-execution owner and exact
+`.argv` evidence path. Link and native execution stay in #509's platform and ABI
+gates; object success does not silently satisfy them. Rejection controls retain
+their source hashes and registered diagnostic obligation in `inputs.tsv` rather
+than being counted as successful object programs.
+
+Real-project obligations are references, not copied descriptors. The retirement
+contract consumes the admitted descriptors from #423 and the pinned compatibility
+harnesses indexed in [`compatibility.md`](agents/compatibility.md). Until #423
+publishes passing descriptors, those workloads remain an explicit pending gate;
+this object census does not duplicate their pins, setup, correctness or timing
+contracts.
 
 One group contains the direct reference followed by every MIR allocator for the
 same subject, target, frontend and PIC settings. `rows.tsv` freezes every group
@@ -123,14 +161,36 @@ their `selected` columns intentionally differ. Row IDs from different inventorie
 are not interchangeable. `--timeout` sets the bounded
 deadline for each child, from 1 to 3600 seconds (default 30).
 
+After joining any shards, independently check an executed evidence directory:
+
+```sh
+python3 tools/native_retirement_contract.py validate build/census-full
+```
+
+The validator recomputes the support/input/resource/compiler/object SHA-256
+identities, checks the replacement environment and exact argv, and rejects row,
+selection, target, ABI, lowering, PIC or obligation mismatches. To preserve the
+required common-row transition accounting between a pinned reference and the
+exact rerun candidate:
+
+```sh
+python3 tools/native_retirement_contract.py compare build/census-reference build/census-candidate \
+  --out build/common-row-transitions.json --require-clean-candidate
+```
+
+The report records added and removed identities separately from the common-row
+disposition transitions. The strict option rejects any common candidate row that
+is not a baseline-supported, strict-success or strict-empty-unit result, or that
+reports a fallback.
+
 ## Observations and failure accounting
 
 `results.tsv` joins to `rows.tsv` by row ID and records process kind/status,
-function/fallback counts, the matching baseline function count, artifact size and
-fingerprint. Successful MIR objects require explicit verifier telemetry and zero
-fallbacks. Different function counts from a successful direct baseline are a
-failure. Empty/data-only units are recorded separately from nonempty strict
-successes.
+function/fallback counts, the matching baseline function count, artifact size,
+fast fingerprint and SHA-256 identity. Successful MIR objects require explicit
+verifier telemetry and zero fallbacks. Different function counts from a
+successful direct baseline are a failure. Empty/data-only units are recorded
+separately from nonempty strict successes.
 
 A failed direct reference is `baseline-unresolved`, not proof that its source is
 unsupported. The broad input inventory includes platform-specific observers and
