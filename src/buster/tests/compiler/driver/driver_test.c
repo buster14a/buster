@@ -3456,6 +3456,188 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     return result;
 }
 
+// Compile the stack-layout fixture through both C lowering paths, require
+// deterministic module bytes, then validate and execute them in an independent
+// Memory64 engine. The source is generated here so the native-retirement input
+// manifest remains owned by #508.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("buster-wasm64-stack"), S8(".c"));
+    String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm64-stack"), S8(".cjs"));
+    String8 source = S8(
+        "volatile unsigned char wasm_stack_low_guard = 0xa5;\n"
+        "static unsigned char wasm_stack_static_padding[65503];\n"
+        "volatile unsigned char wasm_stack_high_guard = 0x5a;\n"
+        "static int wasm_stack_guards(void)\n"
+        "{\n"
+        "    return wasm_stack_low_guard != 0xa5 || wasm_stack_high_guard != 0x5a || wasm_stack_static_padding[0] != 0;\n"
+        "}\n"
+        "int wasm_stack_frame32(unsigned int seed)\n"
+        "{\n"
+        "    volatile unsigned char frame[32];\n"
+        "    frame[0] = (unsigned char)seed;\n"
+        "    frame[31] = (unsigned char)(seed + 1);\n"
+        "    return frame[0] != (unsigned char)seed || frame[31] != (unsigned char)(seed + 1) || wasm_stack_guards();\n"
+        "}\n"
+        "static int wasm_stack_recurse(unsigned int depth, unsigned int seed)\n"
+        "{\n"
+        "    volatile unsigned char fixed[48];\n"
+        "    unsigned int dynamic_size = 33 + (depth & 7);\n"
+        "    volatile unsigned char* dynamic = (volatile unsigned char*)__builtin_alloca(dynamic_size);\n"
+        "    fixed[0] = (unsigned char)seed;\n"
+        "    fixed[47] = (unsigned char)(seed + 1);\n"
+        "    dynamic[0] = (unsigned char)(seed + 2);\n"
+        "    dynamic[dynamic_size - 1] = (unsigned char)(seed + 3);\n"
+        "    int child = depth ? wasm_stack_recurse(depth - 1, seed + 5) : 0;\n"
+        "    return child || fixed[0] != (unsigned char)seed || fixed[47] != (unsigned char)(seed + 1) ||\n"
+        "        dynamic[0] != (unsigned char)(seed + 2) || dynamic[dynamic_size - 1] != (unsigned char)(seed + 3);\n"
+        "}\n"
+        "int wasm_stack_nested(void)\n"
+        "{\n"
+        "    return wasm_stack_recurse(7, 11) || wasm_stack_guards();\n"
+        "}\n"
+        "int wasm_stack_mixed(unsigned int size)\n"
+        "{\n"
+        "    volatile unsigned char fixed[32];\n"
+        "    volatile unsigned char* dynamic = (volatile unsigned char*)__builtin_alloca(size);\n"
+        "    fixed[0] = 17;\n"
+        "    fixed[31] = 19;\n"
+        "    dynamic[0] = 23;\n"
+        "    dynamic[size - 1] = 29;\n"
+        "    int child = wasm_stack_frame32(31);\n"
+        "    return child || fixed[0] != 17 || fixed[31] != 19 || dynamic[0] != 23 || dynamic[size - 1] != 29 || wasm_stack_guards();\n"
+        "}\n"
+        "int wasm_stack_vla(unsigned int count, int early)\n"
+        "{\n"
+        "    volatile unsigned char fixed[32];\n"
+        "    fixed[0] = 37;\n"
+        "    fixed[31] = 41;\n"
+        "    {\n"
+        "        volatile unsigned char values[count];\n"
+        "        values[0] = 43;\n"
+        "        values[count - 1] = 47;\n"
+        "        int failure = values[0] != 43 || values[count - 1] != 47 || fixed[0] != 37 || fixed[31] != 41;\n"
+        "        if (early) return failure || wasm_stack_guards();\n"
+        "    }\n"
+        "    return fixed[0] != 37 || fixed[31] != 41 || wasm_stack_guards();\n"
+        "}\n"
+        "unsigned long wasm_stack_zero_alignment(void)\n"
+        "{\n"
+        "    volatile unsigned char* zero = (volatile unsigned char*)__builtin_alloca(0);\n"
+        "    volatile unsigned char* one = (volatile unsigned char*)__builtin_alloca(1);\n"
+        "    volatile unsigned char* wide = (volatile unsigned char*)__builtin_alloca(17);\n"
+        "    one[0] = 53;\n"
+        "    wide[0] = 59;\n"
+        "    wide[16] = 61;\n"
+        "    return ((unsigned long)zero & 15) | ((unsigned long)one & 15) | ((unsigned long)wide & 15) |\n"
+        "        (one[0] != 53) | (wide[0] != 59) | (wide[16] != 61) | wasm_stack_guards();\n"
+        "}\n"
+        "int wasm_stack_exact_limit(void)\n"
+        "{\n"
+        "    volatile unsigned char bytes[65536];\n"
+        "    bytes[0] = 67;\n"
+        "    bytes[65535] = 71;\n"
+        "    return bytes[0] != 67 || bytes[65535] != 71 || wasm_stack_guards();\n"
+        "}\n"
+        "unsigned long wasm_stack_dynamic_limit(unsigned long size)\n"
+        "{\n"
+        "    return (unsigned long)__builtin_alloca(size);\n"
+        "}\n"
+        "void wasm_stack_dynamic_store(unsigned long size)\n"
+        "{\n"
+        "    volatile unsigned char* bytes = (volatile unsigned char*)__builtin_alloca(size);\n"
+        "    bytes[0] = 79;\n"
+        "}\n");
+    String8 script = S8(
+        "\"use strict\";\n"
+        "const fs = require(\"fs\");\n"
+        "const crypto = require(\"crypto\");\n"
+        "const assert = require(\"assert\").strict;\n"
+        "if (process.argv.length !== 3) throw new Error(\"usage: node wasm64-stack.cjs module.wasm\");\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
+        "const digest = crypto.createHash(\"sha256\").update(bytes).digest(\"hex\");\n"
+        "console.log(`WASM64_STACK_RUNTIME runtime=${process.version} v8=${process.versions.v8} memory64_flags=default module_sha256=${digest}`);\n"
+        "assert.equal(WebAssembly.validate(bytes), true, \"valid Memory64 module\");\n"
+        "const wasmModule = new WebAssembly.Module(bytes);\n"
+        "const instance = new WebAssembly.Instance(wasmModule);\n"
+        "const e = instance.exports;\n"
+        "assert.equal(e.memory.buffer.byteLength, 3 * 65536, \"minimal three-page layout\");\n"
+        "for (let repetition = 0; repetition < 4; ++repetition) {\n"
+        "    assert.equal(e.wasm_stack_frame32(13 + repetition), 0, \"materialized fixed frame\");\n"
+        "    assert.equal(e.wasm_stack_nested(), 0, \"simultaneously live recursive frames\");\n"
+        "    assert.equal(e.wasm_stack_mixed(97), 0, \"mixed fixed and dynamic frames\");\n"
+        "    assert.equal(e.wasm_stack_vla(65, repetition & 1), 0, \"VLA scope and early return restoration\");\n"
+        "    assert.equal(e.wasm_stack_zero_alignment(), 0n, \"zero-size and alignment boundaries\");\n"
+        "}\n"
+        "assert.equal(e.wasm_stack_exact_limit(), 0, \"complete 64-KiB reserve is usable\");\n"
+        "assert.notEqual(e.wasm_stack_dynamic_limit(65536n), 0n, \"exact-limit dynamic allocation is accepted\");\n"
+        "assert.equal(e.wasm_stack_frame32(91), 0, \"exact-limit call restored stack\");\n"
+        "function expectStackTrap(size, label) {\n"
+        "    const isolated = new WebAssembly.Instance(wasmModule);\n"
+        "    assert.throws(() => isolated.exports.wasm_stack_dynamic_store(size), error =>\n"
+        "        error instanceof WebAssembly.RuntimeError && /unreachable/.test(error.message), label + \" deliberate overflow trap\");\n"
+        "}\n"
+        "expectStackTrap(65537n, \"over-limit allocation\");\n"
+        "expectStackTrap(0xffffffffffffffffn, \"wrapping allocation\");\n"
+        "console.log(\"WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0\");\n");
+    bool prepared = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+    BUSTER_TEST(arguments, prepared);
+    char8 source_hash_bytes[SHA256_HEX_CAPACITY];
+    Sha256 source_hash;
+    sha256_init(&source_hash);
+    sha256_add(&source_hash, source.pointer, source.length);
+    sha256_finish_hex(&source_hash, source_hash_bytes);
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 frontend = 0; prepared && frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        String8 output = buster_test_temporary_path(arena, S8("buster-wasm64-stack"), string_format(arena, S8("-{u32}.wasm"), frontend));
+        String8 command[] = {S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-O1"), frontends[frontend], S8("-o"), output, source_path};
+        CompilerDriverResult first = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        CompilerDriverResult second = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        String8 description = string_format(arena, S8("Wasm64 stack {S8}: {S8}"), frontends[frontend], first.diagnostic);
+        bool emitted = first.error == COMPILER_DRIVER_ERROR_NONE && first.has_wasm64 && second.error == COMPILER_DRIVER_ERROR_NONE && second.has_wasm64;
+        BUSTER_TEST_RAW(arguments, emitted, description);
+        if (emitted)
+        {
+            BUSTER_TEST(arguments, first.wasm64.stats.static_data_bytes % 65536 == 65520);
+            BUSTER_TEST(arguments, first.wasm64.stats.memory_min_pages == 3);
+            BUSTER_TEST(arguments, first.wasm64.bytes.length == second.wasm64.bytes.length &&
+                                       memcmp(first.wasm64.bytes.pointer, second.wasm64.bytes.pointer, first.wasm64.bytes.length) == 0);
+            Sha256 module_hash;
+            char8 module_hash_bytes[SHA256_HEX_CAPACITY];
+            sha256_init(&module_hash);
+            sha256_add(&module_hash, first.wasm64.bytes.pointer, first.wasm64.bytes.length);
+            sha256_finish_hex(&module_hash, module_hash_bytes);
+            arguments->show(arguments, S8("WASM64_STACK_EMISSION frontend={S8} argv=-target,wasm64-unknown-freestanding,-nostdinc,-O1,{S8},-o,<temporary>,<source> source_sha256={S8} module_sha256={S8}\n"),
+                            frontends[frontend], frontends[frontend], (String8){source_hash_bytes, 64}, (String8){module_hash_bytes, 64});
+            String8 node = executable_resolve_in_path(arena, S8("node"));
+            if (node.length)
+            {
+                String8 node_arguments[] = {node, script_path, output};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = 1});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            else
+            {
+                arguments->show(arguments, S8("Wasm64 stack engine execution unavailable: Node is not installed\n"));
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
 #if BUSTER_LINK_LIBC && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_host_command(Arena* arena, SliceString8 options)
@@ -4429,6 +4611,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x86_64_i128_complement);
