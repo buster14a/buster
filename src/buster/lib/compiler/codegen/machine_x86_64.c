@@ -14599,7 +14599,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             encoder.overflow = true;
                         }
-                        else
+                        else if (assembly->bytes.length)
                         {
                             memcpy(encoder.bytes + encoder.count, assembly->bytes.pointer, assembly->bytes.length);
                             encoder.count += (u32)assembly->bytes.length;

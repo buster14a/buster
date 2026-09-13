@@ -9599,7 +9599,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 {
                     encoder.error = true;
                 }
-                else
+                else if (assembly->bytes.length)
                 {
                     memcpy(encoder.bytes + encoder.count, assembly->bytes.pointer, assembly->bytes.length);
                     encoder.count += (u32)assembly->bytes.length;
