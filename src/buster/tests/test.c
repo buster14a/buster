@@ -50,6 +50,7 @@
 
 #include <buster/tests/byte_writer_test.h>
 #include <buster/tests/arena_test.h>
+#include <buster/tests/sanitizer_test.h>
 #include <buster/tests/hash_test.h>
 #include <buster/tests/simd_test.h>
 #include <buster/tests/string_test.h>
@@ -104,6 +105,7 @@
 #if BUSTER_UNITY_BUILD
 #include <buster/tests/byte_writer_test.c>
 #include <buster/tests/arena_test.c>
+#include <buster/tests/sanitizer_test.c>
 #include <buster/tests/hash_test.c>
 #include <buster/tests/simd_test.c>
 #include <buster/tests/string_test.c>
@@ -363,6 +365,7 @@ typedef enum TestId
 {
     TEST_ID_BYTE_WRITER,
     TEST_ID_ARENA,
+    TEST_ID_SANITIZER,
     TEST_ID_HASH,
     TEST_ID_SIMD,
     TEST_ID_STRING,
@@ -420,6 +423,7 @@ typedef enum TestId
 BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_BYTE_WRITER] = {S8_INITIALIZER("byte_writer_tests"), &byte_writer_tests},
     [TEST_ID_ARENA] = {S8_INITIALIZER("arena_tests"), &arena_tests},
+    [TEST_ID_SANITIZER] = {S8_INITIALIZER("sanitizer_tests"), &sanitizer_tests},
     [TEST_ID_HASH] = {S8_INITIALIZER("hash_tests"), &hash_tests},
     [TEST_ID_SIMD] = {S8_INITIALIZER("simd_tests"), &simd_tests},
     [TEST_ID_STRING] = {S8_INITIALIZER("string_tests"), &string_tests},
