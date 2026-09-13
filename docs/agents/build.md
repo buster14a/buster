@@ -114,8 +114,11 @@ build-driver worker command used only by the pooled artifact-fanout target.
 native target/allocator/frontend/PIC object matrix before running any selected
 groups. It supports an independently pinned direct compiler, fixture/target
 filters and deterministic shards without removing unexecuted rows from its
-manifest. See the [census contract](../native-retirement-census.md) for retained
-evidence, strict failure accounting and its explicit object/per-function limits.
+manifest. Executed rows require the reviewed SHA-256 support contract and an
+explicit resource-header directory; both compiler legs use its frozen copy with
+a replacement environment and no implicit system includes. See the
+[census contract](../native-retirement-census.md) for retained evidence, strict
+failure accounting and its explicit object/per-function limits.
 
 `generate --cc gcc` and the GCC combination row share native discovery policy:
 macOS selects `gcc-15` from PATH (Homebrew GCC 15); other platforms select `gcc`.

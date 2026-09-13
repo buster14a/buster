@@ -1,0 +1,80 @@
+name: Native retirement contract
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/native-retirement-contract.yml
+      - build.c
+      - docs/agents/build.md
+      - docs/native-retirement-census.md
+      - docs/native-retirement-support-v1.tsv
+      - tools/differential.c
+      - tools/native_retirement_census.c
+      - tools/native_retirement_contract.py
+      - tests/**
+  workflow_dispatch:
+
+concurrency:
+  group: native-retirement-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Frozen support and environment contract
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build and validate the manifest producer
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
+      - name: Prove unreviewed input drift fails closed
+        run: |
+          printf '\n' >> tests/basic_c_operations.c
+          if "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/drift; then
+            echo 'error: changed input was admitted without a contract update' >&2
+            exit 1
+          fi
+          test -f evidence/drift/summary.txt
+          grep -Fx 'io_failed=1' evidence/drift/summary.txt
+          git restore -- tests/basic_c_operations.c
+      - name: Exercise frozen resource and replacement environment
+        run: |
+          resource_include="$(clang -print-resource-dir)/include"
+          if "$RUNNER_TEMP/retirement-build" native_retirement_census \
+            --ide /bin/false \
+            --compiler-revision "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --baseline-ide /bin/false \
+            --baseline-revision "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --fixture basic_c_operations.c \
+            --target x86_64-unknown-linux-gnu \
+            --resource-include "$resource_include" \
+            --out evidence/resource-smoke; then
+            echo 'error: the deliberately failing compiler was accepted' >&2
+            exit 1
+          fi
+          test -s evidence/resource-smoke/dependencies.tsv
+          test -s evidence/resource-smoke/environment.tsv
+          grep -Fx 'unfrozen_dependencies=none-for-object-census' evidence/resource-smoke/manifest.txt
+          grep -q -F $'resource-header\t' evidence/resource-smoke/dependencies.tsv
+          python3 tools/native_retirement_contract.py validate evidence/resource-smoke
+      - name: Retain contract diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-retirement-contract-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
