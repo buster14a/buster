@@ -23,29 +23,24 @@ requiring them to equal the historical observation. The September 19 warning
 is still correct for the original bundles. The additional run 34726450979 has
 September 20 UTC expirations; it is not a substitute for the older runs.
 
-The approved destination inspected here is the **existing repository release**
-`native-retirement-evidence-eb1bef2`, ID 387739401. The checker resolves actual
-asset IDs, downloads their bytes into a fresh temporary directory, applies the
+The approved destinations are the repository releases
+`native-retirement-evidence-eb1bef2`, `native-retirement-evidence-2bb4ce9`, and
+`native-retirement-evidence-history-20260912`. The catalog partitions every
+artifact ID across exactly one of those tags. The checker resolves their actual
+asset IDs, downloads bytes into a fresh temporary directory, applies the
 existing helper's per-asset size/hash checks, and hashes ordered split parts
-against the frozen original Actions ZIP identity. It never trusts only an
+against each frozen original Actions ZIP identity. It never trusts only an
 internally consistent release manifest and never uploads or overwrites anything.
-Missing assets are reported as missing **from this inspected destination**, not
-as proof that no other durable copy exists. A separately approved destination
-must be explicitly recorded before this gate may inspect it.
 
 ## Reproduction and CI
 
 The `Native retirement history` workflow checks out the submitted revision and
-pins the existing archive helper to
-`b1ef825124b6bda13217b6fde62eae03f4f189a3`. This temporary cross-branch dependency
-must be reconciled with the archive owner's reviewed integration; it is not a
-copy of that implementation in the source tree. The workflow has read-only
-repository/Actions permissions and runs no compiler or benchmark.
+uses the archive helper integrated beside this checker. The workflow has
+read-only repository/Actions permissions and runs no compiler or benchmark.
 
-From the submitted checkout, with that existing helper checkout available:
+From the submitted checkout:
 
 ```sh
-export PYTHONPATH=/absolute/path/to/pinned-archive-checkout/tools
 python3 tests/native_retirement_inventory_test.py -v
 python3 tools/native_retirement_inventory.py \
   --catalog docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json \

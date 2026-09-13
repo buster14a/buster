@@ -1,14 +1,40 @@
 {
   "schema": "buster-native-retirement-history-v1",
   "repository": "buster14a/buster",
-  "release_id": 387739401,
-  "release_tag": "native-retirement-evidence-eb1bef2",
+  "durable_releases": [
+    {
+      "tag": "native-retirement-evidence-eb1bef2",
+      "artifact_ids": [10303964052, 10304642722]
+    },
+    {
+      "tag": "native-retirement-evidence-2bb4ce9",
+      "artifact_ids": [10305878954, 10305707825]
+    },
+    {
+      "tag": "native-retirement-evidence-history-20260912",
+      "artifact_ids": [
+        10304875115,
+        10304761452,
+        10304213369,
+        10308181383,
+        10307414648,
+        10305327992,
+        10305232400,
+        10304147437,
+        10303853373,
+        10303967670,
+        10303806553,
+        10303946160,
+        10303052559
+      ]
+    }
+  ],
   "inspected_main": "15b19813ca51cf993d3526acb6f66c1f51f7c377",
   "direct_oracle": {
     "commit": "3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e",
     "tree": "ffe6f065ec9a4594a18e5f984d621ba28145d247"
   },
-  "limitations": "This is a required-history ledger, not a completeness or semantic acceptance receipt. Null binary identities are unverified and must not be borrowed from another run. Host headers/resource includes and environment remain unfrozen under #508. Only the explicitly named release is inspected; a missing entry is not proof that no other durable copy exists.",
+  "limitations": "This is a required-history ledger, not semantic or retirement acceptance. Null binary identities are unverified and must not be borrowed from another run. Host headers/resource includes and environment remain unfrozen under #508.",
   "artifacts": [
     {
       "id": 10304875115,
@@ -112,8 +138,9 @@
       "candidate_tree": "0be66d46760004e4654400347e1ccf920b0fe3d5",
       "expires_at_observed": "2026-09-19T21:24:33Z",
       "recorded_outcome": "reported-strict-sanitized-7776-including-controls",
-      "candidate_binary_sha256": null,
+      "candidate_binary_sha256": "60ba044e6c33fb5e9519fa0d860d785be63f5cc1f5824e5ece57454228813a20",
       "direct_oracle_binary_sha256": null,
+      "binary_identity_evidence": "Release native-retirement-evidence-2bb4ce9 archive-manifest.json after original ZIP verification.",
       "producing_workflow_conclusion_observed": "failure"
     },
     {

@@ -101,12 +101,20 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(inventory.origin_errors(item, {}))
 
     def test_catalog_rejects_duplicates_and_missing_identities(self):
-        catalog = {"schema": inventory.SCHEMA, "repository": inventory.REPOSITORY, "artifacts": [expected()]}
+        catalog = {"schema": inventory.SCHEMA, "repository": inventory.REPOSITORY,
+                   "durable_releases": [{"tag": "test", "artifact_ids": [1]}],
+                   "artifacts": [expected()]}
         self.assertEqual(len(inventory.check_catalog(catalog)), 1)
+        self.assertEqual(inventory.destination_tags(catalog, catalog["artifacts"]), {1: "test"})
         for artifacts in ([], [expected(), expected()], [dict(expected(), candidate_commit="main")],
                           [dict(expected(), sha256="unknown")]):
             with self.subTest(artifacts=artifacts), self.assertRaises(ValueError):
                 inventory.check_catalog(dict(catalog, artifacts=artifacts))
+        for releases in ([], [{"tag": "test", "artifact_ids": []}],
+                         [{"tag": "test", "artifact_ids": [1, 1]}],
+                         [{"tag": "bad tag", "artifact_ids": [1]}]):
+            with self.subTest(releases=releases), self.assertRaises(ValueError):
+                inventory.destination_tags(dict(catalog, durable_releases=releases), catalog["artifacts"])
 
     def test_recorded_history_keeps_original_newer_and_failed_bundles(self):
         path = Path(__file__).resolve().parents[1] / "docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json"
