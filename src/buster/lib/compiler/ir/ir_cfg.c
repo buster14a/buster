@@ -138,6 +138,13 @@ BUSTER_GLOBAL_LOCAL void ir_cfg_remap_extras(Arena* scratch, IrFunction* functio
     }
 }
 
+#define IR_CFG_NARROW_POOL_COUNT_BOUND ((u64)UINT32_MAX * (u64)UINT16_MAX)
+BUSTER_CT_CHECK(sizeof(((IrFunction*)0)->instruction_count) == sizeof(u32));
+BUSTER_CT_CHECK(sizeof(((IrInstruction*)0)->target_count) == sizeof(u16));
+BUSTER_CT_CHECK(sizeof(((IrInstruction*)0)->immediate_count) == sizeof(u16));
+BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND <= UINT64_MAX / sizeof(IrBlockId));
+BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND <= UINT64_MAX / sizeof(u64));
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunction* function, IrPublishedCfg* cfg)
 {
     IrValidationResult result = ir_validation_ok();
@@ -180,8 +187,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
                 immediate_end = row->immediates + row->immediate_count;
                 cfg->immediate_count += row->immediate_count;
             }
-            if (cfg->operand_count > UINT64_MAX / sizeof(IrValueId) || cfg->target_count > UINT64_MAX / sizeof(IrBlockId) ||
-                cfg->immediate_count > UINT64_MAX / sizeof(u64))
+            // Operand counts are u32, so their u32-by-u32 total can exceed
+            // the byte-size limit. The two u16 counts are bounded at compile
+            // time above by instruction_count's u32 representation.
+            if (cfg->operand_count > UINT64_MAX / sizeof(IrValueId))
             {
                 result.error = IR_VALIDATION_INVALID_ID;
             }
@@ -198,29 +207,32 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
         cfg->allocated_bytes += operands_contiguous ? 0 : cfg->operand_count * sizeof(*operands);
         cfg->allocated_bytes += targets_contiguous ? 0 : cfg->target_count * sizeof(*targets);
         cfg->allocated_bytes += immediates_contiguous ? 0 : cfg->immediate_count * sizeof(*immediates);
-        u64 operand_cursor = 0;
-        u64 target_cursor = 0;
-        u64 immediate_cursor = 0;
-        for (u32 index = 0; index < function->instruction_count; index += 1)
+        if (!operands_contiguous || !targets_contiguous || !immediates_contiguous)
         {
-            IrInstruction* row = function->instructions + index;
-            if (!operands_contiguous && row->operand_count)
+            u64 operand_cursor = 0;
+            u64 target_cursor = 0;
+            u64 immediate_cursor = 0;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
             {
-                memcpy(operands + operand_cursor, row->operands, sizeof(*operands) * row->operand_count);
-                row->operands = operands + operand_cursor;
-                operand_cursor += row->operand_count;
-            }
-            if (!targets_contiguous && row->target_count)
-            {
-                memcpy(targets + target_cursor, row->targets, sizeof(*targets) * row->target_count);
-                row->targets = targets + target_cursor;
-                target_cursor += row->target_count;
-            }
-            if (!immediates_contiguous && row->immediate_count)
-            {
-                memcpy(immediates + immediate_cursor, row->immediates, sizeof(*immediates) * row->immediate_count);
-                row->immediates = immediates + immediate_cursor;
-                immediate_cursor += row->immediate_count;
+                IrInstruction* row = function->instructions + index;
+                if (!operands_contiguous && row->operand_count)
+                {
+                    memcpy(operands + operand_cursor, row->operands, sizeof(*operands) * row->operand_count);
+                    row->operands = operands + operand_cursor;
+                    operand_cursor += row->operand_count;
+                }
+                if (!targets_contiguous && row->target_count)
+                {
+                    memcpy(targets + target_cursor, row->targets, sizeof(*targets) * row->target_count);
+                    row->targets = targets + target_cursor;
+                    target_cursor += row->target_count;
+                }
+                if (!immediates_contiguous && row->immediate_count)
+                {
+                    memcpy(immediates + immediate_cursor, row->immediates, sizeof(*immediates) * row->immediate_count);
+                    row->immediates = immediates + immediate_cursor;
+                    immediate_cursor += row->immediate_count;
+                }
             }
         }
     }
