@@ -17,7 +17,15 @@ typedef unsigned char u8;
 typedef double F64x16 __attribute__((vector_size(128)));
 typedef u8 Byte256 __attribute__((vector_size(256)));
 
-static F64x16 vector_make(double base)
+F64x16 vector_make(double base);
+F64x16 vector_identity(F64x16 value);
+double vector_straddle(int first, long long second, F64x16 value, int third);
+double vector_third(F64x16 a, F64x16 b, F64x16 c);
+Byte256 bytes_make(unsigned base);
+Byte256 bytes_shift(int amount, Byte256 value);
+
+#if !defined(WIDE_VECTOR_CONSUMER_ONLY)
+F64x16 vector_make(double base)
 {
     F64x16 value;
     for (int lane = 0; lane < 16; lane += 1)
@@ -27,14 +35,14 @@ static F64x16 vector_make(double base)
     return value;
 }
 
-static F64x16 vector_identity(F64x16 value)
+F64x16 vector_identity(F64x16 value)
 {
     return value;
 }
 
 // Two leading slots force the pieces to start mid-file; at baseline the tail
 // pieces and the trailing scalar continue on the stack.
-static double vector_straddle(int first, long long second, F64x16 value, int third)
+double vector_straddle(int first, long long second, F64x16 value, int third)
 {
     double sum = (double)first + (double)second + (double)third;
     for (int lane = 0; lane < 16; lane += 1)
@@ -46,7 +54,7 @@ static double vector_straddle(int first, long long second, F64x16 value, int thi
 
 // Three wide arguments exhaust the register file however wide the pieces
 // are, so the last vector's references all travel as stack eightbytes.
-static double vector_third(F64x16 a, F64x16 b, F64x16 c)
+double vector_third(F64x16 a, F64x16 b, F64x16 c)
 {
     double sum = 0;
     for (int lane = 0; lane < 16; lane += 1)
@@ -56,7 +64,7 @@ static double vector_third(F64x16 a, F64x16 b, F64x16 c)
     return sum;
 }
 
-static Byte256 bytes_make(unsigned base)
+Byte256 bytes_make(unsigned base)
 {
     Byte256 value;
     for (int lane = 0; lane < 256; lane += 1)
@@ -69,7 +77,7 @@ static Byte256 bytes_make(unsigned base)
 // A 256-byte result stays behind the hidden pointer below AVX-512 and comes
 // back in zmm0-3 with it; the leading scalar keeps the slot file offset by
 // one in the argument direction.
-static Byte256 bytes_shift(int amount, Byte256 value)
+Byte256 bytes_shift(int amount, Byte256 value)
 {
     for (int lane = 0; lane < 256; lane += 1)
     {
@@ -77,38 +85,61 @@ static Byte256 bytes_shift(int amount, Byte256 value)
     }
     return value;
 }
+#endif
 
+#if !defined(WIDE_VECTOR_PROVIDER_ONLY)
 int main(void)
 {
-    F64x16 identity = vector_identity(vector_make(1.0));
-    for (int lane = 0; lane < 16; lane += 1)
+    int result = 0;
+    struct
     {
-        if (identity[lane] != 1.0 + (double)lane)
+        unsigned long long before[2];
+        F64x16 value;
+        unsigned long long after[2];
+    } guarded;
+    guarded.before[0] = 0x51c0ffee51c0ffeeull;
+    guarded.before[1] = 0x0ddf00d50ddf00d5ull;
+    guarded.after[0] = 0xdecaf00ddecaf00dull;
+    guarded.after[1] = 0x123456789abcdef0ull;
+    guarded.value = vector_make(1.0);
+    F64x16 (*volatile identity_call)(F64x16) = vector_identity;
+    F64x16 identity = identity_call(guarded.value);
+    for (int lane = 0; lane < 16 && !result; lane += 1)
+    {
+        if (identity[lane] != 1.0 + (double)lane || guarded.value[lane] != 1.0 + (double)lane)
         {
-            return 1;
+            result = 1;
         }
+    }
+    if (!result && (guarded.before[0] != 0x51c0ffee51c0ffeeull || guarded.before[1] != 0x0ddf00d50ddf00d5ull ||
+                    guarded.after[0] != 0xdecaf00ddecaf00dull || guarded.after[1] != 0x123456789abcdef0ull))
+    {
+        result = 5;
     }
 
     // 11 + 22 + 33 + sum(2..17) = 66 + 152
-    if (vector_straddle(11, 22, vector_make(2.0), 33) != 218.0)
+    if (!result && vector_straddle(11, 22, vector_make(2.0), 33) != 218.0)
     {
-        return 2;
+        result = 2;
     }
 
     // sum over lanes of (5+l) - (3+l) - (4+l) = 16 * -2 - sum(0..15)
-    if (vector_third(vector_make(3.0), vector_make(4.0), vector_make(5.0)) != -152.0)
+    if (!result && vector_third(vector_make(3.0), vector_make(4.0), vector_make(5.0)) != -152.0)
     {
-        return 3;
+        result = 3;
     }
 
-    Byte256 shifted = bytes_shift(5, bytes_make(9));
-    for (int lane = 0; lane < 256; lane += 1)
+    Byte256 original = bytes_make(9);
+    Byte256 (*volatile shift_call)(int, Byte256) = bytes_shift;
+    Byte256 shifted = shift_call(5, original);
+    for (int lane = 0; lane < 256 && !result; lane += 1)
     {
-        if (shifted[lane] != (u8)(14 + (unsigned)lane))
+        if (shifted[lane] != (u8)(14 + (unsigned)lane) || original[lane] != (u8)(9 + (unsigned)lane))
         {
-            return 4;
+            result = 4;
         }
     }
 
-    return 0;
+    return result;
 }
+#endif
