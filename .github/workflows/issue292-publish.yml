@@ -1,0 +1,115 @@
+name: Issue 292 verified source publication
+
+on:
+  push:
+    branches: [astra/issue292-transport-20260912]
+    paths: [.github/workflows/issue292-publish.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue292-source-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 670666371df9387d250f8030a57aa35b7d22bcba
+          path: transport
+          persist-credentials: false
+      - name: Verify complete patch and publish immutable objects only
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-published'
+          root.mkdir()
+          payload_bytes = pathlib.Path('../transport/issue292/payload.json').read_bytes()
+          if hashlib.sha256(payload_bytes).hexdigest() != 'a94d696e4df451825abb9dead187943dcbb573fcf0b4b6835a6c576ca37cf105':
+              raise RuntimeError('Transport bytes changed')
+          payload = json.loads(payload_bytes)
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          if git('rev-parse', 'HEAD') != payload['base'] or git('rev-parse', 'HEAD^{tree}') != payload['base_tree']:
+              raise RuntimeError('Baseline identity mismatch')
+          paths = [row['path'] for row in payload['files']]
+          allowed = {
+              'src/buster/lib/compiler/frontend/c/c_gen.c',
+              'src/buster/lib/compiler/frontend/c/c_internal.h',
+              'src/buster/lib/compiler/frontend/c/c_parse.c',
+              'src/buster/lib/compiler/frontend/c/c_parse_internal.h',
+              'src/buster/tests/compiler/driver/driver_test.c',
+              'src/buster/tests/compiler/frontend/c/c_test.c',
+          }
+          if set(paths) != allowed or len(paths) != len(allowed):
+              raise RuntimeError('Unexpected file set')
+          for row in payload['files']:
+              if git('hash-object', row['path']) != row['before_blob']:
+                  raise RuntimeError('Preimage mismatch: ' + row['path'])
+          patch = gzip.decompress(base64.b64decode(payload['patch_gzip_base64'], validate=True))
+          if hashlib.sha256(patch).hexdigest() != payload['patch_sha256']:
+              raise RuntimeError('Patch hash mismatch')
+          patch_path = root / 'candidate.patch'
+          patch_path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(patch_path)], check=True)
+          subprocess.run(['git', 'apply', str(patch_path)], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          if set(git('diff', '--name-only').splitlines()) != allowed:
+              raise RuntimeError('Applied path set mismatch')
+          for row in payload['files']:
+              data = pathlib.Path(row['path']).read_bytes()
+              if hashlib.sha256(data).hexdigest() != row['sha256'] or git('hash-object', row['path']) != row['git_blob']:
+                  raise RuntimeError('Candidate mismatch: ' + row['path'])
+          subprocess.run(['git', 'add', '--', *paths], check=True)
+          expected_tree = git('write-tree')
+          endpoint = 'https://api.github.com/repos/buster14a/buster/'
+          def post(path, body):
+              request = urllib.request.Request(endpoint + path, data=json.dumps(body).encode(), method='POST',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  return json.load(response)
+          entries = []
+          for row in payload['files']:
+              blob = post('git/blobs', {'content': pathlib.Path(row['path']).read_text(), 'encoding': 'utf-8'})
+              if blob['sha'] != row['git_blob']:
+                  raise RuntimeError('Remote blob mismatch')
+              entries.append({'path': row['path'], 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = post('git/trees', {'base_tree': payload['base_tree'], 'tree': entries})
+          if tree['sha'] != expected_tree:
+              raise RuntimeError('Remote tree mismatch')
+          commit = post('git/commits', {'message': 'c: share call arity validation with unevaluated operands\n\nRefs #292. This fixes demonstrated sizeof call constraints; it does not yet provide the full IR-free syntax-only endpoint.',
+                                       'tree': tree['sha'], 'parents': [payload['base']]})
+          result = {'commit': commit['sha'], 'tree': tree['sha'], 'base': payload['base'],
+                    'patch_sha256': payload['patch_sha256'], 'files': payload['files'],
+                    'validation': 'Source identity and git diff --check only; no compiler tests in publication job.'}
+          (root / 'publication.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Candidate commit: `' + commit['sha'] + '`\n\nNo repository refs were moved. Compiler validation is separate.\n')
+          PY
+      - name: Retain exact patch and publication identities
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue292-published-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue292-published/
+          if-no-files-found: error
+          retention-days: 7
