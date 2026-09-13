@@ -1,11 +1,13 @@
 #pragma once
 
-// Private test seams for production constexpr, expression typing, binding, and aggregate-tag queries.
+// Private test seams for production constexpr, call arity, expression typing, binding, and aggregate-tag queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
+                                                        u32 start, u32 end);
 BUSTER_F_DECL bool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                        CDeclaration* declaration);
 BUSTER_F_DECL u32 c_test_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol);

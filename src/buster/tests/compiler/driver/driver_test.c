@@ -1299,6 +1299,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArg
     return result;
 }
 
+// The same sources reach the frontend through syntax-only and object actions.
+// Compare structured diagnostics as well as their rendered severity/location/
+// ordering; backend capability failures are deliberately absent from this corpus.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool valid;
+    } cases[] = {
+        {S8("int f(int); int g(void) { return sizeof(f()); }\n"), false},
+        {S8("int f(void); int g(void) { return sizeof(f(1)); }\n"), false},
+        {S8("int f(int, ...); int g(void) { return sizeof(f()); }\n"), false},
+        {S8("int g(int (*p)(int)) { return sizeof(p()); }\n"), false},
+        {S8("int g(void) { const int x = 1; x = 2; return x; }\n"), false},
+        {S8("void g(void) { return 1; }\n"), false},
+        {S8("int g(void) { return; }\n"), false},
+        {S8("_Static_assert(0, \"syntax diagnostic corpus\");\n"), false},
+        {S8("int g(int x) { return _Generic(x, int: 1, int: 2); }\n"), false},
+        {S8("int g(int n) { int a[n] = {1}; return a[0]; }\n"), false},
+        {S8("int g(int n) { switch(n) { case 1: return 1; case 1: return 2; } return 0; }\n"), false},
+        {S8("int f(int); int g(void) { return sizeof(f(1)); }\n"), true},
+        {S8("int g(int x) { return x * 3 + 1; }\n"), true},
+        {S8("static int x; int *p = &x;\n"), true},
+    };
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-syntax-diagnostic-corpus"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-syntax-diagnostic-corpus"), S8(".o"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)));
+            String8 syntax_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-fsyntax-only"), input};
+            String8 object_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-c"), S8("-o"), output, input};
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+            CompilerDriverResult object = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+            BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid);
+            BUSTER_TEST(arguments, syntax.error == object.error);
+            BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+            BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
+            BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
+            for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(syntax.diagnostic_count, object.diagnostic_count); diagnostic += 1)
+            {
+                CompilerDiagnostic first = syntax.diagnostics[diagnostic];
+                CompilerDiagnostic second = object.diagnostics[diagnostic];
+                BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
+                BUSTER_STRING_TEST(arguments, first.code, second.code);
+                BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
+                BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4390,6 +4453,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
 
     TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);
 
