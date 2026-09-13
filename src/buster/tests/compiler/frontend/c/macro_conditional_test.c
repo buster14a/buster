@@ -9,6 +9,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected)
 {
     UnitTestResult result = {0};
@@ -46,6 +47,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(U
     }
     return result;
 }
+#endif
 
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
