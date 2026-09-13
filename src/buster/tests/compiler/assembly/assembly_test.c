@@ -5390,10 +5390,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(aarch64_jump.bytes.pointer, expected_aarch64_jump, sizeof(expected_aarch64_jump)) == 0);
     BUSTER_TEST(arguments, aarch64_jump.relocation_count == 1 && aarch64_jump.relocations[0].offset == 0 &&
                                aarch64_jump.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_JUMP26);
-    Target aarch64_baseline_target = aarch64_target;
-    aarch64_baseline_target.cpu_model = CPU_MODEL_BASELINE;
+    Target aarch64_inline_baseline_target = aarch64_target;
+    aarch64_inline_baseline_target.cpu_model = CPU_MODEL_BASELINE;
     AssemblyEncodeResult aarch64_inline_conditional = assembly_encode(
-        arguments->arena, S8("cbnz w9, .Lbuster.inline.asm.0.1\n"), (AssemblyEncodeOptions){.target = aarch64_baseline_target});
+        arguments->arena, S8("cbnz w9, .Lbuster.inline.asm.0.1\n"), (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
     static u8 const expected_aarch64_inline_conditional[] = {0x09, 0x00, 0x00, 0x35};
     BUSTER_TEST(arguments, aarch64_inline_conditional.diagnostic_count == 0 &&
                                aarch64_inline_conditional.bytes.length == sizeof(expected_aarch64_inline_conditional) &&
@@ -5405,7 +5405,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyEncodeResult aarch64_inline_multiple = assembly_encode(
         arguments->arena,
         S8("cbz w9, .Lbuster.inline.asm.0.1\ncmp w9, #1\nb.eq .Lbuster.inline.asm.0.2\n"),
-        (AssemblyEncodeOptions){.target = aarch64_baseline_target});
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
     static u8 const expected_aarch64_inline_multiple[] = {
         0x09, 0x00, 0x00, 0x34, 0x3f, 0x05, 0x00, 0x71, 0x00, 0x00, 0x00, 0x54,
     };
