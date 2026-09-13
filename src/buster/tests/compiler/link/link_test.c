@@ -2508,6 +2508,255 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
     return result;
 }
 
+// Places a synthetic image at the start of `arena` and appends the production
+// ELF section table to it. Unless `dirty_tail` is UINT64_MAX, the arena bytes
+// below that offset into the appended tail are poisoned and rewound first, so
+// on a fresh arena the dirty high-water mark lies exactly there and the storage
+// above it has never been written. `copy` allocates one byte after the image,
+// so the append cannot grow the image in place and takes its copying path.
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_section_table_place(Arena* arena, ByteSlice prefix, ObjectFile* object, u64 dirty_tail, u8 poison,
+                                                                             bool copy, u8** image)
+{
+    arena_reset_to_start(arena);
+    if (dirty_tail != UINT64_MAX)
+    {
+        u64 dirty = (copy ? prefix.length * 2 + 1 : prefix.length) + dirty_tail;
+        memset(arena_allocate(arena, u8, dirty), poison, dirty);
+        arena_reset_to_start(arena);
+    }
+    *image = arena_allocate(arena, u8, prefix.length);
+    memcpy(*image, prefix.pointer, prefix.length);
+    if (copy)
+    {
+        *arena_allocate(arena, u8, 1) = 0xee;
+    }
+    return link_elf_test_section_table_append(arena, (ByteSlice){.pointer = *image, .length = prefix.length}, object);
+}
+
+// The ELF section-table append zeroes its tail through the arena's dirty-aware
+// allocation, so no byte of its image may depend on what the arena held. A
+// fresh mapping, a dirty high-water mark at each boundary inside the tail, the
+// copying growth path and repeated reuse all reproduce the fresh bump's image;
+// the image prefix survives, and the bytes nothing writes are zero.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_section_table_tail(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Every link_elf_debug_kinds entry, in its order.
+    ObjectSectionKind debug_kinds[] = {
+        OBJECT_SECTION_DEBUG_INFO,     OBJECT_SECTION_DEBUG_ABBREV,   OBJECT_SECTION_DEBUG_LINE,     OBJECT_SECTION_DEBUG_STR,
+        OBJECT_SECTION_DEBUG_LOC,      OBJECT_SECTION_DEBUG_RANGES,   OBJECT_SECTION_DEBUG_ADDR,     OBJECT_SECTION_DEBUG_STR_OFFSETS,
+        OBJECT_SECTION_DEBUG_LINE_STR, OBJECT_SECTION_DEBUG_RNGLISTS, OBJECT_SECTION_DEBUG_LOCLISTS,
+    };
+    // Neither pattern contains a zero byte, so a cleared byte cannot pass for
+    // a preserved one.
+    u8 debug_bytes[64] = {0};
+    for (u32 index = 0; index < sizeof(debug_bytes); index += 1)
+    {
+        debug_bytes[index] = (u8)(0x41 + index * 7);
+    }
+    u8 prefix_bytes[136] = {0};
+    for (u32 index = 0; index < sizeof(prefix_bytes); index += 1)
+    {
+        prefix_bytes[index] = (u8)(0x80 | index);
+    }
+    // link_test_elf_section_find reads only an image with the ELF magic.
+    memcpy(prefix_bytes, "\x7f" "ELF", 4);
+    u8 poisons[] = {0xa5, 0x5a};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    ArenaCreation creation = {.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}};
+    // One arena for every repeated append: each is handed the poison and the
+    // images of every earlier shape and length as its dirty storage.
+    Arena* reused = arena_create(creation);
+    if (BUSTER_REQUIRE(arguments, reused != 0))
+    {
+        memset(arena_allocate(reused, u8, BUSTER_KB(16)), 0xc3, BUSTER_KB(16));
+        arena_reset_to_start(reused);
+        for (u32 shape = 0; shape < 2; shape += 1)
+        {
+            ObjectFile object = link_test_object_make(arguments->arena, target, (ByteSlice){0}, 0, 0, 0, 0);
+            for (u32 index = 0; shape && index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+            {
+                object.sections[debug_kinds[index]].data = (ByteSlice){.pointer = debug_bytes + index, .length = (u64)index * 3 + 1};
+            }
+            // Eight prefix lengths give the padding before the section table
+            // every width from none to seven bytes.
+            for (u64 length = 128; length < sizeof(prefix_bytes); length += 1)
+            {
+                ByteSlice prefix = {.pointer = prefix_bytes, .length = length};
+                Arena* fresh = arena_create(creation);
+                if (BUSTER_REQUIRE(arguments, fresh != 0))
+                {
+                    u8* image = 0;
+                    NativeExecutableLinkResult reference = link_test_section_table_place(fresh, prefix, &object, UINT64_MAX, 0, false, &image);
+                    ByteSlice expected = reference.executable;
+                    if (BUSTER_REQUIRE(arguments, reference.error == LINK_ERROR_NONE && expected.pointer == image && expected.length > length + 64))
+                    {
+                        u64 table = link_read_u64(expected.pointer, 40);
+                        u16 section_count = 0;
+                        u16 string_index = 0;
+                        memcpy(&section_count, expected.pointer + 60, sizeof(section_count));
+                        memcpy(&string_index, expected.pointer + 62, sizeof(string_index));
+                        if (BUSTER_REQUIRE(arguments, table >= length && table <= expected.length && (u32)string_index + 1 == (u32)section_count &&
+                                                          expected.length - table == (u64)section_count * 64))
+                        {
+                            u64 string_header = table + (u64)string_index * 64;
+                            u64 string_offset = link_read_u64(expected.pointer, string_header + 24);
+                            u64 string_size = link_read_u64(expected.pointer, string_header + 32);
+                            if (BUSTER_REQUIRE(arguments,
+                                               string_offset >= length && string_size != 0 && string_offset <= table && string_size <= table - string_offset))
+                            {
+                                u64 string_end = string_offset + string_size;
+                                // The prefix survives except for the ELF header's section-table fields.
+                                BUSTER_TEST(arguments, memcmp(expected.pointer, prefix.pointer, 40) == 0);
+                                BUSTER_TEST(arguments, memcmp(expected.pointer + 48, prefix.pointer + 48, 10) == 0);
+                                BUSTER_TEST(arguments, memcmp(expected.pointer + 64, prefix.pointer + 64, length - 64) == 0);
+                                // Nothing writes the padding, the null section header, the
+                                // string separators or the string table header's unused fields.
+                                u64 nonzero = 0;
+                                u32 separators = 0;
+                                for (u64 offset = string_end; offset < table + 64; offset += 1)
+                                {
+                                    nonzero += expected.pointer[offset] != 0;
+                                }
+                                for (u64 offset = string_offset; offset < string_end; offset += 1)
+                                {
+                                    separators += expected.pointer[offset] == 0;
+                                }
+                                BUSTER_TEST(arguments, table == align_forward(string_end, 8));
+                                BUSTER_TEST(arguments, nonzero == 0);
+                                BUSTER_TEST(arguments, expected.pointer[string_offset] == 0 && separators == (u32)section_count);
+                                BUSTER_TEST(arguments, link_read_u64(expected.pointer, string_header + 8) == 0 &&
+                                                           link_read_u64(expected.pointer, string_header + 16) == 0 &&
+                                                           link_read_u32(expected.pointer, string_header + 40) == 0 &&
+                                                           link_read_u32(expected.pointer, string_header + 44) == 0 &&
+                                                           link_read_u64(expected.pointer, string_header + 56) == 0);
+                                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+                                {
+                                    ByteSlice data = object.sections[debug_kinds[index]].data;
+                                    u64 header = 0;
+                                    bool found = link_test_elf_section_find(expected, object_section_name_for_kind(debug_kinds[index]), 0, &header);
+                                    // Without input bytes only the DWARF 4 family keeps its empty section.
+                                    BUSTER_TEST(arguments, found == (shape != 0 || debug_kinds[index] < OBJECT_SECTION_DEBUG_ADDR));
+                                    if (found)
+                                    {
+                                        u64 offset = link_read_u64(expected.pointer, header + 24);
+                                        u64 size = link_read_u64(expected.pointer, header + 32);
+                                        BUSTER_TEST(arguments, size == data.length && offset >= length && offset <= string_offset &&
+                                                                   size <= string_offset - offset &&
+                                                                   (size == 0 || memcmp(expected.pointer + offset, data.pointer, size) == 0));
+                                    }
+                                }
+                                u64 tail = expected.length - length;
+                                u64 boundaries[] = {
+                                    0, 1, string_end - length, string_end - length + 1, table - length + 1, tail - 1, tail, tail + BUSTER_KB(4),
+                                };
+                                for (u32 copy = 0; copy < 2; copy += 1)
+                                {
+                                    for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(boundaries); boundary += 1)
+                                    {
+                                        Arena* dirty = arena_create(creation);
+                                        if (BUSTER_REQUIRE(arguments, dirty != 0))
+                                        {
+                                            u8* placed = 0;
+                                            NativeExecutableLinkResult linked = link_test_section_table_place(dirty, prefix, &object, boundaries[boundary],
+                                                                                                              poisons[boundary % 2], copy != 0, &placed);
+                                            u8* grown = copy ? placed + length + 1 : placed;
+                                            BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE && linked.executable.pointer == grown &&
+                                                                       linked.executable.length == expected.length &&
+                                                                       memcmp(linked.executable.pointer, expected.pointer, expected.length) == 0);
+                                            // Copying leaves the original image and the allocation after it alone.
+                                            BUSTER_TEST(arguments, !copy || (memcmp(placed, prefix.pointer, length) == 0 && placed[length] == 0xee));
+                                            BUSTER_TEST(arguments, arena_destroy(dirty, 1));
+                                        }
+                                    }
+                                }
+                                for (u32 copy = 0; copy < 2; copy += 1)
+                                {
+                                    BUSTER_TEST(arguments, arena_dirty_position(reused) >= arena_minimum_position + length * 2 + 1 + tail);
+                                    u8* placed = 0;
+                                    NativeExecutableLinkResult linked =
+                                        link_test_section_table_place(reused, prefix, &object, UINT64_MAX, 0, copy != 0, &placed);
+                                    u8* grown = copy ? placed + length + 1 : placed;
+                                    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE && linked.executable.pointer == grown &&
+                                                               linked.executable.length == expected.length &&
+                                                               memcmp(linked.executable.pointer, expected.pointer, expected.length) == 0);
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, arena_destroy(fresh, 1));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(reused, 1));
+    }
+
+    // The production writers reach the append on its bump path. Every debug
+    // section survives into their images, and relinking over a poisoned output
+    // arena reproduces the fresh image exactly.
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u8 aarch64_text[] = {0x00, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ByteSlice text =
+            architectures[architecture] == CPU_ARCH_AARCH64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text) : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text);
+        ObjectSymbol symbols[] = {
+            {.name = S8("main"), .kind = OBJECT_SYMBOL_FUNCTION, .section = OBJECT_SECTION_TEXT, .size = text.length, .global = true},
+        };
+        Target writer_target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        ObjectFile object = link_test_object_make(arguments->arena, writer_target, text, symbols, BUSTER_ARRAY_LENGTH(symbols), 0, 0);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+        {
+            object.sections[debug_kinds[index]].data = (ByteSlice){.pointer = debug_bytes + index, .length = (u64)index * 3 + 1};
+        }
+        Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = 1}});
+        Arena* temporary = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = 1}});
+        if (BUSTER_REQUIRE(arguments, output != 0 && temporary != 0))
+        {
+            ByteSlice first = {0};
+            for (u32 iteration = 0; iteration < 1 + BUSTER_ARRAY_LENGTH(poisons); iteration += 1)
+            {
+                if (iteration)
+                {
+                    u64 poisoned = arena_dirty_position(output) - arena_minimum_position + BUSTER_KB(64);
+                    memset(arena_allocate(output, u8, poisoned), poisons[iteration - 1], poisoned);
+                    arena_reset_to_start(output);
+                }
+                NativeExecutableLinkOptions options = {.entry_symbol = S8("main")};
+                NativeExecutableLinkResult linked = link_elf_test_executable(output, temporary, &object, options);
+                if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+                {
+                    if (!iteration)
+                    {
+                        first.length = linked.executable.length;
+                        first.pointer = arena_allocate(arguments->arena, u8, first.length);
+                        memcpy(first.pointer, linked.executable.pointer, first.length);
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+                        {
+                            ByteSlice data = object.sections[debug_kinds[index]].data;
+                            u64 header = 0;
+                            BUSTER_TEST(arguments, link_test_elf_section_find(first, object_section_name_for_kind(debug_kinds[index]), 0, &header));
+                            u64 offset = link_read_u64(first.pointer, header + 24);
+                            u64 size = link_read_u64(first.pointer, header + 32);
+                            BUSTER_TEST(arguments, header != 0 && size == data.length && offset <= first.length && size <= first.length - offset &&
+                                                       memcmp(first.pointer + offset, data.pointer, size) == 0);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, linked.executable.length == first.length && memcmp(linked.executable.pointer, first.pointer, first.length) == 0);
+                    }
+                }
+                arena_reset_to_start(output);
+            }
+        }
+        BUSTER_TEST(arguments, !output || arena_destroy(output, 1));
+        BUSTER_TEST(arguments, !temporary || arena_destroy(temporary, 1));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_unused_got_marker(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2805,6 +3054,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult initialized = link_test_merged_section_initialization(arguments);
     result.succeeded_test_count += initialized.succeeded_test_count;
     result.test_count += initialized.test_count;
+    UnitTestResult section_table_tail = link_test_elf_section_table_tail(arguments);
+    result.succeeded_test_count += section_table_tail.succeeded_test_count;
+    result.test_count += section_table_tail.test_count;
     UnitTestResult alignment = link_test_elf_data_alignment(arguments);
     result.succeeded_test_count += alignment.succeeded_test_count;
     result.test_count += alignment.test_count;

@@ -152,9 +152,9 @@ checksum of the normalized JSONL emitted by the importer.
 
 The current audit output has 7,491 coverage rows, 7,491 canonical forms,
 22,631 fields, 23,039 segments, 26,262 operands, 7,855 predicate uses, and
-116 distinct predicate features. The flat-chunk header is 3,952,180 bytes
-(checksum `52b6075d82359ef6`), the flat-chunk coverage include is 299,898
-bytes (checksum `ec5065a9b4503e40`), and the sorted string pool is 337,490
+116 distinct predicate features. The flat-chunk header is 3,952,200 bytes
+(checksum `df371ae89b4e5326`), the flat-chunk coverage include is 299,900
+bytes (checksum `d0f324311530f995`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
 the proven-signature index contains 4,333 ranges and 4,333 candidates.
