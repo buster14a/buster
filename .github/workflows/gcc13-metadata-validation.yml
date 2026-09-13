@@ -1,0 +1,145 @@
+name: GCC 13 metadata prerequisite evidence
+
+# Session-only execution branch. This workflow is not part of the source PR.
+# Compiler configuration and tests use the existing native build driver.
+on:
+  push:
+    branches: [codex/gcc13-metadata-validation-20260912]
+
+concurrency:
+  group: gcc13-metadata-validation-20260912
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    if: ${{ github.repository == 'buster14a/buster' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      BASE_SHA: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+      CANDIDATE_BRANCH: codex/gcc13-metadata-width-20260912
+      BUSTER_GCC: /usr/bin/gcc-13
+      BUSTER_TEST_JOBS: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Checkout frozen source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+          persist-credentials: false
+
+      - name: Publish source-only candidate
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gcc13-metadata"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          path = Path('src/buster/tests/compiler/assembly/x86_64_metadata_test.c')
+          data = path.read_bytes()
+          blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          if blob != '2b6ff0be6792795da3360189a134522978984de2':
+              raise SystemExit('Frozen metadata test blob does not match inspected source')
+          old = b'            u16 memory_bits = vector_bits / test_case.memory_divisor;\n'
+          new = (b'            // Both operands promote to int; fixture widths are at most 512 bits.\n'
+                 b'            u16 memory_bits = (u16)(vector_bits / test_case.memory_divisor);\n'
+                 b'            valid &= (u32)memory_bits * test_case.memory_divisor == vector_bits;\n')
+          if data.count(old) != 1:
+              raise SystemExit('Expected exactly one inspected width calculation')
+          path.write_bytes(data.replace(old, new, 1))
+          PY
+          test "$(git diff --name-only)" = src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/gcc13-metadata/candidate.patch"
+          git add -- src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'test(x86): make broadcast width narrowing explicit for GCC 13'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/gcc13-metadata/candidate-sha.txt"
+          git rev-parse 'HEAD^{tree}' | tee "$RUNNER_TEMP/gcc13-metadata/candidate-tree.txt"
+          git show --stat --oneline HEAD
+          remote_sha=$(git ls-remote origin "refs/heads/$CANDIDATE_BRANCH" | cut -f1)
+          test "$remote_sha" = "$BASE_SHA"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          printf '::add-mask::%s\n' "$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
+          printf 'Source candidate: `%s`\n\nFrozen baseline: `%s`\n' "$(git rev-parse HEAD)" "$BASE_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure frozen GCC 13 baseline
+        id: configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$BASE_SHA"
+          exec > >(tee "$RUNNER_TEMP/gcc13-metadata/configure.log") 2>&1
+          git rev-parse HEAD
+          uname -a
+          nproc
+          free -m
+          "$BUSTER_GCC" --version
+          clang --version
+          cmake --version
+          ninja --version
+          printf 'BUSTER_TEST_JOBS=%s CMAKE_BUILD_PARALLEL_LEVEL=%s\n' "$BUSTER_TEST_JOBS" "$CMAKE_BUILD_PARALLEL_LEVEL"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-driver"
+          "$RUNNER_TEMP/buster-driver" generate --sanitize --cc gcc --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+
+      - name: Require baseline registered-test compilation failure
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          set +e
+          "$RUNNER_TEMP/buster-driver" build --config Debug -t ide 2>&1 | tee "$RUNNER_TEMP/gcc13-metadata/baseline.log"
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > "$RUNNER_TEMP/gcc13-metadata/baseline-exit.txt"
+          test "$result" -ne 0
+          grep -E 'x86_64_metadata_test\.c:2351:[0-9]+: error:.*\[-Werror=conversion\]' "$RUNNER_TEMP/gcc13-metadata/baseline.log"
+          printf '\nBaseline: expected GCC conversion diagnostic reproduced; build exit %s.\n' "$result" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and execute candidate registered suite
+        id: candidate
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' && steps.configure.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate=$(cat "$RUNNER_TEMP/gcc13-metadata/candidate-sha.txt")
+          git checkout --detach "$candidate"
+          test "$(git rev-parse HEAD)" = "$candidate"
+          git diff --exit-code
+          git diff --cached --exit-code
+          # Reuse the identical configured tree; only the inspected source changed.
+          "$RUNNER_TEMP/buster-driver" build --config Debug -t test_all 2>&1 | tee "$RUNNER_TEMP/gcc13-metadata/candidate.log"
+          printf '\nCandidate registered suite: passed on `%s`.\n' "$candidate" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record observed step outcomes
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PUBLISH_RESULT: ${{ steps.publish.outcome }}
+          CONFIGURE_RESULT: ${{ steps.configure.outcome }}
+          BASELINE_RESULT: ${{ steps.baseline.outcome }}
+          CANDIDATE_RESULT: ${{ steps.candidate.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/gcc13-metadata"
+          printf 'publish=%s\nconfigure=%s\nbaseline=%s\ncandidate=%s\n' "$PUBLISH_RESULT" "$CONFIGURE_RESULT" "$BASELINE_RESULT" "$CANDIDATE_RESULT" | tee "$RUNNER_TEMP/gcc13-metadata/outcomes.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve raw evidence, including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gcc13-metadata-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gcc13-metadata
+          if-no-files-found: error
+          retention-days: 14
