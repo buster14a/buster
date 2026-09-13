@@ -55,6 +55,9 @@ static int tp_host_lock_acquire(char const* path, TpHostLock* lock)
         struct stat info;
         if (!error && fstat(descriptor, &info) != 0) error = errno;
         if (!error && !S_ISREG(info.st_mode)) error = EINVAL;
+        if (!error && info.st_nlink != 1) error = EINVAL;
+        if (!error && info.st_uid != geteuid()) error = EACCES;
+        if (!error && (info.st_mode & 077) != 0) error = EACCES;
         if (!error && flock(descriptor, LOCK_EX | LOCK_NB) != 0) error = errno;
         if (!error) lock->descriptor = descriptor;
         else if (descriptor >= 0) close(descriptor);
