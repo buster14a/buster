@@ -21,8 +21,8 @@ jobs:
     permissions:
       contents: write
     env:
-      BASE_SHA: 15b19813ca51cf993d3526acb6f66c1f51f7c377
-      CANDIDATE_BRANCH: codex/gcc13-metadata-width-20260912
+      BASE_SHA: 327c985506ef991036a0ce9cea63b176ce10ab8a
+      CANDIDATE_BRANCH: codex/gcc13-test-widths-evidence-20260912
       BUSTER_GCC: /usr/bin/gcc-13
       BUSTER_TEST_JOBS: '1'
       CMAKE_BUILD_PARALLEL_LEVEL: '1'
@@ -31,7 +31,7 @@ jobs:
       - name: Checkout frozen source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+          ref: 327c985506ef991036a0ce9cea63b176ce10ab8a
           persist-credentials: false
 
       - name: Publish source-only candidate
@@ -46,24 +46,22 @@ jobs:
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
-          path = Path('src/buster/tests/compiler/assembly/x86_64_metadata_test.c')
+          path = Path('src/buster/tests/compiler/codegen/machine_test.c')
           data = path.read_bytes()
           blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-          if blob != '2b6ff0be6792795da3360189a134522978984de2':
-              raise SystemExit('Frozen metadata test blob does not match inspected source')
-          old = b'            u16 memory_bits = vector_bits / test_case.memory_divisor;\n'
-          new = (b'            // Both operands promote to int; fixture widths are at most 512 bits.\n'
-                 b'            u16 memory_bits = (u16)(vector_bits / test_case.memory_divisor);\n'
-                 b'            valid &= (u32)memory_bits * test_case.memory_divisor == vector_bits;\n')
+          if blob != '239072972a80656ee3aa59c72ddf5a6c9dd83e0a':
+              raise SystemExit('Frozen machine test blob does not match inspected source')
+          old = b'                    call_push_count += (call_placement.callee_saved_mask >> physical_register) & 1u;\n'
+          new = b'                    call_push_count += (u32)((call_placement.callee_saved_mask >> physical_register) & 1u);\n'
           if data.count(old) != 1:
-              raise SystemExit('Expected exactly one inspected width calculation')
+              raise SystemExit('Expected exactly one inspected call-push counter')
           path.write_bytes(data.replace(old, new, 1))
           PY
-          test "$(git diff --name-only)" = src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+          test "$(git diff --name-only)" = src/buster/tests/compiler/codegen/machine_test.c
           git diff --check
           git diff --binary > "$RUNNER_TEMP/gcc13-metadata/candidate.patch"
-          git add -- src/buster/tests/compiler/assembly/x86_64_metadata_test.c
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'test(x86): make broadcast width narrowing explicit for GCC 13'
+          git add -- src/buster/tests/compiler/codegen/machine_test.c
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'test(machine): explicitly narrow masked callee-saved register bit'
           git rev-parse HEAD | tee "$RUNNER_TEMP/gcc13-metadata/candidate-sha.txt"
           git rev-parse 'HEAD^{tree}' | tee "$RUNNER_TEMP/gcc13-metadata/candidate-tree.txt"
           git show --stat --oneline HEAD
@@ -105,7 +103,7 @@ jobs:
           set -e
           printf '%s\n' "$result" > "$RUNNER_TEMP/gcc13-metadata/baseline-exit.txt"
           test "$result" -ne 0
-          grep -E 'x86_64_metadata_test\.c:2351:[0-9]+: error:.*\[-Werror=conversion\]' "$RUNNER_TEMP/gcc13-metadata/baseline.log"
+          grep -E 'machine_test\.c:7241:[0-9]+: error:.*\[-Werror=conversion\]' "$RUNNER_TEMP/gcc13-metadata/baseline.log"
           printf '\nBaseline: expected GCC conversion diagnostic reproduced; build exit %s.\n' "$result" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build and execute candidate registered suite
