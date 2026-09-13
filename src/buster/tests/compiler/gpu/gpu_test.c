@@ -21,6 +21,26 @@ BUSTER_GLOBAL_LOCAL bool gpu_test_step_has_argument(GpuPipelinePlan plan, u32 st
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool gpu_test_step_has_argument_sequence(GpuPipelinePlan plan, u32 step_index, String8* sequence, u32 sequence_count)
+{
+    bool result = false;
+    if (step_index < plan.step_count && plan.steps[step_index].kind == GPU_PIPELINE_STEP_PROCESS)
+    {
+        SliceString8 arguments = plan.steps[step_index].arguments;
+        for (u64 start = 0; start + sequence_count <= arguments.length && !result; start += 1)
+        {
+            bool matches = true;
+            for (u32 index = 0; index < sequence_count; index += 1)
+            {
+                matches = matches && string_equal(arguments.pointer[start + index], sequence[index]);
+            }
+            result = matches;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool gpu_test_plan_has_tool(GpuPipelinePlan plan, String8 tool)
 {
     bool result = false;
@@ -139,6 +159,38 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("--target=spirv64v1.6-unknown-vulkan1.3")));
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("-c")));
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("cl")));
+    }
+    {
+        CPreprocessorOperation operations[] = {
+            {S8("ORDERED"), C_PREPROCESSOR_OPERATION_UNDEFINE},
+            {S8("ORDERED=1"), C_PREPROCESSOR_OPERATION_DEFINE},
+            {S8("ORDERED"), C_PREPROCESSOR_OPERATION_UNDEFINE},
+            {S8("FUNCTION(x)=x + x"), C_PREPROCESSOR_OPERATION_DEFINE},
+        };
+        String8 expected[] = {S8("-UORDERED"), S8("-DORDERED=1"), S8("-UORDERED"), S8("-DFUNCTION(x)=x + x")};
+        String8 inputs[][1] = {{S8("kernel.cl")}, {S8("shader.metal")}, {S8("shader.hlsl")}};
+        String8 targets[] = {S8("spirv64"), S8("air64-apple-macos"), S8("dxil-pc-shadermodel6.9-compute")};
+        for (u32 consumer = 0; consumer < BUSTER_ARRAY_LENGTH(targets); consumer += 1)
+        {
+            GpuPipelineOptions options = gpu_test_options(inputs[consumer], 1, gpu_test_target(targets[consumer]), GPU_PIPELINE_ACTION_OBJECT);
+            options.macro_operations = operations;
+            options.macro_operation_count = BUSTER_ARRAY_LENGTH(operations);
+            GpuPipelinePlan plan = gpu_pipeline_plan(arena, options);
+            BUSTER_TEST(arguments, plan.error == GPU_PIPELINE_ERROR_NONE && plan.step_count != 0);
+            BUSTER_TEST(arguments, gpu_test_step_has_argument_sequence(plan, 0, expected, BUSTER_ARRAY_LENGTH(expected)));
+        }
+
+        String8 legacy_definitions[] = {S8("FIRST=1"), S8("SECOND(x)=x")};
+        String8 legacy_undefinitions[] = {S8("FIRST")};
+        String8 legacy_expected[] = {S8("-DFIRST=1"), S8("-DSECOND(x)=x"), S8("-UFIRST")};
+        GpuPipelineOptions legacy = gpu_test_options(inputs[0], 1, gpu_test_target(targets[0]), GPU_PIPELINE_ACTION_OBJECT);
+        legacy.definitions = legacy_definitions;
+        legacy.undefinitions = legacy_undefinitions;
+        legacy.definition_count = BUSTER_ARRAY_LENGTH(legacy_definitions);
+        legacy.undefinition_count = BUSTER_ARRAY_LENGTH(legacy_undefinitions);
+        GpuPipelinePlan legacy_plan = gpu_pipeline_plan(arena, legacy);
+        BUSTER_TEST(arguments, legacy_plan.error == GPU_PIPELINE_ERROR_NONE && legacy_plan.step_count != 0);
+        BUSTER_TEST(arguments, gpu_test_step_has_argument_sequence(legacy_plan, 0, legacy_expected, BUSTER_ARRAY_LENGTH(legacy_expected)));
     }
     {
         String8 inputs[] = {S8("kernel.cl")};

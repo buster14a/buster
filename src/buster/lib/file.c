@@ -108,27 +108,24 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
 #elif BUSTER_LINUX || BUSTER_MACOS
     {
         char* path_buffer = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
-        if (path_buffer)
-        {
-            memcpy(path_buffer, path.pointer, path.length);
-            path_buffer[path.length] = 0;
+        memcpy(path_buffer, path.pointer, path.length);
+        path_buffer[path.length] = 0;
 
-            int file_descriptor = open(path_buffer, O_RDONLY, 0);
-            if (file_descriptor >= 0)
+        int file_descriptor = open(path_buffer, O_RDONLY, 0);
+        if (file_descriptor >= 0)
+        {
+            struct stat file_stats = {0};
+            if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
             {
-                struct stat file_stats = {0};
-                if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
+                void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
+                if (mapped != MAP_FAILED)
                 {
-                    void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
-                    if (mapped != MAP_FAILED)
-                    {
-                        result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
-                        result.mapped_pointer = mapped;
-                        result.mapped_size = (u64)file_stats.st_size;
-                    }
+                    result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
+                    result.mapped_pointer = mapped;
+                    result.mapped_size = (u64)file_stats.st_size;
                 }
-                close(file_descriptor);
             }
+            close(file_descriptor);
         }
     }
 #endif
@@ -197,7 +194,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
             u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
             allocation_size = BUSTER_MAX(allocation_size, 1);
             u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
-            u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+            u64 allocation_alignment = options.start_alignment;
             u8* file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
             if (file_size)
             {
@@ -248,7 +245,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
             if (stats.valid)
             {
                 u64 reported_size = stats.size;
-                u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+                u64 allocation_alignment = options.start_alignment;
                 u64 file_size;
                 u64 allocation_size;
                 u8* file_buffer;

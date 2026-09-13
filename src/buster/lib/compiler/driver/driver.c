@@ -7,6 +7,8 @@
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse, lowering, codegen, and object/executable
 // output (with -emit-llvm, Wasm64, and eBPF as alternate emissions), the
+// compiler_driver_preprocess_text serializer keeps -E line structure while
+// guarding every apparent adjacency with the C lexical-boundary rules, the
 // dynamic-library plumbing around compiler_driver_dynamic_libraries
 // resolves import libraries for hosted links — reading a library's own
 // export table when one is needed, through
@@ -26,6 +28,7 @@
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -248,6 +251,35 @@ BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_language(CompilerDrive
     case COMPILER_DRIVER_LANGUAGE_COUNT: break;
     }
     return GPU_SOURCE_LANGUAGE_COUNT;
+}
+
+// Keep the native-language boundary independent of enum ordering. Assembly is
+// a native input even though its enum value follows the GPU source languages;
+// invalid values are not native and are rejected by the native resolver.
+bool compiler_driver_language_is_native(CompilerDriverLanguage language)
+{
+    bool result;
+    switch (language)
+    {
+    case COMPILER_DRIVER_LANGUAGE_AUTOMATIC:
+    case COMPILER_DRIVER_LANGUAGE_C:
+    case COMPILER_DRIVER_LANGUAGE_ASSEMBLY:
+        result = true;
+        break;
+    case COMPILER_DRIVER_LANGUAGE_OPENCL:
+    case COMPILER_DRIVER_LANGUAGE_CUDA:
+    case COMPILER_DRIVER_LANGUAGE_HIP:
+    case COMPILER_DRIVER_LANGUAGE_METAL:
+    case COMPILER_DRIVER_LANGUAGE_HLSL:
+    case COMPILER_DRIVER_LANGUAGE_LLVM_IR:
+    case COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY:
+    case COMPILER_DRIVER_LANGUAGE_METAL_AIR:
+    case COMPILER_DRIVER_LANGUAGE_COUNT:
+    default:
+        result = false;
+        break;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_effective_language(CompilerDriverInvocation invocation, String8 path)
@@ -591,7 +623,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
                       invocation->gpu_shader_model.length || invocation->metal_sdk.length || invocation->cuda_path.length || invocation->rocm_path.length ||
                       invocation->gpu_tools.clang_path.length || invocation->gpu_tools.llc_path.length || invocation->gpu_tools.spirv_link_path.length ||
                       invocation->gpu_tools.spirv_dis_path.length || invocation->gpu_tools.xcrun_path.length || invocation->gpu_tools.dxc_path.length ||
-                      invocation->gpu_argument_count || invocation->save_gpu_temporaries || invocation->language > COMPILER_DRIVER_LANGUAGE_C;
+                      invocation->gpu_argument_count || invocation->save_gpu_temporaries || !compiler_driver_language_is_native(invocation->language);
     if (gpu_option)
     {
         compiler_driver_argument_error(arena, invocation, S8("GPU option requires a GPU target: {S8}"),
@@ -769,8 +801,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.input_paths = arena_allocate(arena, String8, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
-    invocation.definitions = arena_allocate(arena, String8, arguments.length);
-    invocation.undefinitions = arena_allocate(arena, String8, arguments.length);
+    invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
     invocation.library_paths = arena_allocate(arena, String8, arguments.length);
     invocation.libraries = arena_allocate(arena, String8, arguments.length);
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
@@ -928,11 +959,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-D")))
             {
-                invocation.definitions[invocation.definition_count++] = value;
+                invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                    .operand = value,
+                    .kind = C_PREPROCESSOR_OPERATION_DEFINE,
+                };
             }
             else if (string_equal(argument, S8("-U")))
             {
-                invocation.undefinitions[invocation.undefinition_count++] = value;
+                invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                    .operand = value,
+                    .kind = C_PREPROCESSOR_OPERATION_UNDEFINE,
+                };
             }
             else if (string_equal(argument, S8("-L")))
             {
@@ -1413,12 +1450,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(prefix, S8("-D")) && value.length)
         {
-            invocation.definitions[invocation.definition_count++] = value;
+            invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                .operand = value,
+                .kind = C_PREPROCESSOR_OPERATION_DEFINE,
+            };
             continue;
         }
         if (string_equal(prefix, S8("-U")) && value.length)
         {
-            invocation.undefinitions[invocation.undefinition_count++] = value;
+            invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                .operand = value,
+                .kind = C_PREPROCESSOR_OPERATION_UNDEFINE,
+            };
             continue;
         }
         if (string_equal(prefix, S8("-L")) && value.length)
@@ -2360,9 +2403,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynami
     return result;
 }
 
-// Splits a `-D` operand at its first `=`. The `=` decides the value, not the
-// text after it: `-DNAME=` leaves an empty replacement list, and only the form
-// with no `=` at all takes the `1` default -- the split clang and GCC make.
+// Legacy API-built invocations still carry separate raw `-D` operands. Split
+// those at their first `=` before handing them to CPreprocessOptions; parsed
+// command lines keep their raw operands in the authoritative ordered stream.
 BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8 definition)
 {
     for (u64 index = 0; index < definition.length; index += 1)
@@ -2458,16 +2501,99 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // established idiom preprocesses a file of literal lines and greps the output
 // for one of them -- CPython's Misc/platform_triplet.c is
 // `grep '^PLATFORM_TRIPLET='` -- so tokens that shared a source line must
-// share an output line, and tokens that touched in the source must touch in
-// the output.  A printer that space-joined the whole stream onto one line
-// made that grep read the triplet as empty.  Both facts are recovered from
-// the source map: a line gap becomes a newline (capped, since without line
-// markers a skipped conditional's size is not information), and adjacency is
-// the previous token's column plus its width reaching the next token's
-// column.  Tokens a macro expansion synthesized share the use site's
-// location, where the column arithmetic does not hold; they keep the single
-// space, which is also what a hand-built result with no recovery map
-// degrades to for every token.
+// share an output line, and tokens that touched in the source should touch in
+// the output when their emitted spellings remain lexically separate. A printer
+// that space-joined the whole stream onto one line made that grep read the
+// triplet as empty. Both facts are recovered from the source map: a line gap
+// becomes a newline (capped, since without line markers a skipped
+// conditional's size is not information), and adjacency is the previous
+// token's column plus its emitted width reaching the next token's column.
+// Respelling and replacement can make those different coordinate systems
+// coincide accidentally, so compiler_driver_preprocess_requires_separator
+// protects every apparent adjacency. Tokens a macro expansion synthesized
+// share the use site's location, where the column arithmetic does not hold;
+// they keep the single space, which is also what a hand-built result with no
+// recovery map degrades to for every token.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_literal_has_prefix(String8 spelling)
+{
+    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_identifier_is_literal_prefix(String8 spelling)
+{
+    bool result = (spelling.length == 1 &&
+                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
+                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_punctuators_join(CToken previous, String8 current)
+{
+    char8 first = current.length ? current.pointer[0] : 0;
+    bool result = false;
+    switch ((CPunctuator)previous.punctuator)
+    {
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
+    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
+    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_EXCLAMATION:
+    case C_PUNCTUATOR_STAR:
+    case C_PUNCTUATOR_CARET: result = first == '='; break;
+    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
+    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
+    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
+    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
+    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
+    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_COLON: result = first == '>'; break;
+    case C_PUNCTUATOR_DOT: result = first == '.'; break;
+    case C_PUNCTUATOR_SHIFT_LEFT:
+    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
+    default: break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_requires_separator(CToken previous, String8 previous_spelling, CToken current,
+                                                                         String8 current_spelling)
+{
+    bool result = false;
+    if (previous.kind == C_TOKEN_IDENTIFIER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER ||
+                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
+        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
+        {
+            result = compiler_driver_preprocess_literal_has_prefix(current_spelling) ||
+                     compiler_driver_preprocess_identifier_is_literal_prefix(previous_spelling);
+        }
+    }
+    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 (current.kind == C_TOKEN_STRING_LITERAL && compiler_driver_preprocess_literal_has_prefix(current_spelling));
+        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
+        {
+            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
+            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
+            result = first == '.' ||
+                     ((first == '+' || first == '-') &&
+                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
+        }
+    }
+    else if (previous.kind == C_TOKEN_PUNCTUATOR)
+    {
+        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
+                  current_spelling.pointer[0] != '.') ||
+                 (current.kind == C_TOKEN_PUNCTUATOR && compiler_driver_preprocess_punctuators_join(previous, current_spelling));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
 {
     enum { compiler_driver_preprocess_line_gap_cap = 8 };
@@ -2484,6 +2610,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     u32 previous_line = 1;
     u32 previous_file = 0;
     u32 previous_end_column = 0;
+    CToken previous_token = {0};
+    String8 previous_spelling = {0};
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -2492,14 +2620,23 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
             break;
         }
         CSourceLocation location = c_preprocess_token_location(&preprocess, token);
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
         if (length)
         {
             if (location.file != previous_file || location.line < previous_line)
             {
+                if (previous_token.punctuator == C_PUNCTUATOR_BACKSLASH)
+                {
+                    text[length++] = ' ';
+                }
                 text[length++] = '\n';
             }
             else if (location.line > previous_line)
             {
+                if (previous_token.punctuator == C_PUNCTUATOR_BACKSLASH)
+                {
+                    text[length++] = ' ';
+                }
                 u32 gap = location.line - previous_line;
                 gap = gap > compiler_driver_preprocess_line_gap_cap ? compiler_driver_preprocess_line_gap_cap : gap;
                 for (u32 newline = 0; newline < gap; newline += 1)
@@ -2507,12 +2644,12 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                     text[length++] = '\n';
                 }
             }
-            else if (location.column != previous_end_column)
+            else if (location.column != previous_end_column ||
+                     compiler_driver_preprocess_requires_separator(previous_token, previous_spelling, token, spelling))
             {
                 text[length++] = ' ';
             }
         }
-        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
         if (lookup && lookup_offset >= length && lookup_offset - length < spelling.length)
         {
             *lookup = location;
@@ -2522,6 +2659,12 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         previous_line = location.line;
         previous_file = location.file;
         previous_end_column = location.column + (u32)spelling.length;
+        previous_token = token;
+        previous_spelling = spelling;
+    }
+    if (previous_token.punctuator == C_PUNCTUATOR_BACKSLASH)
+    {
+        text[length++] = ' ';
     }
     text[length++] = '\n';
     text[length] = 0;
@@ -3184,6 +3327,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     }
     CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = split, .length = split_length},
                                                 (CPreprocessOptions){
+                                                    .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
                                                     .undefinitions = invocation.undefinitions,
                                                     .include_paths = invocation.include_paths,
@@ -3192,6 +3336,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
@@ -3263,6 +3408,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
+                                                    .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
                                                     .undefinitions = invocation.undefinitions,
                                                     .include_paths = invocation.include_paths,
@@ -3271,6 +3417,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
@@ -3646,6 +3793,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
                                                           .input_paths = invocation.input_paths,
                                                           .include_paths = invocation.include_paths,
                                                           .system_include_paths = invocation.system_include_paths,
+                                                          .macro_operations = invocation.macro_operations,
                                                           .definitions = invocation.definitions,
                                                           .undefinitions = invocation.undefinitions,
                                                           .extra_arguments = invocation.gpu_arguments,
@@ -3658,6 +3806,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
                                                           .input_count = invocation.input_count,
                                                           .include_path_count = invocation.include_path_count,
                                                           .system_include_path_count = invocation.system_include_path_count,
+                                                          .macro_operation_count = invocation.macro_operation_count,
                                                           .definition_count = invocation.definition_count,
                                                           .undefinition_count = invocation.undefinition_count,
                                                           .extra_argument_count = invocation.gpu_argument_count,

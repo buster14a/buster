@@ -214,9 +214,22 @@ run as code.
 A forward branch to a label always uses the near form: the instruction layer
 sizes a statement before the label is known and this assembler does not relax.
 `.S` inputs run through C preprocessing with assembly comment-line handling.
-The printer preserves line structure and token adjacency; the root input splits
-unquoted dollar prefixes before lexing. Assembly errors resolve lazily back to
-originating tokens and physical positions, including `#line` identities.
+The printer preserves line structure and source adjacency when adjacent emitted
+spellings still re-lex as the same tokens. A lexical boundary check inserts one
+space when keyword respelling or macro replacement would instead fuse
+identifiers, preprocessing numbers, literal prefixes, punctuators or comment
+openers, and keeps a backslash token from splicing away a generated newline.
+The root input splits unquoted dollar prefixes before lexing. Assembly errors
+resolve lazily back to originating tokens and physical positions, including
+`#line` identities; an inserted separator itself has no source range.
+
+`-D` and `-U` form one ordered macro-operation stream across native C,
+preprocessed assembly, and external GPU forwarding. Predefined macros are
+installed before that stream is replayed, so later command-line operations win;
+function-like `-D` operands use the same parameter and replacement parser as a
+source `#define`. API callers that still populate separate definition and
+undefinition arrays retain the historical compatibility order (all definitions,
+then all undefinitions), but a nonempty ordered stream is authoritative.
 
 C, assembly and backend failures publish the shared
 [diagnostic contract](../diagnostics.md). Strict fallback uses symbolic opcode

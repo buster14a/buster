@@ -422,11 +422,30 @@ struct CLexResult
 typedef struct CPreprocessorDefinition CPreprocessorDefinition;
 struct CPreprocessorDefinition
 {
+    // An identifier, optionally followed immediately by a function-like
+    // parameter list parsed under the same rules as a source `#define`.
     String8 name;
     // The replacement list, taken verbatim: an empty value defines an
     // object-like macro that expands to nothing, the way `-DNAME=` does. A
     // caller that wants the `1` a valueless `-DNAME` means must spell it.
     String8 value;
+};
+
+typedef enum CPreprocessorOperationKind
+{
+    C_PREPROCESSOR_OPERATION_DEFINE,
+    C_PREPROCESSOR_OPERATION_UNDEFINE,
+    C_PREPROCESSOR_OPERATION_COUNT,
+} CPreprocessorOperationKind;
+
+typedef struct CPreprocessorOperation CPreprocessorOperation;
+struct CPreprocessorOperation
+{
+    // The operand without its -D/-U prefix. Definitions retain their first
+    // '=' so forwarding consumers preserve `-DNAME`, `-DNAME=`, and values
+    // containing later '=' characters exactly.
+    String8 operand;
+    CPreprocessorOperationKind kind;
 };
 
 typedef enum CPreprocessDialect
@@ -445,6 +464,10 @@ typedef enum CPreprocessDialect
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
+    // Authoritative when macro_operation_count is nonzero. The separate
+    // arrays below remain the compatibility path for existing callers: their
+    // definitions are applied first, followed by their undefinitions.
+    CPreprocessorOperation* macro_operations;
     CPreprocessorDefinition* definitions;
     String8* undefinitions;
     String8* include_paths;
@@ -452,6 +475,7 @@ struct CPreprocessOptions
     String8 source_path;
     Target target;
     TargetDataLayout data_layout;
+    u32 macro_operation_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 include_path_count;

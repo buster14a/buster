@@ -10,7 +10,7 @@ repository:
 
 ```sh
 ./build.sh build --config Release -t ide
-./build/build test_yyjson --config Release /path/to/yyjson-v0.12.0
+./build.sh test_yyjson --config Release /path/to/yyjson-v0.12.0
 ```
 
 The checkout must be tag `0.12.0` at commit
