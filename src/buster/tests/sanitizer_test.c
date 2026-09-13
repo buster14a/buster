@@ -4,11 +4,12 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
+#if !BUSTER_WINDOWS
+#include <signal.h>
+#endif
 
 enum
 {
-    SANITIZER_TEST_LSAN_EXIT_CODE = 86,
-    SANITIZER_TEST_UBSAN_EXIT_CODE = 87,
     SANITIZER_TEST_ALLOCATION_SIZE = 4096,
 };
 
@@ -134,15 +135,11 @@ BUSTER_GLOBAL_LOCAL String8 sanitizer_test_stream(ProcessWaitResult wait, Standa
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool sanitizer_test_failed_with(ProcessWaitResult wait, u32 exit_code)
+BUSTER_GLOBAL_LOCAL bool sanitizer_test_failed(ProcessWaitResult wait)
 {
-#if BUSTER_WINDOWS
-    bool result = wait.result == PROCESS_RESULT_FAILED && wait.platform_status == exit_code;
-#else
     int status = (int)wait.platform_status;
-    bool result = (wait.result == PROCESS_RESULT_FAILED && WIFEXITED(status) && WEXITSTATUS(status) == (int)exit_code) ||
-                  (wait.result == PROCESS_RESULT_CRASH && WIFSIGNALED(status));
-#endif
+    bool result = (wait.result == PROCESS_RESULT_FAILED && WIFEXITED(status) && WEXITSTATUS(status) != 0) ||
+                  (wait.result == PROCESS_RESULT_CRASH && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
     return result;
 }
 
@@ -213,7 +210,7 @@ BUSTER_GLOBAL_LOCAL void sanitizer_test_check_ubsan(UnitTestArguments* arguments
     String8 error = sanitizer_test_stream(wait, STANDARD_STREAM_ERROR);
     sanitizer_test_show_child(arguments, S8("undefined-shift"), output, error);
     BUSTER_TEST(arguments, !wait.timed_out);
-    BUSTER_TEST(arguments, sanitizer_test_failed_with(wait, SANITIZER_TEST_UBSAN_EXIT_CODE));
+    BUSTER_TEST(arguments, sanitizer_test_failed(wait));
     BUSTER_TEST(arguments, string_first_sequence(error, S8("runtime error:")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(error, S8("shift exponent 32")) != BUSTER_STRING_NO_MATCH);
     result_pointer->test_count += result.test_count;
@@ -231,7 +228,7 @@ BUSTER_GLOBAL_LOCAL void sanitizer_test_check_lsan(UnitTestArguments* arguments,
     String8 error = sanitizer_test_stream(wait, STANDARD_STREAM_ERROR);
     sanitizer_test_show_child(arguments, mode, output, error);
     BUSTER_TEST(arguments, !wait.timed_out);
-    BUSTER_TEST(arguments, sanitizer_test_failed_with(wait, SANITIZER_TEST_LSAN_EXIT_CODE));
+    BUSTER_TEST(arguments, sanitizer_test_failed(wait));
     BUSTER_TEST(arguments, string_first_sequence(output, marker) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(error, S8("ERROR: LeakSanitizer")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(error, S8("4096 byte(s) leaked")) != BUSTER_STRING_NO_MATCH);
