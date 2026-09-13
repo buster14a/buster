@@ -6,70 +6,38 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: native-retirement-archive-eb1bef2
-  cancel-in-progress: false
+  group: native-retirement-durable-replay-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
-env:
-  EVIDENCE_TAG: native-retirement-evidence-eb1bef2
-  CONTRACT: docs/performance-audits/evidence/2026-09-12-retirement/archive-contract.json
-
 jobs:
-  publish_current:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Publish current immutable evidence bytes
-    runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Check out archival implementation and source history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Retrieve expiring Actions archives
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir "$RUNNER_TEMP/archive-input"
-          gh api repos/${{ github.repository }}/actions/artifacts/10305878954/zip > "$RUNNER_TEMP/archive-input/native-retirement-2bb4ce9-34718946098.zip"
-          gh api repos/${{ github.repository }}/actions/artifacts/10305707825/zip > "$RUNNER_TEMP/archive-input/strict-retirement-2bb4ce9-34718946098.zip"
-      - name: Freeze validation, candidate and direct-oracle source
-        run: |
-          git archive --format=tar.gz --prefix=buster-validation-cfa63d6/ cfa63d6dd4ec60b32b7de29ba52b241181065dc5 > "$RUNNER_TEMP/archive-input/buster-validation-source-cfa63d6.tar.gz"
-          git archive --format=tar.gz --prefix=buster-candidate-2bb4ce9/ 2bb4ce939d99c3956848ca7bc9c347f3ae8db231 > "$RUNNER_TEMP/archive-input/buster-candidate-source-2bb4ce9.tar.gz"
-          git archive --format=tar.gz --prefix=buster-direct-oracle-3e912a3/ 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e > "$RUNNER_TEMP/archive-input/buster-direct-oracle-source-3e912a3.tar.gz"
-      - name: Verify originals and prepare release assets
-        run: >-
-          python3 tools/native_retirement_archive.py prepare
-          --contract docs/performance-audits/evidence/2026-09-12-retirement/archive-contract-2bb4ce9.json
-          --source "$RUNNER_TEMP/archive-input"
-          --output "$RUNNER_TEMP/release-assets"
-      - name: Publish durable release
-        env:
-          GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-          CURRENT_TAG: native-retirement-evidence-2bb4ce9
-        run: |
-          gh release create "$CURRENT_TAG" \
-            --target cfa63d6dd4ec60b32b7de29ba52b241181065dc5 \
-            --title "Native-retirement evidence for 2bb4ce9" \
-            --notes-file docs/performance-audits/evidence/2026-09-12-retirement/RELEASE-2bb4ce9.md \
-            --prerelease
-          for asset in "$RUNNER_TEMP/release-assets"/*; do
-            gh release upload "$CURRENT_TAG" "$asset"
-          done
-
   census_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Download and replay census archive
+    name: Replay census archive (${{ matrix.label }})
     runs-on: ubuntu-26.04
     timeout-minutes: 120
     permissions:
-      contents: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: eb1bef2
+            tag: native-retirement-evidence-eb1bef2
+            validation_ref: 38f150f7affdf458a9b394961709d659cc738bf3
+            candidate_ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+            validation_asset: buster-validation-source-38f150f.tar.gz
+            candidate_asset: buster-candidate-source-eb1bef2.tar.gz
+            census_asset: native-retirement-eb1bef2-34714527496.zip
+          - label: 2bb4ce9
+            tag: native-retirement-evidence-2bb4ce9
+            validation_ref: cfa63d6dd4ec60b32b7de29ba52b241181065dc5
+            candidate_ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+            validation_asset: buster-validation-source-cfa63d6.tar.gz
+            candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
+            census_asset: native-retirement-2bb4ce9-34718946098.zip
     steps:
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -79,13 +47,13 @@ jobs:
       - name: Check out pinned validation source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 38f150f7affdf458a9b394961709d659cc738bf3
+          ref: ${{ matrix.validation_ref }}
           path: replay-validation
           persist-credentials: false
       - name: Check out pinned candidate source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+          ref: ${{ matrix.candidate_ref }}
           path: candidate
           persist-credentials: false
       - name: Check out pinned direct-oracle source
@@ -97,14 +65,16 @@ jobs:
       - name: Download published census and source assets
         env:
           GH_TOKEN: ${{ github.token }}
+          EVIDENCE_TAG: ${{ matrix.tag }}
+          CENSUS_ASSET: ${{ matrix.census_asset }}
+          VALIDATION_ASSET: ${{ matrix.validation_asset }}
+          CANDIDATE_ASSET: ${{ matrix.candidate_asset }}
         run: |
           mkdir "$RUNNER_TEMP/release-assets"
           gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/release-assets" \
             --pattern archive-manifest.json --pattern SHA256SUMS \
-            --pattern native-retirement-eb1bef2-34714527496.zip \
-            --pattern buster-validation-source-38f150f.tar.gz \
-            --pattern buster-candidate-source-eb1bef2.tar.gz \
-            --pattern buster-direct-oracle-source-3e912a3.tar.gz
+            --pattern "$CENSUS_ASSET" --pattern "$VALIDATION_ASSET" \
+            --pattern "$CANDIDATE_ASSET" --pattern buster-direct-oracle-source-3e912a3.tar.gz
       - name: Verify destination bytes and extract census
         run: |
           python3 validation/tools/native_retirement_archive.py verify-census \
@@ -118,7 +88,7 @@ jobs:
           python3 validation/tools/native_retirement_archive.py restore-census-inputs
           --evidence candidate/evidence
           --source candidate
-      - name: Rebuild the direct oracle from its archived source
+      - name: Rebuild the direct oracle from its pinned source
         working-directory: reference
         run: |
           clang --version
@@ -145,31 +115,49 @@ jobs:
           --archived-reference "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-0/baseline-ide.exe"
           --rebuilt-reference "$GITHUB_WORKSPACE/reference/build/Release/ide"
           --run-id "${{ github.run_id }}"
-          --output "$RUNNER_TEMP/census-replay-${{ github.run_id }}.json"
+          --output "$RUNNER_TEMP/census-replay-${{ matrix.label }}-${{ github.run_id }}.json"
       - name: Publish census replay receipt
         env:
           GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-        run: gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/census-replay-${{ github.run_id }}.json" --repo "${{ github.repository }}"
+          EVIDENCE_TAG: ${{ matrix.tag }}
+        run: >-
+          gh release upload "$EVIDENCE_TAG"
+          "$RUNNER_TEMP/census-replay-${{ matrix.label }}-${{ github.run_id }}.json"
+          --repo "${{ github.repository }}"
       - name: Retain census replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: census-replay-${{ github.run_id }}
-          path: ${{ runner.temp }}/census-replay-${{ github.run_id }}.json
+          name: census-replay-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
           retention-days: 7
           if-no-files-found: error
 
   strict_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Download and replay strict archive
+    name: Replay strict archive (${{ matrix.label }})
     runs-on: ubuntu-26.04
     timeout-minutes: 120
     permissions:
-      contents: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: eb1bef2
+            tag: native-retirement-evidence-eb1bef2
+            candidate_ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+            candidate_asset: buster-candidate-source-eb1bef2.tar.gz
+            strict_pattern: strict-retirement-eb1bef2-34714527496.zip.part-*
+          - label: 2bb4ce9
+            tag: native-retirement-evidence-2bb4ce9
+            candidate_ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+            candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
+            strict_pattern: strict-retirement-2bb4ce9-34718946098.zip.part-*
     steps:
       - name: Check out pinned candidate source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+          ref: ${{ matrix.candidate_ref }}
           persist-credentials: false
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -179,19 +167,21 @@ jobs:
       - name: Download published strict and source assets
         env:
           GH_TOKEN: ${{ github.token }}
+          EVIDENCE_TAG: ${{ matrix.tag }}
+          CANDIDATE_ASSET: ${{ matrix.candidate_asset }}
+          STRICT_PATTERN: ${{ matrix.strict_pattern }}
         run: |
           mkdir "$RUNNER_TEMP/release-assets"
           gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/release-assets" \
             --pattern archive-manifest.json --pattern SHA256SUMS \
-            --pattern 'strict-retirement-eb1bef2-34714527496.zip.part-*' \
-            --pattern buster-candidate-source-eb1bef2.tar.gz
+            --pattern "$STRICT_PATTERN" --pattern "$CANDIDATE_ASSET"
       - name: Reconstruct and verify strict destination bytes
         run: >-
           python3 validation/tools/native_retirement_archive.py verify-strict
           --assets "$RUNNER_TEMP/release-assets"
           --output "$RUNNER_TEMP/strict"
           --cleanup
-      - name: Restore pinned candidate source
+      - name: Restore archived compiler at its original workspace path
         run: |
           mkdir -p evidence/strict-binary
           cp "$RUNNER_TEMP/strict/archived-ide" evidence/strict-binary/ide
@@ -217,15 +207,19 @@ jobs:
           --preflight "$RUNNER_TEMP/strict/strict-preflight.json"
           --replay "$GITHUB_WORKSPACE/evidence/strict-differential"
           --run-id "${{ github.run_id }}"
-          --output "$RUNNER_TEMP/strict-replay-${{ github.run_id }}.json"
+          --output "$RUNNER_TEMP/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json"
       - name: Publish strict replay receipt
         env:
           GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-        run: gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/strict-replay-${{ github.run_id }}.json" --repo "${{ github.repository }}"
+          EVIDENCE_TAG: ${{ matrix.tag }}
+        run: >-
+          gh release upload "$EVIDENCE_TAG"
+          "$RUNNER_TEMP/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json"
+          --repo "${{ github.repository }}"
       - name: Retain strict replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: strict-replay-${{ github.run_id }}
-          path: ${{ runner.temp }}/strict-replay-${{ github.run_id }}.json
+          name: strict-replay-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
           retention-days: 7
           if-no-files-found: error
