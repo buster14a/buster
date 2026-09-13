@@ -197,10 +197,16 @@ carries the commit, tree and compiler binary digest in the retained evidence.
 Its strict differential is a native six-host matrix: Linux, macOS and Windows
 on both x86-64 and AArch64. A successful object census on the Linux x86-64
 coordinator is therefore not mislabeled as runtime evidence for the other five
-hosts. Each host builds its own immutable candidate and sanitized independent
-oracle. The stable `Native retirement acceptance complete` check rejects a
-missing, skipped, cancelled or failed census or native matrix. The archived
-direct reference remains separately pinned.
+hosts. Each host builds its own immutable candidate and independent O0/O2
+oracle. Sanitizer coverage is required on Linux, macOS and Windows x86-64; the
+workflow prepends Clang's matching resource-runtime directory on Windows so a
+different installed ASan DLL cannot satisfy the run. The Windows Arm64 runner's
+LLVM package does not ship an AArch64 ASan runtime, so that lane records
+`oracle_sanitizer=not-run` and the exact reason instead of reporting an
+unsanitized run as a sanitizer pass. The stable
+`Native retirement acceptance complete` check rejects a missing, skipped,
+cancelled or failed census or native matrix. The archived direct reference
+remains separately pinned.
 
 The workflow does not synthesize #508's support decision or make the census a
 retirement verdict. After that manifest is approved, the final candidate run
