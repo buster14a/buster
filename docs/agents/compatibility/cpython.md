@@ -60,7 +60,9 @@ macro argument (GitHub #76) without using a substituted Clang object. The
 Clang reference compiles the same unit through CPython's generated make rules.
 The removed substitute's Clang-specific `-gdwarf-4` spelling is no longer
 needed; the ELF reader accepts the ordinary DWARF 5 section family (GitHub
-#77). `test_gdb`'s two tests are the expected buster-only
+#77). `CPYTHON_UNIT` records this Buster-built object independently for every
+allocator, and `CPYTHON_REMAINDER` distinguishes a later whole-tree failure
+without treating the unit as failed. `test_gdb`'s two tests are the expected buster-only
 suite divergence: gdb inspects a running python and Buster-linked
 executables carry no `.symtab` (issue 843). Refleak hunting, the
 resource-gated suite surface (`-u all`), and performance are out of scope.

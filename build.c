@@ -20664,8 +20664,13 @@ BUSTER_GLOBAL_LOCAL bool cpython_run_workload(Arena* arena, String8 tree_directo
 }
 
 BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 source_directory, String8 tree_directory, String8 cc, String8 trampoline_ide,
-                                                      String8 label, String8 allocator_flag, bool prebuild_trampoline)
+                                                      String8 label, String8 allocator_flag, bool prebuild_trampoline,
+                                                      bool* trampoline_built_out)
 {
+    if (trampoline_built_out)
+    {
+        *trampoline_built_out = false;
+    }
     make_directory_recursive(arena, tree_directory);
     u64 configure_start = os_now_microseconds();
     // The allocator flag rides CFLAGS rather than CC: driver options follow
@@ -20700,6 +20705,11 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
     {
         string_print(S8("error: test_cpython could not build perf_jit_trampoline.o with Buster for tree={S8}\n"), label);
         return false;
+    }
+    if (prebuild_trampoline)
+    {
+        *trampoline_built_out = true;
+        string_print(S8("CPYTHON_UNIT tree={S8} unit=Python/perf_jit_trampoline.o compiler=buster status=pass\n"), label);
     }
     String8 make = executable_resolve_in_path(arena, S8("make"));
     if (!make.length)
@@ -20862,7 +20872,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     // The Clang reference first: a reference that cannot build or answer the
     // workload means the environment, not the compiler, is what broke.
     String8 clang_tree = path_join(arena, output_directory, S8("clang"));
-    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang"), (String8){0}, false))
+    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang"), (String8){0}, false, 0))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -20878,16 +20888,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
     SliceString8 buster_failed = {0};
     SliceString8 clang_failed = {0};
+    bool compatibility_failed = false;
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(allocators); allocator_index += 1)
     {
         String8 mode = allocators[allocator_index];
         String8 tree = path_join(arena, output_directory, string_format(arena, S8("buster-{S8}"), mode));
         String8 cc = string_format(arena, S8("{S8} cc"), ide);
         String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
-        if (!cpython_configure_and_build(arena, source_directory, tree, cc, ide, mode, allocator_flag, true))
+        bool trampoline_built = false;
+        if (!cpython_configure_and_build(arena, source_directory, tree, cc, ide, mode, allocator_flag, true, &trampoline_built))
         {
             string_print(S8("error: test_cpython allocator={S8} build failed\n"), mode);
-            return PROCESS_RESULT_FAILED;
+            if (trampoline_built)
+            {
+                string_print(S8("CPYTHON_REMAINDER allocator={S8} status=fail unit_status=pass\n"), mode);
+            }
+            compatibility_failed = true;
+            continue;
         }
         String8 workload_output = {0};
         if (!cpython_run_workload(arena, tree, workload_path, &workload_output))
@@ -20914,6 +20931,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
                 return PROCESS_RESULT_FAILED;
             }
         }
+    }
+    if (compatibility_failed)
+    {
+        return PROCESS_RESULT_FAILED;
     }
 
     // The gate: a test the Buster build fails that the Clang build passes.
