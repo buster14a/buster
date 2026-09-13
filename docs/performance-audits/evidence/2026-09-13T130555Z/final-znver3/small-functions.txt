@@ -1,0 +1,36 @@
+--------------------------------------------------------------------------------
+Profile data file 'issue564-evidence/small.callgrind' (creator: callgrind-3.26.0)
+--------------------------------------------------------------------------------
+I1 cache: 
+D1 cache: 
+LL cache: 
+Timerange: Basic block 0 - 23701162
+Trigger: Program termination
+Profiled target:  ./build-prod/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-callgrind.metrics issue564-evidence/small.c -o issue564-evidence/small-callgrind.o (PID 4391, part 1)
+Events recorded:  Ir
+Events shown:     Ir
+Event sort order: Ir
+Thresholds:       0.01
+Include dirs:     
+User annotated:   
+Auto-annotation:  on
+
+--------------------------------------------------------------------------------
+Ir                   
+--------------------------------------------------------------------------------
+122,981,881 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                    file:function
+--------------------------------------------------------------------------------
+
+122,981,881 (100.0%)  *  ???:0x0000000000023cc0 [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+122,735,541 (99.80%)  >   ???:(below main) (1x) [/home/runner/work/buster/buster/build-prod/Release/ide]
+    245,800 ( 0.20%)  >   ./elf/./elf/rtld.c:_dl_start (1x) [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+        513 ( 0.00%)  >   ./elf/./elf/dl-init.c:_dl_init (1x) [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+          4 ( 0.00%)  >   ./elf/../sysdeps/x86_64/dl-cet.c:_dl_cet_setup_features (1x) [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+
+122,735,541 (99.80%)  < ???:0x0000000000023cc0 (1x) [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+122,735,541 (99.80%)  *  ???:(below main) [/home/runner/work/buster/buster/build-prod/Release/ide]
+122,735,529 (99.80%)  >   ./csu/../csu/libc-start.c:__libc_start_main@@GLIBC_2.34 (1x) [/usr/lib/x86_64-linux-gnu/libc.so.6]
+

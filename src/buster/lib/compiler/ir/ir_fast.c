@@ -496,6 +496,7 @@ IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
 {
     IrValidationResult result = ir_validation_ok();
+    IR_CONSTRUCTION_RECORD(PREPARATION_CALLS, 1);
     if (!program || !program->arena || !module)
     {
         result.error = IR_VALIDATION_INVALID_ID;
@@ -505,6 +506,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
     {
         if (!input_certified)
         {
+            IR_CONSTRUCTION_RECORD(PREPARATION_INPUT_VALIDATIONS, 1);
             result = ir_validate_canonical_module(program, module);
             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
         }
@@ -516,6 +518,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 IrFunction* function = module->functions + index;
                 if (function->state == IR_FUNCTION_LOWERED)
                 {
+                    IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
                     ir_promote_function(program, function, &module->local_promotion);
                 }
             }
@@ -527,6 +530,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 // check the transformed rows before publication instead.
                 if (!input_certified || BUSTER_IR_TRANSFORM_CHECKS)
                 {
+                    IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
                     result = ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
                 }
@@ -544,6 +548,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             bool fast_input_valid = true;
             if (input_certified)
             {
+                IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
                 IrValidationResult fast_input = ir_validate_canonical_module(program, module);
                 fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
             }
@@ -556,12 +561,17 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 for (u32 index = 0; index < module->function_count; index += 1)
                 {
                     IrFunction* function = module->functions + index;
-                    if (function->state == IR_FUNCTION_LOWERED) ir_fast_function(program, function, &module->fast);
+                    if (function->state == IR_FUNCTION_LOWERED)
+                    {
+                        IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
+                        ir_fast_function(program, function, &module->fast);
+                    }
                 }
                 u64 changes = 0;
                 for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
                 if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
                 {
+                    IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
                     result = ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
                 }
@@ -573,6 +583,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             IrFunction* function = module->functions + index;
             if (function->state == IR_FUNCTION_LOWERED)
             {
+                IR_CONSTRUCTION_RECORD(PREPARATION_PUBLICATION_FUNCTIONS, 1);
                 IrValidationResult published = ir_function_publish_cfg(program->arena, function);
                 if (published.error != IR_VALIDATION_NONE)
                 {

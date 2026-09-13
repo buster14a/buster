@@ -325,6 +325,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_census(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrTypeId parameter_type = {.value = 1};
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_POINTER, .element_type = {.value = 3},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0},
+         .parameter_types = &parameter_type, .parameter_count = 1},
+        {.id = {.value = 3}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
+    };
+    u64 argument_index = 0;
+    IrValueId call_operand = {.value = 0};
+    IrValue value = {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = 1}, .result = {.value = 0},
+         .immediates = &argument_index, .immediate_count = 1, .next = {.value = 1}},
+        {.opcode = IR_OPCODE_CALL, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .symbol = IR_SYMBOL_ID_INVALID, .operands = &call_operand, .operand_count = 1, .next = {.value = 2}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .next = IR_INSTRUCTION_ID_INVALID},
+    };
+    IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 2},
+                     .sealed = true, .terminated = true};
+    IrFunction function = {.canonical_type = {.value = 2}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                           .blocks = &block, .block_count = 1, .instructions = instructions, .instruction_count = 3,
+                           .values = &value, .value_count = 1};
+    IrModule module = {.functions = &function, .function_count = 1};
+    IrProgram program = {.modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrConstructionCounters before = ir_construction_counters();
+    IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_VALIDATION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+    IR_VALIDATION_EXPECT(VALIDATION_CALLS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BLOCKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_INSTRUCTIONS, 3);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(IrBlockId) * 3);
+    IR_VALIDATION_EXPECT(VALIDATION_FUNCTIONS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_VALUE_BLOCKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_VALUES, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_BLOCKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_INSTRUCTIONS, 3);
+    IR_VALIDATION_EXPECT(VALIDATION_OPERAND_IDS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_RESULT_RELATIONSHIPS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OPERATION_CHECKS, 3);
+    IR_VALIDATION_EXPECT(VALIDATION_CALL_CHECKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_TERMINATOR_CHECKS, 3);
+#undef IR_VALIDATION_EXPECT
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
@@ -337,6 +400,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult construction = ir_test_construction_appends(arguments);
     result.test_count += construction.test_count;
     result.succeeded_test_count += construction.succeeded_test_count;
+    UnitTestResult validation_census = ir_test_validation_census(arguments);
+    result.test_count += validation_census.test_count;
+    result.succeeded_test_count += validation_census.succeeded_test_count;
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},

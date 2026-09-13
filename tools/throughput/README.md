@@ -379,6 +379,23 @@ These share the existing saturation, calling-thread and failed-attempt rules.
 They do not add timers, histograms, per-function storage or a reporting switch.
 Explicit clear bytes exclude ordinary map writes and allocator-internal clears.
 
+The `validation_*` and `preparation_*` fields attribute the canonical boundary.
+`validation_calls` counts complete module-verifier entries. The ownership fields
+count the preliminary function scan, published-CFG checks, lowered functions,
+blocks, instruction-chain steps and owner-map clear bytes. The remaining fields
+count globals/relocations and their overlap pairs, aliases, initializers, value
+and provenance visits, block parameters and incoming values, instruction,
+operand, target and result checks, opcode-operation checks, conversions,
+calls/fixed arguments, provenance-bearing opcodes and terminator checks.
+`preparation_*_validations` separates the four verifier call sites: uncertified
+input, changed promotion output, certified FAST input, and changed FAST output.
+The other preparation fields count lowered functions offered to promotion,
+FAST, and dense-CFG publication. Successful validation therefore normally
+visits each instruction once for ownership and once for opcode semantics; those
+visits prove different invariants and are not a measured redundancy. Counters
+record work reached before the first validation error, so compare successful
+inputs when using totals as complete populations.
+
 Initial estimates and finish populations cover different failure boundaries;
 do not subtract them blindly on invalid sources. Counts do not measure
 append latency, phase times, retained arena memory, or all-consumer cost.
