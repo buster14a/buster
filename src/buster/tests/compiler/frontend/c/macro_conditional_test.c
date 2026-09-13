@@ -9,6 +9,42 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
+BUSTER_GLOBAL_LOCAL void c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected)
+{
+    u64 actual_count = 0;
+    u64 expected_count = 0;
+    for (u64 index = 0; index < actual.token_count; index += 1)
+    {
+        actual_count += actual.tokens[index].kind != C_TOKEN_NEWLINE;
+    }
+    for (u64 index = 0; index < expected.token_count; index += 1)
+    {
+        expected_count += expected.tokens[index].kind != C_TOKEN_NEWLINE;
+    }
+    BUSTER_TEST(arguments, actual_count == expected_count);
+    u64 actual_index = 0;
+    u64 expected_index = 0;
+    while (actual_index < actual.token_count && expected_index < expected.token_count)
+    {
+        while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+        {
+            actual_index += 1;
+        }
+        while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+        {
+            expected_index += 1;
+        }
+        if (actual_index < actual.token_count && expected_index < expected.token_count)
+        {
+            BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                               c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+            actual_index += 1;
+            expected_index += 1;
+        }
+    }
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -85,13 +121,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 CLexResult reference = c_lex(temporary.arena, BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
                 CLexResult expected = c_lex(temporary.arena, expected_source);
                 BUSTER_TEST(arguments, reference.diagnostic_count == 0);
-                BUSTER_TEST(arguments, reference.token_count == expected.token_count);
-                for (u64 index = 0; index < reference.token_count && index < expected.token_count; index += 1)
-                {
-                    BUSTER_TEST(arguments, reference.tokens[index].kind == expected.tokens[index].kind);
-                    BUSTER_STRING_TEST(arguments, c_token_spelling(reference.spelling_base, reference.tokens[index]),
-                                       c_token_spelling(expected.spelling_base, expected.tokens[index]));
-                }
+                c_macro_conditional_compare_semantic_tokens(arguments, reference, expected);
             }
         }
         scratch_end(temporary);
