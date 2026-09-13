@@ -282,8 +282,9 @@ BUSTER_F_DECL bool buster_aarch64_metadata_mnemonic_candidate(BusterAarch64Metad
 
 // Arm's canonical Apple-M1 fixed-spelling projection is an independent,
 // compact catalog.  Unlike the LLVM candidate index above, these rows are
-// selected directly from the Arm canonical artifact and are safe for the
-// explicit Apple-M1 target parser path only.
+// selected directly from the Arm canonical artifact.  The historical M1 name
+// describes their import provenance; target feature checks make the exact
+// architectural words available to every valid AArch64 profile.
 typedef struct BusterAarch64ArmM1FixedSpelling BusterAarch64ArmM1FixedSpelling;
 struct BusterAarch64ArmM1FixedSpelling
 {

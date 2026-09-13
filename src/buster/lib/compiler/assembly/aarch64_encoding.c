@@ -725,7 +725,11 @@ bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1Fixe
 
 bool buster_aarch64_arm_m1_fixed_target(Target target)
 {
-    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+    // The table records exact words imported while the Apple-M1 profile was
+    // the only AArch64 assembly consumer.  Its rows are architectural Arm
+    // encodings, and each non-base row carries the feature checked below; the
+    // provenance of the table must not exclude generic AArch64 targets.
+    return target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target);
 }
 
 bool buster_aarch64_arm_m1_fixed_supported_for_target(BusterAarch64ArmM1FixedSpelling fixed, Target target)
