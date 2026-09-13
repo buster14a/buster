@@ -4933,7 +4933,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         MachineInlineAssembly* descriptor = (MachineInlineAssembly*)machine_stream_append(selector->arena, &selector->inline_assemblies);
         *descriptor = (MachineInlineAssembly){.source = source, .bytes = encoded.bytes, .clobber_mask = exact_clobbers,
                                               .first_operand = first_operand, .first_relocation = first_relocation,
-                                              .operand_count = (u16)instruction->operand_count,
+                                              .operand_count = (u8)instruction->operand_count,
                                               .relocation_count = (u16)encoded.relocation_count,
                                               .effects = (u8)(effects | (general_goto ? MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR : 0)),
                                               .successor_count = general_goto ? (u16)(instruction->target_count + control_count) : 0,

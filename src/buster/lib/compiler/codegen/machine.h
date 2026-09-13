@@ -1201,9 +1201,7 @@ struct MachineInlineAssembly
     u64 clobber_mask;
     u32 first_operand;
     u32 first_relocation;
-    u16 operand_count;
     u16 relocation_count;
-    u8 effects;
     // Number of consecutive continuation blocks beginning at
     // `fallthrough_block`. General asm-goto retains one continuation for every
     // declared successor, including labels not referenced by the template.
@@ -1212,6 +1210,9 @@ struct MachineInlineAssembly
     // declared label list. Remaining successors are per-control-reference
     // publication continuations.
     u16 declared_successor_count;
+    // Selectors cap the operand array at sixteen before constructing this row.
+    u8 operand_count;
+    u8 effects;
     u32 preserved_vector_slot;
     // General asm-goto's explicit fallthrough successor. The transaction
     // encoder captures outputs and branches here before laying out taken-edge
