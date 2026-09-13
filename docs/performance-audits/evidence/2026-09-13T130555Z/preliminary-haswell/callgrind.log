@@ -1,0 +1,88 @@
++ COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v)
++ valgrind --tool=callgrind --cache-sim=no --branch-sim=no --callgrind-out-file=issue564-evidence/unity.callgrind ./build-prod/Release/ide cc -Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=issue564-evidence/unity-callgrind.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-callgrind
+==4317== Callgrind, a call-graph generating cache profiler
+==4317== Copyright (C) 2002-2017, and GNU GPL'd, by Josef Weidendorfer et al.
+==4317== Using Valgrind-3.26.0 and LibVEX; rerun with -h for copyright info
+==4317== Command: ./build-prod/Release/ide cc -Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=issue564-evidence/unity-callgrind.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-callgrind
+==4317== 
+==4317== For interactive control, run 'callgrind_control -h'.
+TARGET cpu=haswell features=aes,avx,avx2,bmi1,bmi2,cx16,f16c,fma,invpcid,lzcnt,monitor,movbe,pclmul,popcnt,rdrand,rdseed,sse2,sse3,sse4.1,sse4.2,ssse3,vmx,xsave
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                337                      371
+bytes on disk                 30.955.770               30.989.392
+physical lines                   388.372                  389.513
+
+bytes scanned                 30.953.432               30.987.048
+  code                        24.510.748   79.2 %      24.529.186   79.2 %
+  comment                      1.759.861    5.7 %       1.772.652    5.7 %
+  whitespace                   4.682.823   15.1 %       4.685.210   15.1 %
+  literals, within code       13.182.332   42.6 %      13.182.553   42.5 %
+
+lines scanned                    387.203                  388.341
+  code, the sLOC                 347.702   89.8 %         348.516   89.7 %
+  comment                         29.595    7.6 %          29.857    7.7 %
+  blank                           11.681    3.0 %          11.758    3.0 %
+  both, counted twice              1.775    0.5 %           1.790    0.5 %
+
+comments                          24.724                   24.793
+tokens                         3.048.828                3.051.967
+spliced-away lines                 1.169    0.3 %           1.172    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.397.251  111.3 %
+  their spelling bytes        24.916.919  101.6 %
+  bytes retained              33.865.122  109.3 %
+  macro expansions               126.362
+  #define directives               3.449
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.616  re-read in total
+IR_FRONTEND_SSA functions=4525 locals=40596 reads=149181 writes=65667 parameters_created=412539 parameters_removed=382736 temporaries=10534 fallback_locals=1979
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1330373 changes=96907
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1330373 changes=9586
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2686566 changes=138892
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=92602 changes=0
+IR_FAST functions=4803 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2078208 retained_bound=15685928 compact_ns=0 instructions_before=1330373 instructions_after=1181695
+IR_LOCAL_PROMOTION candidates=26900 promoted=175 loads_removed=529 stores_removed=322 parameters_inserted=1289 parameters_removed=1158 uninitialized=0 barriers=8 instructions_before=1331399 instructions_after=1330373 values_before=1151191 values_after=1150618
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3488 parameter_visits=2370 incoming_visits=5439
+CODEGEN cpu=haswell vector_bits=256 functions=4803 instructions=1181695 values=1001940 stack_value_bytes=5232352 stack_frame_bytes=5232352 max_stack_frame_bytes=657432 code_bytes=18991422 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1583337 exact_successes=1583337 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=69076
+CODEGEN_ALLOCATOR reloads=170191 spills=206363 boundary_spills=94848 boundary_reloads=27366 boundary_copies=87 copies=149770 rematerializations=60690 pins=0 splits=0 scheduled=0 schedule_kept=0
+==4317== 
+==4317== Events    : Ir
+==4317== Collected : 16510062894
+==4317== 
+==4317== I   refs:      16,510,062,894
++ valgrind --tool=callgrind --cache-sim=no --branch-sim=no --callgrind-out-file=issue564-evidence/small.callgrind ./build-prod/Release/ide cc -g0 -O0 -c -fsource-metrics=issue564-evidence/small-callgrind.metrics issue564-evidence/small.c -o issue564-evidence/small-callgrind.o
+==4376== Callgrind, a call-graph generating cache profiler
+==4376== Copyright (C) 2002-2017, and GNU GPL'd, by Josef Weidendorfer et al.
+==4376== Using Valgrind-3.26.0 and LibVEX; rerun with -h for copyright info
+==4376== Command: ./build-prod/Release/ide cc -g0 -O0 -c -fsource-metrics=issue564-evidence/small-callgrind.metrics issue564-evidence/small.c -o issue564-evidence/small-callgrind.o
+==4376== 
+==4376== For interactive control, run 'callgrind_control -h'.
+==4376== 
+==4376== Events    : Ir
+==4376== Collected : 122964394
+==4376== 
+==4376== I   refs:      122,964,394
++ cmp issue564-evidence/unity-prod issue564-evidence/unity-callgrind
++ cmp issue564-evidence/small-prod.o issue564-evidence/small-callgrind.o
++ callgrind_annotate --inclusive=yes --tree=both --threshold=0.01 issue564-evidence/unity.callgrind
++ callgrind_annotate --inclusive=no --auto=yes --threshold=0.001 issue564-evidence/unity.callgrind src/buster/lib/compiler/ir/ir.c src/buster/lib/compiler/ir/ir_fast.c
++ callgrind_annotate --inclusive=yes --tree=both --threshold=0.01 issue564-evidence/small.callgrind
++ callgrind_annotate --inclusive=no --auto=yes --threshold=0.001 issue564-evidence/small.callgrind src/buster/lib/compiler/ir/ir.c src/buster/lib/compiler/ir/ir_fast.c
++ sha256sum issue564-evidence/small.callgrind issue564-evidence/unity.callgrind issue564-evidence/unity-callgrind issue564-evidence/small-callgrind.o
++ git status --short
+?? build-census/
+?? build-prod/
+?? issue564-evidence/

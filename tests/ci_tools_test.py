@@ -636,7 +636,14 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_bootstrap_keeps_every_native_gate_in_order(self):
         text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
-        commands = re.findall(r"(?m)^        run: '\"\$RUNNER_TEMP/buster-build\" (.+)'$", text)
+        command_text = text[:text.index(
+            "      - name: Check the bootstrap probe against independent compiler oracles")]
+        matches = re.findall(
+            r"(?m)^(?:        run: '\"\$RUNNER_TEMP/buster-build\" ([^']+)'|"
+            r"            \"\$RUNNER_TEMP/buster-build\" ([^\n]+))$",
+            command_text,
+        )
+        commands = [inline or block for inline, block in matches]
         self.assertEqual(commands, [
             "self_host_audit_self_test",
             "generate --cc clang --ci --linker DEFAULT",
