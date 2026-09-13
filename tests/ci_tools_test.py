@@ -712,6 +712,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("sanitizer: required", strict)
         self.assertIn("sanitizer: not-run", strict)
         self.assertIn("runner-llvm-package-omits-aarch64-asan-runtime", strict)
+        self.assertIn("'lib\\${{ matrix.clang_arch }}-pc-windows-msvc'", strict)
         self.assertIn("clang_rt.asan_dynamic-${{ matrix.clang_arch }}.dll", strict)
         self.assertIn('$env:PATH = "$RuntimeDir;$env:PATH"', strict)
         self.assertIn("$DifferentialArgs += '--sanitize-oracle'", strict)
