@@ -8699,7 +8699,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {S8("aarch64-unknown-linux-gnu"),
              S8("int f(void) { int r = 0; __asm__ goto (\"adr x0, %l0\" : : : \"x0\" : target); goto done; target: r = 1; done: return r; }\n")},
             {S8("aarch64-unknown-linux-gnu"),
-             S8("int f(void) { int r = 0; __asm__ goto (\"bl %l0\" : : : \"x30\" : target); goto done; target: r = 1; done: return r; }\n")},
+             S8("int f(void) { int r = 0; __asm__ goto (\"bl %l0\" : : : : target); goto done; target: r = 1; done: return r; }\n")},
         };
         for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(unsupported_asm_goto_controls); control += 1)
         {
@@ -8713,8 +8713,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                  S8("-o"), object_path, source_path};
             CompilerDriverResult rejected = compiler_driver_execute_invocation(
                 arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_CODEGEN &&
-                                   rejected.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !rejected.has_object);
+            BUSTER_TEST_RAW(arguments, rejected.error == COMPILER_DRIVER_ERROR_CODEGEN &&
+                                           rejected.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !rejected.has_object,
+                            string_format(arguments->arena, S8("unsupported asm-goto control {u32}: driver {u32}, codegen {u32}, object {u32}, diagnostic {S8}"),
+                                          control, rejected.error, rejected.codegen_error, rejected.has_object, rejected.diagnostic));
         }
     }
     {

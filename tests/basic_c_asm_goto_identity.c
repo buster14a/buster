@@ -127,7 +127,7 @@ static int goto_label_address_addend(void)
 #if defined(__x86_64__) || defined(_M_X64)
     void* address = 0;
     __asm__ goto("lea %l[target]+4(%%rip), %0" : "=r"(address) : : : target);
-    result = (char*)address == (char*)&&target + 4 ? 70 : 71;
+    result = address == &&target + 4 ? 70 : 71;
     goto done;
 target:
     result = 72;
