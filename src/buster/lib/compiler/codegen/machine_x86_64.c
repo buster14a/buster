@@ -4958,8 +4958,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                 machine_builder_block_end(&selector->builder, selector->open_block);
                 machine_builder_block_begin(&selector->builder);
                 selector->open_block = (MachineBlock){0};
-                bool used = target < successor_count;
-                if (used)
+                bool successor_used = target < successor_count;
+                if (successor_used)
                 {
                     selected = machine_x64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
                     u32 target_index = target < instruction->target_count ? target : control_targets[target - instruction->target_count];
