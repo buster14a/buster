@@ -187,6 +187,11 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names8[] = {
     S8_INITIALIZER("r8b"), S8_INITIALIZER("r9b"), S8_INITIALIZER("r10b"), S8_INITIALIZER("r11b"), S8_INITIALIZER("r12b"), S8_INITIALIZER("r13b"), S8_INITIALIZER("r14b"), S8_INITIALIZER("r15b"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
+    // Zero-operand hints still pass through the general template resolver
+    // when operands, physical clobbers or asm-goto edges give the operation
+    // allocator-visible state.  The shared assembler, not the legacy direct
+    // emitter, owns their bytes once the transaction is represented in MIR.
+    S8_INITIALIZER("nop"), S8_INITIALIZER("pause"),
     S8_INITIALIZER("mov"), S8_INITIALIZER("movb"), S8_INITIALIZER("movw"), S8_INITIALIZER("movl"), S8_INITIALIZER("movq"), S8_INITIALIZER("movzx"), S8_INITIALIZER("movsx"), S8_INITIALIZER("movzb"), S8_INITIALIZER("movzw"), S8_INITIALIZER("movzl"),
     S8_INITIALIZER("movsxb"), S8_INITIALIZER("movsxw"), S8_INITIALIZER("movsxl"), S8_INITIALIZER("add"), S8_INITIALIZER("addb"), S8_INITIALIZER("addw"), S8_INITIALIZER("addl"), S8_INITIALIZER("addq"), S8_INITIALIZER("sub"), S8_INITIALIZER("subb"),
     S8_INITIALIZER("subw"), S8_INITIALIZER("subl"), S8_INITIALIZER("subq"), S8_INITIALIZER("xor"), S8_INITIALIZER("xorb"), S8_INITIALIZER("xorw"), S8_INITIALIZER("xorl"), S8_INITIALIZER("xorq"), S8_INITIALIZER("or"), S8_INITIALIZER("orb"), S8_INITIALIZER("orw"),

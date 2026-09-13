@@ -3306,11 +3306,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                                     barrier_opcode = architectures[architecture] == CPU_ARCH_X86_64 ? MACHINE_X64_ASM_IDENTITY : MACHINE_A64_ASM_IDENTITY;
                                 }
                                 u32 barrier_count = 0;
+                                u32 observed_assembly_opcode = UINT32_MAX;
                                 for (u32 row = 0; row < selected.function.instruction_count; row += 1)
                                 {
-                                    barrier_count += selected.function.instructions[row].opcode == barrier_opcode;
+                                    u32 opcode = selected.function.instructions[row].opcode;
+                                    barrier_count += opcode == barrier_opcode;
+                                    if ((opcode >= MACHINE_X64_INLINE_ASSEMBLY && opcode <= MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS) ||
+                                        (opcode >= MACHINE_A64_INLINE_ASSEMBLY && opcode <= MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS))
+                                    {
+                                        observed_assembly_opcode = opcode;
+                                    }
                                 }
-                                BUSTER_TEST_RAW(arguments, barrier_count == 1, description);
+                                BUSTER_TEST_RAW(arguments, barrier_count == 1,
+                                                string_format(arguments->arena, S8("{S8}: expected opcode {u32}, count {u32}, observed {u32}"),
+                                                              description, barrier_opcode, barrier_count, observed_assembly_opcode));
                                 MachineOpcodeInfo const* info = machine_opcode_info(barrier_opcode);
                                 if (fixtures[fixture].general)
                                 {
