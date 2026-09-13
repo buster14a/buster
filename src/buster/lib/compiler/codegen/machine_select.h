@@ -217,7 +217,7 @@ struct MachineFunction;
 // Remap canonical edges after block expansion. Deterministic literal assembly
 // keeps its one executable successor; general asm-goto edges leave the target
 // continuation which captures and publishes that path's output values.
-BUSTER_F_DECL void machine_selection_finish_canonical_edges(struct MachineFunction* machine, IrFunction* source,
+BUSTER_F_DECL bool machine_selection_finish_canonical_edges(Arena* arena, struct MachineFunction* machine, IrFunction* source,
                                                              u32 canonical_edge_offset, u32 const* block_entries, u32 const* block_exits,
                                                              u32 const* asm_goto_continuations);
 
