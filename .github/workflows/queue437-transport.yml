@@ -1,17 +1,15 @@
-name: Queue 437 one-shot authoring transport
+name: Queue 437 exact-revision software validation
 on:
   push:
     branches: [astra/437-durable-fake-queue-20260913]
-    paths:
-      - .github/workflows/queue437-transport.yml
-      - .github/queue437-transport.py
+    paths: [.github/workflows/queue437-transport.yml]
 permissions:
-  contents: write
+  contents: read
 concurrency:
-  group: queue437-owned-transport-${{ github.ref }}
+  group: queue437-owned-validation-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  integrate:
+  validate:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -22,43 +20,36 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Apply guarded integration and publish only the owned candidate branch
-        id: integration
+          ref: cdad7b080eb972f0cdda589846de9a8f3cabf943
+          persist-credentials: false
+      - name: Bootstrap existing native build driver with hosted CI flags
+        id: bootstrap
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/queue437-evidence"
-          python3 .github/queue437-transport.py
-          git add build.c tools/bench_service/queue.c tools/bench_service/protocol.c tools/bench_service/tests.c
-          git rm .github/queue437-transport.py .github/workflows/queue437-transport.yml
-          git diff --cached --check
-          git -c user.name='Buster queue integration' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'bench service: integrate durable fake queue and native CI gates'
-          git push origin HEAD:refs/heads/astra/437-durable-fake-queue-published-20260913
           git rev-parse HEAD | tee "$RUNNER_TEMP/queue437-evidence/revision.txt"
-          git diff 15b19813ca51cf993d3526acb6f66c1f51f7c377 HEAD --stat | tee "$RUNNER_TEMP/queue437-evidence/diff-stat.txt"
-          git diff 15b19813ca51cf993d3526acb6f66c1f51f7c377 HEAD -- build.c > "$RUNNER_TEMP/queue437-evidence/build-integration.patch"
-          git archive HEAD tools/bench_service build.c > "$RUNNER_TEMP/queue437-evidence/source.tar"
-      - name: Native queue regressions on the published revision
-        if: ${{ !cancelled() && steps.integration.outcome == 'success' }}
+          clang --version | tee "$RUNNER_TEMP/queue437-evidence/toolchain.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build" 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/bootstrap.log"
+      - name: Native queue regressions
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh bench_service self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-normal.log"
+          "$RUNNER_TEMP/buster-build" bench_service self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-normal.log"
       - name: Native queue address and undefined behavior sanitizers
-        if: ${{ !cancelled() && steps.integration.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-sanitized.log"
+          "$RUNNER_TEMP/buster-build" bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-sanitized.log"
       - name: Existing throughput harness regressions
-        if: ${{ !cancelled() && steps.integration.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh bench_throughput self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/throughput-normal.log"
-      - name: Preserve exact revision, source and successful or failed validation logs
+          "$RUNNER_TEMP/buster-build" bench_throughput self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/throughput-normal.log"
+      - name: Retain exact revision and all validation results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
