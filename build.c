@@ -20532,7 +20532,6 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
         ide,
         S8("cc"),
         S8("-fno-pic"),
-        S8("-ftls-model=local-exec"),
         S8("-gdwarf-4"),
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),
