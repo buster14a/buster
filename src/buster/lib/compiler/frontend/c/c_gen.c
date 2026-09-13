@@ -32998,6 +32998,13 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
     }
     if (builder->target.cpu_arch == CPU_ARCH_X86_64)
     {
+        if (clobber.length >= 4 && clobber.pointer[0] == 'x' && clobber.pointer[1] == 'm' && clobber.pointer[2] == 'm')
+        {
+            u64 number = 0;
+            String8 suffix = string_slice(clobber, 3, clobber.length);
+            return c_conditional_number(suffix, &number) && number <= 15 &&
+                   (suffix.length == 1 || (suffix.length == 2 && suffix.pointer[0] == '1'));
+        }
         if (target_uses_llp64_data_model(builder->target) &&
             (string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
              string_equal(clobber, S8("sil")) || string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) ||
@@ -33043,7 +33050,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
             suffix.length -= 1;
             return c_conditional_number(suffix, &number) && number <= 27;
         }
-        return string_equal(clobber, S8("sp")) || string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
+        return string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
     }
     return false;
 }
