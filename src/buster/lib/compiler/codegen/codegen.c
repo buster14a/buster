@@ -235,6 +235,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     S8_INITIALIZER("jno"), S8_INITIALIZER("jnp"), S8_INITIALIZER("jns"), S8_INITIALIZER("jnz"),
     S8_INITIALIZER("jo"), S8_INITIALIZER("jp"), S8_INITIALIZER("jpe"), S8_INITIALIZER("jpo"),
     S8_INITIALIZER("js"), S8_INITIALIZER("jz"),
+    // The LOOP and CX-zero families have only an eight-bit architectural
+    // displacement. For private asm-goto labels the shared assembler expands
+    // them to the original predicate plus a near landing jump, so they reach
+    // the same explicit MIR control-continuation model as ordinary branches.
+    S8_INITIALIZER("loop"), S8_INITIALIZER("loope"), S8_INITIALIZER("loopz"),
+    S8_INITIALIZER("loopne"), S8_INITIALIZER("loopnz"),
+    S8_INITIALIZER("jecxz"), S8_INITIALIZER("jrcxz"),
     // The scalar SSE instructions musl's own x86-64 math is written in, which
     // are the only reason the 'x' operand class exists here. Each writes only
     // its named vector operands, so they need none of the memory or immediate
