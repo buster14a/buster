@@ -23,13 +23,13 @@ jobs:
       BUSTER_MATRIX_THREADS: '1'
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-      CANDIDATE: 1abb484976852aeaffd20007a8c4f0d84be8d11d
+      CANDIDATE: 78973781584cc1b5c9965af3bbbb927ef9e752e3
       BASELINE: 15b19813ca51cf993d3526acb6f66c1f51f7c377
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 1abb484976852aeaffd20007a8c4f0d84be8d11d
-          fetch-depth: 3
+          ref: 78973781584cc1b5c9965af3bbbb927ef9e752e3
+          fetch-depth: 4
           persist-credentials: false
       - name: Establish exact source and machine provenance
         shell: bash
@@ -99,7 +99,8 @@ jobs:
           test "$(git diff --name-only)" = src/buster/tests/compiler/frontend/c/c_test.c
           "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/baseline-regression-build.log"
           python3 "$RUNNER_TEMP/issue292-run-tests.py" baseline-regression
-      - name: Build and test unchanged submitted candidate
+      - name: Build unchanged submitted candidate
+        id: candidate_build
         shell: bash
         run: |
           set -euo pipefail
@@ -110,8 +111,14 @@ jobs:
           "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/candidate-build.log"
           cp build/Release/ide "$RUNNER_TEMP/issue292-validation/candidate-ide"
           cp build/CMakeCache.txt "$RUNNER_TEMP/issue292-validation/candidate-CMakeCache.txt"
-          python3 "$RUNNER_TEMP/issue292-run-tests.py" candidate
+          sha256sum "$RUNNER_TEMP/issue292-validation/baseline-ide" "$RUNNER_TEMP/issue292-validation/candidate-ide" > "$RUNNER_TEMP/issue292-validation/compiler-hashes.txt"
+      - name: Require the complete candidate test suite
+        shell: bash
+        run: python3 "$RUNNER_TEMP/issue292-run-tests.py" candidate
+      # Independent observations are retained even if the full suite fails.
+      # A failed test step still fails this job: no continue-on-error or filtering.
       - name: Existing paired frontend scaling benchmark without instrumentation
+        if: ${{ always() && steps.candidate_build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -122,11 +129,12 @@ jobs:
             --out "$RUNNER_TEMP/issue292-validation/scaling" \
             2>&1 | tee "$RUNNER_TEMP/issue292-validation/scaling.log"
       - name: Capture fresh small and large syntax-only time and peak RSS
+        if: ${{ always() && steps.candidate_build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess
+          import hashlib, json, os, pathlib, subprocess, time
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-validation'
           sources = {'small': root / 'scaling/small-1.c', 'large': pathlib.Path('tests/c_abi_cfuncs.c').resolve()}
           manifest = {name: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'bytes': path.stat().st_size} for name, path in sources.items()}
@@ -141,10 +149,12 @@ jobs:
                           compiler = root / (label + '-ide')
                           sample = root / ('time-' + size + '-' + form.lstrip('-') + '-' + str(pair) + '-' + label + '.txt')
                           command = [str(compiler), 'cc', '-g0', '-std=gnu23', form, '-fsyntax-only', str(source)]
+                          start = time.perf_counter_ns()
                           run = subprocess.run(['/usr/bin/time', '-f', '%e %U %S %M', '-o', str(sample), *command], capture_output=True, text=True, timeout=120)
+                          elapsed = time.perf_counter_ns() - start
                           record = {'size': size, 'form': form, 'pair': pair, 'label': label, 'command': command,
                                     'returncode': run.returncode, 'stdout': run.stdout, 'stderr': run.stderr,
-                                    'time_raw': sample.read_text()}
+                                    'time_raw': sample.read_text(), 'wall_with_time_wrapper_ns': elapsed}
                           records.append(record)
                           (root / 'syntax-time-rss.json').write_text(json.dumps({'hosted_observation_not_dedicated_9700X': True, 'sources': manifest, 'samples': records}, indent=2) + '\n')
           if any(record['returncode'] != 0 for record in records):
@@ -154,17 +164,18 @@ jobs:
                   raise SystemExit('Timing source changed')
           PY
       - name: Run IR work-counter assertions in separate diagnostic build
+        if: ${{ always() && steps.candidate_build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/issue292-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
           "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/counter-build.log"
-          python3 "$RUNNER_TEMP/issue292-run-tests.py" candidate-counters
           for form in -ffrontend-ssa -fno-frontend-ssa; do
             build/Release/ide cc -g0 -std=gnu23 "$form" -fsyntax-only \
               "-fsource-metrics=$RUNNER_TEMP/issue292-validation/current-$form.metrics" \
               "$RUNNER_TEMP/issue292-validation/scaling/small-1.c"
           done
+          python3 "$RUNNER_TEMP/issue292-run-tests.py" candidate-counters
       - name: Retain all results, including failures
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
