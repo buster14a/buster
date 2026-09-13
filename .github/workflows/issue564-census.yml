@@ -64,12 +64,12 @@ jobs:
           set -x
           printf 'int add(int a, int b) { return a + b; }\n' > issue564-evidence/small.c
           sha256sum issue564-evidence/small.c >> issue564-evidence/inputs.sha256
-          COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v)
+          COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 -g -v)
           ./build-prod/Release/ide cc "${COMMON[@]}" -fsource-metrics=issue564-evidence/unity-prod.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-prod
           ./build-census/Release/ide cc "${COMMON[@]}" -fsource-metrics=issue564-evidence/unity-census.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-census
           cmp issue564-evidence/unity-prod issue564-evidence/unity-census
-          ./build-prod/Release/ide cc -g0 -O0 -c -fsource-metrics=issue564-evidence/small-prod.metrics issue564-evidence/small.c -o issue564-evidence/small-prod.o
-          ./build-census/Release/ide cc -g0 -O0 -c -fsource-metrics=issue564-evidence/small-census.metrics issue564-evidence/small.c -o issue564-evidence/small-census.o
+          ./build-prod/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-prod.metrics issue564-evidence/small.c -o issue564-evidence/small-prod.o
+          ./build-census/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-census.metrics issue564-evidence/small.c -o issue564-evidence/small-census.o
           cmp issue564-evidence/small-prod.o issue564-evidence/small-census.o
           ! grep -q '^ir_construction\.' issue564-evidence/unity-prod.metrics
           ! grep -q '^ir_construction\.' issue564-evidence/small-prod.metrics
@@ -82,11 +82,11 @@ jobs:
           set -euo pipefail
           exec > >(tee issue564-evidence/callgrind.log) 2>&1
           set -x
-          COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v)
+          COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 -g -v)
           valgrind --tool=callgrind --cache-sim=no --branch-sim=no --callgrind-out-file=issue564-evidence/unity.callgrind \
             ./build-prod/Release/ide cc "${COMMON[@]}" -fsource-metrics=issue564-evidence/unity-callgrind.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-callgrind
           valgrind --tool=callgrind --cache-sim=no --branch-sim=no --callgrind-out-file=issue564-evidence/small.callgrind \
-            ./build-prod/Release/ide cc -g0 -O0 -c -fsource-metrics=issue564-evidence/small-callgrind.metrics issue564-evidence/small.c -o issue564-evidence/small-callgrind.o
+            ./build-prod/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-callgrind.metrics issue564-evidence/small.c -o issue564-evidence/small-callgrind.o
           cmp issue564-evidence/unity-prod issue564-evidence/unity-callgrind
           cmp issue564-evidence/small-prod.o issue564-evidence/small-callgrind.o
           callgrind_annotate --inclusive=yes --tree=both --threshold=0.01 issue564-evidence/unity.callgrind > issue564-evidence/unity-functions.txt

@@ -4829,9 +4829,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
                 IrValueId value = ir_label_incoming_value(&incoming, predecessor);
                 valid = value.value < function->value_count && function->values[value.value].canonical_type.value == parameter->canonical_type.value;
             }
+            IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, valid);
             if (valid)
             {
-                IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, 1);
                 valid = ir_label_parameter_provenance_values_valid(function, parameter->value, &incoming);
             }
             if (!valid)
@@ -4868,17 +4868,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
                         predecessor = predecessor->next;
                     }
                 }
-                if (result.error == IR_VALIDATION_NONE && (incoming || predecessor))
+                IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS,
+                                       result.error == IR_VALIDATION_NONE && !incoming && !predecessor);
+                if (result.error == IR_VALIDATION_NONE && (incoming || predecessor || !ir_label_block_parameter_provenance_valid(function, parameter)))
                 {
                     result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
-                }
-                else if (result.error == IR_VALIDATION_NONE)
-                {
-                    IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, 1);
-                    if (!ir_label_block_parameter_provenance_valid(function, parameter))
-                    {
-                        result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
-                    }
                 }
             }
         }
