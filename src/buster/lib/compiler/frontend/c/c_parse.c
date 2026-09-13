@@ -2227,6 +2227,10 @@ BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* 
             CScopeId scope = c_parse_scope_for_token(analysis, (CScopeId){.value = 0}, index);
             entity = c_parse_lookup_entity_token(analysis, preprocess.spelling_base, scope, &token);
         }
+        if (entity.value < analysis->entity_count && analysis->entities[entity.value].declaration_token_plus_one == index + 1)
+        {
+            continue;
+        }
         CTypeId type_id = entity.value < analysis->entity_count ? analysis->entities[entity.value].type : C_TYPE_ID_INVALID;
         CType* type = type_id.value < analysis->type_count ? &analysis->types[type_id.value] : 0;
         bool indirect = type && type->kind == C_TYPE_POINTER;
@@ -2261,7 +2265,8 @@ BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* 
                 argument_count += 1;
             }
         }
-        if (complete && !c_semantic_call_accepts_arity(type->parameter_count, type->is_variadic, type->is_unprototyped, argument_count))
+        bool is_unprototyped = type->is_unprototyped && !c_preprocess_dialect_is_c23(preprocess.dialect);
+        if (complete && !c_semantic_call_accepts_arity(type->parameter_count, type->is_variadic, is_unprototyped, argument_count))
         {
             result.message = c_semantic_call_arity_message(arena, indirect ? (String8){0} : c_token_spelling(preprocess.spelling_base, token),
                                                           type->parameter_count, type->is_variadic, argument_count);
