@@ -203,18 +203,17 @@ jobs:
         include:
           - label: eb1bef2
             tag: native-retirement-evidence-eb1bef2
-            candidate_ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
             candidate_asset: buster-candidate-source-eb1bef2.tar.gz
             strict_pattern: strict-retirement-eb1bef2-34714527496.zip.part-*
           - label: 2bb4ce9
             tag: native-retirement-evidence-2bb4ce9
-            candidate_ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
             candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
             strict_pattern: strict-retirement-2bb4ce9-34718946098.zip.part-*
     steps:
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: validation
           persist-credentials: false
       - name: Download published strict and source assets
         env:
@@ -229,19 +228,14 @@ jobs:
             --pattern "$STRICT_PATTERN" --pattern "$CANDIDATE_ASSET"
       - name: Reconstruct and verify strict destination bytes
         run: |
-          python3 tools/native_retirement_archive.py verify-strict \
+          python3 validation/tools/native_retirement_archive.py verify-strict \
             --assets "$RUNNER_TEMP/release-assets" \
             --output "$RUNNER_TEMP/strict" \
             --cleanup
-          cp tools/native_retirement_archive.py "$RUNNER_TEMP/native_retirement_archive.py"
-      - name: Check out pinned candidate source at a clean workspace root
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ matrix.candidate_ref }}
-          clean: true
-          persist-credentials: false
-      - name: Restore archived compiler at its original workspace path
+          cp validation/tools/native_retirement_archive.py "$RUNNER_TEMP/native_retirement_archive.py"
+      - name: Restore pinned source snapshot and archived compiler
         run: |
+          tar -xzf "$RUNNER_TEMP/release-assets/${{ matrix.candidate_asset }}" --strip-components=1
           mkdir -p evidence/strict-binary
           cp "$RUNNER_TEMP/strict/archived-ide" evidence/strict-binary/ide
           chmod 555 evidence/strict-binary/ide
