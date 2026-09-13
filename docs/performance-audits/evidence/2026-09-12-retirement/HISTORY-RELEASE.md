@@ -1,9 +1,9 @@
 # Native-retirement evidence history from September 12, 2026
 
-This release preserves thirteen historical census, strict, raw, partial, and
+This release preserves fifteen historical census, strict, raw, partial, and
 failed-run GitHub Actions archives that were not already covered by the durable
 `eb1bef2` and `2bb4ce9` releases. Together, the three releases cover all
-seventeen artifacts discovered from the native-retirement evidence branch.
+nineteen artifacts discovered from the native-retirement evidence branch.
 
 Every asset retains the original Actions artifact name with `.zip` appended.
 Archives larger than GitHub's per-asset limit are split into numbered

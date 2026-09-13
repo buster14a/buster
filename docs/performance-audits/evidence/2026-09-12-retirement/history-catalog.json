@@ -25,7 +25,9 @@
         10303967670,
         10303806553,
         10303946160,
-        10303052559
+        10303052559,
+        10310206305,
+        10310195493
       ]
     }
   ],
@@ -169,6 +171,36 @@
       "candidate_tree": "0be66d46760004e4654400347e1ccf920b0fe3d5",
       "expires_at_observed": "2026-09-20T00:09:08Z",
       "recorded_outcome": "artifact-present-workflow-failed-job-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10310206305,
+      "name": "native-retirement-2bb4ce9-34731220185",
+      "size": 396443308,
+      "sha256": "87cd7bbd2452fc666dfa0fbd0cfcc3fdefc5c86d7a0a0b41ee97768180ff4da7",
+      "run": 34731220185,
+      "workflow_commit": "af4c84b0b789a441fbaea71061d9d0e5d91fedf0",
+      "candidate_commit": "2bb4ce939d99c3956848ca7bc9c347f3ae8db231",
+      "candidate_tree": "0be66d46760004e4654400347e1ccf920b0fe3d5",
+      "expires_at_observed": "2026-09-20T02:01:45Z",
+      "recorded_outcome": "four-complete-census-shards-with-1104-supported-gaps-join-skipped-by-ci-step-policy",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10310195493,
+      "name": "strict-retirement-2bb4ce9-34731220185",
+      "size": 2359011344,
+      "sha256": "dca0a1313aed86f9cb3e2dad3995fa4608e2c150514c1f9e28c8de081c29dbe4",
+      "run": 34731220185,
+      "workflow_commit": "af4c84b0b789a441fbaea71061d9d0e5d91fedf0",
+      "candidate_commit": "2bb4ce939d99c3956848ca7bc9c347f3ae8db231",
+      "candidate_tree": "0be66d46760004e4654400347e1ccf920b0fe3d5",
+      "expires_at_observed": "2026-09-20T02:01:47Z",
+      "recorded_outcome": "reported-strict-sanitized-7776-including-controls",
       "candidate_binary_sha256": null,
       "direct_oracle_binary_sha256": null,
       "producing_workflow_conclusion_observed": "failure"

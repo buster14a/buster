@@ -9,13 +9,16 @@ overwrite release assets.
 
 ## Frozen identity versus current availability
 
-`history-catalog.json` records seventeen required archives discovered through the
+`history-catalog.json` records nineteen required archives discovered through the
 original and newer #504 runs, including the failed-packaging raw strict bundle.
 Each archive keeps its own Actions ID, producing workflow revision, candidate
 commit/tree, byte count, SHA-256, observed expiration, and recorded outcome.
 The complete paginated discovery in run 34728261000 added eight archives to
-the initial nine-entry inventory. Unknown per-build binary hashes are explicitly null; identical source revisions
-are not a license to reuse another run's binary identity or outcome.
+the initial nine-entry inventory. A later #504 run then produced two additional
+archives; the gate detected them, and publication run 34732745347 preserved
+their exact bytes before this catalog accepted them. Unknown per-build binary
+hashes are explicitly null; identical source revisions are not a license to
+reuse another run's binary identity or outcome.
 
 The checker refreshes the evidence branch's workflow runs and artifact metadata,
 follows pagination, and reports additional unregistered archives. It compares
@@ -35,9 +38,10 @@ internally consistent release manifest and never uploads or overwrites anything.
 
 Publication run
 [34730125413](https://github.com/buster14a/buster/actions/runs/34730125413)
-verified the complete transfer from the original Actions artifacts. The history
-release contains 21 release assets totaling 12,809,466,853 bytes; together the
-three releases preserve all seventeen original ZIP identities. Larger ZIPs are
+verified the first complete transfer from the original Actions artifacts. The
+late transfer above extended the history release to 25 release assets totaling
+15,564,921,505 bytes; together the three releases preserve all nineteen
+original ZIP identities. Larger ZIPs are
 split into deterministic 1,000,000,000-byte parts.
 
 ## Reproduction and CI

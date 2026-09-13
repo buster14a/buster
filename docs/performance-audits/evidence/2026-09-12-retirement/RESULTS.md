@@ -13,14 +13,14 @@ native-backend retirement or close parent issue #36.
   (2,359,006,674 bytes), plus exact source snapshots, manifest, checksums, and
   successful replay receipts.
 - [`native-retirement-evidence-2bb4ce9`](https://github.com/buster14a/buster/releases/tag/native-retirement-evidence-2bb4ce9)
-  preserves census ZIP `a5f1b5f70a22f59f5be3c5eb8070155d050ef85f22b3b495eea34cfe7875ff49`
+  preserves census ZIP `a5f1b5f76bd67401b80b32071386f93c75fd0f2fdd72f517b525b8d9fd76b6eb`
   (396,442,720 bytes) and reconstructed strict ZIP
   `434b9a8ed1a0e52fc53cf084a044de213fbb4cc5d7d482380bbe18f45c937910`
   (2,359,014,398 bytes), plus the same reproduction material.
 - [`native-retirement-evidence-history-20260912`](https://github.com/buster14a/buster/releases/tag/native-retirement-evidence-history-20260912)
-  preserves the remaining thirteen census, strict, partial, raw, and failed-run
-  archives. Its 21 assets total 12,809,466,853 bytes. Together the three
-  releases cover every one of the seventeen Actions artifacts in
+  preserves the remaining fifteen census, strict, partial, raw, and failed-run
+  archives. Its 25 assets total 15,564,921,505 bytes. Together the three
+  releases cover every one of the nineteen Actions artifacts in
   `history-catalog.json`.
 
 Each contract binds source commits and trees, original Actions artifact IDs,
@@ -108,3 +108,11 @@ Failed repair attempts remain visible in Actions runs 34727739903, 34728409857,
 and 34729266820. They respectively record a receipt-publication mistake, an
 incorrect nested workspace, and replay against the wrong source checkout; none
 is relabeled as successful evidence.
+
+The final history gate subsequently detected two archives created by later
+#504 run 34731220185. CI transfer run
+[34732745347](https://github.com/buster14a/buster/actions/runs/34732745347)
+preserved and destination-verified their 396,443,308-byte census ZIP and
+2,359,011,344-byte strict ZIP. Their producing workflow failure and skipped
+census join remain recorded rather than being inferred from the successful
+semantic pair above.
