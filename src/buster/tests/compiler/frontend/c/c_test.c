@@ -13517,7 +13517,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
                         " typedef __int128 I; typedef unsigned __int128 U;"
                         " struct W { I a,b,c,d; };"
                         " struct W wide = {((I)1<<100),(I)0xffffffffffffffffULL,-((I)1<<100),-((I)1<<126)*2};"
-                        " U unsigned_wide[] = {((U)1<<100),(U)0xffffffffffffffffULL,(U)-1,(U)1<<127};");
+                        " U unsigned_wide[] = {((U)1<<100),(U)0xffffffffffffffffULL,(U)-1,(U)1<<127};"
+                        " unsigned long long byte_words[] = {0,0x0123456789abcdefULL,0xfedcba9876543210ULL};"
+                        " void *byte_pointers[] = {0,(void *)0x0123456789abcdefULL,(void *)0xfedcba9876543210ULL};");
+    // Pin every byte, including an embedded null and bytes with the high bit set.
+    // Integer and integer-cast pointer arrays take distinct byte-store paths.
+    u8 expected_byte_words[] = {
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+    };
     u8 expected_bool[] = {1, 1, 1, 1, 1, 1, 1, 0};
     u8 expected_float[] = {0,0,0,0x5f, 0,0,0,0x5f, 0,0,0x80,0x5f};
     u8 expected_double[] = {0,0,0,0,0,0,0xe0,0x43, 0,0,0,0,0,0,0xe0,0x43, 0,0,0,0,0,0,0xf0,0x43};
@@ -13535,6 +13544,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
         0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
     };
     struct { String8 name; ByteSlice expected; } cases[] = {
+        {S8("byte_words"), BUSTER_ARRAY_TO_SLICE(expected_byte_words)},
+        {S8("byte_pointers"), BUSTER_ARRAY_TO_SLICE(expected_byte_words)},
         {S8("booleans"), BUSTER_ARRAY_TO_SLICE(expected_bool)},
         {S8("bool_array"), BUSTER_ARRAY_TO_SLICE(expected_bool)},
         {S8("floats"), BUSTER_ARRAY_TO_SLICE(expected_float)},
