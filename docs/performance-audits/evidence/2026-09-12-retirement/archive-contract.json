@@ -1,0 +1,76 @@
+{
+  "schema": "buster-native-retirement-archive-v1",
+  "release": {
+    "tag": "native-retirement-evidence-eb1bef2",
+    "url": "https://github.com/buster14a/buster/releases/tag/native-retirement-evidence-eb1bef2"
+  },
+  "upstream_run": {
+    "id": 34714527496,
+    "url": "https://github.com/buster14a/buster/actions/runs/34714527496",
+    "head_commit": "38f150f7affdf458a9b394961709d659cc738bf3",
+    "head_tree": "cc1b9067d1bc519ee87c40bfcb556520a226d522",
+    "created_at": "2026-09-12T19:33:45Z"
+  },
+  "sources": {
+    "validation": {
+      "commit": "38f150f7affdf458a9b394961709d659cc738bf3",
+      "tree": "cc1b9067d1bc519ee87c40bfcb556520a226d522",
+      "asset": "buster-validation-source-38f150f.tar.gz",
+      "files": {
+        "docs/performance-audits/evidence/2026-09-12-retirement/join-census.py": "47470db6758e38ae6dad2a0244bf2c0109059a9f2ba161f9fba46083b6137f5f",
+        "docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py": "edafd3c7cb178682f1f4491ad9185ef059af0aae5d1b777f560b62808ed58540",
+        "tools/ci_pack_evidence.py": "522c42e9119371bbea6ed1d56c1be7f955dfca5fb00cb3b787b27a8e1ef6075f"
+      }
+    },
+    "candidate": {
+      "commit": "eb1bef2f124c6a778a435ae1eda18ae489c489c5",
+      "tree": "f9b5ae7c1db928ba646a4a4d1533cf2e68a505dd",
+      "asset": "buster-candidate-source-eb1bef2.tar.gz"
+    },
+    "direct_oracle": {
+      "commit": "3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e",
+      "tree": "ffe6f065ec9a4594a18e5f984d621ba28145d247",
+      "asset": "buster-direct-oracle-source-3e912a3.tar.gz"
+    }
+  },
+  "artifacts": {
+    "census": {
+      "artifact_id": 10303964052,
+      "artifact_name": "native-retirement-eb1bef2-34714527496",
+      "archive_name": "native-retirement-eb1bef2-34714527496.zip",
+      "size": 389211062,
+      "sha256": "fe48776d3116f1620e940d132965b306a6714c5f86d3ab1a1ada59413650505b"
+    },
+    "strict": {
+      "artifact_id": 10304642722,
+      "artifact_name": "strict-retirement-eb1bef2-34714527496",
+      "archive_name": "strict-retirement-eb1bef2-34714527496.zip",
+      "size": 2359006674,
+      "sha256": "0351edbcd30062fb72790559396bf771c17b6364b16a408ee83b7c157dbf9670",
+      "part_size": 1000000000
+    }
+  },
+  "identities": {
+    "candidate_binary_sha256": "2bdf15fb6ef4a043d85cb3ed042456cf61ca04eb1e9df3c3f69827ae0c9aca27",
+    "strict_candidate_binary_sha256": "fba419609920611f6df45bb36a79e1d57e014821bef493e965a481acdc1c7a44",
+    "direct_oracle_binary_sha256": "1190c010537be78a81dc00b85fa6ca8af5573765a278f8ff52c95318d22f16c1",
+    "census_rows": 76416,
+    "census_groups": 19104,
+    "census_subjects": 398,
+    "census_inputs": 537,
+    "strict_configurations": 7776
+  },
+  "toolchain": {
+    "runner": "ubuntu-26.04",
+    "image_version": "20260907.131.1",
+    "clang": "Ubuntu clang version 21.1.8 (6ubuntu1)",
+    "target": "x86_64-pc-linux-gnu",
+    "installed_dir": "/usr/lib/llvm-21/bin",
+    "bootstrap_exception": "GitHub-hosted images do not provide the trusted TinyCC bootstrap; build.c was compiled with the image Clang as documented."
+  },
+  "scope": {
+    "census": "Complete tracked-test baseline-CPU object matrix; raw and joined ledgers are retained.",
+    "strict": "7776 native strict-MIR configurations with the sanitizer oracle enabled.",
+    "limitations": "Inherited host/resource headers and the process environment were not frozen. This evidence does not authorize direct-backend retirement. Dependency closure belongs to issue #508."
+  }
+}

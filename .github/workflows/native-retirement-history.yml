@@ -1,0 +1,50 @@
+name: Native retirement history
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-retirement-history.yml
+      - tools/native_retirement_inventory.py
+      - tools/native_retirement_archive.py
+      - tests/native_retirement_inventory_test.py
+      - docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json
+      - docs/performance-audits/evidence/2026-09-12-retirement/HISTORY.md
+  workflow_dispatch:
+
+concurrency:
+  group: native-retirement-history-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  history:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Original identities and durable history bytes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out submitted history gate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run offline original-identity regressions
+        run: python3 tests/native_retirement_inventory_test.py -v
+      - name: Independently download and check the durable history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 tools/native_retirement_inventory.py
+          --catalog docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json
+          --output "${{ runner.temp }}/retirement-history"
+      - name: Retain actual metadata and unsuccessful outcomes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: retirement-history-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/retirement-history
+          retention-days: 7
+          if-no-files-found: error

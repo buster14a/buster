@@ -212,6 +212,7 @@ typedef enum CodegenModuleRelocationKind
     // the field explicitly.
     CODEGEN_MODULE_RELOCATION_X86_64_PC32,
     CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+    CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
     CODEGEN_MODULE_RELOCATION_ABSOLUTE32,
     CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
     CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
@@ -479,6 +480,11 @@ struct CodegenModule
     u8 reserved_failure[3];
     u32 entry_count;
     u32 function_count;
+    // Trailing function descriptors synthesized for labels defined by
+    // module-level assembly. Their source supplies no compiler unwind
+    // directives, so the ARM64 COFF writer retains them for symbol sizes but
+    // does not manufacture platform unwind records for them.
+    u32 assembly_function_count;
     u32 global_count;
     u32 relocation_count;
     u32 data_relocation_count;

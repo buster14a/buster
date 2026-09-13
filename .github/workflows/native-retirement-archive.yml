@@ -1,0 +1,229 @@
+name: Native retirement durable replay
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-retirement-archive.yml
+      - tools/native_retirement_archive.py
+      - docs/performance-audits/evidence/2026-09-12-retirement/archive-contract*.json
+      - docs/performance-audits/evidence/2026-09-12-retirement/RELEASE*.md
+  workflow_dispatch:
+
+concurrency:
+  group: native-retirement-durable-replay-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  census_replay:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Replay census archive (${{ matrix.label }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: eb1bef2
+            tag: native-retirement-evidence-eb1bef2
+            validation_ref: 38f150f7affdf458a9b394961709d659cc738bf3
+            candidate_ref: eb1bef2f124c6a778a435ae1eda18ae489c489c5
+            validation_asset: buster-validation-source-38f150f.tar.gz
+            candidate_asset: buster-candidate-source-eb1bef2.tar.gz
+            census_asset: native-retirement-eb1bef2-34714527496.zip
+          - label: 2bb4ce9
+            tag: native-retirement-evidence-2bb4ce9
+            validation_ref: cfa63d6dd4ec60b32b7de29ba52b241181065dc5
+            candidate_ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231
+            validation_asset: buster-validation-source-cfa63d6.tar.gz
+            candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
+            census_asset: native-retirement-2bb4ce9-34718946098.zip
+    steps:
+      - name: Check out replay implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: validation
+          persist-credentials: false
+      - name: Check out pinned validation source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.validation_ref }}
+          path: replay-validation
+          persist-credentials: false
+      - name: Check out pinned candidate source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.candidate_ref }}
+          path: candidate
+          persist-credentials: false
+      - name: Check out pinned direct-oracle source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          path: reference
+          persist-credentials: false
+      - name: Download published census and source assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_TAG: ${{ matrix.tag }}
+          CENSUS_ASSET: ${{ matrix.census_asset }}
+          VALIDATION_ASSET: ${{ matrix.validation_asset }}
+          CANDIDATE_ASSET: ${{ matrix.candidate_asset }}
+        run: |
+          for attempt in 1 2 3; do
+            attempt_dir="$RUNNER_TEMP/release-assets-$attempt"
+            mkdir "$attempt_dir"
+            if gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$attempt_dir" \
+              --pattern archive-manifest.json --pattern SHA256SUMS \
+              --pattern "$CENSUS_ASSET" --pattern "$VALIDATION_ASSET" \
+              --pattern "$CANDIDATE_ASSET" --pattern buster-direct-oracle-source-3e912a3.tar.gz; then
+              mv "$attempt_dir" "$RUNNER_TEMP/release-assets"
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+      - name: Verify destination bytes and extract census
+        run: |
+          python3 validation/tools/native_retirement_archive.py verify-census \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --output "$RUNNER_TEMP/census" \
+            --cleanup
+          test ! -e candidate/evidence
+          mv "$RUNNER_TEMP/census/candidate/evidence" candidate/evidence
+      - name: Restore tracked input omitted by Actions hidden-file packaging
+        run: >-
+          python3 validation/tools/native_retirement_archive.py restore-census-inputs
+          --evidence candidate/evidence
+          --source candidate
+      - name: Rebuild the direct oracle from its pinned source
+        working-directory: reference
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/reference-build"
+          "$RUNNER_TEMP/reference-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/reference-build" build --config Release -t ide
+      - name: Replay census join and byte validator
+        working-directory: candidate/evidence
+        run: |
+          mv census-integrated-joined-v3 census-integrated-joined-recorded-v3
+          cp "$GITHUB_WORKSPACE/replay-validation/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py" .
+          cp "$GITHUB_WORKSPACE/replay-validation/docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py" .
+          clang -O2 -fPIC -shared -I"$GITHUB_WORKSPACE/candidate/src" \
+            "$GITHUB_WORKSPACE/candidate/src/buster/lib/hash.c" -o libcensus_hash.so
+          python3 "$PWD/join-census.py" census-integrated 4
+          python3 "$PWD/validate-census-v2.py" census-integrated 4
+      - name: Record successful census round trip
+        run: >-
+          python3 validation/tools/native_retirement_archive.py census-receipt
+          --manifest "$RUNNER_TEMP/release-assets/archive-manifest.json"
+          --report "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-validated-v2.json"
+          --recorded "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-joined-recorded-v3"
+          --replayed "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-joined-v3"
+          --archived-reference "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-0/baseline-ide.exe"
+          --rebuilt-reference "$GITHUB_WORKSPACE/reference/build/Release/ide"
+          --run-id "${{ github.run_id }}"
+          --output "$RUNNER_TEMP/census-replay-${{ matrix.label }}-${{ github.run_id }}.json"
+      - name: Retain census replay receipt with the CI run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: census-replay-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/census-replay-${{ matrix.label }}-${{ github.run_id }}.json
+          retention-days: 7
+          if-no-files-found: error
+
+  strict_replay:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Replay strict archive (${{ matrix.label }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: eb1bef2
+            tag: native-retirement-evidence-eb1bef2
+            candidate_asset: buster-candidate-source-eb1bef2.tar.gz
+            strict_pattern: strict-retirement-eb1bef2-34714527496.zip.part-*
+          - label: 2bb4ce9
+            tag: native-retirement-evidence-2bb4ce9
+            candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
+            strict_pattern: strict-retirement-2bb4ce9-34718946098.zip.part-*
+    steps:
+      - name: Check out replay implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: validation
+          persist-credentials: false
+      - name: Download published strict and source assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_TAG: ${{ matrix.tag }}
+          CANDIDATE_ASSET: ${{ matrix.candidate_asset }}
+          STRICT_PATTERN: ${{ matrix.strict_pattern }}
+        run: |
+          for attempt in 1 2 3; do
+            attempt_dir="$RUNNER_TEMP/release-assets-$attempt"
+            mkdir "$attempt_dir"
+            if gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$attempt_dir" \
+              --pattern archive-manifest.json --pattern SHA256SUMS \
+              --pattern "$STRICT_PATTERN" --pattern "$CANDIDATE_ASSET"; then
+              mv "$attempt_dir" "$RUNNER_TEMP/release-assets"
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+      - name: Reconstruct and verify strict destination bytes
+        run: |
+          python3 validation/tools/native_retirement_archive.py verify-strict \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --output "$RUNNER_TEMP/strict" \
+            --cleanup
+          cp validation/tools/native_retirement_archive.py "$RUNNER_TEMP/native_retirement_archive.py"
+      - name: Restore pinned source snapshot and archived compiler
+        run: |
+          tar -xzf "$RUNNER_TEMP/release-assets/${{ matrix.candidate_asset }}" --strip-components=1
+          mkdir -p evidence/strict-binary
+          cp "$RUNNER_TEMP/strict/archived-ide" evidence/strict-binary/ide
+          chmod 555 evidence/strict-binary/ide
+      - name: Replay every strict configuration with sanitizer enabled
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/strict-build"
+          "$RUNNER_TEMP/strict-build" test_differential \
+            --ide "$GITHUB_WORKSPACE/evidence/strict-binary/ide" --cc clang \
+            --strict-mir --sanitize-oracle --out "$GITHUB_WORKSPACE/evidence/strict-differential"
+      - name: Report first strict replay diagnostic after failure
+        if: ${{ failure() }}
+        run: |
+          diagnostic=$(find evidence/strict-differential -name '*.stderr' -type f -size +0c -print -quit 2>/dev/null || true)
+          if [[ -n "$diagnostic" ]]; then
+            sed -n '1,120p' "$diagnostic"
+          fi
+      - name: Record successful strict round trip
+        run: >-
+          python3 "$RUNNER_TEMP/native_retirement_archive.py" strict-receipt
+          --manifest "$RUNNER_TEMP/release-assets/archive-manifest.json"
+          --preflight "$RUNNER_TEMP/strict/strict-preflight.json"
+          --replay "$GITHUB_WORKSPACE/evidence/strict-differential"
+          --run-id "${{ github.run_id }}"
+          --output "$RUNNER_TEMP/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json"
+      - name: Retain strict replay receipt with the CI run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-replay-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json
+          retention-days: 7
+          if-no-files-found: error

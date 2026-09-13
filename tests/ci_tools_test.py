@@ -14,6 +14,7 @@ import tempfile
 import textwrap
 import unittest
 from unittest import mock
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -21,6 +22,7 @@ import ci_pack_evidence
 import ci_summary
 import ci_zig
 import github_ci_time
+import native_retirement_archive
 
 
 class ZigTests(unittest.TestCase):
@@ -394,6 +396,129 @@ class EvidencePackTests(unittest.TestCase):
         files, _ = self.members()
         self.assertEqual(set(files), {"buster-ci/" + name for name in self.KEEP})
 
+
+
+class NativeRetirementArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.assets = self.root / "assets"
+        self.commit = "1" * 40
+        self.tree = "2" * 40
+        self.compiler = b"archived compiler\n"
+
+    def archive_source(self, name):
+        tree = self.root / (name + "-tree")
+        tree.mkdir()
+        (tree / "source.txt").write_text(name)
+        with tarfile.open(self.source / name, "w:gz") as bundle:
+            bundle.add(tree, arcname=name.removesuffix(".tar.gz"))
+
+    def make_inputs(self):
+        census = self.source / "census.zip"
+        with zipfile.ZipFile(census, "w") as bundle:
+            bundle.writestr("candidate/evidence/manifest.txt", "complete=1\n")
+        evidence = self.root / "evidence"
+        (evidence / "strict-binary").mkdir(parents=True)
+        (evidence / "strict-differential").mkdir()
+        (evidence / "strict-binary/ide").write_bytes(self.compiler)
+        (evidence / "strict-binary/source.txt").write_text(self.commit + "\n" + self.tree + "\n")
+        compiler_hash = hashlib.sha256(self.compiler).hexdigest()
+        (evidence / "strict-binary/sha256.txt").write_text(compiler_hash + "  evidence/strict-binary/ide\n")
+        (evidence / "strict-differential/summary.txt").write_text(
+            "version=1 failures=0 io_failed=0 configurations=432\n")
+        result = {"success": True, "required_steps": ["strict_build", "strict_self_test", "strict_execute"],
+                  "steps": {name: {"outcome": "success"} for name in
+                            ("strict_build", "strict_self_test", "strict_execute")}}
+        (evidence / "result.json").write_text(json.dumps(result) + "\n")
+        (evidence / "summary.md").write_text("## Buster CI\n\n**Result: SUCCESS**\n")
+        packed = self.root / "native-ci-logs.tar.gz"
+        with tarfile.open(packed, "w:gz") as bundle:
+            bundle.add(evidence, arcname="evidence")
+        strict = self.source / "strict.zip"
+        with zipfile.ZipFile(strict, "w", compression=zipfile.ZIP_STORED) as bundle:
+            bundle.write(packed, packed.name)
+            bundle.write(evidence / "result.json", "result.json")
+            bundle.write(evidence / "summary.md", "summary.md")
+        for name in ("validation.tar.gz", "candidate.tar.gz", "direct.tar.gz"):
+            self.archive_source(name)
+        contract = {
+            "schema": "test", "release": {"tag": "test", "url": "https://example.invalid/test"},
+            "sources": {
+                "validation": {"commit": self.commit, "tree": self.tree, "asset": "validation.tar.gz"},
+                "candidate": {"commit": self.commit, "tree": self.tree, "asset": "candidate.tar.gz"},
+                "direct_oracle": {"commit": self.commit, "tree": self.tree, "asset": "direct.tar.gz"},
+            },
+            "artifacts": {
+                "census": {"archive_name": census.name, "size": census.stat().st_size,
+                           "sha256": hashlib.sha256(census.read_bytes()).hexdigest()},
+                "strict": {"archive_name": strict.name, "size": strict.stat().st_size,
+                           "sha256": hashlib.sha256(strict.read_bytes()).hexdigest(), "part_size": 100},
+            },
+            "identities": {"candidate_binary_sha256": compiler_hash, "direct_oracle_binary_sha256": "0" * 64,
+                           "census_rows": 1, "strict_configurations": 7776},
+        }
+        path = self.root / "contract.json"
+        path.write_text(json.dumps(contract))
+        return path
+
+    def test_prepared_archives_round_trip_and_corruption_fails_closed(self):
+        contract = self.make_inputs()
+        native_retirement_archive.prepare(contract, self.source, self.assets)
+        manifest = json.loads((self.assets / native_retirement_archive.MANIFEST_NAME).read_text())
+        self.assertGreater(len(manifest["artifacts"]["strict"]["release_assets"]), 1)
+        self.assertEqual(manifest["identities"]["strict_candidate_binary_sha256"],
+                         hashlib.sha256(self.compiler).hexdigest())
+        census_output = self.root / "census-output"
+        native_retirement_archive.verify_census(self.assets, census_output, False)
+        self.assertEqual((census_output / "candidate/evidence/manifest.txt").read_text(), "complete=1\n")
+        strict_output = self.root / "strict-output"
+        native_retirement_archive.verify_strict(self.assets, strict_output, False)
+        self.assertEqual((strict_output / "archived-ide").read_bytes(), self.compiler)
+        damaged = self.assets / manifest["artifacts"]["strict"]["release_assets"][0]
+        damaged.write_bytes(b"damage" + damaged.read_bytes())
+        with self.assertRaisesRegex(ValueError, "size mismatch"):
+            native_retirement_archive.verify_strict(self.assets, self.root / "damaged", False)
+
+    def test_census_receipt_records_a_nonidentical_clean_rebuild(self):
+        contract = self.make_inputs()
+        value = json.loads(contract.read_text())
+        archived = self.root / "archived-direct"
+        rebuilt = self.root / "rebuilt-direct"
+        archived.write_bytes(b"archived direct compiler\n")
+        rebuilt.write_bytes(b"clean rebuilt direct compiler\n")
+        archived_sha256 = hashlib.sha256(archived.read_bytes()).hexdigest()
+        value["identities"]["direct_oracle_binary_sha256"] = archived_sha256
+        contract.write_text(json.dumps(value))
+        native_retirement_archive.prepare(contract, self.source, self.assets)
+        manifest = json.loads((self.assets / native_retirement_archive.MANIFEST_NAME).read_text())
+        report = self.root / "report.json"
+        report.write_text(json.dumps({
+            "rows_validated": 1,
+            "binaries_sha256": {
+                "candidate-ide.exe": manifest["identities"]["candidate_binary_sha256"],
+                "baseline-ide.exe": archived_sha256,
+            },
+            "inputs_sha256": {"tests/input.c": "3" * 64},
+        }))
+        recorded = self.root / "recorded"
+        replayed = self.root / "replayed"
+        recorded.mkdir()
+        replayed.mkdir()
+        (recorded / "results.tsv").write_text("same\n")
+        (replayed / "results.tsv").write_text("same\n")
+        receipt = self.root / "receipt.json"
+        native_retirement_archive.census_receipt(
+            self.assets / native_retirement_archive.MANIFEST_NAME, report, recorded, replayed,
+            archived, rebuilt, "123", receipt)
+        result = json.loads(receipt.read_text())
+        self.assertFalse(result["rebuilt_matches_archived"])
+        self.assertEqual(result["archived_direct_oracle_sha256"], archived_sha256)
+        self.assertEqual(result["rebuilt_direct_oracle_sha256"],
+                         hashlib.sha256(rebuilt.read_bytes()).hexdigest())
 
 
 class WorkflowPolicyTests(unittest.TestCase):

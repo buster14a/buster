@@ -506,7 +506,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     {
         MachineInstruction* instruction = function->instructions + instruction_index;
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        u64 foreclosed = info->clobber_mask;
+        u64 foreclosed = machine_instruction_opcode_row(function, instruction).clobber_mask;
         if (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL)
         {
             foreclosed |= caller_saved_allocatable;

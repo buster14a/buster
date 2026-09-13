@@ -1077,7 +1077,10 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(fixed_m1_target));
     Target generic_m1_arch = fixed_m1_target;
     generic_m1_arch.cpu_model = CPU_MODEL_A64_GENERIC;
-    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(generic_m1_arch));
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(generic_m1_arch));
+    Target baseline_m1_arch = fixed_m1_target;
+    baseline_m1_arch.cpu_model = CPU_MODEL_BASELINE;
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(baseline_m1_arch));
     Target x86_m1_arch = fixed_m1_target;
     x86_m1_arch.cpu_arch = CPU_ARCH_X86_64;
     BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(x86_m1_arch));

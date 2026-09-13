@@ -2343,6 +2343,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         CodegenModule alignment_assembly_codegen = codegen_generate_canonical_module(arguments->arena, alignment_assembly_program, alignment_assembly_module,
                                                                                         target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, alignment_assembly_codegen.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, alignment_assembly_codegen.assembly_function_count == 1);
         CodegenFunctionDescriptor* aligned_body_descriptor =
             alignment_assembly_codegen.error == CODEGEN_ERROR_NONE ? codegen_test_c_descriptor_find(&alignment_assembly_codegen, aligned_body_symbol) : 0;
         BUSTER_TEST(arguments, aligned_body_descriptor != 0);

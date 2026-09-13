@@ -2377,7 +2377,10 @@ struct CIntegerIrBuilder
     u32 label_count;
     CPreprocessResult preprocess;
     CParseResult parse;
-    CEntityId* token_entities;
+    // Each token's resolved entity id plus one, so an unresolved token is the
+    // zero a fresh arena already holds; c_ir_identifier_entity subtracts one,
+    // which returns C_ID_UNDERLYING_INVALID for it without a second test.
+    u32* token_entities_plus_one;
     CIrConstantEntityIndex* constant_entity_index;
     IrFunction** declaration_functions;
     IrSymbolId* entity_symbols;
@@ -2408,14 +2411,14 @@ struct CIntegerIrBuilder
     // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
     // c_ir_group_type_name owns it and says which groups are never stored.
     u32* group_type_names;
-    u32* matching_delimiters;
+    u32* matching_delimiters_plus_one;
     // Whole-stream matching-delimiter array borrowed from the parse position
     // index, non-null only when the index scanned the stream with zero
     // delimiter mismatches. Properly nested sub-ranges answer identically to
     // the per-body index, so when this is set the per-body build and its
     // array are skipped entirely; malformed streams leave it null and keep
     // the per-body scan's exact verdicts.
-    u32 const* stream_matching_delimiters;
+    u32 const* stream_matching_delimiters_plus_one;
     // Borrowed from the parse position index when it is built: ascending
     // positions of every identifier-then-colon token pair, the necessary
     // condition of c_ir_named_label_at. label_candidates_valid distinguishes
@@ -3064,7 +3067,7 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
             break;
         }
         u32 open = stack[--stack_count].token_index;
-        builder->matching_delimiters[open - builder->body_token_start] = token_index;
+        builder->matching_delimiters_plus_one[open - builder->body_token_start] = token_index + 1;
     }
     valid &= stack_count == 0;
     scratch_end(temporary);
@@ -3073,11 +3076,13 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
-    if (builder->stream_matching_delimiters)
+    if (builder->stream_matching_delimiters_plus_one)
     {
         if (open < builder->preprocess.token_count)
         {
-            u32 match = builder->stream_matching_delimiters[open];
+            // Both arrays store the match plus one, so an absent match decodes
+            // to UINT32_MAX and the range test below rejects it unchanged.
+            u32 match = builder->stream_matching_delimiters_plus_one[open] - 1;
             if (match < end && c_token_is_punctuator(&builder->preprocess.tokens[open], opening) &&
                 c_token_is_punctuator(&builder->preprocess.tokens[match], closing))
             {
@@ -3091,7 +3096,7 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
         u32 offset = open - builder->body_token_start;
         if (offset < builder->body_token_count)
         {
-            u32 match = builder->matching_delimiters[offset];
+            u32 match = builder->matching_delimiters_plus_one[offset] - 1;
             if (match < end && c_token_is_punctuator(&builder->preprocess.tokens[open], opening) &&
                 c_token_is_punctuator(&builder->preprocess.tokens[match], closing))
             {
@@ -4423,13 +4428,13 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_name(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity(CIntegerIrBuilder* builder, u32 token_index)
 {
     CEntityId result;
-    if (!builder->token_entities || token_index >= builder->preprocess.token_count)
+    if (!builder->token_entities_plus_one || token_index >= builder->preprocess.token_count)
     {
         result = C_ENTITY_ID_INVALID;
     }
     else
     {
-        result = builder->token_entities[token_index];
+        result = (CEntityId){.value = builder->token_entities_plus_one[token_index] - 1};
     }
 
     return result;
@@ -11619,8 +11624,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* b
         byte_length = element_count * decoded.element_width;
         array_type = requested_type;
     }
-    u8* bytes = arena_allocate(builder->arena, u8, byte_length);
-    memset(bytes, 0, byte_length);
+    u8* bytes = arena_allocate_zeroed(builder->arena, u8, byte_length);
     if (decoded.bytes.length)
     {
         memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
@@ -32514,6 +32518,11 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     }
     else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
     {
+        result = builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
+    }
+    else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) ||
+             IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+    {
         result = builder->target.cpu_arch == CPU_ARCH_X86_64;
     }
     else
@@ -32565,6 +32574,25 @@ BUSTER_C_INTERNAL CIrBoundRegisterName const c_ir_bound_register_names[] = {
     {S8_INITIALIZER("r11"), IR_INLINE_ASSEMBLY_CONSTRAINT_R11},
 };
 
+// Parse an AArch64 general-register name accepted by inline assembly. Operand
+// bindings apply the narrower allocator-safe subset at their call site;
+// clobbers may additionally name the target's reserved scratch registers.
+BUSTER_C_INTERNAL bool c_ir_aarch64_inline_assembly_register(String8 name, u32* register_out)
+{
+    bool valid = name.length >= 2 && (name.pointer[0] == 'x' || name.pointer[0] == 'w');
+    u64 number = 0;
+    if (valid)
+    {
+        String8 suffix = string_slice(name, 1, name.length);
+        valid = c_conditional_number(suffix, &number) && number <= 27;
+    }
+    if (valid)
+    {
+        *register_out = (u32)number;
+    }
+    return valid;
+}
+
 // The assembler label of a declaration, read from the declaration's own tokens.
 // A label on a function or a file-scope object renames the symbol and is read
 // by c_declaration_link_name; on a `register` local it names a machine register
@@ -32600,13 +32628,14 @@ BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, u3
 // GNU guarantees a local register variable only where the standard leaves the
 // register choice to the compiler: as an operand of an asm statement. The
 // binding therefore refines this operand's class rather than reserving the
-// register across the function, which is exactly what musl needs to place
-// syscall arguments four through six, for which x86-64 has no constraint
-// letter. Only a single unadorned identifier can carry a binding, so anything
-// else -- a cast, a member, an expression -- leaves the class alone.
+// register across the function. x86 keeps its named fixed classes; AArch64
+// retains a target-neutral physical index beside R. Only a single unadorned
+// identifier can carry a binding, so anything else -- a cast, a member, an
+// expression -- leaves the class alone.
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u64* constraint_out)
 {
-    if (state->operand_close != state->constraint_index + 3 || builder->target.cpu_arch != CPU_ARCH_X86_64)
+    if (state->operand_close != state->constraint_index + 3 ||
+        (builder->target.cpu_arch != CPU_ARCH_X86_64 && builder->target.cpu_arch != CPU_ARCH_AARCH64))
     {
         return false;
     }
@@ -32645,11 +32674,19 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
     }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_bound_register_names); index += 1)
     {
-        if (string_equal(c_ir_bound_register_names[index].name, label))
+        if (builder->target.cpu_arch == CPU_ARCH_X86_64 && string_equal(c_ir_bound_register_names[index].name, label))
         {
             *constraint_out = c_ir_bound_register_names[index].constraint;
             return true;
         }
+    }
+    u32 physical_register = UINT32_MAX;
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && c_ir_aarch64_inline_assembly_register(label, &physical_register) &&
+        (physical_register <= 15 || physical_register >= 19))
+    {
+        *constraint_out = IR_INLINE_ASSEMBLY_CONSTRAINT_R | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                          ((u64)physical_register << IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT);
+        return true;
     }
     builder->failure_message = string_format(builder->arena, S8("unsupported register '{S8}' bound to a local register variable"), label);
     builder->failure_token_index = identifier_index;
@@ -32660,8 +32697,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
 // storage rather than its value, so the place has to be kept where an ordinary
 // input would keep the loaded value; the constraint therefore has to be read
 // before the lowered expression is consumed, which is earlier than the parser
-// below runs. The three spellings are matched exactly rather than by scanning
-// for the letter, because an operand name may contain one.
+// below runs. The admitted spellings are matched exactly rather than by
+// scanning for the letter, because an operand name may contain one.
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuilder* builder, u32 constraint_index)
 {
     ByteSlice bytes = {0};
@@ -32671,7 +32708,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuild
         return false;
     }
     String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
-    return string_equal(text, S8("m")) || string_equal(text, S8("=m")) || string_equal(text, S8("+m"));
+    return string_equal(text, S8("m")) || string_equal(text, S8("=m")) || string_equal(text, S8("+m")) ||
+           string_equal(text, S8("=&m")) || string_equal(text, S8("+&m"));
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, CToken token, bool output,
@@ -32684,17 +32722,20 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     }
     u64 constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
     bool read_write = false;
+    bool early_clobber = false;
     bool matching = false;
     u32 match_index = UINT32_MAX;
     if (output)
     {
-        if (bytes.length != 2 || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
+        bool modifier_shape = bytes.length == 2 || (bytes.length == 3 && bytes.pointer[1] == '&');
+        if (!modifier_shape || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
         {
             builder->failure_message = S8("malformed asm output constraint");
             return false;
         }
         read_write = bytes.pointer[0] == '+';
-        switch (bytes.pointer[1])
+        early_clobber = bytes.length == 3;
+        switch (bytes.pointer[1 + early_clobber])
         {
         case 'a':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
@@ -32906,7 +32947,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             builder->failure_message = S8("asm matching operands have incompatible width or class");
             return false;
         }
-        constraint = output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        constraint = output_constraint & (IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                                          IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK);
         constraint |= IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | ((u64)match_index << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT);
     }
     else
@@ -32928,9 +32970,10 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         }
         constraint |= output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0;
         constraint |= read_write ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
+        constraint |= early_clobber ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
     }
     if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT ||
-        (matching && !c_ir_inline_assembly_constraint_class_supported(builder, constraint)))
+        !c_ir_inline_assembly_constraint_class_supported(builder, constraint))
     {
         builder->failure_message = S8("unsupported asm constraint for target");
         return false;
@@ -32941,45 +32984,49 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* builder, String8 clobber)
 {
+    bool result = false;
     if (string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")))
     {
-        return true;
+        result = true;
     }
-    if (builder->target.cpu_arch == CPU_ARCH_X86_64)
+    else if (builder->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        if (target_uses_llp64_data_model(builder->target) &&
-            (string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
-             string_equal(clobber, S8("sil")) || string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) ||
-             string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil"))))
-        {
-            return false;
-        }
-        // `st` is the top of the x87 register stack, and a template declares it
-        // clobbered to say that it popped what it was handed -- musl's
-        // `llrintl` and `lrintl` are `fistpll`, which does. The deeper
-        // positions (`st(1)` and below) are not here: each would say that the
-        // template popped a different number of registers, and the emitter's
-        // model is the one pop this spelling states.
-        String8 names[] = {
-            S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rbx"), S8("ebx"), S8("bx"), S8("bl"),
-            S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
-            S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"),
-            S8("st"),
-        };
-        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
-        {
-            if (string_equal(clobber, names[name_index]))
-            {
-                return true;
-            }
-        }
-        if (clobber.length >= 2 && clobber.pointer[0] == 'r')
+        if (clobber.length >= 4 && clobber.pointer[0] == 'x' && clobber.pointer[1] == 'm' && clobber.pointer[2] == 'm')
         {
             u64 number = 0;
-            String8 suffix = clobber;
-            suffix.pointer += 1;
-            suffix.length -= 1;
-            return c_conditional_number(suffix, &number) && number >= 8 && number <= 11;
+            String8 suffix = string_slice(clobber, 3, clobber.length);
+            result = c_conditional_number(suffix, &number) && number <= 15 &&
+                     (suffix.length == 1 || (suffix.length == 2 && suffix.pointer[0] == '1'));
+        }
+        else if (!target_uses_llp64_data_model(builder->target) ||
+                 (!string_equal(clobber, S8("rsi")) && !string_equal(clobber, S8("esi")) && !string_equal(clobber, S8("si")) &&
+                  !string_equal(clobber, S8("sil")) && !string_equal(clobber, S8("rdi")) && !string_equal(clobber, S8("edi")) &&
+                  !string_equal(clobber, S8("di")) && !string_equal(clobber, S8("dil"))))
+        {
+            // `st` is the top of the x87 register stack, and a template declares it
+            // clobbered to say that it popped what it was handed -- musl's
+            // `llrintl` and `lrintl` are `fistpll`, which does. The deeper
+            // positions (`st(1)` and below) are not here: each would say that the
+            // template popped a different number of registers, and the emitter's
+            // model is the one pop this spelling states.
+            String8 names[] = {
+                S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rbx"), S8("ebx"), S8("bx"), S8("bl"),
+                S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
+                S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"),
+                S8("st"),
+            };
+            for (u32 name_index = 0; !result && name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+            {
+                result = string_equal(clobber, names[name_index]);
+            }
+            if (!result && clobber.length >= 2 && clobber.pointer[0] == 'r')
+            {
+                u64 number = 0;
+                String8 suffix = clobber;
+                suffix.pointer += 1;
+                suffix.length -= 1;
+                result = c_conditional_number(suffix, &number) && number >= 8 && number <= 11;
+            }
         }
     }
     else if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
@@ -32990,11 +33037,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
             String8 suffix = clobber;
             suffix.pointer += 1;
             suffix.length -= 1;
-            return c_conditional_number(suffix, &number) && number <= 18;
+            result = c_conditional_number(suffix, &number) && number <= 27;
         }
-        return string_equal(clobber, S8("sp")) || string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
+        else
+        {
+            result = string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
+        }
     }
-    return false;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
@@ -33046,8 +33096,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(String8 clobber, u64 constraint)
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(CIntegerIrBuilder* builder, String8 clobber, u64 constraint)
 {
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
+    {
+        u32 physical_register = UINT32_MAX;
+        return c_ir_aarch64_inline_assembly_register(clobber, &physical_register) &&
+               physical_register == IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint);
+    }
     switch (constraint & 0xff)
     {
     case IR_INLINE_ASSEMBLY_CONSTRAINT_A:
@@ -33099,7 +33155,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_conflict(CIntegerIrBuilder*
     {
         for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
         {
-            if (c_ir_inline_assembly_clobber_matches_constraint(state->clobbers[clobber_index], state->constraints[operand_index]))
+            if (c_ir_inline_assembly_clobber_matches_constraint(builder, state->clobbers[clobber_index], state->constraints[operand_index]))
             {
                 builder->failure_message = S8("asm operand constraint conflicts with its clobber list");
                 return true;
@@ -33113,22 +33169,33 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBu
 {
     for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
     {
-        u64 constraint = state->constraints[operand_index] & 0xff;
-        if (!IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint))
+        u64 constraint = state->constraints[operand_index];
+        u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        bool physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint);
+        if (!physical && !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint_class))
         {
             continue;
         }
         for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
         {
-            u64 previous_constraint = state->constraints[previous_index] & 0xff;
-            if (previous_constraint == constraint)
+            u64 previous_constraint = state->constraints[previous_index];
+            u64 previous_class = previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+            bool previous_physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(previous_constraint);
+            bool same_register = physical && previous_physical
+                                     ? IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint) ==
+                                           IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(previous_constraint)
+                                     : !physical && !previous_physical && previous_class == constraint_class;
+            if (same_register)
             {
                 bool current_output = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
                 bool previous_output = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
                 bool current_read_write = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
                 bool previous_read_write = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+                bool current_early_clobber = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
+                bool previous_early_clobber = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
                 bool output_input_pair = current_output != previous_output &&
-                                         ((current_output && !current_read_write) || (previous_output && !previous_read_write));
+                                         ((current_output && !current_read_write && !current_early_clobber) ||
+                                          (previous_output && !previous_read_write && !previous_early_clobber));
                 if (!output_input_pair)
                 {
                     builder->failure_message = S8("asm fixed-register operands conflict without a supported matching constraint");
@@ -33570,7 +33637,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_special_literal_operands_valid(CInte
         bool preserves_rbx = output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B];
         for (u32 clobber_index = 0; clobber_index < state->clobber_count && !preserves_rbx; clobber_index += 1)
         {
-            preserves_rbx = c_ir_inline_assembly_clobber_matches_constraint(state->clobbers[clobber_index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+            preserves_rbx = c_ir_inline_assembly_clobber_matches_constraint(builder, state->clobbers[clobber_index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
         }
         if (!preserves_rbx)
         {
@@ -36956,7 +37023,7 @@ BUSTER_C_INTERNAL void c_ir_store_pointer_bits(CIntegerIrBuilder* builder, IrTyp
     for (u64 byte_index = 0; byte_index < size; byte_index += 1)
     {
         u64 source_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : size - byte_index - 1;
-        bytes[offset + byte_index] = source_index < sizeof(value) ? (u8)(value >> (u32)(source_index * 8)) : 0;
+        bytes[offset + byte_index] = (u8)(source_index < sizeof(value) ? value >> (u32)(source_index * 8) : 0);
     }
 }
 
@@ -38273,7 +38340,7 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
 }
 
 CEntityId c_test_ir_constant_entity_at(CParseResult* parse, CPreprocessResult preprocess,
-                                       CEntityId* token_entities, u32 token_index)
+                                       u32* token_entities_plus_one, u32 token_index)
 {
     if (!parse)
     {
@@ -38285,14 +38352,14 @@ CEntityId c_test_ir_constant_entity_at(CParseResult* parse, CPreprocessResult pr
         .temporary_arena = parse->arena,
         .preprocess = preprocess,
         .parse = *parse,
-        .token_entities = token_entities,
+        .token_entities_plus_one = token_entities_plus_one,
         .constant_entity_index = &constant_entity_index,
     };
     return c_ir_constant_entity_at(&builder, token_index);
 }
 
 bool c_test_ir_constant_entity_index_equivalent(CParseResult* parse, CPreprocessResult preprocess,
-                                                CEntityId* token_entities, u32 token_count)
+                                                u32* token_entities_plus_one, u32 token_count)
 {
     if (!parse || token_count > preprocess.token_count)
     {
@@ -38304,7 +38371,7 @@ bool c_test_ir_constant_entity_index_equivalent(CParseResult* parse, CPreprocess
         .temporary_arena = parse->arena,
         .preprocess = preprocess,
         .parse = *parse,
-        .token_entities = token_entities,
+        .token_entities_plus_one = token_entities_plus_one,
         .constant_entity_index = &constant_entity_index,
     };
     for (u32 token_index = 0; token_index < token_count; token_index += 1)
@@ -38333,7 +38400,7 @@ bool c_test_ir_constant_entity_index_equivalent(CParseResult* parse, CPreprocess
 }
 
 bool c_test_ir_constant_entity_index_lifetime(CParseResult* parse, CPreprocessResult preprocess,
-                                              CEntityId* token_entities, u32 token_count)
+                                              u32* token_entities_plus_one, u32 token_count)
 {
     if (!parse || !parse->arena || token_count > preprocess.token_count)
     {
@@ -38351,7 +38418,7 @@ bool c_test_ir_constant_entity_index_lifetime(CParseResult* parse, CPreprocessRe
         .temporary_arena = rewindable_arena,
         .preprocess = preprocess,
         .parse = *parse,
-        .token_entities = token_entities,
+        .token_entities_plus_one = token_entities_plus_one,
         .constant_entity_index = &constant_entity_index,
     };
     CEntityId expected = C_ENTITY_ID_INVALID;
@@ -42964,7 +43031,7 @@ BUSTER_C_INTERNAL void c_ir_constant_store_unit_bits(IrProgram* program, u64 siz
     for (u64 byte_index = 0; byte_index < size; byte_index += 1)
     {
         u64 source_index = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : size - byte_index - 1;
-        u8 byte = source_index < sizeof(bits) ? (u8)(bits >> (u32)(source_index * 8)) : (sign_extend ? 0xff : 0);
+        u8 byte = (u8)(source_index < sizeof(bits) ? bits >> (u32)(source_index * 8) : (sign_extend ? 0xff : 0));
         bytes[offset + byte_index] = byte;
     }
 }
@@ -43185,8 +43252,7 @@ BUSTER_C_INTERNAL bool c_ir_global_string_pointer_initializer(CIntegerIrBuilder*
         return false;
     }
     u64 length = element_count * decoded.element_width;
-    u8* bytes = arena_allocate(builder->arena, u8, length);
-    memset(bytes, 0, length);
+    u8* bytes = arena_allocate_zeroed(builder->arena, u8, length);
     if (decoded.bytes.length)
     {
         memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
@@ -43520,8 +43586,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
                 builder->failure_message = S8("static label address must be a function-local void pointer label value");
                 return false;
             }
-            u8* bytes = arena_allocate(arena, u8, type->layout.size);
-            memset(bytes, 0, type->layout.size);
+            u8* bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
             IrGlobalRelocation* relocations = arena_allocate(arena, IrGlobalRelocation, 1);
             relocations[0] = (IrGlobalRelocation){
                 .symbol = builder->function->symbol,
@@ -43545,8 +43610,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
                 global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
                 return true;
             }
-            u8* bytes = arena_allocate(arena, u8, type->layout.size);
-            memset(bytes, 0, type->layout.size);
+            u8* bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
             c_ir_store_pointer_bits(builder, type, bytes, 0, raw_pointer);
             global->bytes = (ByteSlice){.pointer = bytes, .length = type->layout.size};
             global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
@@ -43797,8 +43861,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         {
             return false;
         }
-        u8* bytes = arena_allocate(arena, u8, type->layout.size);
-        memset(bytes, 0, type->layout.size);
+        u8* bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
         if (decoded.bytes.length)
         {
             memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
@@ -44279,8 +44342,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     bool label_candidates_valid = parse.position_index && parse.position_index->built;
     u32 const* label_candidate_positions = label_candidates_valid ? parse.position_index->label_candidate_positions : 0;
     u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
-    u32 const* stream_matching_delimiters =
-        label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters : 0;
+    u32 const* stream_matching_delimiters_plus_one =
+        label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
     CIrQueryMachine queries = {
         .frames = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
         .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
@@ -44550,14 +44613,13 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             c_type_ir_map[alias_type] = IR_TYPE_ID_INVALID;
         }
     }
-    CEntityId* token_entities = arena_allocate(arena, CEntityId, preprocess.token_count);
-    memset(token_entities, 0xff, sizeof(*token_entities) * preprocess.token_count);
+    u32* token_entities_plus_one = arena_allocate_zeroed(arena, u32, preprocess.token_count);
     for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
     {
         CIdentifierUse use = parse.identifier_uses[use_index];
         if (use.token_index < preprocess.token_count)
         {
-            token_entities[use.token_index] = use.entity;
+            token_entities_plus_one[use.token_index] = use.entity.value + 1;
         }
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -44565,9 +44627,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         CEntity* entity = &parse.entities[entity_index];
         if (entity->declaration_token_plus_one && entity->declaration_token_plus_one <= preprocess.token_count)
         {
-            token_entities[entity->declaration_token_plus_one - 1] = (CEntityId){
-                .value = entity_index,
-            };
+            token_entities_plus_one[entity->declaration_token_plus_one - 1] = entity_index + 1;
         }
     }
     IrFunction** declaration_functions = arena_allocate(arena, IrFunction*, parse.declaration_count);
@@ -44602,7 +44662,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         .module = module,
         .preprocess = preprocess,
         .parse = parse,
-        .token_entities = token_entities,
+        .token_entities_plus_one = token_entities_plus_one,
         .constant_entity_index = &constant_entity_index,
         .declaration_functions = declaration_functions,
         .entity_symbols = entity_symbols,
@@ -44628,7 +44688,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         .target = target,
         .failure_token_index = UINT32_MAX,
         .body_token_start = (u32)preprocess.token_count,
-        .stream_matching_delimiters = stream_matching_delimiters,
+        .stream_matching_delimiters_plus_one = stream_matching_delimiters_plus_one,
     };
     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
     {
@@ -45827,8 +45887,14 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                                                           .is_weak = entity_weak[entity_index],
                                                                       });
     }
-    u32* token_function_declarations = arena_allocate(arena, u32, preprocess.token_count);
-    memset(token_function_declarations, 0xff, sizeof(*token_function_declarations) * preprocess.token_count);
+    // One slot per preprocessed token, holding the owning definition's index
+    // plus one so the absent value is zero.  The array is a fresh allocation
+    // in a forward-growing arena, so a zero sentinel is the pages the OS
+    // already cleared and costs nothing to establish, where a UINT32_MAX
+    // sentinel wrote the whole array; every read subtracts one, which returns
+    // the same UINT32_MAX for an unowned token by unsigned wraparound.  This
+    // is the spelling CEntity.declaration_token_plus_one already uses.
+    u32* token_function_declarations_plus_one = arena_allocate_zeroed(arena, u32, preprocess.token_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -45843,7 +45909,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         for (u64 token_index = declaration.body_start; token_index < body_end; token_index += 1)
         {
-            token_function_declarations[token_index] = declaration_index;
+            token_function_declarations_plus_one[token_index] = declaration_index + 1;
         }
         // A variable-length array parameter's bound is evaluated in the
         // function entry block, but its tokens precede body_start.  Attribute
@@ -45870,7 +45936,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 }
                 for (u64 token_index = bound.token_start; token_index < bound_end; token_index += 1)
                 {
-                    token_function_declarations[token_index] = declaration_index;
+                    token_function_declarations_plus_one[token_index] = declaration_index + 1;
                 }
             }
         }
@@ -45892,7 +45958,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     {
         CIdentifierUse use = parse.identifier_uses[use_index];
         if (use.entity.value < parse.entity_count && parse.entities[use.entity.value].kind == C_ENTITY_FUNCTION &&
-            (use.token_index >= preprocess.token_count || token_function_declarations[use.token_index] == UINT32_MAX))
+            (use.token_index >= preprocess.token_count || !token_function_declarations_plus_one[use.token_index]))
         {
             function_referenced_outside[use.entity.value] = true;
         }
@@ -46321,7 +46387,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         {
             continue;
         }
-        u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations[use.token_index] : UINT32_MAX;
+        u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations_plus_one[use.token_index] - 1 : UINT32_MAX;
         if (owner_index == UINT32_MAX)
         {
             if (!function_needed[candidate_index])
@@ -46582,7 +46648,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 // field access, arrays and switches are not function barriers.
                 bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
                                      token_index + 1 < body_end && preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
-                                     token_entities[token_index + 1].value == C_ID_UNDERLYING_INVALID;
+                                     !token_entities_plus_one[token_index + 1];
                 direct_ssa_enabled = !label_address &&
                                      !(token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("asm")) ||
                                        string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm")) ||
@@ -46648,7 +46714,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             .current_block = block->id,
             .preprocess = preprocess,
             .parse = parse,
-            .token_entities = token_entities,
+            .token_entities_plus_one = token_entities_plus_one,
             .constant_entity_index = &constant_entity_index,
             .declaration_functions = declaration_functions,
             .entity_symbols = entity_symbols,
@@ -46707,9 +46773,11 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             .prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
             .prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .group_type_names = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
-            .matching_delimiters =
-                stream_matching_delimiters ? 0 : arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
-            .stream_matching_delimiters = stream_matching_delimiters,
+            .matching_delimiters_plus_one =
+                stream_matching_delimiters_plus_one
+                    ? 0
+                    : arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .stream_matching_delimiters_plus_one = stream_matching_delimiters_plus_one,
             .label_candidate_positions = label_candidate_positions,
             .label_candidate_count = label_candidate_count,
             .label_candidates_valid = label_candidates_valid,
@@ -46729,11 +46797,11 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             builder.prepared_call_token_heads[token_offset] = UINT32_MAX;
             builder.group_type_names[token_offset] = 0;
         }
-        if (!builder.stream_matching_delimiters)
+        if (!builder.stream_matching_delimiters_plus_one)
         {
             for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
             {
-                builder.matching_delimiters[token_offset] = UINT32_MAX;
+                builder.matching_delimiters_plus_one[token_offset] = 0;
             }
         }
         // The label-metadata store arrays are sized here but cleared by the
@@ -46746,7 +46814,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         // A mismatch-free stream answers every delimiter query from the parse
         // index's whole-stream array, so the per-body build (a classifying
         // scan of every body token) runs only for malformed streams.
-        bool delimiters_valid = builder.stream_matching_delimiters ? true : c_ir_build_delimiter_index(&builder);
+        bool delimiters_valid = builder.stream_matching_delimiters_plus_one ? true : c_ir_build_delimiter_index(&builder);
         if (!delimiters_valid)
         {
             builder.failure_message = S8("function body has mismatched delimiters");

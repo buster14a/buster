@@ -5390,6 +5390,145 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(aarch64_jump.bytes.pointer, expected_aarch64_jump, sizeof(expected_aarch64_jump)) == 0);
     BUSTER_TEST(arguments, aarch64_jump.relocation_count == 1 && aarch64_jump.relocations[0].offset == 0 &&
                                aarch64_jump.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_JUMP26);
+    Target aarch64_inline_baseline_target = aarch64_target;
+    aarch64_inline_baseline_target.cpu_model = CPU_MODEL_BASELINE;
+    AssemblyEncodeResult aarch64_inline_conditional = assembly_encode(
+        arguments->arena, S8("cbnz w9, .Lbuster.inline.asm.0.1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target, .private_inline_labels = true});
+    static u8 const expected_aarch64_inline_conditional[] = {
+        0x49, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x14,
+    };
+    BUSTER_TEST(arguments, aarch64_inline_conditional.diagnostic_count == 0 &&
+                               aarch64_inline_conditional.bytes.length == sizeof(expected_aarch64_inline_conditional) &&
+                               memcmp(aarch64_inline_conditional.bytes.pointer, expected_aarch64_inline_conditional,
+                                      sizeof(expected_aarch64_inline_conditional)) == 0);
+    BUSTER_TEST(arguments, aarch64_inline_conditional.relocation_count == 1 &&
+                               aarch64_inline_conditional.relocations[0].offset == 4 &&
+                               aarch64_inline_conditional.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26);
+    AssemblyEncodeResult aarch64_inline_compare = assembly_encode(
+        arguments->arena, S8("cmp w9, #1\n"), (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
+    static u8 const expected_aarch64_inline_compare[] = {0x3f, 0x05, 0x00, 0x71};
+    BUSTER_TEST(arguments, aarch64_inline_compare.diagnostic_count == 0 &&
+                               aarch64_inline_compare.bytes.length == sizeof(expected_aarch64_inline_compare) &&
+                               memcmp(aarch64_inline_compare.bytes.pointer, expected_aarch64_inline_compare,
+                                      sizeof(expected_aarch64_inline_compare)) == 0);
+    AssemblyEncodeResult aarch64_compare_aliases = assembly_encode(
+        arguments->arena, S8("cmp w9, w10\ncmp x9, x10, lsr #3\ncmn w9, #1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
+    static u8 const expected_aarch64_compare_aliases[] = {
+        0x3f, 0x01, 0x0a, 0x6b, 0x3f, 0x0d, 0x4a, 0xeb, 0x3f, 0x05, 0x00, 0x31,
+    };
+    BUSTER_TEST(arguments, aarch64_compare_aliases.diagnostic_count == 0 &&
+                               aarch64_compare_aliases.bytes.length == sizeof(expected_aarch64_compare_aliases) &&
+                               memcmp(aarch64_compare_aliases.bytes.pointer, expected_aarch64_compare_aliases,
+                                      sizeof(expected_aarch64_compare_aliases)) == 0);
+    AssemblyEncodeResult aarch64_inline_bcond = assembly_encode(
+        arguments->arena, S8("b.eq .Lbuster.inline.asm.0.2\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target, .private_inline_labels = true});
+    static u8 const expected_aarch64_inline_bcond[] = {
+        0x41, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00, 0x14,
+    };
+    BUSTER_TEST(arguments, aarch64_inline_bcond.diagnostic_count == 0 &&
+                               aarch64_inline_bcond.bytes.length == sizeof(expected_aarch64_inline_bcond) &&
+                               memcmp(aarch64_inline_bcond.bytes.pointer, expected_aarch64_inline_bcond,
+                                      sizeof(expected_aarch64_inline_bcond)) == 0 &&
+                               aarch64_inline_bcond.relocation_count == 1 &&
+                               aarch64_inline_bcond.relocations[0].offset == 4 &&
+                               aarch64_inline_bcond.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26);
+    AssemblyEncodeResult aarch64_inline_multiple = assembly_encode(
+        arguments->arena,
+        S8("cbz w9, .Lbuster.inline.asm.0.1\ncmp w9, #1\nb.eq .Lbuster.inline.asm.0.2\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target, .private_inline_labels = true});
+    static u8 const expected_aarch64_inline_multiple[] = {
+        0x49, 0x00, 0x00, 0x35, 0x00, 0x00, 0x00, 0x14,
+        0x3f, 0x05, 0x00, 0x71,
+        0x41, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00, 0x14,
+    };
+    BUSTER_TEST(arguments, aarch64_inline_multiple.diagnostic_count == 0 &&
+                               aarch64_inline_multiple.bytes.length == sizeof(expected_aarch64_inline_multiple) &&
+                               memcmp(aarch64_inline_multiple.bytes.pointer, expected_aarch64_inline_multiple,
+                                      sizeof(expected_aarch64_inline_multiple)) == 0);
+    BUSTER_TEST(arguments, aarch64_inline_multiple.relocation_count == 2 &&
+                               aarch64_inline_multiple.relocations[0].offset == 4 &&
+                               aarch64_inline_multiple.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 &&
+                               aarch64_inline_multiple.relocations[1].offset == 16 &&
+                               aarch64_inline_multiple.relocations[1].kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26);
+    AssemblyEncodeResult aarch64_inline_mixed_labels = assembly_encode(
+        arguments->arena,
+        S8("b entry\n"
+           "backward:\n"
+           "nop\n"
+           "b forward\n"
+           "entry:\n"
+           "tbz w0, #0, .Lbuster.inline.asm.0.1\n"
+           "b after\n"
+           "forward:\n"
+           "b backward\n"
+           "after:\n"
+           "nop\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target, .private_inline_labels = true});
+    static u8 const expected_aarch64_inline_mixed_labels[] = {
+        0x03, 0x00, 0x00, 0x14,
+        0x1f, 0x20, 0x03, 0xd5,
+        0x04, 0x00, 0x00, 0x14,
+        0x40, 0x00, 0x00, 0x37,
+        0x00, 0x00, 0x00, 0x14,
+        0x02, 0x00, 0x00, 0x14,
+        0xfb, 0xff, 0xff, 0x17,
+        0x1f, 0x20, 0x03, 0xd5,
+    };
+    BUSTER_TEST(arguments, aarch64_inline_mixed_labels.diagnostic_count == 0 &&
+                               aarch64_inline_mixed_labels.relocation_count == 1 &&
+                               aarch64_inline_mixed_labels.relocations[0].offset == 16 &&
+                               aarch64_inline_mixed_labels.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 &&
+                               aarch64_inline_mixed_labels.bytes.length == sizeof(expected_aarch64_inline_mixed_labels) &&
+                               memcmp(aarch64_inline_mixed_labels.bytes.pointer, expected_aarch64_inline_mixed_labels,
+                                      sizeof(expected_aarch64_inline_mixed_labels)) == 0);
+    u32 private_branch_words[2] = {0};
+    BUSTER_TEST(arguments, assembly_test_aarch64_expand_private_short_branch(
+                               ASSEMBLY_RELOCATION_AARCH64_CONDBR19, UINT32_C(0x5400000f), private_branch_words) &&
+                               private_branch_words[0] == UINT32_C(0xd503201f) &&
+                               private_branch_words[1] == UINT32_C(0x14000000));
+
+    AssemblyEncodeResult aarch64_scalar_memory = assembly_encode(
+        arguments->arena,
+        S8("str w10, [x9]\n"
+           "ldr w11, [x12, #4]\n"
+           "str x13, [sp, #16]\n"
+           "LDRB w14, [x15, #3]\n"
+           "strh w16, [x17, #6]\n"
+           "ldr x18, [x19, #24]\n"
+           "strb w20, [x21, #2]\n"
+           "ldrh w22, [x23, #4]\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    // Independent llvm-mc 22.1.8 encodings for all scalar widths, both
+    // directions, SP bases, zero offsets, and scaled unsigned offsets.
+    static u8 const expected_aarch64_scalar_memory[] = {
+        0x2a, 0x01, 0x00, 0xb9, 0x8b, 0x05, 0x40, 0xb9,
+        0xed, 0x0b, 0x00, 0xf9, 0xee, 0x0d, 0x40, 0x39,
+        0x30, 0x0e, 0x00, 0x79, 0x72, 0x0e, 0x40, 0xf9,
+        0xb4, 0x0a, 0x00, 0x39, 0xf6, 0x0a, 0x40, 0x79,
+    };
+    BUSTER_TEST(arguments, aarch64_scalar_memory.diagnostic_count == 0 &&
+                               aarch64_scalar_memory.bytes.length == sizeof(expected_aarch64_scalar_memory) &&
+                               memcmp(aarch64_scalar_memory.bytes.pointer, expected_aarch64_scalar_memory,
+                                      sizeof(expected_aarch64_scalar_memory)) == 0);
+    AssemblyEncodeResult aarch64_scalar_memory_invalid = assembly_encode(
+        arguments->arena,
+        S8("ldr w0, [w1]\n"
+           "str sp, [x1]\n"
+           "ldrb x0, [x1]\n"
+           "strh w0, [x1, #1]\n"
+           "ldr x0, [xzr]\n"
+           "ldr x0, [x1, #32768]\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_scalar_memory_invalid.diagnostic_count == 6 &&
+                               aarch64_scalar_memory_invalid.bytes.length == 0);
+    for (u32 diagnostic_index = 0; diagnostic_index < aarch64_scalar_memory_invalid.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments,
+                    aarch64_scalar_memory_invalid.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
 
     AssemblyEncodeResult invalid = assembly_encode(arguments->arena, S8("same:\n same: nop\n ret x0\n unknown\n"),
                                                     (AssemblyEncodeOptions){
@@ -8579,6 +8718,20 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                                       0x3f, 0x0c, 0x62, 0x2a,
                                                                       0x3f, 0x0c, 0x42, 0x2a},
                                                          36));
+    Target aarch64_baseline_target = aarch64_target;
+    aarch64_baseline_target.cpu_model = CPU_MODEL_BASELINE;
+    AssemblyEncodeResult aarch64_baseline_scalar_and_alias = assembly_encode(
+        arguments->arena,
+        S8("add w0, w1, w2\n"
+           "mov w3, w4\n"
+           "mov x5, x6\n"),
+        (AssemblyEncodeOptions){.target = aarch64_baseline_target});
+    BUSTER_TEST(arguments, aarch64_baseline_scalar_and_alias.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_baseline_scalar_and_alias.bytes,
+                                                         (u8 const[]){0x20, 0x00, 0x02, 0x0b,
+                                                                      0xe3, 0x03, 0x04, 0x2a,
+                                                                      0xe5, 0x03, 0x06, 0xaa},
+                                                         12));
     AssemblyEncodeResult aarch64_m1_unary_gpr_collision_regression = assembly_encode(
         arguments->arena,
         S8("cls w0, w1\n"
@@ -13263,6 +13416,57 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    unresolved_pc8.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
                                    unresolved_pc8.relocations[0].offset == 1 && unresolved_pc8.relocations[0].addend == -1 &&
                                    unresolved_pc8.relocations[0].symbol == 0);
+        AssemblyEncodeResult private_pc8 = assembly_encode(
+            arguments->arena, S8("loop .Lbuster.inline.asm.0.1+1\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL, .private_inline_labels = true});
+        u8 const expected_private_pc8[] = {0xe2, 0x02, 0xeb, 0x05, 0xe9, 0x00, 0x00, 0x00, 0x00};
+        BUSTER_TEST(arguments, private_pc8.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(private_pc8.bytes, expected_private_pc8,
+                                                             BUSTER_ARRAY_LENGTH(expected_private_pc8)) &&
+                                   private_pc8.symbol_count == 1 && private_pc8.relocation_count == 1 &&
+                                   private_pc8.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   private_pc8.relocations[0].offset == 5 && private_pc8.relocations[0].addend == -3 &&
+                                   private_pc8.relocations[0].symbol == 0);
+        AssemblyEncodeResult private_pc8_user_source = assembly_encode(
+            arguments->arena, S8("loop .Lbuster.inline.asm.0.1+1\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, private_pc8_user_source.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(private_pc8_user_source.bytes, expected_unresolved_pc8,
+                                                             BUSTER_ARRAY_LENGTH(expected_unresolved_pc8)) &&
+                                   private_pc8_user_source.relocation_count == 1 &&
+                                   private_pc8_user_source.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   private_pc8_user_source.relocations[0].addend == 0);
+        AssemblyEncodeResult private_pc8_mixed_labels = assembly_encode(
+            arguments->arena,
+            S8("jmp entry\n"
+               "backward:\n"
+               "nop\n"
+               "loop forward\n"
+               "entry:\n"
+               "jrcxz .Lbuster.inline.asm.0.1\n"
+               "jmp after\n"
+               "forward:\n"
+               "loop backward\n"
+               "after:\n"
+               "nop\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL, .private_inline_labels = true});
+        u8 const expected_private_pc8_mixed_labels[] = {
+            0xe9, 0x03, 0x00, 0x00, 0x00,
+            0x90,
+            0xe2, 0x0e,
+            0xe3, 0x02, 0xeb, 0x05, 0xe9, 0x00, 0x00, 0x00, 0x00,
+            0xe9, 0x02, 0x00, 0x00, 0x00,
+            0xe2, 0xed,
+            0x90,
+        };
+        BUSTER_TEST(arguments, private_pc8_mixed_labels.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(private_pc8_mixed_labels.bytes,
+                                                             expected_private_pc8_mixed_labels,
+                                                             BUSTER_ARRAY_LENGTH(expected_private_pc8_mixed_labels)) &&
+                                   private_pc8_mixed_labels.relocation_count == 1 &&
+                                   private_pc8_mixed_labels.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   private_pc8_mixed_labels.relocations[0].offset == 13 &&
+                                   private_pc8_mixed_labels.relocations[0].addend == -4);
 
         typedef struct ClassicUnresolvedPc8Case ClassicUnresolvedPc8Case;
         struct ClassicUnresolvedPc8Case
