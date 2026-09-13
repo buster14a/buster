@@ -261,54 +261,136 @@ bool machine_selection_assembly_label_target(MachineAssemblyLabelPlan const* pla
     return found;
 }
 
-void machine_selection_finish_canonical_edges(MachineFunction* machine, IrFunction* source, u32 canonical_edge_offset,
-                                               u32 const* block_entries, u32 const* block_exits,
-                                               u32 const* asm_goto_continuations)
+bool machine_selection_finish_canonical_edges(Arena* arena, MachineFunction* machine, IrFunction* source,
+                                               u32 canonical_edge_offset, u32 const* block_entries,
+                                               u32 const* block_exits, u32 const* asm_goto_continuations)
 {
-    if (block_entries || ir_function_may_contain_opcodes(source, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)))
+    bool valid = arena && machine && source && source->published_cfg && canonical_edge_offset <= machine->edge_count &&
+                 source->published_cfg->edge_count == machine->edge_count - canonical_edge_offset;
+    bool remap = valid && (block_entries || ir_function_may_contain_opcodes(source, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
+    if (remap)
     {
-        u32 kept_edges = canonical_edge_offset;
-        for (u32 edge_index = canonical_edge_offset; edge_index < machine->edge_count; edge_index += 1)
+        IrPublishedCfg const* cfg = source->published_cfg;
+        u64 capacity = canonical_edge_offset;
+        for (u32 canonical_source = 0; valid && canonical_source < source->block_count; canonical_source += 1)
         {
-            MachineEdge edge = machine->edges[edge_index];
-            u32 canonical_source = edge.source_block;
             IrInstruction* canonical_terminator = source->instructions + source->blocks[canonical_source].last_instruction.value;
             u32 continuation = asm_goto_continuations ? asm_goto_continuations[canonical_source] : UINT32_MAX;
             if (canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY && continuation != UINT32_MAX)
             {
-                u32 target_index = UINT32_MAX;
-                for (u32 index = 0; target_index == UINT32_MAX && index < canonical_terminator->target_count; index += 1)
-                {
-                    if (canonical_terminator->targets[index].value == edge.destination_block)
-                    {
-                        target_index = index;
-                    }
-                }
-                edge.source_block = target_index < canonical_terminator->target_count ? continuation + target_index : UINT32_MAX;
+                capacity += canonical_terminator->target_count;
             }
             else
             {
-                edge.source_block = block_exits ? block_exits[canonical_source] : canonical_source;
+                capacity += cfg->blocks[canonical_source].successor_count;
             }
-            edge.destination_block = block_entries ? block_entries[edge.destination_block] : edge.destination_block;
-            bool keep = edge.source_block < machine->block_count;
-            if (keep && canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY && continuation == UINT32_MAX)
+            valid = capacity <= MACHINE_REF_PAYLOAD_LIMIT;
+        }
+        MachineEdge* edges = valid ? arena_allocate(arena, MachineEdge, capacity) : 0;
+        u64 scratch_position = arena->position;
+        u32* edges_by_destination = valid ? arena_allocate(arena, u32, source->block_count) : 0;
+        if (valid)
+        {
+            memset(edges_by_destination, 0xff, sizeof(*edges_by_destination) * source->block_count);
+            if (canonical_edge_offset)
             {
-                // These selected templates have one executable successor.
-                // Other canonical asm-goto destinations must not assign their
-                // joins before the emitted unconditional branch.
-                MachineBlock* block = machine->blocks + edge.source_block;
-                MachineInstruction* branch = machine->instructions + block->first_instruction + block->instruction_count - 1u;
-                keep = machine_ref_payload(branch->operands[0]) == edge.destination_block;
-            }
-            if (keep)
-            {
-                machine->edges[kept_edges] = edge;
-                kept_edges += 1;
+                memcpy(edges, machine->edges, sizeof(*edges) * canonical_edge_offset);
             }
         }
-        machine->edge_count = kept_edges;
+        u32 kept_edges = canonical_edge_offset;
+        for (u32 canonical_source = 0; valid && canonical_source < source->block_count; canonical_source += 1)
+        {
+            IrInstruction* canonical_terminator = source->instructions + source->blocks[canonical_source].last_instruction.value;
+            IrCfgBlock const* cfg_block = cfg->blocks + canonical_source;
+            u32 continuation = asm_goto_continuations ? asm_goto_continuations[canonical_source] : UINT32_MAX;
+            bool general_goto = canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY && continuation != UINT32_MAX;
+            if (general_goto)
+            {
+                u32 machine_source = continuation ? continuation - 1u : UINT32_MAX;
+                valid = machine_source < machine->block_count && machine->blocks[machine_source].instruction_count;
+                MachineInstruction* instruction = valid
+                                                      ? machine->instructions + machine->blocks[machine_source].first_instruction +
+                                                            machine->blocks[machine_source].instruction_count - 1u
+                                                      : 0;
+                valid = valid &&
+                        (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY || instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY) &&
+                        instruction->payload < machine->inline_assembly_count;
+                if (valid)
+                {
+                    MachineInlineAssembly* assembly = machine->inline_assemblies + instruction->payload;
+                    assembly->successor_count = canonical_terminator->target_count;
+                    valid = assembly->fallthrough_block == continuation;
+                }
+                for (u32 successor = 0; valid && successor < cfg_block->successor_count; successor += 1)
+                {
+                    u32 cfg_edge_index = cfg_block->successor_offset + successor;
+                    MachineEdge edge = machine->edges[canonical_edge_offset + cfg_edge_index];
+                    valid = edge.source_block == canonical_source && edge.destination_block < source->block_count;
+                    if (valid)
+                    {
+                        edges_by_destination[edge.destination_block] = canonical_edge_offset + cfg_edge_index;
+                    }
+                }
+                for (u32 target = 0; valid && target < canonical_terminator->target_count; target += 1)
+                {
+                    u32 destination = canonical_terminator->targets[target].value;
+                    u32 edge_index = destination < source->block_count ? edges_by_destination[destination] : UINT32_MAX;
+                    valid = edge_index != UINT32_MAX && continuation <= MACHINE_REF_PAYLOAD_LIMIT - target;
+                    if (valid)
+                    {
+                        MachineEdge edge = machine->edges[edge_index];
+                        edge.source_block = continuation + target;
+                        edge.destination_block = block_entries ? block_entries[destination] : destination;
+                        edges[kept_edges++] = edge;
+                    }
+                }
+                for (u32 successor = 0; successor < cfg_block->successor_count; successor += 1)
+                {
+                    u32 cfg_edge_index = cfg_block->successor_offset + successor;
+                    u32 destination = machine->edges[canonical_edge_offset + cfg_edge_index].destination_block;
+                    if (destination < source->block_count)
+                    {
+                        edges_by_destination[destination] = UINT32_MAX;
+                    }
+                }
+            }
+            else
+            {
+                for (u32 successor = 0; valid && successor < cfg_block->successor_count; successor += 1)
+                {
+                    u32 cfg_edge_index = cfg_block->successor_offset + successor;
+                    MachineEdge edge = machine->edges[canonical_edge_offset + cfg_edge_index];
+                    valid = edge.source_block == canonical_source && edge.destination_block < source->block_count;
+                    u32 canonical_destination = edge.destination_block;
+                    edge.source_block = block_exits ? block_exits[canonical_source] : canonical_source;
+                    edge.destination_block = block_entries ? block_entries[canonical_destination] : canonical_destination;
+                    bool keep = valid && edge.source_block < machine->block_count;
+                    if (keep && canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        // These selected templates have one executable successor.
+                        // Other canonical asm-goto destinations must not assign their
+                        // joins before the emitted unconditional branch.
+                        MachineBlock* block = machine->blocks + edge.source_block;
+                        MachineInstruction* branch = machine->instructions + block->first_instruction + block->instruction_count - 1u;
+                        keep = machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
+                               machine_ref_payload(branch->operands[0]) == edge.destination_block;
+                    }
+                    if (keep)
+                    {
+                        edges[kept_edges++] = edge;
+                    }
+                }
+            }
+        }
+        valid = valid && kept_edges <= capacity;
+        if (valid)
+        {
+            machine->edges = edges;
+            machine->edge_count = kept_edges;
+        }
+        arena_set_position(arena, scratch_position);
     }
+    return valid;
 }
 
 #define MACHINE_SELECTION_ADDRESS_CACHE_CAPACITY 64u

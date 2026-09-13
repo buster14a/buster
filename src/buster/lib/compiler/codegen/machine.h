@@ -1199,7 +1199,10 @@ struct MachineInlineAssembly
     // image and saves/restores the named low halves around its bytes.  Bit N
     // names XMMN; the only admitted bits are 6 and 7.
     u8 preserved_vector_mask;
-    u8 reserved[2];
+    // Number of consecutive continuation blocks beginning at
+    // `fallthrough_block`. General asm-goto retains one continuation for every
+    // declared successor, including labels not referenced by the template.
+    u16 successor_count;
     u32 preserved_vector_slot;
     // General asm-goto's explicit fallthrough successor. The transaction
     // encoder captures outputs and branches here before laying out taken-edge

@@ -7075,8 +7075,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         result.function = machine_function_builder_finish(arena, &selector.builder);
-        machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits,
-                                                  selector.asm_goto_continuations);
         result.function.target = &machine_aarch64_description;
         result.function.windows_aarch64_frame = target_uses_pe_unwind(target);
         result.function.windows_aarch64_variadic = windows_variadic;
@@ -7128,6 +7126,12 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             arena_allocate(arena, MachineInlineAssemblyRelocation, selector.inline_assembly_relocations.total_count);
         result.function.inline_assembly_relocation_count = selector.inline_assembly_relocations.total_count;
         machine_stream_flatten(&selector.inline_assembly_relocations, result.function.inline_assembly_relocations);
+        if (!machine_selection_finish_canonical_edges(arena, &result.function, function, canonical_edge_offset,
+                                                       selector.block_entries, selector.block_exits,
+                                                       selector.asm_goto_continuations))
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+        }
         result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
         result.function.line_mark_count = line_marks.total_count;
         machine_stream_flatten(&line_marks, result.function.line_marks);

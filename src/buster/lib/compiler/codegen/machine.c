@@ -2238,9 +2238,25 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
             MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            MachineInlineAssembly* inline_assemblies = function->inline_assemblies;
+            MachineInlineAssemblyRelocation* inline_assembly_relocations = function->inline_assembly_relocations;
+            result = (!function->inline_assembly_count || function->inline_assemblies) &&
+                     (!function->inline_assembly_relocation_count || function->inline_assembly_relocations);
             if (function->switch_case_count)
             {
                 memcpy(switch_cases, function->switch_cases, sizeof(*switch_cases) * function->switch_case_count);
+            }
+            if (result && function->inline_assembly_count)
+            {
+                inline_assemblies = arena_allocate(arena, MachineInlineAssembly, function->inline_assembly_count);
+                memcpy(inline_assemblies, function->inline_assemblies, sizeof(*inline_assemblies) * function->inline_assembly_count);
+            }
+            if (result && function->inline_assembly_relocation_count)
+            {
+                inline_assembly_relocations =
+                    arena_allocate(arena, MachineInlineAssemblyRelocation, function->inline_assembly_relocation_count);
+                memcpy(inline_assembly_relocations, function->inline_assembly_relocations,
+                       sizeof(*inline_assembly_relocations) * function->inline_assembly_relocation_count);
             }
             u64 scratch_position = arena->position;
             u32* old_to_new = arena_allocate(arena, u32, old_block_count);
@@ -2285,6 +2301,28 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                     if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
                     {
                         split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            for (u32 assembly_index = 0; result && assembly_index < function->inline_assembly_count; assembly_index += 1)
+            {
+                MachineInlineAssembly* assembly = inline_assemblies + assembly_index;
+                bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+                result = assembly->first_relocation <= function->inline_assembly_relocation_count &&
+                         assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
+                         (!terminator || assembly->fallthrough_block < old_block_count);
+                if (result && terminator)
+                {
+                    assembly->fallthrough_block = old_to_new[assembly->fallthrough_block];
+                }
+                for (u32 relocation_index = 0; result && relocation_index < assembly->relocation_count; relocation_index += 1)
+                {
+                    MachineInlineAssemblyRelocation* relocation =
+                        inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                    result = !relocation->is_block || relocation->block < old_block_count;
+                    if (result && relocation->is_block)
+                    {
+                        relocation->block = old_to_new[relocation->block];
                     }
                 }
             }
@@ -2458,6 +2496,8 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->edges = edges;
                 function->edge_count = new_edge_count;
                 function->switch_cases = switch_cases;
+                function->inline_assemblies = inline_assemblies;
+                function->inline_assembly_relocations = inline_assembly_relocations;
             }
             arena_set_position(arena, scratch_position);
         }
@@ -2876,6 +2916,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                 }
             }
             u32 preserved_vector_count = ((assembly->preserved_vector_mask >> 6) & 1u) + ((assembly->preserved_vector_mask >> 7) & 1u);
+            bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
             valid = valid && (assembly->clobber_mask & operand_register_mask) == operand_register_mask &&
                     x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
                     (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) ||
@@ -2888,9 +2929,11 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     assembly->preserved_vector_mask == expected_preserved_vector_mask &&
                     (!preserved_vector_count ||
                      (assembly->preserved_vector_slot < function->stack_slot_count &&
-                      function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u));
-            bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
-            valid = valid && (!terminator || assembly->fallthrough_block < function->block_count);
+                      function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u)) &&
+                    (terminator
+                         ? assembly->successor_count && assembly->fallthrough_block < function->block_count &&
+                               assembly->successor_count <= function->block_count - assembly->fallthrough_block
+                         : assembly->successor_count == 0);
             for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
             {
                 MachineInlineAssemblyRelocation* relocation =
@@ -2909,7 +2952,9 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     valid = terminator && (x64_kind || a64_kind) &&
                             relocation->offset <= assembly->bytes.length &&
                             sizeof(u32) <= assembly->bytes.length - relocation->offset &&
-                            (!a64_kind || !(relocation->offset & 3u));
+                            (!a64_kind || !(relocation->offset & 3u)) &&
+                            relocation->block > assembly->fallthrough_block &&
+                            relocation->block - assembly->fallthrough_block < assembly->successor_count;
                 }
                 else if (valid)
                 {
@@ -3619,18 +3664,10 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             if (is_terminator && (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY || instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY))
             {
                 MachineInlineAssembly* assembly = function->inline_assemblies + instruction->payload;
-                for (u32 required_index = 0; required_index <= assembly->relocation_count; required_index += 1)
+                for (u32 successor = 0; successor < assembly->successor_count; successor += 1)
                 {
-                    bool required = required_index == 0;
-                    u32 destination = assembly->fallthrough_block;
-                    if (required_index)
-                    {
-                        MachineInlineAssemblyRelocation* relocation =
-                            function->inline_assembly_relocations + assembly->first_relocation + required_index - 1u;
-                        required = relocation->is_block != 0;
-                        destination = relocation->block;
-                    }
-                    bool edge_found = !required;
+                    u32 destination = assembly->fallthrough_block + successor;
+                    bool edge_found = false;
                     for (u32 edge_index = 0; !edge_found && edge_index < function->edge_count; edge_index += 1)
                     {
                         MachineEdge* edge = function->edges + edge_index;
@@ -3648,13 +3685,8 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
                     {
                         continue;
                     }
-                    bool declared = edge->destination_block == assembly->fallthrough_block;
-                    for (u32 relocation_index = 0; !declared && relocation_index < assembly->relocation_count; relocation_index += 1)
-                    {
-                        MachineInlineAssemblyRelocation* relocation =
-                            function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
-                        declared = relocation->is_block && relocation->block == edge->destination_block;
-                    }
+                    bool declared = edge->destination_block >= assembly->fallthrough_block &&
+                                    edge->destination_block - assembly->fallthrough_block < assembly->successor_count;
                     if (!declared)
                     {
                         MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);

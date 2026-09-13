@@ -112,10 +112,19 @@ nonzero:
     return value + 50;
 }
 
+static int goto_repeated_target(int value)
+{
+    __asm__ goto(ASM_CONDITIONAL : : "r"(value) : "cc" : same, same);
+    return 60;
+same:
+    return 61;
+}
+
 int main(void)
 {
     return goto_numeric(5) != 12 || goto_named(7) != 18 || goto_swap(3, 7) != 703 || goto_fallthrough(11) != 24 ||
            goto_join(1) != 8 || goto_join(2) != 6 || goto_loop(0) != 0 || goto_loop(8) != 92 || goto_no_operands() != 17 ||
            goto_conditional(0) != 21 || goto_conditional(7) != 22 || goto_multiple_targets(0) != 31 ||
-           goto_multiple_targets(1) != 32 || goto_multiple_targets(2) != 30 || goto_read_write(-2) != 40 || goto_read_write(3) != 55;
+           goto_multiple_targets(1) != 32 || goto_multiple_targets(2) != 30 || goto_read_write(-2) != 40 ||
+           goto_read_write(3) != 55 || goto_repeated_target(0) != 60 || goto_repeated_target(1) != 61;
 }

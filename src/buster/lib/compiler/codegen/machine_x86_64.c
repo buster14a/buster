@@ -8291,8 +8291,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
-    machine_selection_finish_canonical_edges(&result.function, function, canonical_edge_offset, selector.block_entries, selector.block_exits,
-                                               selector.asm_goto_continuations);
     result.function.target = windows_abi ? &machine_x86_64_windows_description : &machine_x86_64_description;
     machine_stream_cursor_close(&selector.immediates, selector.immediate_cursor);
     result.function.immediates = (u64*)machine_stream_materialize(arena, arena, &selector.immediates, BUSTER_ALIGN_OF(u64));
@@ -8362,6 +8360,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         arena_allocate(arena, MachineInlineAssemblyRelocation, selector.inline_assembly_relocations.total_count);
     result.function.inline_assembly_relocation_count = selector.inline_assembly_relocations.total_count;
     machine_stream_flatten(&selector.inline_assembly_relocations, result.function.inline_assembly_relocations);
+    if (!machine_selection_finish_canonical_edges(arena, &result.function, function, canonical_edge_offset,
+                                                   selector.block_entries, selector.block_exits,
+                                                   selector.asm_goto_continuations))
+    {
+        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+    }
     if (!machine_function_split_parameter_edges(arena, &result.function))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
