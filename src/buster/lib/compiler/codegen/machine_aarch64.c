@@ -5299,7 +5299,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
                     selected = machine_a64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
                     u32 target_index = target < instruction->target_count ? target : control_targets[target - instruction->target_count];
                     u32 destination = instruction->targets[target_index].value;
-                    selected = destination < function->block_count;
+                    selected = selected && destination < function->block_count;
                     if (selected)
                     {
                         machine_a64_select_row(selector, (MachineInstruction){
