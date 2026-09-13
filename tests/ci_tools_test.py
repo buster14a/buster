@@ -959,6 +959,15 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("name: Native retirement acceptance complete", complete)
         self.assertIn('[[ "$CENSUS_RESULT" == success && "$STRICT_RESULT" == success ]]', complete)
 
+    def test_windows_arm64_oracle_keeps_the_full_corpus_with_required_link_shims(self):
+        differential = (ROOT / "tools/differential.c").read_text()
+        clear_cache = (ROOT / "tests/differential/clear_cache_host.c").read_text()
+        self.assertIn("#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64", differential)
+        self.assertIn('!test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }', differential)
+        self.assertIn("defined(_WIN32)", clear_cache)
+        self.assertIn("defined(_M_ARM64) || defined(__aarch64__)", clear_cache)
+        self.assertIn("void __clear_cache(void *begin, void *end)", clear_cache)
+
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
