@@ -52,8 +52,11 @@ local filesystem** in an existing controlled directory. Set `LOCK` to an
 absolute path such as `/srv/buster-bench/host.lock`; arrange directory access
 before the session. No privileged policy changes are performed. The file is
 created when absent, without truncation, with mode 0600; no automatic permission
-change is made to an existing file. Final-component symlinks and nonregular
-files are refused. Network filesystem lock semantics are outside this contract.
+change is made to an existing file. The lock must remain a private regular
+single-link file owned by the invoking user: group/other permission bits,
+foreign ownership and extra hard links are refused. Final-component symlinks and
+nonregular files are refused. Network filesystem lock semantics are outside this
+contract.
 
 ```sh
 BENCH=build/throughput-tools/throughput

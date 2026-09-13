@@ -112,6 +112,7 @@ static void test_host_qualification(char const* executable, char const* root)
     if (paths)
     {
         CHECK(test_text(root, "qualification.lock", "persistent lock contents\n"));
+        CHECK(chmod(path, 0600) == 0);
         test_host_lock_lifetime(executable, path);
         TpHostFact fact;
         tp_host_read(&fact, path);
@@ -151,6 +152,23 @@ static void test_host_qualification(char const* executable, char const* root)
         CHECK(symlink(path, absent) == 0);
         CHECK(tp_host_lock_acquire(absent, &lock) != 0 && lock.descriptor == -1);
         CHECK(unlink(absent) == 0);
+
+        /* A cooperative lease is meaningful only when every participant can
+         * identify the same private regular inode. Existing files are not
+         * chmoded as a side effect of admission: reject an accidentally
+         * shared lock and leave its contents untouched. */
+        CHECK(chmod(path, 0640) == 0);
+        CHECK(tp_host_lock_acquire(path, &lock) == EACCES && lock.descriptor == -1);
+        tp_host_read(&fact, path);
+        CHECK(!fact.error && !fact.truncated && !strcmp(fact.value, "persistent lock contents\n"));
+        CHECK(chmod(path, 0600) == 0);
+        CHECK(tp_host_lock_acquire(path, &lock) == 0);
+        tp_host_lock_release(&lock);
+
+        char hardlink[TP_PATH_CAP];
+        CHECK(tp_path(hardlink, root, "qualification-hardlink") && link(path, hardlink) == 0);
+        CHECK(tp_host_lock_acquire(path, &lock) == EINVAL && lock.descriptor == -1);
+        CHECK(unlink(hardlink) == 0);
 
         int cpu = tp_first_allowed_cpu();
         CHECK(cpu >= 0);
