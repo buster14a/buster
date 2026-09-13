@@ -771,8 +771,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.input_paths = arena_allocate(arena, String8, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
-    invocation.definitions = arena_allocate(arena, String8, arguments.length);
-    invocation.undefinitions = arena_allocate(arena, String8, arguments.length);
+    invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
     invocation.library_paths = arena_allocate(arena, String8, arguments.length);
     invocation.libraries = arena_allocate(arena, String8, arguments.length);
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
@@ -930,11 +929,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-D")))
             {
-                invocation.definitions[invocation.definition_count++] = value;
+                invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                    .operand = value,
+                    .kind = C_PREPROCESSOR_OPERATION_DEFINE,
+                };
             }
             else if (string_equal(argument, S8("-U")))
             {
-                invocation.undefinitions[invocation.undefinition_count++] = value;
+                invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                    .operand = value,
+                    .kind = C_PREPROCESSOR_OPERATION_UNDEFINE,
+                };
             }
             else if (string_equal(argument, S8("-L")))
             {
@@ -1415,12 +1420,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(prefix, S8("-D")) && value.length)
         {
-            invocation.definitions[invocation.definition_count++] = value;
+            invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                .operand = value,
+                .kind = C_PREPROCESSOR_OPERATION_DEFINE,
+            };
             continue;
         }
         if (string_equal(prefix, S8("-U")) && value.length)
         {
-            invocation.undefinitions[invocation.undefinition_count++] = value;
+            invocation.macro_operations[invocation.macro_operation_count++] = (CPreprocessorOperation){
+                .operand = value,
+                .kind = C_PREPROCESSOR_OPERATION_UNDEFINE,
+            };
             continue;
         }
         if (string_equal(prefix, S8("-L")) && value.length)
@@ -2362,9 +2373,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynami
     return result;
 }
 
-// Splits a `-D` operand at its first `=`. The `=` decides the value, not the
-// text after it: `-DNAME=` leaves an empty replacement list, and only the form
-// with no `=` at all takes the `1` default -- the split clang and GCC make.
+// Legacy API-built invocations still carry separate raw `-D` operands. Split
+// those at their first `=` before handing them to CPreprocessOptions; parsed
+// command lines keep their raw operands in the authoritative ordered stream.
 BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8 definition)
 {
     for (u64 index = 0; index < definition.length; index += 1)
@@ -3286,6 +3297,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     }
     CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = split, .length = split_length},
                                                 (CPreprocessOptions){
+                                                    .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
                                                     .undefinitions = invocation.undefinitions,
                                                     .include_paths = invocation.include_paths,
@@ -3294,6 +3306,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
@@ -3365,6 +3378,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
+                                                    .macro_operations = invocation.macro_operations,
                                                     .definitions = definitions,
                                                     .undefinitions = invocation.undefinitions,
                                                     .include_paths = invocation.include_paths,
@@ -3373,6 +3387,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
@@ -3748,6 +3763,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
                                                           .input_paths = invocation.input_paths,
                                                           .include_paths = invocation.include_paths,
                                                           .system_include_paths = invocation.system_include_paths,
+                                                          .macro_operations = invocation.macro_operations,
                                                           .definitions = invocation.definitions,
                                                           .undefinitions = invocation.undefinitions,
                                                           .extra_arguments = invocation.gpu_arguments,
@@ -3760,6 +3776,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
                                                           .input_count = invocation.input_count,
                                                           .include_path_count = invocation.include_path_count,
                                                           .system_include_path_count = invocation.system_include_path_count,
+                                                          .macro_operation_count = invocation.macro_operation_count,
                                                           .definition_count = invocation.definition_count,
                                                           .undefinition_count = invocation.undefinition_count,
                                                           .extra_argument_count = invocation.gpu_argument_count,

@@ -140,11 +140,15 @@ struct GpuToolchain
 };
 
 typedef struct GpuPipelineOptions GpuPipelineOptions;
+struct CPreprocessorOperation;
 struct GpuPipelineOptions
 {
     String8* input_paths;
     String8* include_paths;
     String8* system_include_paths;
+    // Authoritative when macro_operation_count is nonzero. The separate
+    // arrays preserve the legacy API policy: definitions, then undefinitions.
+    struct CPreprocessorOperation* macro_operations;
     String8* definitions;
     String8* undefinitions;
     String8* extra_arguments;
@@ -157,6 +161,7 @@ struct GpuPipelineOptions
     u32 input_count;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 macro_operation_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 extra_argument_count;

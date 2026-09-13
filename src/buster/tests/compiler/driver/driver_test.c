@@ -4723,8 +4723,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, found_sysroot_multiarch);
     BUSTER_TEST(arguments, found_sysroot_include);
-    BUSTER_TEST(arguments, invocation.definition_count == 1);
-    BUSTER_TEST(arguments, invocation.undefinition_count == 1);
+    BUSTER_TEST(arguments, invocation.macro_operation_count == 2);
+    if (invocation.macro_operation_count == 2)
+    {
+        BUSTER_TEST(arguments, invocation.macro_operations[0].kind == C_PREPROCESSOR_OPERATION_DEFINE);
+        BUSTER_STRING_TEST(arguments, invocation.macro_operations[0].operand, S8("DEBUG=1"));
+        BUSTER_TEST(arguments, invocation.macro_operations[1].kind == C_PREPROCESSOR_OPERATION_UNDEFINE);
+        BUSTER_STRING_TEST(arguments, invocation.macro_operations[1].operand, S8("NDEBUG"));
+    }
+    BUSTER_TEST(arguments, invocation.definition_count == 0 && invocation.undefinition_count == 0);
     BUSTER_TEST(arguments, invocation.library_path_count == 1);
     BUSTER_TEST(arguments, invocation.library_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.library_paths[0], S8("/sdk/lib"));
@@ -5278,6 +5285,113 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, separated_preprocess.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, string_first_sequence(separated_preprocess.output, S8("int probe = 0 ;")) != BUSTER_STRING_NO_MATCH);
         scratch_end(define_temporary);
+    }
+    {
+        String8 define_after_undefine[] = {
+            S8("-E"), S8("-UORDERED"), S8("-D"), S8("ORDERED=7"), S8("tests/basic_c_macro_options.c"),
+        };
+        CompilerDriverResult defined = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(define_after_undefine)));
+        BUSTER_TEST(arguments, defined.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(defined.output, S8("7")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(defined.output, S8("ORDERED_ABSENT")) == BUSTER_STRING_NO_MATCH);
+
+        String8 undefine_after_define[] = {
+            S8("-E"), S8("-DORDERED=7"), S8("-U"), S8("ORDERED"), S8("tests/basic_c_macro_options.c"),
+        };
+        CompilerDriverResult undefined = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(undefine_after_define)));
+        BUSTER_TEST(arguments, undefined.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(undefined.output, S8("ORDERED_ABSENT")) != BUSTER_STRING_NO_MATCH);
+
+        String8 macro_chain[] = {
+            S8("-E"),
+            S8("-DORDERED=1"),
+            S8("-UORDERED"),
+            S8("-D"),
+            S8("ORDERED=9"),
+            S8("-UNEVER_DEFINED"),
+            S8("-DREPEAT=1"),
+            S8("-DREPEAT=2"),
+            S8("-DIMPLICIT"),
+            S8("-DEMPTY="),
+            S8("-U__clang__"),
+            S8("-D__GNUC__=99"),
+            S8("-DDOUBLE(x)=((x)+(x))"),
+            S8("-D"),
+            S8("ZERO()=zero"),
+            S8("-DMULTI(a,b)=a*b"),
+            S8("-DIDENTITY(x)=x"),
+            S8("-DNESTED(x)=IDENTITY(DOUBLE(x))"),
+            S8("-DSTRINGIFY(x)=#x"),
+            S8("-DPASTE(a,b)=a##b"),
+            S8("-DVARIADIC(first,...)=first+__VA_ARGS__"),
+            S8("-DEQUALS(x)=x==1"),
+            S8("-D"),
+            S8("SPACED(x)=x + x"),
+            S8("-DEMPTY_FUNCTION(x)="),
+            S8("tests/basic_c_macro_options.c"),
+        };
+        CompilerDriverResult chained = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(macro_chain)));
+        BUSTER_TEST(arguments, chained.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 expected_sequences[] = {
+            S8("9"),              S8("2"),                S8("1"),           S8("empty_begin"),
+            S8("empty_end"),
+            S8("99"),             S8("CLANG_ABSENT"),     S8("( ( 21 ) + ( 21 ) )"), S8("zero"),
+            S8("2 * 3"),          S8("( ( 2 ) + ( 2 ) )"), S8("\"two words\""), S8("joined"),
+            S8("1 + 2 + 3"),      S8("1 == 1"),           S8("3 + 3"),
+            S8("empty_function_begin"), S8("empty_function_end"),
+        };
+        for (u32 sequence_index = 0; sequence_index < BUSTER_ARRAY_LENGTH(expected_sequences); sequence_index += 1)
+        {
+            BUSTER_TEST_RAW(arguments, string_first_sequence(chained.output, expected_sequences[sequence_index]) != BUSTER_STRING_NO_MATCH,
+                            expected_sequences[sequence_index]);
+        }
+
+        String8 undefine_builtin[] = {S8("-E"), S8("-U__GNUC__"), S8("tests/basic_c_macro_options.c")};
+        CompilerDriverResult builtin_absent = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(undefine_builtin)));
+        BUSTER_TEST(arguments, builtin_absent.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(builtin_absent.output, S8("GNUC_ABSENT")) != BUSTER_STRING_NO_MATCH);
+
+        String8 redefine_builtin[] = {S8("-E"), S8("-D"), S8("__GNUC__=99"), S8("tests/basic_c_macro_options.c")};
+        CompilerDriverResult builtin_redefined = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(redefine_builtin)));
+        BUSTER_TEST(arguments, builtin_redefined.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(builtin_redefined.output, S8("99")) != BUSTER_STRING_NO_MATCH);
+
+        String8 malformed_definitions[] = {
+            S8("1BAD=1"), S8("BAD NAME=1"), S8("DUP(x,x)=x"), S8("TRAILING(x,)=x"), S8("VARIADIC(...,x)=x"), S8("OPEN(x=x"),
+        };
+        for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_definitions); malformed_index += 1)
+        {
+            String8 malformed_command[] = {S8("-E"), S8("-D"), malformed_definitions[malformed_index], S8("tests/basic_c_macro_options.c")};
+            CompilerDriverResult malformed = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(malformed_command)));
+            BUSTER_TEST_RAW(arguments, malformed.error == COMPILER_DRIVER_ERROR_TOKENIZE, malformed_definitions[malformed_index]);
+            BUSTER_TEST(arguments, malformed.tokenizer_error_count != 0 && malformed.diagnostic_count != 0);
+        }
+        String8 malformed_undefine_command[] = {S8("-E"), S8("-U"), S8("BAD NAME"), S8("tests/basic_c_macro_options.c")};
+        CompilerDriverResult malformed_undefine = compiler_driver_execute_invocation(
+            arguments->arena,
+            compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(malformed_undefine_command)));
+        BUSTER_TEST(arguments, malformed_undefine.error == COMPILER_DRIVER_ERROR_TOKENIZE);
+        BUSTER_TEST(arguments, malformed_undefine.tokenizer_error_count == 1 && malformed_undefine.diagnostic_count == 1);
+
+        String8 legacy_command[] = {S8("-E"), S8("tests/basic_c_macro_options.c")};
+        CompilerDriverInvocation legacy_invocation =
+            compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(legacy_command));
+        String8 legacy_definitions[] = {S8("ORDERED=4"), S8("DOUBLE(x)=((x)+(x))")};
+        String8 legacy_undefinitions[] = {S8("ORDERED")};
+        legacy_invocation.definitions = legacy_definitions;
+        legacy_invocation.undefinitions = legacy_undefinitions;
+        legacy_invocation.definition_count = BUSTER_ARRAY_LENGTH(legacy_definitions);
+        legacy_invocation.undefinition_count = BUSTER_ARRAY_LENGTH(legacy_undefinitions);
+        CompilerDriverResult legacy_result = compiler_driver_execute_invocation(arguments->arena, legacy_invocation);
+        BUSTER_TEST(arguments, legacy_result.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("ORDERED_ABSENT")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("( ( 21 ) + ( 21 ) )")) != BUSTER_STRING_NO_MATCH);
     }
     String8 warning_command_line[] = {
         S8("-fsyntax-only"),
@@ -14672,7 +14786,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         // assemble rather than encoding the wrong immediate.
         String8 preprocessed_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-preprocessed"), S8(".o"));
         String8 preprocessed_command_line[] = {
-            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), preprocessed_path, S8("tests/basic_asm_preprocessed.S"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-UBASIC_ASM_PREPROCESSED_STATUS"),
+            S8("-DBASIC_ASM_PREPROCESSED_STATUS=0"), S8("-o"), preprocessed_path, S8("tests/basic_asm_preprocessed.S"),
         };
         CompilerDriverResult preprocessed = compiler_driver_execute_invocation(
             asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocessed_command_line)));
