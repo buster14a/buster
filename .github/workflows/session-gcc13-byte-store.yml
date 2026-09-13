@@ -11,7 +11,7 @@ permissions:
 jobs:
   publish-and-prove:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       BUSTER_GCC: /usr/bin/gcc-13
       BUSTER_TEST_JOBS: '1'
@@ -19,24 +19,38 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 72b336f3485f3d337b6a9280b79b8f611d381825
-      - name: Publish only the two guarded production edits
+          ref: b86878ccca28edbe90bdc747ca4c4e5df533c5e4
+          fetch-depth: 2
+      - name: Extend the existing registered byte-payload fixture
         id: source
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/gcc13-byte-store"
-          test "$(git rev-parse HEAD)" = 72b336f3485f3d337b6a9280b79b8f611d381825
-          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = 15899cf8917d60c1fad97b1e8b5635c543291da8
+          test "$(git rev-parse HEAD)" = b86878ccca28edbe90bdc747ca4c4e5df533c5e4
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = 18d363a8c0694e7022e34b543d0ad81ff0232ab9
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('src/buster/lib/compiler/frontend/c/c_gen.c')
+          path = Path('src/buster/tests/compiler/frontend/c/c_test.c')
           text = path.read_text()
           changes = (
-              ('bytes[offset + byte_index] = source_index < sizeof(value) ? (u8)(value >> (u32)(source_index * 8)) : 0;',
-               'bytes[offset + byte_index] = (u8)(source_index < sizeof(value) ? value >> (u32)(source_index * 8) : 0);'),
-              ('u8 byte = source_index < sizeof(bits) ? (u8)(bits >> (u32)(source_index * 8)) : (sign_extend ? 0xff : 0);',
-               'u8 byte = (u8)(source_index < sizeof(bits) ? bits >> (u32)(source_index * 8) : (sign_extend ? 0xff : 0));'),
+              ('" U unsigned_wide[] = {((U)1<<100),(U)0xffffffffffffffffULL,(U)-1,(U)1<<127};");',
+               '" U unsigned_wide[] = {((U)1<<100),(U)0xffffffffffffffffULL,(U)-1,(U)1<<127};"\n'
+               '                        " unsigned long long byte_words[] = {0,0x0123456789abcdefULL,0xfedcba9876543210ULL};"\n'
+               '                        " void *byte_pointers[] = {0,(void *)0x0123456789abcdefULL,(void *)0xfedcba9876543210ULL};");'),
+              ('    u8 expected_bool[] = {1, 1, 1, 1, 1, 1, 1, 0};',
+               '    // Pin every byte, including an embedded null and bytes with the high bit set.\n'
+               '    // Integer and integer-cast pointer arrays take distinct byte-store paths.\n'
+               '    u8 expected_byte_words[] = {\n'
+               '        0, 0, 0, 0, 0, 0, 0, 0,\n'
+               '        0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,\n'
+               '        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,\n'
+               '    };\n'
+               '    u8 expected_bool[] = {1, 1, 1, 1, 1, 1, 1, 0};'),
+              ('        {S8("booleans"), BUSTER_ARRAY_TO_SLICE(expected_bool)},',
+               '        {S8("byte_words"), BUSTER_ARRAY_TO_SLICE(expected_byte_words)},\n'
+               '        {S8("byte_pointers"), BUSTER_ARRAY_TO_SLICE(expected_byte_words)},\n'
+               '        {S8("booleans"), BUSTER_ARRAY_TO_SLICE(expected_bool)},'),
           )
           for before, after in changes:
               assert text.count(before) == 1, before
@@ -44,26 +58,18 @@ jobs:
           path.write_text(text)
           PY
           git diff --check
-          test "$(git diff --name-only)" = src/buster/lib/compiler/frontend/c/c_gen.c
-          git diff --binary > "$RUNNER_TEMP/gcc13-byte-store/candidate.patch"
+          test "$(git diff --name-only)" = src/buster/tests/compiler/frontend/c/c_test.c
           git switch -c astra/gcc13-byte-store-narrowing-20260912
           git config user.name 'Codex'
           git config user.email 'codex@openai.com'
-          git add src/buster/lib/compiler/frontend/c/c_gen.c
-          git commit -m 'c: make byte-store narrowing explicit for GCC 13'
+          git add src/buster/tests/compiler/frontend/c/c_test.c
+          git commit -m 'test(c): pin integer and pointer initializer byte payloads'
           candidate=$(git rev-parse HEAD)
           git push origin HEAD:refs/heads/astra/gcc13-byte-store-narrowing-20260912
           printf 'candidate=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
+          git diff --binary 72b336f3485f3d337b6a9280b79b8f611d381825 HEAD > "$RUNNER_TEMP/gcc13-byte-store/candidate.patch"
+          { git rev-parse HEAD HEAD^{tree}; git hash-object src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c; } | tee "$RUNNER_TEMP/gcc13-byte-store/source-identities.txt"
           git show --stat --oneline HEAD
-          { git rev-parse HEAD HEAD^{tree}; git hash-object src/buster/lib/compiler/frontend/c/c_gen.c; } | tee "$RUNNER_TEMP/gcc13-byte-store/source-identities.txt"
-          python3 - <<'PY' | tee "$RUNNER_TEMP/gcc13-byte-store/registered-coverage.txt"
-          from pathlib import Path
-          path = Path('src/buster/tests/compiler/frontend/c/c_test.c')
-          lines = path.read_text().splitlines()
-          first, last = 13453, 13577
-          for index in range(first - 1, last):
-              print(f'{index + 1}: {lines[index]}')
-          PY
       - name: Freeze toolchain and generated configuration
         shell: bash
         run: |
@@ -72,10 +78,9 @@ jobs:
           { uname -a; lscpu; free -h; "$BUSTER_GCC" --version; clang --version; cmake --version; ninja --version; } > "$evidence/environment.txt"
           git checkout --detach 72b336f3485f3d337b6a9280b79b8f611d381825
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-driver"
-          "$RUNNER_TEMP/buster-driver" generate --sanitize --cc gcc --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$evidence/configure.log"
-          cp build/CMakeCache.txt "$evidence/CMakeCache.txt"
-          cp build/compile_commands.json "$evidence/compile_commands.json"
-          find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > "$evidence/generated-before.sha256"
+          "$RUNNER_TEMP/buster-driver" generate --sanitize --cc gcc --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON 2>&1 | tee "$evidence/configure.log"
+          cp build/CMakeCache.txt build/compile_commands.json "$evidence/"
+          find build -type f \( -name '*.h' -o -name '*.ninja' -o -name CMakeCache.txt -o -name compile_commands.json \) -print0 | sort -z | xargs -0 sha256sum > "$evidence/configuration-before.sha256"
       - name: Require both baseline conversion diagnostics
         shell: bash
         run: |
@@ -91,7 +96,7 @@ jobs:
           grep -F 'c_ir_store_pointer_bits' "$evidence/baseline-c-gen.log"
           grep -F 'c_ir_constant_store_unit_bits' "$evidence/baseline-c-gen.log"
           test "$(grep -c '\[-Werror=conversion\]' "$evidence/baseline-c-gen.log")" -eq 2
-      - name: Require candidate compilation with identical configuration
+      - name: Require exact candidate compilation with identical configuration
         env:
           CANDIDATE: ${{ steps.source.outputs.candidate }}
         shell: bash
@@ -100,11 +105,44 @@ jobs:
           evidence="$RUNNER_TEMP/gcc13-byte-store"
           git checkout --detach "$CANDIDATE"
           cmake --build build --config Debug --target CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_gen.c.o -- -j1 -v 2>&1 | tee "$evidence/candidate-c-gen.log"
-          find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > "$evidence/generated-after.sha256"
-          cmp "$evidence/generated-before.sha256" "$evidence/generated-after.sha256"
+          find build -type f \( -name '*.h' -o -name '*.ninja' -o -name CMakeCache.txt -o -name compile_commands.json \) -print0 | sort -z | xargs -0 sha256sum > "$evidence/configuration-after.sha256"
+          cmp "$evidence/configuration-before.sha256" "$evidence/configuration-after.sha256"
           printf '0\n' > "$evidence/candidate.exit"
-          printf 'Exact candidate %s: both baseline GCC 13 conversion failures reproduced; candidate c_gen object passed. Full registered suite NOT RUN by this job.\n' "$CANDIDATE" | tee "$evidence/result.txt"
-          cat "$evidence/result.txt" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Exact candidate %s: both baseline GCC 13 conversion failures reproduced; candidate c_gen object passed with byte-identical configuration.\n' "$CANDIDATE" | tee "$evidence/object-result.txt"
+          cat "$evidence/object-result.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve a separate integration of the pinned fixture prerequisite
+        id: integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/gcc13-byte-store"
+          git fetch --no-tags --depth=1 origin 15b19813ca51cf993d3526acb6f66c1f51f7c377 0e1d1a436367631aa6475c17c73130b932faf0de
+          git diff --binary 15b19813ca51cf993d3526acb6f66c1f51f7c377 0e1d1a436367631aa6475c17c73130b932faf0de -- src/buster/tests/compiler/assembly/x86_64_metadata_test.c src/buster/tests/compiler/codegen/machine_test.c > "$evidence/pr547-prerequisite.patch"
+          test -s "$evidence/pr547-prerequisite.patch"
+          cat "$evidence/pr547-prerequisite.patch"
+          git apply --check "$evidence/pr547-prerequisite.patch"
+          git apply "$evidence/pr547-prerequisite.patch"
+          git diff --check
+          git switch -c astra/gcc13-byte-store-integration-20260912
+          git add src/buster/tests/compiler/assembly/x86_64_metadata_test.c src/buster/tests/compiler/codegen/machine_test.c
+          git commit -m 'validation: compose PR 547 pinned fixtures with PR 558 byte-store repair' -m 'Fixture prerequisite: 0e1d1a436367631aa6475c17c73130b932faf0de against 15b19813ca51cf993d3526acb6f66c1f51f7c377. Validation-only integration; neither prerequisite nor transport is added to PR 558.'
+          integration=$(git rev-parse HEAD)
+          git push origin HEAD:refs/heads/astra/gcc13-byte-store-integration-20260912
+          printf 'integration=%s\n' "$integration" >> "$GITHUB_OUTPUT"
+          { git rev-parse HEAD HEAD^{tree}; git show --stat --oneline HEAD; } | tee "$evidence/integration-identities.txt"
+      - name: Run the full registered GCC sanitized suite on the explicit integration
+        env:
+          INTEGRATION: ${{ steps.integration.outputs.integration }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/gcc13-byte-store"
+          test "$(git rev-parse HEAD)" = "$INTEGRATION"
+          mkdir -p "$RUNNER_TEMP/buster-test-files"
+          export BUSTER_TEST_TEMPORARY_BASE="$RUNNER_TEMP/buster-test-files"
+          "$RUNNER_TEMP/buster-driver" build --config Debug -t test_all -- -j1 2>&1 | tee "$evidence/integration-test-all.log"
+          printf 'Integration %s: full registered GCC Debug ASan/UBSan/LSan suite passed using the unchanged generated fatal policy.\n' "$INTEGRATION" | tee "$evidence/integration-result.txt"
+          cat "$evidence/integration-result.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve all successful and failed evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
