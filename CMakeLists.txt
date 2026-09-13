@@ -1775,6 +1775,15 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
+# The headless compiler has no production font consumer.  Keep the reusable
+# module registered above, but add it to ide only when its registered tests are
+# present.  A future product target using font_provider must name truetype in
+# its own module inventory rather than relying on ide's test dependency.
+set(BUSTER_COMPILER_TEST_MODULES)
+if (BUSTER_INCLUDE_TESTS)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+endif()
+
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
@@ -1784,7 +1793,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     integer
     string
     float
-    truetype
+    ${BUSTER_COMPILER_TEST_MODULES}
     compiler_c_frontend
     compiler_aarch64_encoding
     compiler_aarch64_exact_bridge

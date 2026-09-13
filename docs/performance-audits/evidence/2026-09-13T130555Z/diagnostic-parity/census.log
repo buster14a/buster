@@ -1,0 +1,130 @@
++ printf 'int add(int a, int b) { return a + b; }\n'
++ printf 'int f(void) { return missing; }\n'
++ sha256sum issue564-evidence/small.c issue564-evidence/invalid.c
++ COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 -g -v)
++ ./build-prod/Release/ide cc -Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 -g -v -fsource-metrics=issue564-evidence/unity-prod.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-prod
+TARGET cpu=znver3 features=adx,aes,avx,avx2,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,invpcid,lzcnt,movbe,pclmul,pku,popcnt,rdrand,rdseed,sha,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,vaes,vpclmulqdq,wbnoinvd,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                337                      371
+bytes on disk                 30.955.571               30.989.193
+physical lines                   388.366                  389.507
+
+bytes scanned                 30.953.233               30.986.849
+  code                        24.510.659   79.2 %      24.529.097   79.2 %
+  comment                      1.759.861    5.7 %       1.772.652    5.7 %
+  whitespace                   4.682.713   15.1 %       4.685.100   15.1 %
+  literals, within code       13.182.332   42.6 %      13.182.553   42.5 %
+
+lines scanned                    387.197                  388.335
+  code, the sLOC                 347.696   89.8 %         348.510   89.7 %
+  comment                         29.595    7.6 %          29.857    7.7 %
+  blank                           11.681    3.0 %          11.758    3.0 %
+  both, counted twice              1.775    0.5 %           1.790    0.5 %
+
+comments                          24.724                   24.793
+tokens                         3.048.808                3.051.947
+spliced-away lines                 1.169    0.3 %           1.172    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.397.209  111.3 %
+  their spelling bytes        24.916.754  101.6 %
+  bytes retained              33.864.882  109.3 %
+  macro expansions               126.359
+  #define directives               3.449
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.616  re-read in total
+IR_FRONTEND_SSA functions=4525 locals=40596 reads=149179 writes=65667 parameters_created=412534 parameters_removed=382731 temporaries=10534 fallback_locals=1979
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1330350 changes=96907
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1330350 changes=9586
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2686521 changes=138892
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=92602 changes=0
+IR_FAST functions=4803 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2078208 retained_bound=15685656 compact_ns=0 instructions_before=1330350 instructions_after=1181672
+IR_LOCAL_PROMOTION candidates=26899 promoted=175 loads_removed=529 stores_removed=322 parameters_inserted=1289 parameters_removed=1158 uninitialized=0 barriers=8 instructions_before=1331376 instructions_after=1330350 values_before=1151174 values_after=1150601
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3488 parameter_visits=2370 incoming_visits=5439
+CODEGEN cpu=znver3 vector_bits=256 functions=4803 instructions=1181672 values=1001923 stack_value_bytes=5232304 stack_frame_bytes=5232304 max_stack_frame_bytes=657432 code_bytes=18991214 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1583315 exact_successes=1583315 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=69076
+CODEGEN_ALLOCATOR reloads=170189 spills=206362 boundary_spills=94848 boundary_reloads=27366 boundary_copies=87 copies=149768 rematerializations=60689 pins=0 splits=0 scheduled=0 schedule_kept=0
++ ./build-census/Release/ide cc -Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 -g -v -fsource-metrics=issue564-evidence/unity-census.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-census
+TARGET cpu=znver3 features=adx,aes,avx,avx2,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,invpcid,lzcnt,movbe,pclmul,pku,popcnt,rdrand,rdseed,sha,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,vaes,vpclmulqdq,wbnoinvd,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                337                      371
+bytes on disk                 30.955.571               30.989.193
+physical lines                   388.366                  389.507
+
+bytes scanned                 30.953.233               30.986.849
+  code                        24.510.659   79.2 %      24.529.097   79.2 %
+  comment                      1.759.861    5.7 %       1.772.652    5.7 %
+  whitespace                   4.682.713   15.1 %       4.685.100   15.1 %
+  literals, within code       13.182.332   42.6 %      13.182.553   42.5 %
+
+lines scanned                    387.197                  388.335
+  code, the sLOC                 347.696   89.8 %         348.510   89.7 %
+  comment                         29.595    7.6 %          29.857    7.7 %
+  blank                           11.681    3.0 %          11.758    3.0 %
+  both, counted twice              1.775    0.5 %           1.790    0.5 %
+
+comments                          24.724                   24.793
+tokens                         3.048.808                3.051.947
+spliced-away lines                 1.169    0.3 %           1.172    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.397.209  111.3 %
+  their spelling bytes        24.916.754  101.6 %
+  bytes retained              33.864.882  109.3 %
+  macro expansions               126.359
+  #define directives               3.449
+
+files lexed more than once
+         lexes re-read bytes  path
+             4        12.852  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      33.616  re-read in total
+IR_FRONTEND_SSA functions=4525 locals=40596 reads=149179 writes=65667 parameters_created=412534 parameters_removed=382731 temporaries=10534 fallback_locals=1979
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1330350 changes=96907
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1330350 changes=9586
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2686521 changes=138892
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=92602 changes=0
+IR_FAST functions=4803 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2078208 retained_bound=15685656 compact_ns=0 instructions_before=1330350 instructions_after=1181672
+IR_LOCAL_PROMOTION candidates=26899 promoted=175 loads_removed=529 stores_removed=322 parameters_inserted=1289 parameters_removed=1158 uninitialized=0 barriers=8 instructions_before=1331376 instructions_after=1330350 values_before=1151174 values_after=1150601
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3488 parameter_visits=2370 incoming_visits=5439
+CODEGEN cpu=znver3 vector_bits=256 functions=4803 instructions=1181672 values=1001923 stack_value_bytes=5232304 stack_frame_bytes=5232304 max_stack_frame_bytes=657432 code_bytes=18991214 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1583315 exact_successes=1583315 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=69076
+CODEGEN_ALLOCATOR reloads=170189 spills=206362 boundary_spills=94848 boundary_reloads=27366 boundary_copies=87 copies=149768 rematerializations=60689 pins=0 splits=0 scheduled=0 schedule_kept=0
++ cmp issue564-evidence/unity-prod issue564-evidence/unity-census
++ ./build-prod/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-prod.metrics issue564-evidence/small.c -o issue564-evidence/small-prod.o
++ ./build-census/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-census.metrics issue564-evidence/small.c -o issue564-evidence/small-census.o
++ cmp issue564-evidence/small-prod.o issue564-evidence/small-census.o
++ set +e
++ ./build-prod/Release/ide cc -march=znver3 -c issue564-evidence/invalid.c -o issue564-evidence/invalid-prod.o
++ PROD_STATUS=1
++ ./build-census/Release/ide cc -march=znver3 -c issue564-evidence/invalid.c -o issue564-evidence/invalid-census.o
++ CENSUS_STATUS=1
++ set -e
++ test 1 -ne 0
++ test 1 -eq 1
++ cmp issue564-evidence/invalid-prod.stdout issue564-evidence/invalid-census.stdout
++ cmp issue564-evidence/invalid-prod.stderr issue564-evidence/invalid-census.stderr
++ grep -q '^ir_construction\.' issue564-evidence/unity-prod.metrics
++ grep -q '^ir_construction\.' issue564-evidence/small-prod.metrics
++ grep -q '^ir_construction\.validation_calls=' issue564-evidence/unity-census.metrics
++ grep -q '^ir_construction\.validation_calls=' issue564-evidence/small-census.metrics
++ sha256sum issue564-evidence/unity-prod issue564-evidence/unity-census issue564-evidence/small-prod.o issue564-evidence/small-census.o
++ sha256sum issue564-evidence/invalid-prod.stdout issue564-evidence/invalid-census.stdout issue564-evidence/invalid-prod.stderr issue564-evidence/invalid-census.stderr
