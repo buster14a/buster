@@ -16,11 +16,13 @@ jobs:
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Build Release compiler
+      - name: Bootstrap and build Release compiler
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh build --config Release -t ide
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
       - name: Fetch pinned pristine CPython
         shell: bash
         run: |
@@ -30,4 +32,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh test_cpython --config Release "$RUNNER_TEMP/cpython-v3.13.9"
+          "$RUNNER_TEMP/buster-build" test_cpython --config Release "$RUNNER_TEMP/cpython-v3.13.9"
