@@ -1,4 +1,4 @@
-name: Queue 437 exact-revision software validation
+name: Queue 437 closed-handle regression and platform validation
 on:
   push:
     branches: [astra/437-durable-fake-queue-20260913]
@@ -8,52 +8,177 @@ permissions:
 concurrency:
   group: queue437-owned-validation-${{ github.ref }}
   cancel-in-progress: false
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+  BUSTER_TEST_JOBS: 1
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
 jobs:
-  validate:
+  candidate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
     env:
-      CMAKE_BUILD_PARALLEL_LEVEL: 2
-      BUSTER_TEST_JOBS: 1
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: cdad7b080eb972f0cdda589846de9a8f3cabf943
-          persist-credentials: false
-      - name: Bootstrap existing native build driver with hosted CI flags
-        id: bootstrap
+      - name: Register regression and demonstrate failure before the fix
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/queue437-evidence"
-          git rev-parse HEAD | tee "$RUNNER_TEMP/queue437-evidence/revision.txt"
-          clang --version | tee "$RUNNER_TEMP/queue437-evidence/toolchain.txt"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build" 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/bootstrap.log"
-      - name: Native queue regressions
-        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
+          git rev-parse HEAD | tee "$RUNNER_TEMP/queue437-evidence/baseline-revision.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/bench_service/tests.c')
+          text = p.read_text()
+          old = 'BUSTER_GLOBAL_LOCAL void bq_test_admission(void)'
+          new = '''BUSTER_GLOBAL_LOCAL void bq_test_closed_handle(void)
+          {
+              BqFixture fixture;
+              if (bq_test_begin(&fixture))
+              {
+                  BqQueue* queue = &fixture.queue;
+                  BqRequest request = bq_test_request(1, false);
+                  u64 id = 0;
+                  BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK);
+                  BQ_CHECK(bq_cancel(queue, id) == BQ_OK);
+                  bq_close(queue);
+                  BQ_CHECK(bq_submit(queue, &request, &id) == BQ_IO && id == 0);
+                  BQ_CHECK(bq_cancel(queue, 1) == BQ_IO);
+                  BQ_CHECK(bq_open(queue, fixture.path) == BQ_OK);
+                  BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK && id == 1);
+                  bq_test_end(&fixture);
+              }
+          }
+
+          ''' + old
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          old = '    bq_test_admission();'
+          assert text.count(old) == 1
+          text = text.replace(old, '    bq_test_closed_handle();\n' + old, 1)
+          p.write_text(text)
+          PY
+          git diff -- tools/bench_service/tests.c > "$RUNNER_TEMP/queue437-evidence/registered-regression.patch"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          set +e
+          "$RUNNER_TEMP/buster-build" bench_service self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/baseline-regression.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -F 'BENCH_SERVICE_SELF_TEST' "$RUNNER_TEMP/queue437-evidence/baseline-regression.log" | grep -F 'failures=2 '
+      - name: Fix ownership invalidation and preserve candidate remotely
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/bench_service/queue.c')
+          text = p.read_text()
+          old = '    queue->journal_fd = queue->lock_fd = queue->directory_fd = -1;'
+          assert text.count(old) == 1
+          text = text.replace(old, old + '\n    queue->poisoned = true;', 1)
+          p.write_text(text)
+          PY
+          git add tools/bench_service/queue.c tools/bench_service/tests.c
+          git diff --cached --check
+          git -c user.name='Buster queue integration' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'bench service: invalidate closed handles before idempotent fast paths'
+          git push origin HEAD:refs/heads/astra/437-handle-regression-candidate-20260913
+          sha=$(git rev-parse HEAD)
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$sha" | tee "$RUNNER_TEMP/queue437-evidence/candidate-revision.txt"
+          git archive HEAD tools/bench_service build.c > "$RUNNER_TEMP/queue437-evidence/source.tar"
+      - name: Candidate native tests and standalone CLI
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-build" bench_service self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-normal.log"
-      - name: Native queue address and undefined behavior sanitizers
-        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
+          "$RUNNER_TEMP/buster-build" bench_service capabilities 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/cli-capabilities.log"
+      - name: Candidate address and undefined behavior sanitizers
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-build" bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-sanitized.log"
-      - name: Existing throughput harness regressions
-        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
+      - name: Existing throughput regressions
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-build" bench_throughput self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/throughput-normal.log"
-      - name: Retain exact revision and all validation results
+      - name: Preserve baseline failure and candidate results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: queue437-software-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: queue437-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/queue437-evidence
+          if-no-files-found: error
+          retention-days: 14
+  platforms:
+    needs: candidate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - runner: macos-26
+            kind: posix
+          - runner: windows-2025
+            kind: windows
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          persist-credentials: false
+      - name: Native macOS queue, sanitizer and CLI checks
+        if: ${{ matrix.kind == 'posix' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/queue437-evidence"
+          exec > >(tee "$RUNNER_TEMP/queue437-evidence/macos.log") 2>&1
+          git rev-parse HEAD
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" bench_service self-test
+          "$RUNNER_TEMP/buster-build" bench_service self-test --sanitize
+          "$RUNNER_TEMP/buster-build" bench_service capabilities
+      - name: Windows portable codec and unsupported-storage checks
+        if: ${{ matrix.kind == 'windows' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'queue437-evidence'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio C toolchain missing' }
+          $VsPath = $VsPaths[0].Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          git rev-parse HEAD | Tee-Object -FilePath (Join-Path $Logs 'revision.txt')
+          clang --version | Tee-Object -FilePath (Join-Path $Logs 'toolchain.txt')
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`" 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'bootstrap.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" bench_service self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'codec.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" bench_service capabilities 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'capabilities.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve native-platform results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: queue437-${{ matrix.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/queue437-evidence
           if-no-files-found: error
           retention-days: 14
