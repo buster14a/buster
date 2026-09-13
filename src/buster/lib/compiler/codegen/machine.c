@@ -3008,7 +3008,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                             relocation->kind != ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
                 }
             }
-            valid = valid && control_relocation_count == assembly->successor_count - assembly->declared_successor_count;
+            valid = valid && control_relocation_count == (u32)assembly->successor_count - (u32)assembly->declared_successor_count;
         } break;
         case MACHINE_X64_INLINE_EFFECTS_NONE:
         case MACHINE_X64_INLINE_EFFECTS_MEMORY:

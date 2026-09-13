@@ -5250,8 +5250,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_assembly(MachineA64Selector* 
             }
         }
     }
-    selected = selected && (!general_goto ||
-                            (instruction->target_count <= UINT16_MAX && control_count <= UINT16_MAX - instruction->target_count));
+    selected = selected &&
+               (!general_goto || control_count <= (u32)UINT16_MAX - (u32)instruction->target_count);
     if (selected)
     {
         u32 first_operand = selector->inline_assembly_operands.total_count;

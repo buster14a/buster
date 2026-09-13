@@ -4906,8 +4906,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             }
         }
     }
-    selected = selected && (!general_goto ||
-                            (instruction->target_count <= UINT16_MAX && control_count <= UINT16_MAX - instruction->target_count));
+    selected = selected &&
+               (!general_goto || control_count <= (u32)UINT16_MAX - (u32)instruction->target_count);
     if (selected)
     {
         u32 preserved_vector_count = 0;
