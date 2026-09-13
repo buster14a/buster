@@ -936,6 +936,36 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("if: ${{ !cancelled() }}", artifact)
         self.assertNotIn("always()", artifact)
 
+    def test_retirement_evidence_uses_the_exact_candidate_on_six_native_hosts(self):
+        text = (ROOT / ".github/workflows/native-retirement-evidence.yml").read_text()
+        self.assertIn("BUSTER_RETIREMENT_CANDIDATE: ${{ github.sha }}", text)
+        concurrency = text.split("concurrency:", 1)[1].split("permissions:", 1)[0]
+        self.assertIn("github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id", concurrency)
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", concurrency)
+        self.assertNotIn("ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231", text)
+        self.assertNotIn("--compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231", text)
+        self.assertEqual(text.count('test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"'), 2)
+        strict = text.split("\n  strict_differential:", 1)[1]
+        entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)\n            slug: (.+)\n            platform: (.+)$", strict)
+        self.assertEqual(entries, [
+            ("Linux x86-64 native", "ubuntu-26.04", "linux-x86_64", "unix"),
+            ("Linux AArch64 native", "ubuntu-26.04-arm", "linux-aarch64", "unix"),
+            ("macOS x86-64 native", "macos-26-intel", "macos-x86_64", "unix"),
+            ("macOS AArch64 native", "macos-26", "macos-aarch64", "unix"),
+            ("Windows x86-64 native", "windows-2025", "windows-x86_64", "windows"),
+            ("Windows AArch64 native", "windows-11-arm", "windows-aarch64", "windows"),
+        ])
+        self.assertIn("fail-fast: false", strict)
+        self.assertIn("--strict-mir --sanitize-oracle", strict)
+        self.assertIn("candidate_commit=%s\\ncandidate_tree=%s\\nrunner=%s", strict)
+        self.assertIn("candidate_commit=$Commit", strict)
+        self.assertIn("BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'strict_windows' ||", strict)
+        self.assertIn("strict-retirement-${{ env.BUSTER_RETIREMENT_CANDIDATE }}-${{ matrix.slug }}", strict)
+        complete = text.split("\n  complete:", 1)[1]
+        self.assertIn("needs: [census, strict_differential]", complete)
+        self.assertIn("name: Native retirement acceptance complete", complete)
+        self.assertIn('[[ "$CENSUS_RESULT" == success && "$STRICT_RESULT" == success ]]', complete)
+
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
