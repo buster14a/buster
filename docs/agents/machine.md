@@ -598,13 +598,21 @@
   transaction. Shared assembler output is copied into the native code stream;
   its symbol relocations are translated into ordinary module relocations after
   row and branch relaxation has fixed final offsets.
-- Supported AArch64 `b %lN` / `b %l[name]` and x86 `jmp %lN` /
-  `jmp %l[name]` asm-goto forms end the transaction with an ordinary MIR
-  `B`/`JMP` terminator. Empty-template fallthrough retains the corresponding
-  fallthrough edge. The shared canonical edge pass keeps exactly the executed
-  successor and its edge copies after target block expansion, so allocation,
-  reachability, block ordering and verification see genuine CFG rather than an
-  emitter escape hatch.
+- General asm-goto records the canonical fallthrough and every declared label
+  as MIR successors. Each template control reference gets a distinct landing
+  continuation that publishes outputs before an ordinary `B`/`JMP` reaches
+  the final C block; duplicate references and per-reference addends therefore
+  cannot alias transaction state. AArch64 conditional/compare/test branches
+  are expanded during normal assembler sizing to an inverse short branch plus
+  a `B26`, and x86 `loop`/`jcxz`-family references similarly use a reachable
+  near landing, so local template labels remain stable before machine layout.
+  Empty-template fallthrough and labels omitted from the template retain their
+  declared CFG edges. The shared canonical edge pass clones the corresponding
+  edge copies after target block expansion, so allocation, reachability, block
+  ordering and verification see genuine CFG rather than an emitter escape
+  hatch. X86 RIP-relative `lea` label addresses use the final block relocation;
+  control-like `call`/`xbegin` label references and AArch64 label-address/call
+  forms that the canonical backend did not support remain fail-closed controls.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and

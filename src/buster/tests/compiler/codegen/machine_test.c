@@ -1959,13 +1959,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
         BUSTER_TEST(arguments, machine_function_split_parameter_edges(arena, &empty));
         BUSTER_TEST(arguments, arena->position == start && empty.block_count == 0 && empty.edges == 0);
         {
-            u8 inline_bytes[4] = {0};
+            u8 x64_inline_bytes[] = {0xe9, 0, 0, 0, 0};
+            u8 a64_inline_bytes[] = {0, 0, 0, 0x14};
+            ByteSlice inline_bytes = architecture ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(a64_inline_bytes)
+                                                  : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x64_inline_bytes);
             MachineInstruction rows[] = {
                 {.opcode = (u16)(architecture ? MACHINE_A64_BCC : MACHINE_X64_JCC),
-                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, 4), machine_ref_make(MACHINE_REF_BLOCK, 4)}},
+                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, 5), machine_ref_make(MACHINE_REF_BLOCK, 5)}},
                 {.opcode = (u16)(architecture ? MACHINE_A64_INLINE_ASSEMBLY : MACHINE_X64_INLINE_ASSEMBLY)},
-                {.opcode = target->unconditional_branch_opcode, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 4)}},
-                {.opcode = target->unconditional_branch_opcode, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 4)}},
+                {.opcode = target->unconditional_branch_opcode, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 5)}},
+                {.opcode = target->unconditional_branch_opcode, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 5)}},
+                {.opcode = target->unconditional_branch_opcode, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 5)}},
                 {.opcode = (u16)(architecture ? MACHINE_A64_RET : MACHINE_X64_RET)},
             };
             MachineBlock blocks[] = {
@@ -1974,25 +1978,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 {.first_instruction = 2, .instruction_count = 1},
                 {.first_instruction = 3, .instruction_count = 1},
                 {.first_instruction = 4, .instruction_count = 1},
+                {.first_instruction = 5, .instruction_count = 1},
             };
             MachineEdge edges[] = {
-                {.source_block = 0, .destination_block = 4, .copy_count = 1},
+                {.source_block = 0, .destination_block = 5, .copy_count = 1},
                 {.source_block = 1, .destination_block = 2},
                 {.source_block = 1, .destination_block = 3},
-                {.source_block = 2, .destination_block = 4},
-                {.source_block = 3, .destination_block = 4},
+                {.source_block = 1, .destination_block = 4},
+                {.source_block = 2, .destination_block = 5},
+                {.source_block = 3, .destination_block = 5},
+                {.source_block = 4, .destination_block = 5},
             };
             MachineInlineAssemblyRelocation relocation = {
-                .offset = 0,
-                .block = 3,
+                .offset = architecture ? 0 : 1,
+                .block = 5,
+                .continuation_block = 4,
+                .target_index = 1,
                 .kind = (u8)(architecture ? ASSEMBLY_RELOCATION_AARCH64_BRANCH26 : ASSEMBLY_RELOCATION_X86_PC32),
                 .is_block = true,
+                .is_control = true,
             };
             MachineInlineAssembly assembly = {
-                .bytes = {.pointer = inline_bytes, .length = sizeof(inline_bytes)},
+                .bytes = inline_bytes,
                 .relocation_count = 1,
                 .effects = MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR,
-                .successor_count = 2,
+                .successor_count = 3,
+                .declared_successor_count = 2,
                 .fallthrough_block = 2,
             };
             MachineFunction inline_split = {
@@ -2009,11 +2020,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 .target = target,
             };
             BUSTER_TEST(arguments, machine_function_split_parameter_edges(arena, &inline_split));
-            BUSTER_TEST(arguments, inline_split.block_count == 6 && inline_split.inline_assemblies != &assembly &&
+            BUSTER_TEST(arguments, inline_split.block_count == 7 && inline_split.inline_assemblies != &assembly &&
                                        inline_split.inline_assembly_relocations != &relocation &&
                                        inline_split.inline_assemblies[0].fallthrough_block == 3 &&
-                                       inline_split.inline_assemblies[0].successor_count == 2 &&
-                                       inline_split.inline_assembly_relocations[0].block == 4);
+                                       inline_split.inline_assemblies[0].successor_count == 3 &&
+                                       inline_split.inline_assembly_relocations[0].block == 6 &&
+                                       inline_split.inline_assembly_relocations[0].continuation_block == 5);
             arena_set_position(arena, start);
         }
         for (u32 variant = 0; variant < 16; variant += 1)
@@ -3284,6 +3296,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                             {
                                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
                                 bool memory_effect = string_equal(description, S8("compiler_barrier_memory")) ||
+                                                     string_equal(description, S8("compiler_barrier_memory_cc")) ||
+                                                     string_equal(description, S8("compiler_barrier_cc_memory")) ||
                                                      string_equal(description, S8("compiler_barrier_goto")) ||
                                                      string_equal(description, S8("compiler_barrier_template")) ||
                                                      string_equal(description, S8("compiler_barrier_register_after_memory")) ||
@@ -3637,6 +3651,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_aarch64_call_relocations(UnitTes
         BUSTER_TEST(arguments, !machine_test_patch_aarch64_calls(&rejected));
         BUSTER_TEST(arguments, instruction == before);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_block_relocations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    s64 displacement = 0;
+    BUSTER_TEST(arguments, machine_x64_test_block_displacement(100, 7, 40, &displacement) && displacement == 67);
+    BUSTER_TEST(arguments, !machine_x64_test_block_displacement(100, INT64_MIN, 40, &displacement));
+    BUSTER_TEST(arguments, machine_a64_test_block_displacement(100, 7, 40, &displacement) && displacement == 67);
+    BUSTER_TEST(arguments, !machine_a64_test_block_displacement(100, INT64_MIN, 40, &displacement));
+
+    u32 words[2] = {0};
+    BUSTER_TEST(arguments, machine_a64_test_expand_inline_short_branch(ASSEMBLY_RELOCATION_AARCH64_CONDBR19,
+                                                                       UINT32_C(0x54000000), words));
+    BUSTER_TEST(arguments, words[0] == UINT32_C(0x54000041) && words[1] == UINT32_C(0x14000000));
+    BUSTER_TEST(arguments, machine_a64_test_expand_inline_short_branch(ASSEMBLY_RELOCATION_AARCH64_CONDBR19,
+                                                                       UINT32_C(0x5400000e), words));
+    BUSTER_TEST(arguments, words[0] == UINT32_C(0xd503201f) && words[1] == UINT32_C(0x14000000));
+    BUSTER_TEST(arguments, machine_a64_test_expand_inline_short_branch(ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19,
+                                                                       UINT32_C(0x34000000), words));
+    BUSTER_TEST(arguments, words[0] == UINT32_C(0x35000040) && words[1] == UINT32_C(0x14000000));
+    BUSTER_TEST(arguments, machine_a64_test_expand_inline_short_branch(ASSEMBLY_RELOCATION_AARCH64_TESTBR14,
+                                                                       UINT32_C(0x36000000), words));
+    BUSTER_TEST(arguments, words[0] == UINT32_C(0x37000040) && words[1] == UINT32_C(0x14000000));
+    BUSTER_TEST(arguments, !machine_a64_test_expand_inline_short_branch(ASSEMBLY_RELOCATION_AARCH64_BRANCH26,
+                                                                        UINT32_C(0x14000000), words));
     return result;
 }
 
@@ -5230,6 +5271,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_f80);
     BUSTER_TEST_FIXTURE(arguments, machine_test_native_variadic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
@@ -6529,29 +6571,37 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         MachineInlineAssemblyRelocation goto_relocation = {
             .offset = 1,
             .block = 2,
+            .continuation_block = 3,
+            .target_index = 1,
             .kind = ASSEMBLY_RELOCATION_X86_PC32,
             .is_block = true,
+            .is_control = true,
         };
         MachineInlineAssembly goto_descriptor = {
             .bytes = {.pointer = goto_bytes, .length = sizeof(goto_bytes)},
             .relocation_count = 1,
             .effects = MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR,
-            .successor_count = 2,
+            .successor_count = 3,
+            .declared_successor_count = 2,
             .fallthrough_block = 1,
         };
         MachineInstruction goto_rows[] = {
             {.opcode = MACHINE_X64_INLINE_ASSEMBLY},
             {.opcode = MACHINE_OPCODE_SKELETON_RETURN},
             {.opcode = MACHINE_OPCODE_SKELETON_RETURN},
+            {.opcode = MACHINE_X64_JMP, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 2)}},
         };
         MachineBlock goto_blocks[] = {
             {.first_instruction = 0, .instruction_count = 1},
             {.first_instruction = 1, .instruction_count = 1},
             {.first_instruction = 2, .instruction_count = 1},
+            {.first_instruction = 3, .instruction_count = 1},
         };
         MachineEdge goto_edges[] = {
             {.source_block = 0, .destination_block = 1},
             {.source_block = 0, .destination_block = 2},
+            {.source_block = 0, .destination_block = 3},
+            {.source_block = 3, .destination_block = 2},
             {.source_block = 0, .destination_block = 0},
         };
         MachineFunction goto_function = {
@@ -6560,7 +6610,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             .blocks = goto_blocks,
             .block_count = BUSTER_ARRAY_LENGTH(goto_blocks),
             .edges = goto_edges,
-            .edge_count = 2,
+            .edge_count = 4,
             .inline_assemblies = &goto_descriptor,
             .inline_assembly_count = 1,
             .inline_assembly_relocations = &goto_relocation,
@@ -6568,11 +6618,29 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             .target = machine_target_x86_64(),
         };
         BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_NONE);
-        goto_function.edge_count = 1;
-        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_EDGE_RANGE);
-        goto_function.edge_count = 3;
-        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_EDGE_RANGE);
+        goto_bytes[0] = 0xe8;
+        goto_relocation.is_control = false;
+        goto_relocation.continuation_block = UINT32_MAX;
+        goto_descriptor.successor_count = goto_descriptor.declared_successor_count;
         goto_function.edge_count = 2;
+        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_PAYLOAD);
+        u8 xbegin_bytes[] = {0xc7, 0xf8, 0, 0, 0, 0};
+        goto_descriptor.bytes = (ByteSlice)BUSTER_ARRAY_TO_SLICE(xbegin_bytes);
+        goto_relocation.offset = 2;
+        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_PAYLOAD);
+        goto_bytes[0] = 0xe9;
+        goto_descriptor.bytes = (ByteSlice)BUSTER_ARRAY_TO_SLICE(goto_bytes);
+        goto_relocation.offset = 1;
+        goto_relocation.is_control = true;
+        goto_relocation.continuation_block = 3;
+        goto_descriptor.successor_count = 3;
+        goto_function.edge_count = 4;
+        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_NONE);
+        goto_function.edge_count = 2;
+        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_EDGE_RANGE);
+        goto_function.edge_count = 5;
+        BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_EDGE_RANGE);
+        goto_function.edge_count = 4;
         goto_descriptor.successor_count = 0;
         BUSTER_TEST(arguments, machine_verify_function(&goto_function).error == MACHINE_VERIFY_PAYLOAD);
     }

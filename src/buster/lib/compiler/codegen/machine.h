@@ -1176,10 +1176,17 @@ struct MachineInlineAssemblyRelocation
     String8 symbol;
     s64 addend;
     u32 offset;
+    // Block rows name the final C label independently of the control landing
+    // continuation. Address materializations have no continuation; control
+    // rows use a distinct one per relocation so addends and duplicate label
+    // references cannot alias output-publication state.
     u32 block;
+    u32 continuation_block;
+    u32 target_index;
     u8 kind;
     u8 is_block;
-    u8 reserved[2];
+    u8 is_control;
+    u8 reserved;
 };
 
 typedef struct MachineInlineAssembly MachineInlineAssembly;
@@ -1203,6 +1210,10 @@ struct MachineInlineAssembly
     // `fallthrough_block`. General asm-goto retains one continuation for every
     // declared successor, including labels not referenced by the template.
     u16 successor_count;
+    // Prefix of `successor_count` owned by canonical fallthrough plus the
+    // declared label list. Remaining successors are per-control-reference
+    // publication continuations.
+    u16 declared_successor_count;
     u32 preserved_vector_slot;
     // General asm-goto's explicit fallthrough successor. The transaction
     // encoder captures outputs and branches here before laying out taken-edge
@@ -1949,6 +1960,9 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFun
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
+BUSTER_F_DECL bool machine_a64_test_expand_inline_short_branch(u8 kind, u32 word, u32 words[2]);
+BUSTER_F_DECL bool machine_a64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
 typedef enum MachineFastPickerTestCase
 {
     MACHINE_FAST_PICK_TEST_PREFERRED_FREE = 1u << 0,

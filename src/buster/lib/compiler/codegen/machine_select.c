@@ -19,6 +19,8 @@
 // outputs to their read/write value or matching input before target lowering.
 // machine_selection_assembly_label_plan replaces asm-goto label operands with
 // private assembler symbols and retains their canonical target indices.
+// machine_selection_assembly_label_reference_capacity gives block expansion a
+// parse-independent upper bound for per-reference landing continuations.
 // machine_selection_finish_canonical_edges prunes unexecuted assembly targets
 // and remaps canonical edges after target-specific block expansion.
 
@@ -42,6 +44,33 @@ bool machine_selection_is_compiler_barrier(IrFunction* function, IrInstruction* 
 {
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     return !extra.literal.length && machine_selection_is_operand_free_assembly(function, instruction);
+}
+
+bool machine_selection_assembly_label_reference_capacity(String8 literal, u32* capacity_out)
+{
+    bool valid = capacity_out && (!literal.length || literal.pointer);
+    u32 capacity = 0;
+    for (u64 index = 0; valid && index < literal.length; index += 1)
+    {
+        if (literal.pointer[index] != '%' || index + 1 >= literal.length)
+        {
+            continue;
+        }
+        if (literal.pointer[index + 1] == '%')
+        {
+            index += 1;
+        }
+        else if (literal.pointer[index + 1] == 'l')
+        {
+            valid = capacity != UINT32_MAX;
+            capacity += valid ? 1u : 0u;
+        }
+    }
+    if (valid)
+    {
+        *capacity_out = capacity;
+    }
+    return valid;
 }
 
 bool machine_selection_assembly_identity_plan(IrProgram* program, IrFunction* function, IrInstruction* instruction,
@@ -278,7 +307,19 @@ bool machine_selection_finish_canonical_edges(Arena* arena, MachineFunction* mac
             u32 continuation = asm_goto_continuations ? asm_goto_continuations[canonical_source] : UINT32_MAX;
             if (canonical_terminator->opcode == IR_OPCODE_INLINE_ASSEMBLY && continuation != UINT32_MAX)
             {
-                capacity += canonical_terminator->target_count;
+                u32 machine_source = continuation ? continuation - 1u : UINT32_MAX;
+                bool descriptor_valid = machine_source < machine->block_count && machine->blocks[machine_source].instruction_count;
+                MachineInstruction* instruction = descriptor_valid
+                                                      ? machine->instructions + machine->blocks[machine_source].first_instruction +
+                                                            machine->blocks[machine_source].instruction_count - 1u
+                                                      : 0;
+                descriptor_valid = descriptor_valid &&
+                                   (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY || instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY) &&
+                                   instruction->payload < machine->inline_assembly_count;
+                MachineInlineAssembly* assembly = descriptor_valid ? machine->inline_assemblies + instruction->payload : 0;
+                valid = descriptor_valid && assembly->declared_successor_count == canonical_terminator->target_count &&
+                        assembly->successor_count >= assembly->declared_successor_count;
+                capacity += valid ? assembly->successor_count : 0u;
             }
             else
             {
@@ -318,8 +359,9 @@ bool machine_selection_finish_canonical_edges(Arena* arena, MachineFunction* mac
                 if (valid)
                 {
                     MachineInlineAssembly* assembly = machine->inline_assemblies + instruction->payload;
-                    assembly->successor_count = canonical_terminator->target_count;
-                    valid = assembly->fallthrough_block == continuation;
+                    valid = assembly->fallthrough_block == continuation &&
+                            assembly->declared_successor_count == canonical_terminator->target_count &&
+                            assembly->successor_count >= assembly->declared_successor_count;
                 }
                 for (u32 successor = 0; valid && successor < cfg_block->successor_count; successor += 1)
                 {
@@ -344,6 +386,33 @@ bool machine_selection_finish_canonical_edges(Arena* arena, MachineFunction* mac
                         edges[kept_edges++] = edge;
                     }
                 }
+                MachineInlineAssembly* assembly = valid ? machine->inline_assemblies + instruction->payload : 0;
+                u32 next_control_continuation = continuation + canonical_terminator->target_count;
+                for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
+                {
+                    MachineInlineAssemblyRelocation* relocation =
+                        machine->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                    if (!relocation->is_control)
+                    {
+                        continue;
+                    }
+                    u32 target = relocation->target_index;
+                    u32 destination = target < canonical_terminator->target_count
+                                          ? canonical_terminator->targets[target].value
+                                          : UINT32_MAX;
+                    u32 edge_index = destination < source->block_count ? edges_by_destination[destination] : UINT32_MAX;
+                    valid = edge_index != UINT32_MAX && relocation->continuation_block == next_control_continuation &&
+                            relocation->block == (block_entries ? block_entries[destination] : destination);
+                    if (valid)
+                    {
+                        MachineEdge edge = machine->edges[edge_index];
+                        edge.source_block = relocation->continuation_block;
+                        edge.destination_block = relocation->block;
+                        edges[kept_edges++] = edge;
+                        next_control_continuation += 1;
+                    }
+                }
+                valid = valid && next_control_continuation == continuation + assembly->successor_count;
                 for (u32 successor = 0; successor < cfg_block->successor_count; successor += 1)
                 {
                     u32 cfg_edge_index = cfg_block->successor_offset + successor;

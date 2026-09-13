@@ -128,6 +128,38 @@ saved_register_taken:
     return asm_goto_call_target(selector);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+int asm_goto_saved_register_probe(int selector);
+
+// This independently assembled caller holds a sentinel in the callee-saved
+// RBX across both asm-goto paths.  It restores its caller's original RBX
+// before returning, so the observer is itself ABI-correct.
+__asm__(".text\n"
+        ".globl asm_goto_saved_register_probe\n"
+        ".type asm_goto_saved_register_probe, @function\n"
+        "asm_goto_saved_register_probe:\n"
+        "pushq %rbx\n"
+#if defined(_WIN32)
+        "subq $32, %rsp\n"
+#endif
+        "movq $1515870810, %rbx\n"
+        "call asm_goto_saved_register\n"
+        "cmpq $1515870810, %rbx\n"
+        "je .Lasm_goto_saved_register_preserved\n"
+        "movl $-1, %eax\n"
+        ".Lasm_goto_saved_register_preserved:\n"
+#if defined(_WIN32)
+        "addq $32, %rsp\n"
+#endif
+        "popq %rbx\n"
+        "ret\n");
+#else
+static int asm_goto_saved_register_probe(int selector)
+{
+    return asm_goto_saved_register(selector);
+}
+#endif
+
 static int asm_goto_read_write(int selector)
 {
     int value = selector;
@@ -177,6 +209,7 @@ int main(void)
                  computed_goto_static_table(0) != 47 || computed_goto_static_table(1) != 53 ||
                  computed_goto_typedef() != 43 || asm_goto_value(1) != 11 ||
                  asm_goto_value(0) != 5 || asm_goto_saved_register(1) != 30 || asm_goto_saved_register(0) != 31;
-    result |= asm_goto_read_write(1) != 42 || asm_goto_named(1) != 48 || asm_goto_b_fallthrough(7) != 60;
+    result |= asm_goto_saved_register_probe(1) != 30 || asm_goto_saved_register_probe(0) != 31 ||
+              asm_goto_read_write(1) != 42 || asm_goto_named(1) != 48 || asm_goto_b_fallthrough(7) != 60;
     return result;
 }

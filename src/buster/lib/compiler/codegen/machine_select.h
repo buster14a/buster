@@ -46,6 +46,7 @@ struct MachineAssemblyLabelPlan
     u32 target_count;
 };
 
+BUSTER_F_DECL bool machine_selection_assembly_label_reference_capacity(String8 literal, u32* capacity_out);
 BUSTER_F_DECL bool machine_selection_assembly_label_plan(Arena* arena, IrFunction* function, IrInstruction* instruction,
                                                          IrInstructionExtra extra, MachineAssemblyLabelPlan* plan);
 BUSTER_F_DECL bool machine_selection_assembly_label_target(MachineAssemblyLabelPlan const* plan, String8 symbol,

@@ -511,7 +511,7 @@ struct AssemblyInstruction
     bool metadata;
     u8 metadata_operand_count;
     bool metadata_include_implicit;
-    u8 metadata_reserved;
+    bool metadata_private_pc8_long;
     u32 metadata_form_id;
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
@@ -536,7 +536,9 @@ struct AssemblyInstruction
     BusterAarch64ControlInstruction aarch64_control_instruction;
     AssemblyExpression aarch64_control_expressions[4];
     u8 aarch64_control_expression_mask;
-    u8 aarch64_control_reserved[3];
+    bool aarch64_control_private_long;
+    u8 aarch64_control_private_expression;
+    u8 aarch64_control_reserved;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
     u8 aarch64_system_register_operation;
@@ -564,6 +566,7 @@ struct AssemblyBuilder
     u32 diagnostic_capacity;
     u64 output_capacity;
     u64 output_count;
+    bool private_inline_labels;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -9860,6 +9863,80 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_row_select(String8 mnemonic, B
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_inline_private_label_name(String8 name)
+{
+    String8 prefix = S8(".Lbuster.inline.asm.");
+    return name.length > prefix.length && !memcmp(name.pointer, prefix.pointer, prefix.length);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_private_short_control(AssemblyBuilder* builder, u32 row_index, u8 expression_mask,
+                                                                 AssemblyExpression const expressions[4], u8* operand_out)
+{
+    BusterAarch64ControlSemanticRecord row = {0};
+    AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+    bool private_label = false;
+    if (builder && builder->private_inline_labels && expressions && buster_aarch64_control_semantic_row(row_index, &row))
+    {
+        if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
+        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
+        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+        for (u32 operand_index = 0; !private_label && kind != ASSEMBLY_RELOCATION_COUNT && operand_index < 4; operand_index += 1)
+        {
+            AssemblyExpression expression = expressions[operand_index];
+            bool valid_symbol = expression.has_symbol && expression.symbol < builder->result.symbol_count;
+            String8 symbol_name = valid_symbol
+                                      ? builder->result.symbols[expression.symbol].name
+                                      : (String8){0};
+            private_label = (expression_mask & (u8)(1u << operand_index)) &&
+                            valid_symbol && !builder->result.symbols[expression.symbol].defined &&
+                            assembly_inline_private_label_name(symbol_name);
+            if (private_label && operand_out)
+            {
+                *operand_out = (u8)operand_index;
+            }
+        }
+    }
+    return private_label;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_expand_private_short_branch_word(AssemblyRelocationKind kind, u32 word, u32 words[2])
+{
+    bool valid = words && (kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ||
+                           kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
+                           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14);
+    if (valid && kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19)
+    {
+        valid = (word & UINT32_C(0xff000010)) == UINT32_C(0x54000000);
+        if ((word & 0xfu) < 14u)
+        {
+            word = (word & ~UINT32_C(0x00ffffe0)) | (UINT32_C(2) << 5);
+            word ^= 1u;
+        }
+        else
+        {
+            word = UINT32_C(0xd503201f);
+        }
+    }
+    else if (valid && kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19)
+    {
+        valid = (word & UINT32_C(0x7e000000)) == UINT32_C(0x34000000);
+        word = (word & ~UINT32_C(0x00ffffe0)) | (UINT32_C(2) << 5);
+        word ^= UINT32_C(1) << 24;
+    }
+    else if (valid)
+    {
+        valid = (word & UINT32_C(0x7e000000)) == UINT32_C(0x36000000);
+        word = (word & ~UINT32_C(0x0007ffe0)) | (UINT32_C(2) << 5);
+        word ^= UINT32_C(1) << 24;
+    }
+    if (valid)
+    {
+        words[0] = word;
+        words[1] = UINT32_C(0x14000000);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
                                                                      String8 operands_text, AssemblyInstruction* instruction)
 {
@@ -9989,7 +10066,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_instruction_parse(AssemblyBuil
     instruction->aarch64_control_expression_mask = expression_mask;
     memcpy(instruction->aarch64_control_expressions, expressions, sizeof(expressions));
     instruction->operand_count = candidate.operand_count;
-    instruction->size = 4;
+    instruction->aarch64_control_private_long =
+        assembly_aarch64_private_short_control(builder, row_index, expression_mask, expressions,
+                                               &instruction->aarch64_control_private_expression);
+    instruction->size = instruction->aarch64_control_private_long ? 8 : 4;
     return true;
 }
 
@@ -11160,6 +11240,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_relative_mnemonic(String8 mnemoni
            assembly_word_equal(mnemonic, S8("loope")) || assembly_word_equal(mnemonic, S8("loopz")) ||
            assembly_word_equal(mnemonic, S8("loopne")) || assembly_word_equal(mnemonic, S8("loopnz")) ||
            assembly_word_equal(mnemonic, S8("xbegin"));
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_private_pc8_mnemonic(String8 mnemonic)
+{
+    return assembly_word_equal(mnemonic, S8("jcxz")) || assembly_word_equal(mnemonic, S8("jecxz")) ||
+           assembly_word_equal(mnemonic, S8("jrcxz")) || assembly_word_equal(mnemonic, S8("loop")) ||
+           assembly_word_equal(mnemonic, S8("loope")) || assembly_word_equal(mnemonic, S8("loopz")) ||
+           assembly_word_equal(mnemonic, S8("loopne")) || assembly_word_equal(mnemonic, S8("loopnz"));
 }
 
 BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_att_string_alias(AssemblySyntax syntax, String8 mnemonic)
@@ -12958,12 +13046,31 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     {
         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
     }
+    bool private_pc8_long = false;
+    if (builder->private_inline_labels && assembly_x86_metadata_private_pc8_mnemonic(mnemonic))
+    {
+        for (u32 operand_index = 0; !private_pc8_long && operand_index < operand_count; operand_index += 1)
+        {
+            BusterX86MetadataPhysicalOperand operand = physical[operand_index];
+            u32 symbol_index = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && operand.has_symbol
+                                   ? assembly_symbol_find(builder, operand.symbol)
+                                   : UINT32_MAX;
+            private_pc8_long = symbol_index < builder->result.symbol_count &&
+                               !builder->result.symbols[symbol_index].defined &&
+                               assembly_inline_private_label_name(builder->result.symbols[symbol_index].name);
+        }
+    }
+    if (private_pc8_long && selection.selected_byte_count > UINT32_MAX - 7u)
+    {
+        return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+    }
     AssemblyInstruction instruction = {
         .offset = offset,
         .line = line,
         .column = column,
-        .size = selection.selected_byte_count,
+        .size = selection.selected_byte_count + (private_pc8_long ? 7u : 0u),
         .metadata = true,
+        .metadata_private_pc8_long = private_pc8_long,
         .metadata_operand_count = (u8)operand_count,
         .metadata_include_implicit = query.include_implicit,
         .metadata_form_id = selection.form_id,
@@ -13996,7 +14103,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         .relocations = metadata_relocations,
         .relocation_capacity = BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
     });
-    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != instruction->size ||
+    u32 metadata_size = instruction->size - (instruction->metadata_private_pc8_long ? 7u : 0u);
+    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != metadata_size ||
         builder->result.relocation_count > builder->relocation_capacity ||
         emitted.relocation_count > builder->relocation_capacity - builder->result.relocation_count)
     {
@@ -14017,7 +14125,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
             return false;
         }
     }
-    if (builder->output_count > builder->output_capacity || emitted.byte_count > builder->output_capacity - builder->output_count)
+    if (builder->output_count > builder->output_capacity || instruction->size > builder->output_capacity - builder->output_count)
     {
         assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY, instruction->line, instruction->column, 1);
         return false;
@@ -14025,6 +14133,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
     u32 relocation_symbols[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
     AssemblyRelocationKind relocation_kinds[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
     u32 unresolved_relocation_count = 0;
+    u32 private_relocation = UINT32_MAX;
     for (u32 relocation_index = 0; relocation_index < emitted.relocation_count; relocation_index += 1)
     {
         BusterX86MetadataRelocation relocation = metadata_relocations[relocation_index];
@@ -14037,17 +14146,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         }
         if (!builder->result.symbols[symbol].defined)
         {
-            if (instruction->offset > UINT64_MAX - relocation.offset)
+            bool private_pc8 = instruction->metadata_private_pc8_long && kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                               assembly_inline_private_label_name(builder->result.symbols[symbol].name);
+            if (instruction->offset > UINT64_MAX - relocation.offset ||
+                (private_pc8 && (private_relocation != UINT32_MAX || relocation.width != 1 ||
+                                 relocation.offset >= emitted.byte_count || relocation.addend < INT64_MIN + 3)))
             {
                 assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION, instruction->line, instruction->column, 1);
                 return false;
+            }
+            if (private_pc8)
+            {
+                private_relocation = relocation_index;
             }
             relocation_symbols[unresolved_relocation_count] = symbol;
             relocation_kinds[unresolved_relocation_count] = kind;
             unresolved_relocation_count += 1;
         }
     }
-    if (unresolved_relocation_count > builder->relocation_capacity - builder->result.relocation_count)
+    if (unresolved_relocation_count > builder->relocation_capacity - builder->result.relocation_count ||
+        (instruction->metadata_private_pc8_long && private_relocation == UINT32_MAX))
     {
         assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY, instruction->line, instruction->column, 1);
         return false;
@@ -14061,16 +14179,33 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         {
             continue;
         }
+        bool private_pc8 = relocation_index == private_relocation;
+        u64 relocation_offset = private_pc8 ? (u64)emitted.byte_count + 3u : relocation.offset;
+        if (instruction->offset > UINT64_MAX - relocation_offset)
+        {
+            assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION, instruction->line, instruction->column, 1);
+            return false;
+        }
         builder->result.relocations[builder->result.relocation_count++] = (AssemblyRelocation){
-            .addend = relocation.addend,
-            .offset = instruction->offset + relocation.offset,
+            .addend = private_pc8 ? relocation.addend - 3 : relocation.addend,
+            .offset = instruction->offset + relocation_offset,
             .symbol = relocation_symbols[unresolved_index],
-            .kind = relocation_kinds[unresolved_index],
+            .kind = private_pc8 ? ASSEMBLY_RELOCATION_X86_PC32 : relocation_kinds[unresolved_index],
         };
         unresolved_index += 1;
     }
     memcpy(builder->result.bytes.pointer + builder->output_count, bytes, emitted.byte_count);
-    builder->output_count += emitted.byte_count;
+    if (instruction->metadata_private_pc8_long)
+    {
+        u64 output = builder->output_count;
+        BusterX86MetadataRelocation relocation = metadata_relocations[private_relocation];
+        builder->result.bytes.pointer[output + relocation.offset] = 2;
+        builder->result.bytes.pointer[output + emitted.byte_count] = 0xebu;
+        builder->result.bytes.pointer[output + emitted.byte_count + 1u] = 5;
+        builder->result.bytes.pointer[output + emitted.byte_count + 2u] = 0xe9u;
+        memset(builder->result.bytes.pointer + output + emitted.byte_count + 3u, 0, sizeof(u32));
+    }
+    builder->output_count += instruction->size;
     return true;
 }
 
@@ -14312,6 +14447,51 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                     S8("AArch64 control instruction could not be encoded"));
                 return;
             }
+            if (instruction->aarch64_control_private_long)
+            {
+                BusterAarch64ControlSemanticRecord row = {0};
+                AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+                AssemblyExpression expression = {0};
+                if (buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
+                {
+                    if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
+                    else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
+                    else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                }
+                u8 expression_index = instruction->aarch64_control_private_expression;
+                bool expression_found = expression_index < 4 &&
+                                        (instruction->aarch64_control_expression_mask & (u8)(1u << expression_index));
+                expression = expression_found ? instruction->aarch64_control_expressions[expression_index] : (AssemblyExpression){0};
+                u32 words[2] = {0};
+                if (!expression_found || !assembly_aarch64_expand_private_short_branch_word(kind, word, words))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                        S8("AArch64 private branch instruction could not be expanded"));
+                    return;
+                }
+                s64 target = 0;
+                if (assembly_expression_target(builder, expression, &target))
+                {
+                    s64 displacement = 0;
+                    if (!assembly_aarch64_target_difference(target, instruction->offset + sizeof(u32), &displacement) ||
+                        !a64_pc_relative_patch(A64_OPCODE_B, words[1], displacement, &words[1]))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                            S8("AArch64 private branch target is out of range or unaligned"));
+                        return;
+                    }
+                }
+                else if (!assembly_relocation_append(builder, instruction->offset + sizeof(u32), expression,
+                                                     ASSEMBLY_RELOCATION_AARCH64_BRANCH26, 0))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                        S8("AArch64 private branch relocation addend is out of range"));
+                    return;
+                }
+                assembly_emit_u32(builder, words[0]);
+                assembly_emit_u32(builder, words[1]);
+                continue;
+            }
             for (u32 operand_index = 0; operand_index < 4; operand_index += 1)
             {
                 if (!(instruction->aarch64_control_expression_mask & (u8)(1u << operand_index)))
@@ -14324,12 +14504,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 {
                     BusterAarch64ControlSemanticRecord row = {0};
                     AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
-                    String8 private_prefix = S8(".Lbuster.inline.asm.");
                     String8 symbol_name = expression.has_symbol && expression.symbol < builder->result.symbol_count
                                               ? builder->result.symbols[expression.symbol].name
                                               : (String8){0};
-                    bool private_label = symbol_name.length > private_prefix.length &&
-                                         !memcmp(symbol_name.pointer, private_prefix.pointer, private_prefix.length);
+                    bool private_label = builder->private_inline_labels && assembly_inline_private_label_name(symbol_name);
                     if (private_label && buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
                     {
                         if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
@@ -14474,6 +14652,7 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     AssemblyBuilder builder = {
         .arena = arena,
         .target = options.target,
+        .private_inline_labels = options.private_inline_labels,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,
@@ -14509,6 +14688,11 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool assembly_test_aarch64_expand_private_short_branch(AssemblyRelocationKind kind, u32 word, u32 words[2])
+{
+    return assembly_aarch64_expand_private_short_branch_word(kind, word, words);
+}
+
 bool assembly_test_split_operands(String8 source, String8* operands, u32 operand_capacity, u32* operand_count)
 {
     if (!operand_count || (source.length && !source.pointer) || (operand_capacity && !operands))

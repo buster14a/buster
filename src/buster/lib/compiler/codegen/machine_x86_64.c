@@ -4514,6 +4514,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_compiler_barrier(MachineX64Selector*
 
 BUSTER_GLOBAL_LOCAL u32 machine_x64_select_block_entry(MachineX64Selector* selector, u32 canonical_block);
 
+typedef enum MachineX64InlineAssemblyBlockRelocationClass
+{
+    MACHINE_X64_INLINE_ASSEMBLY_BLOCK_UNSUPPORTED,
+    MACHINE_X64_INLINE_ASSEMBLY_BLOCK_ADDRESS,
+    MACHINE_X64_INLINE_ASSEMBLY_BLOCK_CONTROL,
+} MachineX64InlineAssemblyBlockRelocationClass;
+
+BUSTER_GLOBAL_LOCAL MachineX64InlineAssemblyBlockRelocationClass
+machine_x64_inline_assembly_block_relocation_class(ByteSlice bytes, AssemblyRelocation relocation)
+{
+    bool pc32 = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset <= bytes.length &&
+                sizeof(u32) <= bytes.length - relocation.offset;
+    bool jump = pc32 && relocation.offset && bytes.pointer[relocation.offset - 1u] == 0xe9u;
+    bool conditional = pc32 && relocation.offset >= 2u && bytes.pointer[relocation.offset - 2u] == 0x0fu &&
+                       (bytes.pointer[relocation.offset - 1u] & 0xf0u) == 0x80u;
+    bool address = pc32 && relocation.offset >= 2u && bytes.pointer[relocation.offset - 2u] == 0x8du &&
+                   (bytes.pointer[relocation.offset - 1u] & 0xc7u) == 0x05u;
+    return jump || conditional ? MACHINE_X64_INLINE_ASSEMBLY_BLOCK_CONTROL
+           : address           ? MACHINE_X64_INLINE_ASSEMBLY_BLOCK_ADDRESS
+                               : MACHINE_X64_INLINE_ASSEMBLY_BLOCK_UNSUPPORTED;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* selector, IrInstruction* instruction,
                                                             IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
                                                             String8* source_out, AssemblyEncodeResult* encoded_out)
@@ -4558,7 +4580,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     if (selected)
     {
         encoded = assembly_encode(selector->arena, (String8){.pointer = instructions, .length = instruction_length},
-                                  (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT});
+                                  (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT,
+                                                          .private_inline_labels = true});
         selected = encoded.diagnostic_count == 0;
     }
     if (selected)
@@ -4835,6 +4858,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     {
         selected = machine_x64_inline_assembly_source(selector, instruction, source_extra, registers, vector_registers, &source, &encoded);
     }
+    u32 reference_capacity = 0;
+    selected = selected && machine_selection_assembly_label_reference_capacity(extra.literal, &reference_capacity);
+    u32* control_targets = selected && general_goto && reference_capacity ? arena_allocate(selector->arena, u32, reference_capacity) : 0;
+    u32 control_count = 0;
     u32 first_relocation = selector->inline_assembly_relocations.total_count;
     for (u32 index = 0; selected && index < encoded.relocation_count; index += 1)
     {
@@ -4844,15 +4871,33 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         u32 label_target = UINT32_MAX;
         bool block = selected && machine_selection_assembly_label_target(&label_plan, name, &label_target);
         selected = selected && (block || codegen_assembly_durable_name(extra.literal, &name));
+        MachineX64InlineAssemblyBlockRelocationClass block_class =
+            block ? machine_x64_inline_assembly_block_relocation_class(encoded.bytes, relocation)
+                  : MACHINE_X64_INLINE_ASSEMBLY_BLOCK_UNSUPPORTED;
+        bool control = block_class == MACHINE_X64_INLINE_ASSEMBLY_BLOCK_CONTROL;
+        selected = selected && (!block || (label_target < instruction->target_count &&
+                                           instruction->targets[label_target].value < function->block_count &&
+                                           block_class != MACHINE_X64_INLINE_ASSEMBLY_BLOCK_UNSUPPORTED)) &&
+                   (!control || control_count < reference_capacity) && (!block || relocation.addend <= INT64_MAX - 4);
         if (selected)
         {
+            s64 addend = block ? relocation.addend + 4 : relocation.addend;
+            u32 target_block = block ? machine_x64_select_block_entry(selector, instruction->targets[label_target].value) : UINT32_MAX;
+            u32 continuation_block = control ? first_continuation + instruction->target_count + control_count : UINT32_MAX;
             MachineInlineAssemblyRelocation* row =
                 (MachineInlineAssemblyRelocation*)machine_stream_append(selector->arena, &selector->inline_assembly_relocations);
-            *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = relocation.addend, .offset = (u32)relocation.offset,
-                                                     .block = block ? first_continuation + label_target : UINT32_MAX,
-                                                     .kind = (u8)relocation.kind, .is_block = block};
+            *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = addend, .offset = (u32)relocation.offset,
+                                                     .block = target_block, .continuation_block = continuation_block,
+                                                     .target_index = block ? label_target : UINT32_MAX,
+                                                     .kind = (u8)relocation.kind, .is_block = block, .is_control = control};
+            if (control)
+            {
+                control_targets[control_count++] = label_target;
+            }
         }
     }
+    selected = selected && (!general_goto ||
+                            (instruction->target_count <= UINT16_MAX && control_count <= UINT16_MAX - instruction->target_count));
     if (selected)
     {
         u32 preserved_vector_count = ((preserved_vector_mask >> 6) & 1u) + ((preserved_vector_mask >> 7) & 1u);
@@ -4878,28 +4923,34 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                                               .relocation_count = (u16)encoded.relocation_count,
                                               .effects = (u8)(effects | (general_goto ? MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR : 0)),
                                               .preserved_vector_mask = preserved_vector_mask,
+                                              .successor_count = general_goto ? (u16)(instruction->target_count + control_count) : 0,
+                                              .declared_successor_count = general_goto ? (u16)instruction->target_count : 0,
                                               .preserved_vector_slot = preserved_vector_slot,
                                               .fallthrough_block = general_goto ? first_continuation : UINT32_MAX};
         machine_x64_select_row(selector, (MachineInstruction){.payload = descriptor_index, .opcode = MACHINE_X64_INLINE_ASSEMBLY});
         if (general_goto)
         {
             u32 source_block = selector->builder.open_block;
-            selected = first_continuation == source_block + 1u &&
-                       instruction->target_count <= MACHINE_REF_PAYLOAD_LIMIT - first_continuation;
-            for (u32 target = 0; selected && target < instruction->target_count; target += 1)
+            u32 successor_count = instruction->target_count + control_count;
+            u32 reserved_successor_count = instruction->target_count + reference_capacity;
+            selected = first_continuation == source_block + 1u && successor_count <= UINT16_MAX &&
+                       reserved_successor_count <= MACHINE_REF_PAYLOAD_LIMIT - first_continuation;
+            for (u32 target = 0; selected && target < successor_count; target += 1)
             {
                 machine_builder_edge(&selector->builder, (MachineEdge){.source_block = source_block,
                                                                        .destination_block = first_continuation + target});
             }
-            for (u32 target = 0; selected && target < instruction->target_count; target += 1)
+            for (u32 target = 0; selected && target < reserved_successor_count; target += 1)
             {
                 machine_builder_block_end(&selector->builder, selector->open_block);
                 machine_builder_block_begin(&selector->builder);
                 selector->open_block = (MachineBlock){0};
-                selected = machine_x64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
-                if (selected)
+                bool used = target < successor_count;
+                if (used)
                 {
-                    u32 destination = instruction->targets[target].value;
+                    selected = machine_x64_select_inline_assembly_outputs(selector, instruction, slots, sizes, operand_flags);
+                    u32 target_index = target < instruction->target_count ? target : control_targets[target - instruction->target_count];
+                    u32 destination = instruction->targets[target_index].value;
                     selected = destination < function->block_count;
                     if (selected)
                     {
@@ -7073,6 +7124,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                     !ir_inline_assembly_jump_target(function, instruction, asm_extra.literal, S8("jmp %l"), &asm_target);
             if (general_asm_goto)
             {
+                u32 reference_capacity = 0;
+                bool references_valid = machine_selection_assembly_label_reference_capacity(asm_extra.literal, &reference_capacity);
                 if (!selector.block_entries)
                 {
                     selector.block_entries = arena_allocate(arena, u32, function->block_count);
@@ -7088,14 +7141,15 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     selector.asm_goto_continuations = arena_allocate(arena, u32, function->block_count);
                     memset(selector.asm_goto_continuations, 0xff, sizeof(u32) * function->block_count);
                 }
-                if (instruction->target_count > MACHINE_REF_PAYLOAD_LIMIT - expanded_blocks)
+                if (!references_valid || instruction->target_count > MACHINE_REF_PAYLOAD_LIMIT - expanded_blocks ||
+                    reference_capacity > MACHINE_REF_PAYLOAD_LIMIT - expanded_blocks - instruction->target_count)
                 {
                     machine_x64_reject(&selector, IR_OPCODE_INLINE_ASSEMBLY);
                 }
                 else
                 {
                     selector.asm_goto_continuations[block_index] = expanded_blocks;
-                    expanded_blocks += instruction->target_count;
+                    expanded_blocks += instruction->target_count + reference_capacity;
                 }
             }
             if (instruction->opcode == IR_OPCODE_CALL && instruction->operand_count)
@@ -13453,11 +13507,32 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encode
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
 struct MachineX64BranchFixup
 {
+    s64 addend;
     u32 patch_offset;
     u32 block;
     bool label_address;
     u8 reserved[3];
 };
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out)
+{
+    bool valid = displacement_out && addend >= INT64_MIN + (s64)target_offset &&
+                 addend <= INT64_MAX - (s64)target_offset;
+    s64 target = valid ? (s64)target_offset + addend : 0;
+    valid = valid && target >= INT64_MIN + (s64)place_offset;
+    if (valid)
+    {
+        *displacement_out = target - (s64)place_offset;
+    }
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out)
+{
+    return machine_x64_block_displacement(target_offset, addend, place_offset, displacement_out);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
                                                          MachineInstruction const* instruction, MachineStackPlacement const* placement,
@@ -13994,6 +14069,33 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
     MachineBuilderStream inline_assembly_relocations;
     machine_stream_initialize(&inline_assembly_relocations, sizeof(MachineInlineAssemblyRelocation));
+    u32 control_relocation_count = 0;
+    for (u32 relocation_index = 0; relocation_index < function->inline_assembly_relocation_count; relocation_index += 1)
+    {
+        control_relocation_count += function->inline_assembly_relocations[relocation_index].is_control != 0;
+    }
+    s64* block_addends = control_relocation_count ? arena_allocate(arena, s64, function->block_count) : 0;
+    u32* block_addend_targets = control_relocation_count ? arena_allocate(arena, u32, function->block_count) : 0;
+    if (control_relocation_count)
+    {
+        memset(block_addends, 0, sizeof(*block_addends) * function->block_count);
+        memset(block_addend_targets, 0xff, sizeof(*block_addend_targets) * function->block_count);
+    }
+    for (u32 relocation_index = 0; relocation_index < function->inline_assembly_relocation_count; relocation_index += 1)
+    {
+        MachineInlineAssemblyRelocation* relocation = function->inline_assembly_relocations + relocation_index;
+        if (!relocation->is_control)
+        {
+            continue;
+        }
+        if (relocation->continuation_block >= function->block_count || block_addend_targets[relocation->continuation_block] != UINT32_MAX)
+        {
+            encoder.overflow = true;
+            continue;
+        }
+        block_addends[relocation->continuation_block] = relocation->addend;
+        block_addend_targets[relocation->continuation_block] = relocation->block;
+    }
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
     result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     // Prologue: the frame base is RBP, matching the canonical path, and
@@ -14151,6 +14253,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     {
                         MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
                         *fixup = (MachineX64BranchFixup){
+                            .addend = block_addend_targets &&
+                                              block_addend_targets[block_index] == machine_ref_payload(instruction->operands[0])
+                                          ? block_addends[block_index]
+                                          : 0,
                             .patch_offset = exact_start + 1,
                             .block = machine_ref_payload(instruction->operands[0]),
                         };
@@ -14483,6 +14589,12 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                     (MachineInlineAssemblyRelocation*)machine_stream_append(arena, &inline_assembly_relocations);
                                 *output = row;
                             }
+                            else if (!row.is_control)
+                            {
+                                MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                                *fixup = (MachineX64BranchFixup){.addend = row.addend, .patch_offset = row.offset,
+                                                                 .block = row.block, .label_address = true};
+                            }
                         }
                         bool captured = machine_x64_emit_inline_assembly_outputs(&encoder, function, placement, assembly,
                                                                                  x87_top, x87_below, x87_depth);
@@ -14499,7 +14611,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             MachineInlineAssemblyRelocation const* relocation =
                                 function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
-                            if (!relocation->is_block)
+                            if (!relocation->is_control)
                             {
                                 continue;
                             }
@@ -14515,8 +14627,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 u32 branch_start = encoder.count;
                                 machine_x64_emit_fixed_relative(&encoder, MACHINE_X64_FIXED_TEMPLATE_JMP_REL32, S8("JMP"));
                                 MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
-                                *fixup = (MachineX64BranchFixup){.patch_offset = branch_start + 1u, .block = relocation->block};
-                                s64 displacement = (s64)(u64)stub_offset + relocation->addend - (s64)(u64)template_patch;
+                                *fixup = (MachineX64BranchFixup){.patch_offset = branch_start + 1u,
+                                                                 .block = relocation->continuation_block};
+                                s64 displacement = (s64)(u64)stub_offset - (s64)(u64)(template_patch + 4u);
                                 captured = displacement >= INT32_MIN && displacement <= INT32_MAX;
                                 if (captured)
                                 {
@@ -15227,10 +15340,12 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
         {
             MachineX64BranchFixup* fixup = rows + row_index;
+            s64 displacement = 0;
+            bool displacement_valid = machine_x64_block_displacement(result.block_offsets[fixup->block], fixup->addend,
+                                                                      fixup->patch_offset + 4u, &displacement);
             if (fixup->label_address)
             {
-                s64 displacement = (s64)result.block_offsets[fixup->block] - (s64)(fixup->patch_offset + 4u);
-                if (displacement < INT32_MIN || displacement > INT32_MAX)
+                if (!displacement_valid || displacement < INT32_MIN || displacement > INT32_MAX)
                 {
                     fixups_valid = false;
                     continue;
@@ -15240,8 +15355,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             }
             else
             {
-                u32 displacement = result.block_offsets[fixup->block] - (fixup->patch_offset + 4);
-                memcpy(encoder.bytes + fixup->patch_offset, &displacement, sizeof(displacement));
+                if (!displacement_valid || displacement < INT32_MIN || displacement > INT32_MAX)
+                {
+                    fixups_valid = false;
+                    continue;
+                }
+                s32 encoded_displacement = (s32)displacement;
+                memcpy(encoder.bytes + fixup->patch_offset, &encoded_displacement, sizeof(encoded_displacement));
             }
         }
     }

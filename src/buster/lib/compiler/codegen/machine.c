@@ -2319,10 +2319,16 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 {
                     MachineInlineAssemblyRelocation* relocation =
                         inline_assembly_relocations + assembly->first_relocation + relocation_index;
-                    result = !relocation->is_block || relocation->block < old_block_count;
+                    result = !relocation->is_block ||
+                             (relocation->block < old_block_count &&
+                              (!relocation->is_control || relocation->continuation_block < old_block_count));
                     if (result && relocation->is_block)
                     {
                         relocation->block = old_to_new[relocation->block];
+                        if (relocation->is_control)
+                        {
+                            relocation->continuation_block = old_to_new[relocation->continuation_block];
+                        }
                     }
                 }
             }
@@ -2931,30 +2937,62 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                      (assembly->preserved_vector_slot < function->stack_slot_count &&
                       function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u)) &&
                     (terminator
-                         ? assembly->successor_count && assembly->fallthrough_block < function->block_count &&
+                         ? assembly->declared_successor_count && assembly->declared_successor_count <= assembly->successor_count &&
+                               assembly->successor_count && assembly->fallthrough_block < function->block_count &&
                                assembly->successor_count <= function->block_count - assembly->fallthrough_block
-                         : assembly->successor_count == 0);
+                         : assembly->successor_count == 0 && assembly->declared_successor_count == 0);
+            u32 control_relocation_count = 0;
             for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
             {
                 MachineInlineAssemblyRelocation* relocation =
                     function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
                 valid = relocation->kind < ASSEMBLY_RELOCATION_COUNT && relocation->offset < assembly->bytes.length &&
-                        (relocation->is_block ? relocation->block < function->block_count : relocation->symbol.length && relocation->symbol.pointer);
+                        (relocation->is_block
+                             ? relocation->block < function->block_count && relocation->target_index < assembly->declared_successor_count
+                             : relocation->symbol.length && relocation->symbol.pointer && !relocation->is_control &&
+                                   relocation->block == UINT32_MAX && relocation->continuation_block == UINT32_MAX &&
+                                   relocation->target_index == UINT32_MAX);
                 if (valid && relocation->is_block)
                 {
                     bool x64_kind = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY &&
                                     relocation->kind == ASSEMBLY_RELOCATION_X86_PC32;
                     bool a64_kind = instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY &&
-                                    (relocation->kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 ||
-                                     relocation->kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ||
-                                     relocation->kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
-                                     relocation->kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14);
-                    valid = terminator && (x64_kind || a64_kind) &&
+                                    relocation->kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26;
+                    u32 word = 0;
+                    if (a64_kind && relocation->offset <= assembly->bytes.length && sizeof(word) <= assembly->bytes.length - relocation->offset)
+                    {
+                        memcpy(&word, assembly->bytes.pointer + relocation->offset, sizeof(word));
+                    }
+                    bool a64_control = a64_kind && !(relocation->offset & 3u) &&
+                                       (word & UINT32_C(0xfc000000)) == UINT32_C(0x14000000);
+                    bool x64_control = x64_kind &&
+                                       ((relocation->offset && assembly->bytes.pointer[relocation->offset - 1u] == 0xe9u) ||
+                                        (relocation->offset >= 2u && assembly->bytes.pointer[relocation->offset - 2u] == 0x0fu &&
+                                         (assembly->bytes.pointer[relocation->offset - 1u] & 0xf0u) == 0x80u));
+                    bool x64_address = x64_kind && relocation->offset >= 2u &&
+                                       assembly->bytes.pointer[relocation->offset - 2u] == 0x8du &&
+                                       (assembly->bytes.pointer[relocation->offset - 1u] & 0xc7u) == 0x05u;
+                    valid = terminator && (x64_control || x64_address || a64_control) &&
+                            relocation->is_control == (x64_control || a64_control) &&
                             relocation->offset <= assembly->bytes.length &&
                             sizeof(u32) <= assembly->bytes.length - relocation->offset &&
-                            (!a64_kind || !(relocation->offset & 3u)) &&
-                            relocation->block > assembly->fallthrough_block &&
-                            relocation->block - assembly->fallthrough_block < assembly->successor_count;
+                            (!a64_kind || a64_control) &&
+                            (relocation->is_control
+                                 ? relocation->continuation_block == assembly->fallthrough_block + assembly->declared_successor_count +
+                                                                               control_relocation_count++
+                                 : relocation->continuation_block == UINT32_MAX);
+                    if (valid && relocation->is_control)
+                    {
+                        MachineBlock* continuation = function->blocks + relocation->continuation_block;
+                        MachineInstruction* branch = continuation->instruction_count
+                                                         ? function->instructions + continuation->first_instruction +
+                                                               continuation->instruction_count - 1u
+                                                         : 0;
+                        valid = branch &&
+                                (branch->opcode == MACHINE_X64_JMP || branch->opcode == MACHINE_A64_B) &&
+                                machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
+                                machine_ref_payload(branch->operands[0]) == relocation->block;
+                    }
                 }
                 else if (valid)
                 {
@@ -2963,6 +3001,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                             relocation->kind != ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
                 }
             }
+            valid = valid && control_relocation_count == assembly->successor_count - assembly->declared_successor_count;
         } break;
         case MACHINE_X64_INLINE_EFFECTS_NONE:
         case MACHINE_X64_INLINE_EFFECTS_MEMORY:

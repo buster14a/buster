@@ -90,6 +90,11 @@ struct AssemblyEncodeOptions
 {
     Target target;
     AssemblySyntax syntax;
+    // Machine inline-asm selection reserves `.Lbuster.inline.asm.*` for C
+    // label placeholders that must be made reachable before local layout.
+    // Standalone/module assembly leaves identically spelled user labels alone.
+    bool private_inline_labels;
+    u8 reserved[3];
 };
 
 typedef struct AssemblyEncodeResult AssemblyEncodeResult;
@@ -113,6 +118,7 @@ struct AssemblyEncodeResult
 BUSTER_F_DECL AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool assembly_test_aarch64_expand_private_short_branch(AssemblyRelocationKind kind, u32 word, u32 words[2]);
 // Narrow parser seam for delimiter and capacity regression tests.  Production
 // assembly parsing uses this same splitter for handwritten and metadata forms.
 BUSTER_F_DECL bool assembly_test_split_operands(String8 source, String8* operands, u32 operand_capacity, u32* operand_count);
