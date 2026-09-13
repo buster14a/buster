@@ -212,15 +212,9 @@ jobs:
             candidate_asset: buster-candidate-source-2bb4ce9.tar.gz
             strict_pattern: strict-retirement-2bb4ce9-34718946098.zip.part-*
     steps:
-      - name: Check out pinned candidate source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ matrix.candidate_ref }}
-          persist-credentials: false
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          path: validation
           persist-credentials: false
       - name: Download published strict and source assets
         env:
@@ -234,11 +228,18 @@ jobs:
             --pattern archive-manifest.json --pattern SHA256SUMS \
             --pattern "$STRICT_PATTERN" --pattern "$CANDIDATE_ASSET"
       - name: Reconstruct and verify strict destination bytes
-        run: >-
-          python3 validation/tools/native_retirement_archive.py verify-strict
-          --assets "$RUNNER_TEMP/release-assets"
-          --output "$RUNNER_TEMP/strict"
-          --cleanup
+        run: |
+          python3 tools/native_retirement_archive.py verify-strict \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --output "$RUNNER_TEMP/strict" \
+            --cleanup
+          cp tools/native_retirement_archive.py "$RUNNER_TEMP/native_retirement_archive.py"
+      - name: Check out pinned candidate source at a clean workspace root
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.candidate_ref }}
+          clean: true
+          persist-credentials: false
       - name: Restore archived compiler at its original workspace path
         run: |
           mkdir -p evidence/strict-binary
@@ -260,7 +261,7 @@ jobs:
           fi
       - name: Record successful strict round trip
         run: >-
-          python3 validation/tools/native_retirement_archive.py strict-receipt
+          python3 "$RUNNER_TEMP/native_retirement_archive.py" strict-receipt
           --manifest "$RUNNER_TEMP/release-assets/archive-manifest.json"
           --preflight "$RUNNER_TEMP/strict/strict-preflight.json"
           --replay "$GITHUB_WORKSPACE/evidence/strict-differential"
