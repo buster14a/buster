@@ -149,6 +149,25 @@ BUSTER_GLOBAL_LOCAL void bq_test_image(BqFixture* fixture, u8 const* image, u32 
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_closed_handle(void)
+{
+    BqFixture fixture;
+    if (bq_test_begin(&fixture))
+    {
+        BqQueue* queue = &fixture.queue;
+        BqRequest request = bq_test_request(1, false);
+        u64 id = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_cancel(queue, id) == BQ_OK);
+        bq_close(queue);
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_IO && id == 0);
+        BQ_CHECK(bq_cancel(queue, 1) == BQ_IO);
+        BQ_CHECK(bq_open(queue, fixture.path) == BQ_OK);
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK && id == 1);
+        bq_test_end(&fixture);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_admission(void)
 {
     BqFixture fixture;
@@ -548,6 +567,7 @@ int main(int argc, char** argv)
     (void)argv;
     bq_test_codec();
 #ifndef _WIN32
+    bq_test_closed_handle();
     bq_test_admission();
     bq_test_prefixes_and_corruption();
     bq_test_faults();

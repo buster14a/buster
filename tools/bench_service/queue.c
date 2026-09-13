@@ -521,6 +521,7 @@ void bq_close(BqQueue* queue)
     }
 #endif
     queue->journal_fd = queue->lock_fd = queue->directory_fd = -1;
+    queue->poisoned = true;
 }
 
 BqError bq_open(BqQueue* queue, char const* existing_private_directory)
