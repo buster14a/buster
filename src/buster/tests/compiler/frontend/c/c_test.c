@@ -8930,9 +8930,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
                                                 (CPreprocessOptions){.target = target_native,
                                                                      .data_layout = target_data_layout(target_native),
                                                                      .dialect = C_PREPROCESS_DIALECT_C23});
-        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
-        CAnalysisResult analysis = c_analyze_semantics(temporary.arena, tokens, syntax);
-        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && analysis.diagnostic_count == 0);
+        CAnalysisResult analysis = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && analysis.diagnostic_count == 0);
 #if BUSTER_BENCH_ALLOCATIONS
         IrConstructionCounters before = ir_construction_counters();
 #endif
