@@ -22,7 +22,8 @@
       "expires_at_observed": "2026-09-19T19:21:24Z",
       "recorded_outcome": "validated-census-with-supported-gaps",
       "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10304761452,
@@ -36,7 +37,8 @@
       "expires_at_observed": "2026-09-19T19:28:49Z",
       "recorded_outcome": "strict-packaging-failed-raw-retained",
       "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10304213369,
@@ -50,7 +52,8 @@
       "expires_at_observed": "2026-09-19T19:38:59Z",
       "recorded_outcome": "artifact-present-outcome-not-revalidated",
       "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10303964052,
@@ -64,7 +67,8 @@
       "expires_at_observed": "2026-09-19T19:57:47Z",
       "recorded_outcome": "validated-census-with-1440-supported-gaps",
       "candidate_binary_sha256": "2bdf15fb6ef4a043d85cb3ed042456cf61ca04eb1e9df3c3f69827ae0c9aca27",
-      "direct_oracle_binary_sha256": "1190c010537be78a81dc00b85fa6ca8af5573765a278f8ff52c95318d22f16c1"
+      "direct_oracle_binary_sha256": "1190c010537be78a81dc00b85fa6ca8af5573765a278f8ff52c95318d22f16c1",
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10304642722,
@@ -77,8 +81,10 @@
       "candidate_tree": "f9b5ae7c1db928ba646a4a4d1533cf2e68a505dd",
       "expires_at_observed": "2026-09-19T19:47:04Z",
       "recorded_outcome": "reported-strict-sanitized-7776-including-controls",
-      "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "candidate_binary_sha256": "fba419609920611f6df45bb36a79e1d57e014821bef493e965a481acdc1c7a44",
+      "direct_oracle_binary_sha256": null,
+      "binary_identity_evidence": "Run 34727739903, job 103644794825: downloaded archive preflight and strict replay receipt; receipt publication failed.",
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10305878954,
@@ -92,7 +98,8 @@
       "expires_at_observed": "2026-09-19T21:21:59Z",
       "recorded_outcome": "validated-census-with-1104-supported-gaps",
       "candidate_binary_sha256": "71e8879bf5cbf36648cb741147e784c3d855e9188f1f97ddb2480b62b49b3f97",
-      "direct_oracle_binary_sha256": "33a9987f7d582d9012d2512b48efd0574896575af52fb2269541ca115876f01c"
+      "direct_oracle_binary_sha256": "33a9987f7d582d9012d2512b48efd0574896575af52fb2269541ca115876f01c",
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10305707825,
@@ -106,7 +113,8 @@
       "expires_at_observed": "2026-09-19T21:24:33Z",
       "recorded_outcome": "reported-strict-sanitized-7776-including-controls",
       "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10308181383,
@@ -120,7 +128,8 @@
       "expires_at_observed": "2026-09-20T00:14:29Z",
       "recorded_outcome": "artifact-present-workflow-failed-job-not-revalidated",
       "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
     },
     {
       "id": 10307414648,
@@ -134,7 +143,130 @@
       "expires_at_observed": "2026-09-20T00:09:08Z",
       "recorded_outcome": "artifact-present-workflow-failed-job-not-revalidated",
       "candidate_binary_sha256": null,
-      "direct_oracle_binary_sha256": null
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10305327992,
+      "name": "strict-retirement-eb1bef2-34717699336",
+      "size": 2359024937,
+      "sha256": "e9cd0a6a61d014d65a43eaef469fdc36fa30e9f858159ed1b46e33979a27e311",
+      "run": 34717699336,
+      "workflow_commit": "98ab7857b3cd596a8155fa9c17705250f50c0deb",
+      "candidate_commit": "eb1bef2f124c6a778a435ae1eda18ae489c489c5",
+      "candidate_tree": "f9b5ae7c1db928ba646a4a4d1533cf2e68a505dd",
+      "expires_at_observed": "2026-09-19T20:58:26Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10305232400,
+      "name": "native-retirement-eb1bef2-34717699336",
+      "size": 389210532,
+      "sha256": "0611e8edd20f00969e8258aafe42fd870e06cd4f6977251da8906a588ec013fb",
+      "run": 34717699336,
+      "workflow_commit": "98ab7857b3cd596a8155fa9c17705250f50c0deb",
+      "candidate_commit": "eb1bef2f124c6a778a435ae1eda18ae489c489c5",
+      "candidate_tree": "f9b5ae7c1db928ba646a4a4d1533cf2e68a505dd",
+      "expires_at_observed": "2026-09-19T21:03:18Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10304147437,
+      "name": "strict-retirement-59b7167-raw-34713595257",
+      "size": 2437846992,
+      "sha256": "dbde973ed38f44ccf5fed7b818d45e62e3a8718ce5c07c19eeeac086eae63a28",
+      "run": 34713595257,
+      "workflow_commit": "2287eb051e200ec0ad91000c355c3579e29dde83",
+      "candidate_commit": "59b7167635cb549211263bf372f1796e7d3bf857",
+      "candidate_tree": "07f2b2e1ea465e40a6e8e7f404509091bb809f35",
+      "expires_at_observed": "2026-09-19T19:29:39Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10303853373,
+      "name": "native-retirement-59b7167-34713595257",
+      "size": 389210830,
+      "sha256": "e9f5dfac217cc73e28b749789eaa7b8527f7793dd315d244f8528ef25333420b",
+      "run": 34713595257,
+      "workflow_commit": "2287eb051e200ec0ad91000c355c3579e29dde83",
+      "candidate_commit": "59b7167635cb549211263bf372f1796e7d3bf857",
+      "candidate_tree": "07f2b2e1ea465e40a6e8e7f404509091bb809f35",
+      "expires_at_observed": "2026-09-19T19:38:43Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10303967670,
+      "name": "native-retirement-59b7167-34713047764",
+      "size": 389211531,
+      "sha256": "2b18c8d18566f66ee960521f43670335e93a9694b499334b891184d17c81d32d",
+      "run": 34713047764,
+      "workflow_commit": "4ae1f35387dba09f92dddaa9e3bc100fe7cf32b3",
+      "candidate_commit": "59b7167635cb549211263bf372f1796e7d3bf857",
+      "candidate_tree": "07f2b2e1ea465e40a6e8e7f404509091bb809f35",
+      "expires_at_observed": "2026-09-19T19:27:59Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10303806553,
+      "name": "native-retirement-aa8ccf4-34711464052",
+      "size": 387837617,
+      "sha256": "7ea9ffeea47f1d2ba5faf8e5ff0e6192c9e9c34f23a8214136e3fd9733c1f918",
+      "run": 34711464052,
+      "workflow_commit": "f506d0e97ec31e618556588002712f841e1ce927",
+      "candidate_commit": "aa8ccf452641559e8caadba05ef22f377aa2cf3d",
+      "candidate_tree": "0d172657c921c2980d56e8325fa9359669310f28",
+      "expires_at_observed": "2026-09-19T18:55:29Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10303946160,
+      "name": "native-retirement-aa8ccf4-34711461621",
+      "size": 387839023,
+      "sha256": "bc1c69ed30bd7e42765f55c9cc1d94f690a5857a2fec7c4f7f6c7147fad90784",
+      "run": 34711461621,
+      "workflow_commit": "f506d0e97ec31e618556588002712f841e1ce927",
+      "candidate_commit": "aa8ccf452641559e8caadba05ef22f377aa2cf3d",
+      "candidate_tree": "0d172657c921c2980d56e8325fa9359669310f28",
+      "expires_at_observed": "2026-09-19T18:56:00Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
+    },
+    {
+      "id": 10303052559,
+      "name": "native-retirement-de594a5-34710498319",
+      "size": 97590387,
+      "sha256": "3404baab45fed0868965c121557553f5f4b09a7b64343990d7bb36840b04276c",
+      "run": 34710498319,
+      "workflow_commit": "7563ebb7b8c410d5ee8bb1c75aee9acc0e884677",
+      "candidate_commit": "de594a5be72ab3261f5d88c5372ea2e15c05edee",
+      "candidate_tree": "032128bb2635908ada345f84f978f344a6784d18",
+      "expires_at_observed": "2026-09-19T18:21:53Z",
+      "recorded_outcome": "artifact-present-outcome-not-revalidated",
+      "candidate_binary_sha256": null,
+      "direct_oracle_binary_sha256": null,
+      "producing_workflow_conclusion_observed": "failure"
     }
-  ]
+  ],
+  "inventory_discovery_run": 34728261000,
+  "inventory_discovery_artifact": 10308306515
 }

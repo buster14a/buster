@@ -8,11 +8,12 @@ or the strict differential runner. Their active branches remain unchanged.
 
 ## Frozen identity versus current availability
 
-`history-catalog.json` records nine required archives discovered through the
+`history-catalog.json` records seventeen required archives discovered through the
 original and newer #504 runs, including the failed-packaging raw strict bundle.
 Each archive keeps its own Actions ID, producing workflow revision, candidate
 commit/tree, byte count, SHA-256, observed expiration, and recorded outcome.
-Unknown per-build binary hashes are explicitly null; identical source revisions
+The complete paginated discovery in run 34728261000 added eight archives to
+the initial nine-entry inventory. Unknown per-build binary hashes are explicitly null; identical source revisions
 are not a license to reuse another run's binary identity or outcome.
 
 The checker refreshes the evidence branch's workflow runs and artifact metadata,
