@@ -930,6 +930,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("ref: 2bb4ce939d99c3956848ca7bc9c347f3ae8db231", text)
         self.assertNotIn("--compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231", text)
         self.assertEqual(text.count('test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"'), 2)
+        self.assertEqual(text.count('--resource-include "$(clang -print-resource-dir)/include"'), 4)
         strict = text.split("\n  strict_differential:", 1)[1]
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)\n            slug: (.+)\n            platform: (.+)$", strict)
         self.assertEqual(entries, [
