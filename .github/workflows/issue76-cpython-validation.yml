@@ -1,0 +1,35 @@
+name: Issue 76 CPython validation
+on:
+  push:
+    branches:
+      - codex/issue76-cpython-validation
+permissions:
+  contents: read
+concurrency:
+  group: issue76-cpython-validation
+  cancel-in-progress: false
+jobs:
+  cpython:
+    name: Pinned CPython v3.13.9
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Bootstrap and build Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Fetch pinned pristine CPython
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/fetch_cpython.sh "$RUNNER_TEMP/cpython-v3.13.9"
+      - name: Run pinned compatibility harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_cpython --config Release "$RUNNER_TEMP/cpython-v3.13.9"
