@@ -13,6 +13,8 @@ on:
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
+      - tools/native_retirement_performance_binding.py
+      - tools/native_retirement_performance_binding_test.py
       - tests/**
   workflow_dispatch:
 
@@ -40,6 +42,8 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
           "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
+      - name: Validate immutable performance binding schema
+        run: python3 tools/native_retirement_performance_binding_test.py -v
       - name: Prove unreviewed input drift fails closed
         run: |
           printf '\n' >> tests/basic_c_operations.c

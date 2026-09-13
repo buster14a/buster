@@ -16,6 +16,20 @@
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
+- Native-backend retirement has a separate maintainer-approved
+  [performance contract](../native-retirement-performance-contract.md). Its
+  tighter budgets, immutable #508 binding, dedicated-host admission and
+  simultaneous uncertainty rules apply only to the #36/#512 acceptance run;
+  they do not silently replace the native harness's ordinary CI guard. Before
+  any timing verdict, validate the complete immutable binding record with
+  `python3 tools/native_retirement_performance_binding.py <record.json>
+  --evidence-root <bundle>`; this structural check does not itself accept a
+  performance result. The evidence-root form also parses the versioned
+  canonical performance-row artifact, recomputes the required population and
+  statistical family, and checks #510 provenance/replay receipts. A run without
+  the evidence root is reported as `proof=structural-only`. The acceptance
+  service must use the server-authoritative supervisor lease protocol; the
+  existing cooperative throughput lock is not a substitute.
 
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted
