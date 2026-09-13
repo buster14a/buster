@@ -4677,10 +4677,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     bool reserved[48] = {0};
     u64 exact_clobbers = 0;
     u8 effects = 0;
-    u8 preserved_vector_mask = 0;
+    u16 preserved_vector_mask = 0;
     for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
     {
         X64Register clobber = X64_REGISTER_RAX;
+        u32 vector_clobber = 0;
         if (string_equal(extra.clobbers[index], S8("memory")))
         {
             effects |= MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY;
@@ -4693,6 +4694,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         {
             reserved[clobber] = true;
             exact_clobbers |= UINT64_C(1) << clobber;
+        }
+        else if (codegen_inline_assembly_clobber_vector_register(extra.clobbers[index], &vector_clobber))
+        {
+            reserved[MACHINE_X64_ZMM0 + vector_clobber] = true;
+            exact_clobbers |= UINT64_C(1) << (MACHINE_X64_ZMM0 + vector_clobber);
+            if (machine_x64_target_is_windows(selector->target) && vector_clobber >= 6)
+            {
+                preserved_vector_mask |= (u16)(1u << vector_clobber);
+            }
         }
         else if (!string_equal(extra.clobbers[index], S8("st")))
         {
@@ -4752,7 +4762,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                 exact_clobbers |= UINT64_C(1) << (16 + candidate);
                 if (machine_x64_target_is_windows(selector->target) && candidate >= 6)
                 {
-                    preserved_vector_mask |= (u8)(1u << candidate);
+                    preserved_vector_mask |= (u16)(1u << candidate);
                 }
                 slots[index] = machine_x64_append_slot(selector, 16, 16);
             }
@@ -4900,7 +4910,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                             (instruction->target_count <= UINT16_MAX && control_count <= UINT16_MAX - instruction->target_count));
     if (selected)
     {
-        u32 preserved_vector_count = ((preserved_vector_mask >> 6) & 1u) + ((preserved_vector_mask >> 7) & 1u);
+        u32 preserved_vector_count = 0;
+        for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
+        {
+            preserved_vector_count += (preserved_vector_mask >> vector_register) & 1u;
+        }
         u32 preserved_vector_slot = preserved_vector_count ? machine_x64_append_slot(selector, 16u * preserved_vector_count, 16) : UINT32_MAX;
         u32 first_operand = selector->inline_assembly_operands.total_count;
         for (u32 index = 0; index < instruction->operand_count; index += 1)
@@ -4922,7 +4936,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
                                               .operand_count = (u16)instruction->operand_count,
                                               .relocation_count = (u16)encoded.relocation_count,
                                               .effects = (u8)(effects | (general_goto ? MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR : 0)),
-                                              .preserved_vector_mask = preserved_vector_mask,
                                               .successor_count = general_goto ? (u16)(instruction->target_count + control_count) : 0,
                                               .declared_successor_count = general_goto ? (u16)instruction->target_count : 0,
                                               .preserved_vector_slot = preserved_vector_slot,
@@ -12926,13 +12939,17 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_inline_assembly_outputs(MachineX64Enco
         }
         x87_depth -= 1;
     }
-    if (assembly->preserved_vector_mask)
+    u16 preserved_vector_mask = function->target == machine_target_x86_64_windows()
+                                    ? (u16)((assembly->clobber_mask >> MACHINE_X64_ZMM0) &
+                                            MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK)
+                                    : 0;
+    if (preserved_vector_mask)
     {
         u32 preserve_offset = placement->stack_slot_offsets[assembly->preserved_vector_slot];
         u32 preserve_index = 0;
-        for (u32 xmm = 6; xmm < 8; xmm += 1)
+        for (u32 xmm = 6; xmm < 16; xmm += 1)
         {
-            if (assembly->preserved_vector_mask & (1u << xmm))
+            if (preserved_vector_mask & (1u << xmm))
             {
                 s64 displacement = -(s64)(s32)(preserve_offset - preserve_index * 16u);
                 (void)machine_x64_emit_metadata_xmm_memory(encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,
@@ -14022,7 +14039,17 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         {
             MachineInlineAssembly const* assembly = function->inline_assemblies + capacity_row->payload;
             u64 paths = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) ? (u64)assembly->relocation_count + 1u : 1u;
-            capacity64 += assembly->bytes.length + paths * ((u64)assembly->operand_count * 24u + 16u);
+            u16 preserved_vector_mask = function->target == machine_target_x86_64_windows()
+                                            ? (u16)((assembly->clobber_mask >> MACHINE_X64_ZMM0) &
+                                                    MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK)
+                                            : 0;
+            u32 preserved_vector_count = 0;
+            for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
+            {
+                preserved_vector_count += (preserved_vector_mask >> vector_register) & 1u;
+            }
+            capacity64 += assembly->bytes.length +
+                          paths * ((u64)assembly->operand_count * 24u + (u64)preserved_vector_count * 24u + 16u);
         }
         if (BUSTER_UNLIKELY((row.flags & MACHINE_OPCODE_ROW_VARIABLE_BUDGET) != 0))
         {
@@ -14497,13 +14524,17 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
                         u32 x87_top = UINT32_MAX;
                         u32 x87_below = UINT32_MAX;
-                        if (assembly->preserved_vector_mask)
+                        u16 preserved_vector_mask = function->target == machine_target_x86_64_windows()
+                                                        ? (u16)((assembly->clobber_mask >> MACHINE_X64_ZMM0) &
+                                                                MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK)
+                                                        : 0;
+                        if (preserved_vector_mask)
                         {
                             u32 preserve_offset = placement->stack_slot_offsets[assembly->preserved_vector_slot];
                             u32 preserve_index = 0;
-                            for (u32 xmm = 6; xmm < 8; xmm += 1)
+                            for (u32 xmm = 6; xmm < 16; xmm += 1)
                             {
-                                if (assembly->preserved_vector_mask & (1u << xmm))
+                                if (preserved_vector_mask & (1u << xmm))
                                 {
                                     s64 displacement = -(s64)(s32)(preserve_offset - preserve_index * 16u);
                                     (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVDQU"), xmm, MACHINE_X64_RBP,

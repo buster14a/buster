@@ -482,62 +482,90 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_in
     return result;
 }
 
-// Win64's closed eight-register x-constraint pool reaches XMM6/XMM7 even
-// though ordinary allocator values do not.  Their low 128-bit halves are
-// ABI-preserved, so find the paired MOVDQU frame save/restore for each in the
-// function that consumes all eight registers.  Matching the displacement as
-// well as the register keeps an unrelated vector spill from satisfying this
-// observer.
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_inline_xmm_preserved(ObjectFile* object)
+// Find a paired low-128 MOVDQU frame save/restore for every required Win64 XMM
+// register in one function. Matching the displacement as well as the register
+// keeps an unrelated vector spill from satisfying this object observer.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_inline_xmm_symbol_preserved(
+    ObjectFile* object, String8 name, u16 required_mask)
 {
     bool result = false;
     if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
     {
         ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
-        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, S8("asm_sse_eight_outputs"));
+        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, name);
         if (symbol && symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->section == OBJECT_SECTION_TEXT && symbol->value <= text.length &&
             symbol->size <= text.length - symbol->value)
         {
-            bool saved[2] = {0};
-            bool restored[2] = {0};
-            s32 save_displacement[2] = {0};
-            u64 save_offset[2] = {0};
+            u16 saved_mask = 0;
+            u16 restored_mask = 0;
+            s32 save_displacement[16] = {0};
+            u64 save_offset[16] = {0};
             u64 function_end = symbol->value + symbol->size;
             for (u64 offset = symbol->value; offset + 5 <= function_end; offset += 1)
             {
                 u8* bytes = text.pointer + offset;
-                bool movdqu = bytes[0] == 0xf3 && bytes[1] == 0x0f && (bytes[2] == 0x6f || bytes[2] == 0x7f);
-                u8 modrm = movdqu ? bytes[3] : 0;
-                u32 mode = modrm >> 6;
-                u32 xmm = (modrm >> 3) & 7u;
-                bool frame = (modrm & 7u) == 5u && (mode == 1 || mode == 2);
-                u32 displacement_bytes = mode == 1 ? 1u : 4u;
-                if (movdqu && frame && xmm >= 6 && offset + 4u + displacement_bytes <= function_end)
+                u64 cursor = 0;
+                bool movdqu = bytes[cursor++] == 0xf3;
+                u8 rex = 0;
+                if (movdqu && offset + cursor < function_end && (bytes[cursor] & 0xf0u) == 0x40u)
                 {
-                    s32 displacement = mode == 1 ? (s32)(s8)bytes[4] : 0;
+                    rex = bytes[cursor++];
+                }
+                movdqu = movdqu && offset + cursor + 3 <= function_end && bytes[cursor++] == 0x0f &&
+                          (bytes[cursor] == 0x6f || bytes[cursor] == 0x7f);
+                u8 opcode = movdqu ? bytes[cursor++] : 0;
+                u8 modrm = movdqu ? bytes[cursor++] : 0;
+                u32 mode = modrm >> 6;
+                u32 xmm = ((modrm >> 3) & 7u) | ((rex & 4u) ? 8u : 0u);
+                bool frame = !(rex & 1u) && (modrm & 7u) == 5u && (mode == 1 || mode == 2);
+                u32 displacement_bytes = mode == 1 ? 1u : 4u;
+                if (movdqu && frame && xmm >= 6 && xmm < 16 && offset + cursor + displacement_bytes <= function_end)
+                {
+                    s32 displacement = mode == 1 ? (s32)(s8)bytes[cursor] : 0;
                     if (mode == 2)
                     {
-                        memcpy(&displacement, bytes + 4, sizeof(displacement));
+                        memcpy(&displacement, bytes + cursor, sizeof(displacement));
                     }
-                    u32 index = xmm - 6u;
-                    if (bytes[2] == 0x7f && !saved[index])
+                    u16 bit = (u16)(1u << xmm);
+                    if (opcode == 0x7f && !(saved_mask & bit))
                     {
-                        saved[index] = true;
-                        save_displacement[index] = displacement;
-                        save_offset[index] = offset;
+                        saved_mask |= bit;
+                        save_displacement[xmm] = displacement;
+                        save_offset[xmm] = offset;
                     }
-                    else if (bytes[2] == 0x6f && saved[index] && offset > save_offset[index] &&
-                             displacement == save_displacement[index])
+                    else if (opcode == 0x6f && (saved_mask & bit) && offset > save_offset[xmm] &&
+                             displacement == save_displacement[xmm])
                     {
-                        restored[index] = true;
+                        restored_mask |= bit;
                     }
                 }
             }
-            result = saved[0] && saved[1] && restored[0] && restored[1] && save_displacement[0] != save_displacement[1];
+            result = (saved_mask & required_mask) == required_mask && (restored_mask & required_mask) == required_mask;
+            for (u32 left = 6; result && left < 16; left += 1)
+            {
+                for (u32 right = left + 1; result && right < 16; right += 1)
+                {
+                    if ((required_mask & (1u << left)) && (required_mask & (1u << right)))
+                    {
+                        result = save_displacement[left] != save_displacement[right];
+                    }
+                }
+            }
         }
     }
 
     return result;
+}
+
+// The operand pool reaches XMM6/XMM7, while explicit clobbers may name the
+// complete XMM6-XMM15 nonvolatile range. Require both paths in the same object.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_inline_xmm_preserved(ObjectFile* object)
+{
+    bool operands = compiler_driver_test_windows_x64_inline_xmm_symbol_preserved(
+        object, S8("asm_sse_eight_outputs"), (u16)((1u << 6) | (1u << 7)));
+    bool explicit_clobbers = compiler_driver_test_windows_x64_inline_xmm_symbol_preserved(
+        object, S8("asm_sse_explicit_clobbers"), (u16)((1u << 6) | (1u << 15)));
+    return operands && explicit_clobbers;
 }
 
 // Finds one symbol a module-level assembly block put in an object. The

@@ -18974,6 +18974,59 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(aarch64_clobber_temporary);
     }
     {
+        TemporalArena reserved_clobber_temporary = scratch_begin(0, 0);
+        Target aarch64_target = target_native;
+        aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
+        CPreprocessResult aarch64_clobber_tokens = c_preprocess(
+            reserved_clobber_temporary.arena,
+            S8("int invalid_aarch64_stack_clobber(void) { __asm__(\"\" ::: \"sp\"); return 0; }\n"),
+            (CPreprocessOptions){
+                .target = aarch64_target,
+                .data_layout = target_data_layout(aarch64_target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult aarch64_clobber_parse = c_parse(reserved_clobber_temporary.arena, aarch64_clobber_tokens);
+        CIRLowerResult aarch64_clobber_lowered = c_lower_to_ir(reserved_clobber_temporary.arena, S8("aarch64-stack-clobber.c"),
+                                                               aarch64_clobber_tokens, aarch64_clobber_parse, aarch64_target);
+        BUSTER_TEST(arguments, aarch64_clobber_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_clobber_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_clobber_lowered.diagnostic_count == 1);
+        if (aarch64_clobber_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, aarch64_clobber_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_aarch64_stack_clobber': unsupported GNU inline assembly clobber"));
+        }
+        scratch_end(reserved_clobber_temporary);
+    }
+    {
+        TemporalArena reserved_clobber_temporary = scratch_begin(0, 0);
+        Target x86_64_target = target_native;
+        x86_64_target.cpu_arch = CPU_ARCH_X86_64;
+        CPreprocessResult x86_64_clobber_tokens = c_preprocess(
+            reserved_clobber_temporary.arena,
+            S8("int invalid_x86_64_frame_clobber(void) { __asm__(\"\" ::: \"rbp\"); return 0; }\n"
+               "int invalid_x86_64_stack_clobber(void) { __asm__(\"\" ::: \"rsp\"); return 0; }\n"),
+            (CPreprocessOptions){
+                .target = x86_64_target,
+                .data_layout = target_data_layout(x86_64_target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult x86_64_clobber_parse = c_parse(reserved_clobber_temporary.arena, x86_64_clobber_tokens);
+        CIRLowerResult x86_64_clobber_lowered = c_lower_to_ir(reserved_clobber_temporary.arena, S8("x86_64-reserved-clobber.c"),
+                                                              x86_64_clobber_tokens, x86_64_clobber_parse, x86_64_target);
+        BUSTER_TEST(arguments, x86_64_clobber_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, x86_64_clobber_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, x86_64_clobber_lowered.diagnostic_count == 2);
+        if (x86_64_clobber_lowered.diagnostic_count == 2)
+        {
+            BUSTER_STRING_TEST(arguments, x86_64_clobber_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_x86_64_frame_clobber': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, x86_64_clobber_lowered.diagnostics[1].message,
+                               S8("in function 'invalid_x86_64_stack_clobber': unsupported GNU inline assembly clobber"));
+        }
+        scratch_end(reserved_clobber_temporary);
+    }
+    {
         TemporalArena malformed_recovery_temporary = scratch_begin(0, 0);
         CPreprocessResult malformed_recovery_tokens = c_preprocess(
             malformed_recovery_temporary.arena,

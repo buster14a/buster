@@ -332,6 +332,7 @@ BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value);
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST void codegen_buffer_report_exhausted(CodegenBuffer* buffer);
 BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type);
 bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
+bool codegen_inline_assembly_clobber_vector_register(String8 clobber, u32* register_out);
 bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
 
 BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
@@ -591,17 +592,19 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_transfers_control(String8 sourc
 // what the stack-pointer exception hangs on; see
 // codegen_x64_asm_literal_base_registers.
 //
-// `reserved_registers` is the third exception, and it is the one that makes the
-// reason above stop applying: a register this asm has already committed to --
-// pinned by a fixed-class operand, or named in its clobber list -- is one the
-// emitter cannot also hand to another operand, so a template naming it cannot
-// overwrite anything. musl's `fmodl` is the shape: `fnstsw %%ax` beside an
-// `"=a"` output, where the literal register *is* the operand's register.
+// `reserved_registers` and `reserved_vector_registers` are the third
+// exception, and they are what make the reason above stop applying: a register
+// this asm has already committed to -- pinned by a fixed-class operand, or
+// named in its clobber list -- is one the emitter cannot also hand to another
+// operand, so a template naming it cannot overwrite anything. musl's `fmodl`
+// is the shape: `fnstsw %%ax` beside an `"=a"` output, where the literal
+// register *is* the operand's register.
 //
 // `reason_out`, when the caller asks for one, receives the rule's own words for
 // the refusal instead of leaving the driver to report an opcode number (#831).
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* arena, String8 source, bool transfers_control, bool const* reserved_registers,
-                                                                        String8* reason_out)
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* arena, String8 source, bool transfers_control,
+                                                                        bool const* reserved_registers,
+                                                                        bool const* reserved_vector_registers, String8* reason_out)
 {
     for (u64 index = 0; index < source.length; index += 1)
     {
@@ -687,7 +690,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
             bool stack_hand_off = transfers_control && codegen_inline_assembly_name_in_set(name, codegen_x64_asm_literal_base_registers,
                                                                                           BUSTER_ARRAY_LENGTH(codegen_x64_asm_literal_base_registers));
             X64Register named_register = X64_REGISTER_RAX;
-            bool reserved = reserved_registers && codegen_inline_assembly_clobber_register(name, &named_register) && reserved_registers[named_register];
+            u32 named_vector_register = 0;
+            bool reserved = (reserved_registers && codegen_inline_assembly_clobber_register(name, &named_register) &&
+                             reserved_registers[named_register]) ||
+                            (reserved_vector_registers && codegen_inline_assembly_clobber_vector_register(name, &named_vector_register) &&
+                             reserved_vector_registers[named_vector_register]);
             if (!memory_base && !segment_override && !stack_hand_off && !reserved)
             {
                 if (reason_out)
@@ -864,6 +871,7 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
     // register the emitter chose, and a template naming it by hand is exactly
     // the collision the refusal exists for.
     bool reserved_registers[16] = {0};
+    bool reserved_vector_registers[16] = {0};
     for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
     {
         X64Register pinned = X64_REGISTER_RAX;
@@ -876,14 +884,20 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
     for (u32 clobber_index = 0; clobber_index < extra.clobber_count; clobber_index += 1)
     {
         X64Register clobbered = X64_REGISTER_RAX;
+        u32 clobbered_vector = 0;
         if (codegen_inline_assembly_clobber_register(extra.clobbers[clobber_index], &clobbered) &&
             (u32)clobbered < BUSTER_ARRAY_LENGTH(reserved_registers))
         {
             reserved_registers[clobbered] = true;
         }
+        else if (codegen_inline_assembly_clobber_vector_register(extra.clobbers[clobber_index], &clobbered_vector) &&
+                 clobbered_vector < BUSTER_ARRAY_LENGTH(reserved_vector_registers))
+        {
+            reserved_vector_registers[clobbered_vector] = true;
+        }
     }
     if (!codegen_inline_assembly_template_literal_valid(arena, template_source, codegen_inline_assembly_transfers_control(template_source),
-                                                       reserved_registers, reason_out))
+                                                       reserved_registers, reserved_vector_registers, reason_out))
     {
         return false;
     }
@@ -1067,6 +1081,26 @@ bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* regi
         }
     }
     return false;
+}
+
+bool codegen_inline_assembly_clobber_vector_register(String8 clobber, u32* register_out)
+{
+    bool result = false;
+    if (clobber.length >= 4 && clobber.pointer[0] == 'x' && clobber.pointer[1] == 'm' && clobber.pointer[2] == 'm')
+    {
+        u64 number = 0;
+        String8 suffix = {
+            .pointer = clobber.pointer + 3,
+            .length = clobber.length - 3,
+        };
+        result = codegen_decimal_number(suffix, &number) && number <= 15 &&
+                 (suffix.length == 1 || (suffix.length == 2 && suffix.pointer[0] == '1'));
+        if (result)
+        {
+            *register_out = (u32)number;
+        }
+    }
+    return result;
 }
 
 bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out)
@@ -16645,6 +16679,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
                         {
                             String8 clobber = asm_extra.clobbers[clobber_index];
+                            u32 vector_clobber = 0;
                             bool accepted = string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")) ||
                                             string_equal(clobber, S8("st")) || string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
                                             string_equal(clobber, S8("al")) || string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) ||
@@ -16653,7 +16688,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                             string_equal(clobber, S8("rdx")) || string_equal(clobber, S8("edx")) || string_equal(clobber, S8("dx")) ||
                                             string_equal(clobber, S8("dl")) || string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) ||
                                             string_equal(clobber, S8("si")) || string_equal(clobber, S8("sil")) || string_equal(clobber, S8("rdi")) ||
-                                            string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil"));
+                                            string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil")) ||
+                                            codegen_inline_assembly_clobber_vector_register(clobber, &vector_clobber);
                             if (!accepted && clobber.length >= 2 && clobber.pointer[0] == 'r')
                             {
                                 u64 number = 0;
@@ -16696,10 +16732,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
                         {
                             X64Register clobber_register = X64_REGISTER_RAX;
+                            u32 vector_clobber = 0;
                             if (codegen_inline_assembly_clobber_register(asm_extra.clobbers[clobber_index], &clobber_register))
                             {
                                 clobbered_registers[clobber_register] = true;
                                 used_registers[clobber_register] = true;
+                            }
+                            else if (codegen_inline_assembly_clobber_vector_register(asm_extra.clobbers[clobber_index], &vector_clobber) &&
+                                     vector_clobber < BUSTER_ARRAY_LENGTH(used_vector_registers))
+                            {
+                                used_vector_registers[vector_clobber] = true;
                             }
                         }
                         // Reserve every fixed-register operand before assigning

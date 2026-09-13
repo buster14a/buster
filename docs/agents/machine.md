@@ -597,7 +597,11 @@
   register, `memory`, `cc`/NZCV and x87-stack clobbers remain visible at the
   transaction. Shared assembler output is copied into the native code stream;
   its symbol relocations are translated into ordinary module relocations after
-  row and branch relaxation has fixed final offsets.
+  row and branch relaxation has fixed final offsets. On Win64 the exact vector
+  mask derives one compact frame image for the low 128 bits of every occupied
+  or explicitly clobbered XMM6-XMM15 register; each asm-goto landing restores
+  that image after output publication. Other targets pay neither the frame nor
+  the transfer cost.
 - General asm-goto records the canonical fallthrough and every declared label
   as MIR successors. Each template control reference gets a distinct landing
   continuation that publishes outputs before an ordinary `B`/`JMP` reaches

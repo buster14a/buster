@@ -1190,22 +1190,20 @@ struct MachineInlineAssemblyRelocation
 };
 
 typedef struct MachineInlineAssembly MachineInlineAssembly;
+#define MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK 0xffc0u
 struct MachineInlineAssembly
 {
     String8 source;
     ByteSlice bytes;
+    // Win64 preserves the low 128 bits of XMM6-XMM15. This exact clobber mask
+    // identifies every operand or explicit clobber that needs a transaction
+    // save, without duplicating another register mask in this compact row.
     u64 clobber_mask;
     u32 first_operand;
     u32 first_relocation;
     u16 operand_count;
     u16 relocation_count;
     u8 effects;
-    // Win64 preserves the low 128 bits of XMM6/XMM7.  General x-constraint
-    // allocation still needs the complete eight-register closed pool, so a
-    // transaction that occupies either register owns one contiguous frame
-    // image and saves/restores the named low halves around its bytes.  Bit N
-    // names XMMN; the only admitted bits are 6 and 7.
-    u8 preserved_vector_mask;
     // Number of consecutive continuation blocks beginning at
     // `fallthrough_block`. General asm-goto retains one continuation for every
     // declared successor, including labels not referenced by the template.
@@ -1220,6 +1218,7 @@ struct MachineInlineAssembly
     // landing stubs. Meaningful only when EFFECT_TERMINATOR is set.
     u32 fallthrough_block;
 };
+BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
 
 // Optional selector certificates for individual frame objects in a function
 // that also contains volatile accesses. Zero is deliberately UNKNOWN.

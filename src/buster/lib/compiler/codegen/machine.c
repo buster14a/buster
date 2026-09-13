@@ -2864,7 +2864,12 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             }
             u32 x87_top_count = 0;
             u32 x87_below_count = 0;
-            u8 expected_preserved_vector_mask = 0;
+            u16 expected_preserved_vector_mask = 0;
+            if (valid && instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows())
+            {
+                expected_preserved_vector_mask =
+                    (u16)((assembly->clobber_mask >> MACHINE_X64_ZMM0) & MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK);
+            }
             u8 x87_top_flags = 0;
             u8 x87_below_flags = 0;
             u64 operand_register_mask = 0;
@@ -2901,9 +2906,9 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                 x87_top_flags |= x87_top ? operand->flags : 0;
                 x87_below_flags |= x87_below ? operand->flags : 0;
                 if (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows() &&
-                    vector && operand->physical_register >= MACHINE_X64_ZMM6 && operand->physical_register <= MACHINE_X64_ZMM7)
+                    vector && operand->physical_register >= MACHINE_X64_ZMM6 && operand->physical_register <= MACHINE_X64_ZMM15)
                 {
-                    expected_preserved_vector_mask |= (u8)(1u << (operand->physical_register - MACHINE_X64_ZMM0));
+                    expected_preserved_vector_mask |= (u16)(1u << (operand->physical_register - MACHINE_X64_ZMM0));
                 }
                 for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
                 {
@@ -2921,7 +2926,11 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     valid = valid && !early_conflict;
                 }
             }
-            u32 preserved_vector_count = ((assembly->preserved_vector_mask >> 6) & 1u) + ((assembly->preserved_vector_mask >> 7) & 1u);
+            u32 preserved_vector_count = 0;
+            for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
+            {
+                preserved_vector_count += (expected_preserved_vector_mask >> vector_register) & 1u;
+            }
             bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
             valid = valid && (assembly->clobber_mask & operand_register_mask) == operand_register_mask &&
                     x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
@@ -2931,8 +2940,6 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                           MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) &&
                     (!(x87_below_flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) ||
                      instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY) &&
-                    (assembly->preserved_vector_mask & ~0xc0u) == 0 &&
-                    assembly->preserved_vector_mask == expected_preserved_vector_mask &&
                     (!preserved_vector_count ||
                      (assembly->preserved_vector_slot < function->stack_slot_count &&
                       function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u)) &&

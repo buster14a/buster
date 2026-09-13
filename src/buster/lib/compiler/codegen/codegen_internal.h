@@ -101,6 +101,7 @@ BUSTER_F_DECL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProg
                                                             X64Register* registers, u32* vector_registers,
                                                             AssemblySyntax syntax, String8* source_out, String8* reason_out);
 BUSTER_F_DECL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
+BUSTER_F_DECL bool codegen_inline_assembly_clobber_vector_register(String8 clobber, u32* register_out);
 BUSTER_F_DECL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
 BUSTER_F_DECL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target, IrSymbolKind kind);
 BUSTER_F_DECL bool codegen_assembly_durable_name(String8 durable, String8* name);

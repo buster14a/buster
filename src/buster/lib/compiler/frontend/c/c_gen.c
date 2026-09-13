@@ -32996,45 +32996,49 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* builder, String8 clobber)
 {
+    bool result = false;
     if (string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")))
     {
-        return true;
+        result = true;
     }
-    if (builder->target.cpu_arch == CPU_ARCH_X86_64)
+    else if (builder->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        if (target_uses_llp64_data_model(builder->target) &&
-            (string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
-             string_equal(clobber, S8("sil")) || string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) ||
-             string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil"))))
-        {
-            return false;
-        }
-        // `st` is the top of the x87 register stack, and a template declares it
-        // clobbered to say that it popped what it was handed -- musl's
-        // `llrintl` and `lrintl` are `fistpll`, which does. The deeper
-        // positions (`st(1)` and below) are not here: each would say that the
-        // template popped a different number of registers, and the emitter's
-        // model is the one pop this spelling states.
-        String8 names[] = {
-            S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rbx"), S8("ebx"), S8("bx"), S8("bl"),
-            S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
-            S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"),
-            S8("st"),
-        };
-        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
-        {
-            if (string_equal(clobber, names[name_index]))
-            {
-                return true;
-            }
-        }
-        if (clobber.length >= 2 && clobber.pointer[0] == 'r')
+        if (clobber.length >= 4 && clobber.pointer[0] == 'x' && clobber.pointer[1] == 'm' && clobber.pointer[2] == 'm')
         {
             u64 number = 0;
-            String8 suffix = clobber;
-            suffix.pointer += 1;
-            suffix.length -= 1;
-            return c_conditional_number(suffix, &number) && number >= 8 && number <= 11;
+            String8 suffix = string_slice(clobber, 3, clobber.length);
+            result = c_conditional_number(suffix, &number) && number <= 15 &&
+                     (suffix.length == 1 || (suffix.length == 2 && suffix.pointer[0] == '1'));
+        }
+        else if (!target_uses_llp64_data_model(builder->target) ||
+                 (!string_equal(clobber, S8("rsi")) && !string_equal(clobber, S8("esi")) && !string_equal(clobber, S8("si")) &&
+                  !string_equal(clobber, S8("sil")) && !string_equal(clobber, S8("rdi")) && !string_equal(clobber, S8("edi")) &&
+                  !string_equal(clobber, S8("di")) && !string_equal(clobber, S8("dil"))))
+        {
+            // `st` is the top of the x87 register stack, and a template declares it
+            // clobbered to say that it popped what it was handed -- musl's
+            // `llrintl` and `lrintl` are `fistpll`, which does. The deeper
+            // positions (`st(1)` and below) are not here: each would say that the
+            // template popped a different number of registers, and the emitter's
+            // model is the one pop this spelling states.
+            String8 names[] = {
+                S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rbx"), S8("ebx"), S8("bx"), S8("bl"),
+                S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
+                S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"),
+                S8("st"),
+            };
+            for (u32 name_index = 0; !result && name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+            {
+                result = string_equal(clobber, names[name_index]);
+            }
+            if (!result && clobber.length >= 2 && clobber.pointer[0] == 'r')
+            {
+                u64 number = 0;
+                String8 suffix = clobber;
+                suffix.pointer += 1;
+                suffix.length -= 1;
+                result = c_conditional_number(suffix, &number) && number >= 8 && number <= 11;
+            }
         }
     }
     else if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
@@ -33045,11 +33049,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
             String8 suffix = clobber;
             suffix.pointer += 1;
             suffix.length -= 1;
-            return c_conditional_number(suffix, &number) && number <= 27;
+            result = c_conditional_number(suffix, &number) && number <= 27;
         }
-        return string_equal(clobber, S8("sp")) || string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
+        else
+        {
+            result = string_equal(clobber, S8("xzr")) || string_equal(clobber, S8("wzr"));
+        }
     }
-    return false;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
