@@ -1499,8 +1499,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             }
             u32 alignment = section->alignment;
             u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
-            u64 aligned = align_forward(section_sizes[section->kind], alignment);
-            if (aligned < section_sizes[section->kind] || section_size > UINT64_MAX - aligned)
+            u64 aligned = 0;
+            if (!align_forward_checked(section_sizes[section->kind], alignment, &aligned) || section_size > UINT64_MAX - aligned)
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
@@ -2141,13 +2141,7 @@ BUSTER_GLOBAL_LOCAL bool link_u64_add(u64 left, u64 right, u64* result)
 
 BUSTER_GLOBAL_LOCAL bool link_u64_align_forward(u64 value, u64 alignment, u64* result)
 {
-    bool valid = result && alignment && BUSTER_IS_POWER_OF_TWO(alignment) && value <= UINT64_MAX - (alignment - 1);
-    if (valid)
-    {
-        *result = align_forward(value, alignment);
-    }
-
-    return valid;
+    return align_forward_checked(value, alignment, result);
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
