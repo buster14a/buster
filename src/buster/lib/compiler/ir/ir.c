@@ -113,20 +113,16 @@ u64 ir_field_access_size(IrTypeTable* table, IrField const* field)
 u32 ir_field_access_pieces(u64 access_size, IrFieldAccessPiece* pieces)
 {
     u32 result = 0;
-    if (access_size && access_size <= 9 && pieces)
+    if (access_size && access_size <= IR_FIELD_ACCESS_MAX_SIZE && pieces)
     {
         u64 offset = 0;
         u64 remaining = access_size;
-        while (remaining && result < IR_FIELD_ACCESS_PIECE_CAPACITY)
+        while (remaining)
         {
             u64 piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
             pieces[result++] = (IrFieldAccessPiece){.offset = (u8)offset, .size = (u8)piece};
             offset += piece;
             remaining -= piece;
-        }
-        if (remaining)
-        {
-            result = 0;
         }
     }
 

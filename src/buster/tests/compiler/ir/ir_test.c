@@ -338,6 +338,64 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += construction.test_count;
     result.succeeded_test_count += construction.succeeded_test_count;
 
+    IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
+        {{.offset = 0, .size = 1}},
+        {{.offset = 0, .size = 2}},
+        {{.offset = 0, .size = 2}, {.offset = 2, .size = 1}},
+        {{.offset = 0, .size = 4}},
+        {{.offset = 0, .size = 4}, {.offset = 4, .size = 1}},
+        {{.offset = 0, .size = 4}, {.offset = 4, .size = 2}},
+        {{.offset = 0, .size = 4}, {.offset = 4, .size = 2}, {.offset = 6, .size = 1}},
+        {{.offset = 0, .size = 8}},
+        {{.offset = 0, .size = 8}, {.offset = 8, .size = 1}},
+    };
+    u32 expected_field_access_counts[] = {1, 1, 2, 1, 2, 2, 3, 1, 2};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected_field_access) == IR_FIELD_ACCESS_MAX_SIZE);
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected_field_access) == BUSTER_ARRAY_LENGTH(expected_field_access_counts));
+    for (u32 size = 1; size <= IR_FIELD_ACCESS_MAX_SIZE; size += 1)
+    {
+        IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            pieces[piece] = (IrFieldAccessPiece){.offset = 0xa5, .size = 0x5a};
+        }
+        u32 piece_count = ir_field_access_pieces(size, pieces);
+        u32 expected_count = expected_field_access_counts[size - 1];
+        BUSTER_TEST(arguments, piece_count == expected_count);
+        BUSTER_TEST(arguments, piece_count <= IR_FIELD_ACCESS_PIECE_CAPACITY);
+        u64 covered = 0;
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            if (piece < piece_count)
+            {
+                BUSTER_TEST(arguments, pieces[piece].offset == expected_field_access[size - 1][piece].offset);
+                BUSTER_TEST(arguments, pieces[piece].size == expected_field_access[size - 1][piece].size);
+                BUSTER_TEST(arguments, pieces[piece].offset == covered);
+                covered += pieces[piece].size;
+            }
+            else
+            {
+                BUSTER_TEST(arguments, pieces[piece].offset == 0xa5 && pieces[piece].size == 0x5a);
+            }
+        }
+        BUSTER_TEST(arguments, covered == size);
+    }
+    u64 invalid_field_access_sizes[] = {0, IR_FIELD_ACCESS_MAX_SIZE + 1, UINT64_MAX};
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(invalid_field_access_sizes); invalid += 1)
+    {
+        IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            pieces[piece] = (IrFieldAccessPiece){.offset = 0xa5, .size = 0x5a};
+        }
+        BUSTER_TEST(arguments, ir_field_access_pieces(invalid_field_access_sizes[invalid], pieces) == 0);
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            BUSTER_TEST(arguments, pieces[piece].offset == 0xa5 && pieces[piece].size == 0x5a);
+        }
+    }
+    BUSTER_TEST(arguments, ir_field_access_pieces(IR_FIELD_ACCESS_MAX_SIZE, 0) == 0);
+
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;
     result.test_count += call_validation.test_count;
