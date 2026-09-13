@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches: [bench/423-real-source-20260912]
-    paths: [.github/workflows/throughput-real-source.yml]
+    paths:
+      - .github/workflows/throughput-real-source.yml
+      - tools/throughput/**
+      - build.c
+      - tests/basic_cjson_roundtrip.c
 
 permissions:
   contents: read
@@ -68,6 +72,19 @@ jobs:
           curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
           printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
           tar -xzf external/lua.tar.gz -C external
+      - name: Prepare explicit native dependencies and descriptor inputs
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes libreadline-dev
+          mkdir -p external/cjson-throughput/generated evidence
+          cp external/cjson/cJSON.c external/cjson/cJSON.h external/cjson/cJSON_Utils.c external/cjson/cJSON_Utils.h external/cjson-throughput/
+          cp tests/basic_cjson_roundtrip.c external/cjson-throughput/generated/roundtrip.c
+          : > evidence/cjson.log
+          : > evidence/lua.log
+          : > evidence/sqlite.log
       - name: Prepare SQLite inputs outside timing
         id: sqlite
         if: ${{ !cancelled() }}
@@ -128,6 +145,32 @@ jobs:
           printf 'compiler=%s\ncjson=%s\nlua=%s\nsqlite=%s\n' "$COMPILER" "$CJSON" "$LUA" "$SQLITE" | tee evidence/outcomes.txt
           printf 'Hosted functional qualification only; no dedicated-host timing acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
           cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify descriptor and staged-input preflights
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        env:
+          CJSON: ${{ steps.oracle_cjson.outcome }}
+          LUA: ${{ steps.oracle_lua.outcome }}
+          SQLITE: ${{ steps.oracle_sqlite.outcome }}
+        run: |
+          set -euo pipefail
+          outcome() {
+            case "$1" in
+              success) printf 'pass\n' ;;
+              failure) printf 'failed\n' ;;
+              *) printf 'unavailable\n' ;;
+            esac
+          }
+          .ci-tools/build bench_throughput check-workload tools/throughput/workloads/cjson-1.7.19.workload \
+            --source-root external/cjson-throughput --compiler build/Release/ide --evidence evidence/cjson.log \
+            --evidence-outcome "$(outcome "$CJSON")" > evidence/cjson-preflight.json
+          .ci-tools/build bench_throughput check-workload tools/throughput/workloads/lua-5.4.8.workload \
+            --source-root external/lua-5.4.8/src --compiler build/Release/ide --evidence evidence/lua.log \
+            --evidence-outcome "$(outcome "$LUA")" > evidence/lua-preflight.json
+          .ci-tools/build bench_throughput check-workload tools/throughput/workloads/sqlite-3.53.4.workload \
+            --source-root external/sqlite-amalgamation-3530400 --compiler build/Release/ide --evidence evidence/sqlite.log \
+            --evidence-outcome "$(outcome "$SQLITE")" > evidence/sqlite-preflight.json
+          grep -F '"admitted":false' evidence/cjson-preflight.json evidence/lua-preflight.json evidence/sqlite-preflight.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
