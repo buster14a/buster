@@ -169,21 +169,29 @@ jobs:
             slug: linux-x86_64
             platform: unix
             python: python3
+            sanitizer: required
+            sanitizer_reason: available
           - name: Linux AArch64 native
             runner: ubuntu-26.04-arm
             slug: linux-aarch64
             platform: unix
             python: python3
+            sanitizer: required
+            sanitizer_reason: available
           - name: macOS x86-64 native
             runner: macos-26-intel
             slug: macos-x86_64
             platform: unix
             python: python3
+            sanitizer: required
+            sanitizer_reason: available
           - name: macOS AArch64 native
             runner: macos-26
             slug: macos-aarch64
             platform: unix
             python: python3
+            sanitizer: required
+            sanitizer_reason: available
           - name: Windows x86-64 native
             runner: windows-2025
             slug: windows-x86_64
@@ -192,6 +200,8 @@ jobs:
             vs_arch: amd64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
             clang_arch: x86_64
+            sanitizer: required
+            sanitizer_reason: available-after-resource-runtime-path
           - name: Windows AArch64 native
             runner: windows-11-arm
             slug: windows-aarch64
@@ -200,6 +210,8 @@ jobs:
             vs_arch: arm64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
+            sanitizer: not-run
+            sanitizer_reason: runner-llvm-package-omits-aarch64-asan-runtime
     steps:
       - name: Check out exact implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -219,8 +231,9 @@ jobs:
           mkdir -p evidence/strict-binary
           cp build/Release/ide evidence/strict-binary/ide
           chmod 555 evidence/strict-binary/ide
-          printf 'candidate_commit=%s\ncandidate_tree=%s\nrunner=%s\n' \
+          printf 'candidate_commit=%s\ncandidate_tree=%s\nrunner=%s\noracle_sanitizer=%s\noracle_sanitizer_reason=%s\n' \
             "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" "${{ matrix.runner }}" \
+            "${{ matrix.sanitizer }}" "${{ matrix.sanitizer_reason }}" \
             > evidence/strict-binary/source.txt
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
@@ -271,14 +284,38 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path 'evidence\strict-binary' | Out-Null
           Copy-Item 'build\Release\ide.exe' 'evidence\strict-binary\ide.exe'
-          @("candidate_commit=$Commit", "candidate_tree=$Tree", "runner=${{ matrix.runner }}") |
+          @(
+            "candidate_commit=$Commit"
+            "candidate_tree=$Tree"
+            "runner=${{ matrix.runner }}"
+            "oracle_sanitizer=${{ matrix.sanitizer }}"
+            "oracle_sanitizer_reason=${{ matrix.sanitizer_reason }}"
+          ) |
             Set-Content -Encoding ascii 'evidence\strict-binary\source.txt'
           $Digest = (Get-FileHash -Algorithm SHA256 'evidence\strict-binary\ide.exe').Hash.ToLowerInvariant()
           "$Digest  evidence/strict-binary/ide.exe" | Set-Content -Encoding ascii 'evidence\strict-binary\sha256.txt'
           Copy-Item 'build\CMakeCache.txt', 'build\compile_commands.json' 'evidence\strict-binary\'
           & $Driver test_differential --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $Driver test_differential --ide "$PWD\evidence\strict-binary\ide.exe" --cc clang.exe --strict-mir --sanitize-oracle --out 'evidence\strict-differential'
+          $DifferentialArgs = @(
+            'test_differential'
+            '--ide', "$PWD\evidence\strict-binary\ide.exe"
+            '--cc', 'clang.exe'
+            '--strict-mir'
+            '--out', 'evidence\strict-differential'
+          )
+          if ('${{ matrix.sanitizer }}' -eq 'required') {
+            $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $RuntimeDir = Join-Path $ResourceDir '${{ matrix.clang_arch }}-pc-windows-msvc'
+            $RuntimeDll = Join-Path $RuntimeDir 'clang_rt.asan_dynamic-${{ matrix.clang_arch }}.dll'
+            if (!(Test-Path $RuntimeDll)) {
+              throw "Required Clang sanitizer runtime is missing: $RuntimeDll"
+            }
+            $env:PATH = "$RuntimeDir;$env:PATH"
+            $DifferentialArgs += '--sanitize-oracle'
+          }
+          & $Driver @DifferentialArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Record strict outcome before packaging
         if: ${{ !cancelled() }}
@@ -287,7 +324,7 @@ jobs:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'strict_windows' || 'strict_build_unix strict_self_test_unix strict_execute_unix' }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REPRO: Check out ${{ env.BUSTER_RETIREMENT_CANDIDATE }} and run build.c test_differential with --strict-mir --sanitize-oracle on an immutable Clang-built compiler on ${{ matrix.runner }}.
+          BUSTER_CI_REPRO: Check out ${{ env.BUSTER_RETIREMENT_CANDIDATE }} and run build.c test_differential with --strict-mir on an immutable Clang-built compiler on ${{ matrix.runner }}; oracle sanitizer status is ${{ matrix.sanitizer }} (${{ matrix.sanitizer_reason }}).
         run: '"${{ matrix.python }}" tools/ci_summary.py'
       - name: Bundle and verify full strict evidence
         id: strict_bundle
