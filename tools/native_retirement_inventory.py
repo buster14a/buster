@@ -151,6 +151,27 @@ def check_catalog(catalog):
     return items
 
 
+def destination_tags(catalog, items):
+    result = {}
+    releases = catalog.get("durable_releases", [])
+    if not releases:
+        raise ValueError("history has no approved durable releases")
+    for release in releases:
+        tag = release.get("tag")
+        artifact_ids = release.get("artifact_ids")
+        if (not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", tag) or
+                not isinstance(artifact_ids, list)):
+            raise ValueError("invalid durable release mapping")
+        for artifact_id in artifact_ids:
+            if artifact_id in result:
+                raise ValueError("artifact maps to multiple durable releases")
+            result[artifact_id] = tag
+    expected_ids = {item["id"] for item in items}
+    if set(result) != expected_ids:
+        raise ValueError("durable release mapping is not an exact artifact partition")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", type=Path, required=True)
@@ -165,19 +186,27 @@ def main():
     try:
         catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
         expected = check_catalog(catalog)
+        destination_by_id = destination_tags(catalog, expected)
         report["catalog_sha256"] = archive.digest(args.catalog)
         report["archive_helper_sha256"] = archive.digest(Path(archive.__file__))
         root = f"repos/{REPOSITORY}"
         observed = discover(args.output)
         required_ids = {item["id"] for item in expected}
         report["unregistered_artifacts"] = [item for key, item in observed.items() if key not in required_ids]
-        release = api(f"{root}/releases/{catalog['release_id']}", args.output, "release")
-        if release["tag_name"] != catalog["release_tag"] or release["draft"]:
-            raise ValueError("approved durable release identity/state changed")
-        report["inspected_destination"] = release["html_url"]
-        assets = pages(f"{root}/releases/{release['id']}/assets", None, args.output, "release-assets")
+        destinations = {}
+        report["inspected_destinations"] = []
+        for tag in sorted(set(destination_by_id.values())):
+            release = api(f"{root}/releases/tags/{tag}", args.output, f"release-{tag}")
+            if release["tag_name"] != tag or release["draft"]:
+                raise ValueError("approved durable release identity/state changed")
+            assets = pages(f"{root}/releases/{release['id']}/assets", None, args.output,
+                           f"release-assets-{tag}")
+            destinations[tag] = assets
+            report["inspected_destinations"].append(release["html_url"])
         for item in sorted(expected, key=lambda value: value["expires_at_observed"]):
             row = {"expected": item, "status": "NOT VERIFIED", "origin_errors": []}
+            tag = destination_by_id[item["id"]]
+            row["durable_release"] = tag
             report["artifacts"].append(row)
             try:
                 actual = observed.get(item["id"])
@@ -190,10 +219,10 @@ def main():
             # An expired/unavailable origin is never replaced. An exact already
             # durable copy can still be checked against its frozen original hash.
             try:
-                selected = select_parts(item, assets)
+                selected = select_parts(item, destinations[tag])
                 row["destination_assets"] = selected
                 if not selected:
-                    row["status"] = "MISSING FROM INSPECTED DURABLE DESTINATION"
+                    row["status"] = "MISSING FROM APPROVED DURABLE DESTINATION"
                 else:
                     with tempfile.TemporaryDirectory(prefix="retirement-history-") as temporary:
                         for part in selected:
