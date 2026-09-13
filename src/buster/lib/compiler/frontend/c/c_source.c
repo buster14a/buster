@@ -6446,6 +6446,216 @@ BUSTER_C_INTERNAL CPpToken* c_frame_wrap_tokens(Arena* arena, CPpStampTable* sta
     return wrapped;
 }
 
+typedef enum CPreprocessConditionalDirective
+{
+    C_PREPROCESS_CONDITIONAL_IF,
+    C_PREPROCESS_CONDITIONAL_IFDEF,
+    C_PREPROCESS_CONDITIONAL_IFNDEF,
+    C_PREPROCESS_CONDITIONAL_ELIF,
+    C_PREPROCESS_CONDITIONAL_ELSE,
+    C_PREPROCESS_CONDITIONAL_ENDIF,
+    C_PREPROCESS_CONDITIONAL_COUNT,
+} CPreprocessConditionalDirective;
+
+BUSTER_C_INTERNAL CSourceLocation c_preprocess_logical_location(CPreprocessSourceFrame* frame, CSourceLocation location);
+
+BUSTER_C_INTERNAL CPreprocessConditionalDirective c_preprocess_conditional_directive_kind(char8 const* base, CToken directive)
+{
+    CPreprocessConditionalDirective result = C_PREPROCESS_CONDITIONAL_COUNT;
+    if (c_token_spelling_equal(base, directive, S8("if")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_IF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("ifdef")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_IFDEF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("ifndef")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_IFNDEF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("elif")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ELIF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("else")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ELSE;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("endif")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ENDIF;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellingSpace* space, CSymbolTable* symbol_table,
+                                                          CMacro* first_macro, CPpStampTable* stamps, CPreprocessSourceFrame* source_frame,
+                                                          CPreprocessConditionalDirective directive_kind, CToken directive, u64 token_index,
+                                                          u64 line_end, u32 expansion_limit, CPreprocessResult* result, CPreprocessOptions options,
+                                                          CConditionalFrame** conditional_pointer)
+{
+    CConditionalFrame* conditional = *conditional_pointer;
+    CLexResult lex = source_frame->lex;
+    char8 const* base = space->base;
+    bool active = c_preprocess_is_active(conditional);
+    CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
+    if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_kind == C_PREPROCESS_CONDITIONAL_IFDEF ||
+        directive_kind == C_PREPROCESS_CONDITIONAL_IFNDEF)
+    {
+        bool condition_value = false;
+        bool valid = true;
+        if (directive_kind == C_PREPROCESS_CONDITIONAL_IF)
+        {
+            if (active)
+            {
+                valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, stamps,
+                                               c_frame_wrap_tokens(arena, stamps, source_frame, token_index, line_end),
+                                               (u32)(line_end - token_index), expansion_limit, result, options, source_frame->path,
+                                               source_frame->include_origin, &condition_value);
+            }
+        }
+        else if (token_index + 1 != line_end || lex.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
+        {
+            valid = false;
+        }
+        else
+        {
+            CMacro* macro = c_macro_find_token(first_macro, symbol_table, base, &lex.tokens[token_index]);
+            condition_value = macro && macro->definition.defined;
+            condition_value ^= directive_kind == C_PREPROCESS_CONDITIONAL_IFNDEF;
+        }
+        if (!valid)
+        {
+            c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
+                                         string_format(arena, S8("invalid preprocessing conditional expression in {S8}"), source_frame->path));
+            condition_value = false;
+        }
+        CConditionalFrame* frame = arena_allocate(arena, CConditionalFrame, 1);
+        *frame = (CConditionalFrame){
+            .previous = conditional,
+            .location = directive_location,
+            .parent_active = active,
+            .active = active && condition_value,
+            .branch_taken = active && condition_value,
+        };
+        conditional = frame;
+        if (conditional->previous == source_frame->conditional_base)
+        {
+            if (source_frame->guard_state == C_INCLUDE_GUARD_SEARCHING && directive_kind == C_PREPROCESS_CONDITIONAL_IFNDEF && valid)
+            {
+                CToken guard_name = lex.tokens[token_index];
+                source_frame->guard_state = C_INCLUDE_GUARD_GUARDED;
+                source_frame->guard = conditional;
+                source_frame->guard_symbol =
+                    guard_name.symbol ? guard_name.symbol : c_symbol_intern(symbol_table, c_token_spelling(base, guard_name));
+            }
+            else
+            {
+                source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+            }
+        }
+    }
+    else if (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
+    {
+        if (conditional == source_frame->conditional_base || conditional->else_seen)
+        {
+            c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
+                                         S8("'#elif' has no matching '#if', or follows '#else'"));
+        }
+        else
+        {
+            if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
+            {
+                source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+            }
+            bool condition_value = false;
+            bool evaluate = conditional->parent_active && !conditional->branch_taken;
+            bool valid = true;
+            if (evaluate)
+            {
+                valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, stamps,
+                                               c_frame_wrap_tokens(arena, stamps, source_frame, token_index, line_end),
+                                               (u32)(line_end - token_index), expansion_limit, result, options, source_frame->path,
+                                               source_frame->include_origin, &condition_value);
+            }
+            if (!valid)
+            {
+                c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
+                                             S8("invalid '#elif' expression"));
+                condition_value = false;
+            }
+            conditional->active = evaluate && condition_value;
+            conditional->branch_taken |= conditional->active;
+        }
+    }
+    else if (directive_kind == C_PREPROCESS_CONDITIONAL_ELSE)
+    {
+        if (conditional == source_frame->conditional_base || conditional->else_seen || token_index != line_end)
+        {
+            c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
+                                         S8("invalid or unmatched '#else' directive"));
+        }
+        else
+        {
+            if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
+            {
+                source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+            }
+            conditional->else_seen = true;
+            conditional->active = conditional->parent_active && !conditional->branch_taken;
+            conditional->branch_taken |= conditional->active;
+        }
+    }
+    else
+    {
+        if (conditional == source_frame->conditional_base || token_index != line_end)
+        {
+            c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
+                                         S8("invalid or unmatched '#endif' directive"));
+        }
+        else
+        {
+            if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
+            {
+                source_frame->guard_state = C_INCLUDE_GUARD_CLOSED;
+            }
+            conditional = conditional->previous;
+        }
+    }
+    *conditional_pointer = conditional;
+}
+
+typedef struct CPreprocessSourceSegment CPreprocessSourceSegment;
+struct CPreprocessSourceSegment
+{
+    CPreprocessSourceSegment* next;
+    u64 first;
+    u64 end;
+};
+
+BUSTER_C_INTERNAL void c_preprocess_source_segment_append(Arena* arena, CPreprocessSourceSegment** first_segment,
+                                                          CPreprocessSourceSegment** last_segment, u64 first, u64 end)
+{
+    if (first != end)
+    {
+        CPreprocessSourceSegment* segment = arena_allocate(arena, CPreprocessSourceSegment, 1);
+        *segment = (CPreprocessSourceSegment){
+            .first = first,
+            .end = end,
+        };
+        if (*last_segment)
+        {
+            (*last_segment)->next = segment;
+        }
+        else
+        {
+            *first_segment = segment;
+        }
+        *last_segment = segment;
+    }
+}
+
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_logical_location(CPreprocessSourceFrame* frame, CSourceLocation location)
 {
     s64 line = (s64)location.line + frame->line_delta;
@@ -8205,6 +8415,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 bool is_pragma = c_token_spelling_equal(base, directive, S8("pragma"));
                 bool is_error = c_token_spelling_equal(base, directive, S8("error"));
                 bool is_warning = c_token_spelling_equal(base, directive, S8("warning"));
+                CPreprocessConditionalDirective conditional_directive = c_preprocess_conditional_directive_kind(base, directive);
                 // Any directive at the frame's top level other than the
                 // conditionals themselves sits outside a candidate include
                 // guard, so the file cannot be guard-shaped.
@@ -8214,132 +8425,23 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
                 if (is_if || is_ifdef || is_ifndef)
                 {
-                    bool condition_value = false;
-                    bool valid = true;
-                    if (is_if)
-                    {
-                        if (active)
-                        {
-                            valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, &stamps,
-                                                           c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end), (u32)(line_end - token_index),
-                                                           expansion_limit, &result, options, source_frame->path, source_frame->include_origin, &condition_value);
-                        }
-                    }
-                    else if (token_index + 1 != line_end || lex.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
-                    {
-                        valid = false;
-                    }
-                    else
-                    {
-                        CMacro* macro = c_macro_find_token(first_macro, symbol_table, base, &lex.tokens[token_index]);
-                        condition_value = macro && macro->definition.defined;
-                        condition_value ^= is_ifndef;
-                    }
-                    if (!valid)
-                    {
-                        c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
-                                                     string_format(arena, S8("invalid preprocessing conditional expression in {S8}"), source_frame->path));
-                        condition_value = false;
-                    }
-                    CConditionalFrame* frame = arena_allocate(arena, CConditionalFrame, 1);
-                    *frame = (CConditionalFrame){
-                        .previous = conditional,
-                        .location = directive_location,
-                        .parent_active = active,
-                        .active = active && condition_value,
-                        .branch_taken = active && condition_value,
-                    };
-                    conditional = frame;
-                    if (conditional->previous == source_frame->conditional_base)
-                    {
-                        // A guard candidate is the file's first top-level
-                        // directive and must be `#ifndef NAME` exactly; a
-                        // second top-level conditional after the candidate
-                        // closed means tokens could survive a re-include.
-                        if (source_frame->guard_state == C_INCLUDE_GUARD_SEARCHING && is_ifndef && valid)
-                        {
-                            CToken guard_name = lex.tokens[token_index];
-                            source_frame->guard_state = C_INCLUDE_GUARD_GUARDED;
-                            source_frame->guard = conditional;
-                            source_frame->guard_symbol =
-                                guard_name.symbol ? guard_name.symbol : c_symbol_intern(symbol_table, c_token_spelling(base, guard_name));
-                        }
-                        else
-                        {
-                            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
-                        }
-                    }
+                    c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
                 }
                 else if (is_elif)
                 {
-                    if (conditional == source_frame->conditional_base || conditional->else_seen)
-                    {
-                        c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
-                                                     S8("'#elif' has no matching '#if', or follows '#else'"));
-                    }
-                    else
-                    {
-                        // An #elif arm on the guard conditional itself could
-                        // pass tokens on a re-include, so it breaks the shape.
-                        if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
-                        {
-                            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
-                        }
-                        bool condition_value = false;
-                        bool evaluate = conditional->parent_active && !conditional->branch_taken;
-                        bool valid = true;
-                        if (evaluate)
-                        {
-                            valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, &stamps,
-                                                           c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end), (u32)(line_end - token_index),
-                                                           expansion_limit, &result, options, source_frame->path, source_frame->include_origin, &condition_value);
-                        }
-                        if (!valid)
-                        {
-                            c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL, S8("invalid '#elif' expression"));
-                            condition_value = false;
-                        }
-                        conditional->active = evaluate && condition_value;
-                        conditional->branch_taken |= conditional->active;
-                    }
+                    c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
                 }
                 else if (is_else)
                 {
-                    if (conditional == source_frame->conditional_base || conditional->else_seen || token_index != line_end)
-                    {
-                            c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
-                                                     S8("invalid or unmatched '#else' directive"));
-                    }
-                    else
-                    {
-                        // Same as #elif: an #else arm on the guard passes
-                        // tokens exactly when the guard macro is defined.
-                        if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
-                        {
-                            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
-                        }
-                        conditional->else_seen = true;
-                        conditional->active = conditional->parent_active && !conditional->branch_taken;
-                        conditional->branch_taken |= conditional->active;
-                    }
+                    c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
                 }
                 else if (is_endif)
                 {
-                    if (conditional == source_frame->conditional_base || token_index != line_end)
-                    {
-                        c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
-                                                     S8("invalid or unmatched '#endif' directive"));
-                    }
-                    else
-                    {
-                        if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
-                        {
-                            // The guard's own #endif: the proof holds unless
-                            // anything but end of file follows.
-                            source_frame->guard_state = C_INCLUDE_GUARD_CLOSED;
-                        }
-                        conditional = conditional->previous;
-                    }
+                    c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
+                                                       directive, token_index, line_end, expansion_limit, &result, options, &conditional);
                 }
                 else if (active && (is_error || is_warning))
                 {
@@ -8606,6 +8708,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
         u64 logical_end = line_end;
         u32 parenthesis_depth = 0;
+        bool source_conditionals = false;
+        CPreprocessSourceSegment* first_segment = 0;
+        CPreprocessSourceSegment* last_segment = 0;
         if (classified)
         {
             parenthesis_depth = c_pp_parenthesis_depth(class_masks, token_index, logical_end, 0);
@@ -8629,29 +8734,80 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             u64 next_line_start = logical_end + 1;
             if (next_line_start < lex.token_count && c_token_is_punctuator(&lex.tokens[next_line_start], C_PUNCTUATOR_HASH))
             {
-                break;
-            }
-            logical_end += 1;
-            u64 next_line_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, logical_end) : c_preprocess_line_end(lex, logical_end);
-            if (classified)
-            {
-                parenthesis_depth = c_pp_parenthesis_depth(class_masks, logical_end, next_line_end, parenthesis_depth);
-            }
-            else
-            {
-                for (u64 scan = logical_end; scan < next_line_end; scan += 1)
+                u64 directive_index = next_line_start + 1;
+                if (directive_index >= lex.token_count || lex.tokens[directive_index].kind != C_TOKEN_IDENTIFIER)
                 {
-                    if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    break;
+                }
+                CToken directive = lex.tokens[directive_index];
+                CPreprocessConditionalDirective directive_kind = c_preprocess_conditional_directive_kind(space->base, directive);
+                if (directive_kind == C_PREPROCESS_CONDITIONAL_COUNT)
+                {
+                    if (!c_preprocess_is_active(conditional))
                     {
-                        parenthesis_depth += 1;
+                        directive_index += 1;
+                        logical_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
+                                                 : c_preprocess_line_end(lex, directive_index);
+                        continue;
                     }
-                    else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
+                    break;
+                }
+                if (!source_conditionals)
+                {
+                    c_preprocess_source_segment_append(arena, &first_segment, &last_segment, token_index, logical_end);
+                    source_conditionals = true;
+                }
+                directive_index += 1;
+                u64 directive_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
+                                               : c_preprocess_line_end(lex, directive_index);
+                first_macro->builtin_token_offset = directive.offset;
+                c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, directive_kind, directive,
+                                                   directive_index, directive_end, expansion_limit, &result, options, &conditional);
+                first_macro->builtin_token_offset = token.offset;
+                logical_end = directive_end;
+                continue;
+            }
+            u64 next_line_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, next_line_start)
+                                           : c_preprocess_line_end(lex, next_line_start);
+            if (c_preprocess_is_active(conditional))
+            {
+                if (conditional == source_frame->conditional_base)
+                {
+                    source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+                }
+                if (source_conditionals)
+                {
+                    c_preprocess_source_segment_append(arena, &first_segment, &last_segment, next_line_start, next_line_end);
+                }
+                if (classified)
+                {
+                    parenthesis_depth = c_pp_parenthesis_depth(class_masks, next_line_start, next_line_end, parenthesis_depth);
+                }
+                else
+                {
+                    for (u64 scan = next_line_start; scan < next_line_end; scan += 1)
                     {
-                        parenthesis_depth -= 1;
+                        if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            parenthesis_depth += 1;
+                        }
+                        else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
+                        {
+                            parenthesis_depth -= 1;
+                        }
                     }
                 }
             }
             logical_end = next_line_end;
+        }
+        if (source_conditionals && logical_end < lex.token_count && lex.tokens[logical_end].kind == C_TOKEN_END_OF_FILE)
+        {
+            while (conditional != source_frame->conditional_base)
+            {
+                c_preprocess_diagnostic_push(arena, &result, conditional->location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
+                                             S8("unterminated preprocessing conditional"));
+                conditional = conditional->previous;
+            }
         }
         // A line whose identifiers name no defined macro expands to itself,
         // so its lexed tokens stream straight to the output with the
@@ -8660,7 +8816,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         // at all on this path: the file's source-map entry recovers them
         // from the offsets on demand.
         bool needs_expansion = false;
-        if (classified)
+        if (source_conditionals)
+        {
+            needs_expansion = true;
+        }
+        else if (classified)
         {
             u64 last_word = (logical_end - 1) / C_PP_CLASS_MASK_WINDOW;
             for (u64 word_index = token_index / C_PP_CLASS_MASK_WINDOW; word_index <= last_word && !needs_expansion; word_index += 1)
@@ -8743,10 +8903,27 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         else
         {
             u32 token_file = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
-            CPpToken* wrapped_tokens = arena_allocate(arena, CPpToken, logical_end - token_index);
+            u64 wrapped_capacity = logical_end - token_index;
+            CPpToken* wrapped_tokens = arena_allocate(arena, CPpToken, wrapped_capacity);
             u32 wrapped_count = 0;
             stamps.count = 0;
-            if (classified)
+            if (source_conditionals)
+            {
+                for (CPreprocessSourceSegment* segment = first_segment; segment; segment = segment->next)
+                {
+                    for (u64 scan = segment->first; scan < segment->end; scan += 1)
+                    {
+                        if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                        {
+                            wrapped_tokens[wrapped_count] = (CPpToken){
+                                .token = lex.tokens[scan],
+                            };
+                            wrapped_count += 1;
+                        }
+                    }
+                }
+            }
+            else if (classified)
             {
                 // Wrapping runs of tokens between the line's newlines, the
                 // same segments the fast path copies, so the newline test is
