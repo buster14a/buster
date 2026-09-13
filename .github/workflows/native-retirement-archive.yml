@@ -28,6 +28,7 @@ jobs:
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: validation
           persist-credentials: false
       - name: Download published census and source assets
         env:
@@ -42,47 +43,47 @@ jobs:
             --pattern buster-direct-oracle-source-3e912a3.tar.gz
       - name: Verify destination bytes and extract census
         run: >-
-          python3 tools/native_retirement_archive.py verify-census
+          python3 validation/tools/native_retirement_archive.py verify-census
           --assets "$RUNNER_TEMP/release-assets"
           --output "$RUNNER_TEMP/census"
           --cleanup
       - name: Restore pinned source snapshots
         run: |
-          mkdir "$RUNNER_TEMP/source"
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-validation-source-38f150f.tar.gz" -C "$RUNNER_TEMP/source"
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" -C "$RUNNER_TEMP/source"
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-direct-oracle-source-3e912a3.tar.gz" -C "$RUNNER_TEMP/source"
+          mkdir candidate reference replay-validation
+          tar -xzf "$RUNNER_TEMP/release-assets/buster-validation-source-38f150f.tar.gz" -C replay-validation --strip-components=1
+          tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" -C candidate --strip-components=1
+          tar -xzf "$RUNNER_TEMP/release-assets/buster-direct-oracle-source-3e912a3.tar.gz" -C reference --strip-components=1
       - name: Restore tracked input omitted by Actions hidden-file packaging
         run: >-
-          python3 tools/native_retirement_archive.py restore-census-inputs
+          python3 validation/tools/native_retirement_archive.py restore-census-inputs
           --evidence "$RUNNER_TEMP/census/candidate/evidence"
-          --source "$RUNNER_TEMP/source/buster-candidate-eb1bef2"
+          --source candidate
       - name: Rebuild the direct oracle from its archived source
-        working-directory: ${{ runner.temp }}/source/buster-direct-oracle-3e912a3
+        working-directory: reference
         run: |
           clang --version
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/direct-build"
-          "$RUNNER_TEMP/direct-build" generate --cc clang --ci --linker DEFAULT
-          "$RUNNER_TEMP/direct-build" build --config Release -t ide
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/reference-build"
+          "$RUNNER_TEMP/reference-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/reference-build" build --config Release -t ide
       - name: Replay census join and byte validator
         working-directory: ${{ runner.temp }}/census/candidate/evidence
         run: |
           mv census-integrated-joined-v3 census-integrated-joined-recorded-v3
-          cp "$RUNNER_TEMP/source/buster-validation-38f150f/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py" .
-          cp "$RUNNER_TEMP/source/buster-validation-38f150f/docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py" .
-          clang -O2 -fPIC -shared -I"$RUNNER_TEMP/source/buster-candidate-eb1bef2/src" \
-            "$RUNNER_TEMP/source/buster-candidate-eb1bef2/src/buster/lib/hash.c" -o libcensus_hash.so
+          cp "$GITHUB_WORKSPACE/replay-validation/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py" .
+          cp "$GITHUB_WORKSPACE/replay-validation/docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py" .
+          clang -O2 -fPIC -shared -I"$GITHUB_WORKSPACE/candidate/src" \
+            "$GITHUB_WORKSPACE/candidate/src/buster/lib/hash.c" -o libcensus_hash.so
           python3 "$PWD/join-census.py" census-integrated 4
           python3 "$PWD/validate-census-v2.py" census-integrated 4
       - name: Record successful census round trip
         run: >-
-          python3 tools/native_retirement_archive.py census-receipt
+          python3 validation/tools/native_retirement_archive.py census-receipt
           --manifest "$RUNNER_TEMP/release-assets/archive-manifest.json"
           --report "$RUNNER_TEMP/census/candidate/evidence/census-integrated-validated-v2.json"
           --recorded "$RUNNER_TEMP/census/candidate/evidence/census-integrated-joined-recorded-v3"
           --replayed "$RUNNER_TEMP/census/candidate/evidence/census-integrated-joined-v3"
           --archived-reference "$RUNNER_TEMP/census/candidate/evidence/census-integrated-0/baseline-ide.exe"
-          --rebuilt-reference "$RUNNER_TEMP/source/buster-direct-oracle-3e912a3/build/Release/ide"
+          --rebuilt-reference "$GITHUB_WORKSPACE/reference/build/Release/ide"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/census-replay-${{ github.run_id }}.json"
       - name: Publish census replay receipt
@@ -108,6 +109,7 @@ jobs:
       - name: Check out replay implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: validation
           persist-credentials: false
       - name: Download published strict and source assets
         env:
@@ -120,28 +122,36 @@ jobs:
             --pattern buster-candidate-source-eb1bef2.tar.gz
       - name: Reconstruct and verify strict destination bytes
         run: >-
-          python3 tools/native_retirement_archive.py verify-strict
+          python3 validation/tools/native_retirement_archive.py verify-strict
           --assets "$RUNNER_TEMP/release-assets"
           --output "$RUNNER_TEMP/strict"
           --cleanup
       - name: Restore pinned candidate source
         run: |
-          mkdir "$RUNNER_TEMP/source"
-          tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" -C "$RUNNER_TEMP/source"
+          tar -xzf "$RUNNER_TEMP/release-assets/buster-candidate-source-eb1bef2.tar.gz" --strip-components=1
+          mkdir -p evidence/strict-binary
+          cp "$RUNNER_TEMP/strict/archived-ide" evidence/strict-binary/ide
+          chmod 555 evidence/strict-binary/ide
       - name: Replay every strict configuration with sanitizer enabled
-        working-directory: ${{ runner.temp }}/source/buster-candidate-eb1bef2
         run: |
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/strict-build"
           "$RUNNER_TEMP/strict-build" test_differential \
-            --ide "$RUNNER_TEMP/strict/archived-ide" --cc clang \
-            --strict-mir --sanitize-oracle --out "$RUNNER_TEMP/strict-replay"
+            --ide "$GITHUB_WORKSPACE/evidence/strict-binary/ide" --cc clang \
+            --strict-mir --sanitize-oracle --out "$GITHUB_WORKSPACE/evidence/strict-differential"
+      - name: Report first strict replay diagnostic after failure
+        if: ${{ failure() }}
+        run: |
+          diagnostic=$(find evidence/strict-differential -name '*.stderr' -type f -size +0c -print -quit)
+          if [[ -n "$diagnostic" ]]; then
+            sed -n '1,120p' "$diagnostic"
+          fi
       - name: Record successful strict round trip
         run: >-
-          python3 tools/native_retirement_archive.py strict-receipt
+          python3 validation/tools/native_retirement_archive.py strict-receipt
           --manifest "$RUNNER_TEMP/release-assets/archive-manifest.json"
           --preflight "$RUNNER_TEMP/strict/strict-preflight.json"
-          --replay "$RUNNER_TEMP/strict-replay"
+          --replay "$GITHUB_WORKSPACE/evidence/strict-differential"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/strict-replay-${{ github.run_id }}.json"
       - name: Publish strict replay receipt
