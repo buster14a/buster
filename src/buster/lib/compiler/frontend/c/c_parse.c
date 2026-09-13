@@ -2,8 +2,8 @@
 // passes over the preprocessed token stream, entered through c_parse_ast and
 // c_analyze_semantics at the bottom of the file (c_parse runs both):
 // - c_parse_ast is one linear scan that splits the stream into top-level
-//   CParserDeclaration records — token extents, the name token, the body
-//   range, and typedef/constexpr/variadic flags — by delimiter counting
+//   CParserDeclaration records â token extents, the name token, the body
+//   range, and typedef/constexpr/variadic flags â by delimiter counting
 //   alone. It builds no tree; every later consumer re-walks token ranges.
 //   The same top-level/body walks validate active integer token spellings,
 //   including unevaluated operands, before any type-only shortcut can hide one.
@@ -263,7 +263,7 @@ BUSTER_C_INTERNAL u8 c_parse_token_class(CParseResult* result, CPreprocessResult
 }
 
 // Append one ascending position, doubling the run from an empty start. The two
-// populations this serves — `vector_size` and `_Alignas` spellings — are tens
+// populations this serves â `vector_size` and `_Alignas` spellings â are tens
 // of tokens in a million, so the run is small and the copies are rare; sizing
 // them exactly instead cost a second pass over the whole token stream.
 BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positions, u32* count, u32* capacity, u32 position)
@@ -1693,8 +1693,8 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         // Callers inside the explicit type-parse machine pass no
                         // machine, because its frame stack cannot be reentered;
                         // their operands resolve through the machineless base
-                        // type instead — typedef, named tag, or primitive, with
-                        // no declarator suffixes — so an enum constant like
+                        // type instead â typedef, named tag, or primitive, with
+                        // no declarator suffixes â so an enum constant like
                         // `sizeof(char[sizeof(T)])` folds rather than failing
                         // its whole enum.
                         CTypeId operand_type;
@@ -1748,9 +1748,9 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                             // Kind-matching answers only for kinds whose layout
                             // the kind alone determines. A struct, union,
                             // array, or vector operand that has not resolved
-                            // yet must stay unresolved for this pass — matching
+                            // yet must stay unresolved for this pass â matching
                             // any same-kind type folds a neighbouring type's
-                            // size into the bound — and the fixpoint retries it
+                            // size into the bound â and the fixpoint retries it
                             // once the real layout lands.
                             CTypeKind operand_kind = operand_parse.types[operand_type.value].kind;
                             operand_resolved = false;
@@ -2217,11 +2217,16 @@ BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* 
             continue;
         }
         u32 use_index = c_parse_identifier_use_index(analysis, index);
-        if (use_index == C_ID_UNDERLYING_INVALID)
+        CEntityId entity = use_index != C_ID_UNDERLYING_INVALID ? analysis->identifier_uses[use_index].entity : C_ENTITY_ID_INVALID;
+        // A direct function's callee token is resolved by the call-target
+        // path, not recorded as an ordinary identifier use. Re-enter its
+        // innermost parsed scope so a file-scope declaration is found while
+        // a block-scope object or function-pointer shadow still wins.
+        if (entity.value == C_ID_UNDERLYING_INVALID && analysis->scope_count)
         {
-            continue;
+            CScopeId scope = c_parse_scope_for_token(analysis, (CScopeId){.value = 0}, index);
+            entity = c_parse_lookup_entity_token(analysis, preprocess.spelling_base, scope, &token);
         }
-        CEntityId entity = analysis->identifier_uses[use_index].entity;
         CTypeId type_id = entity.value < analysis->entity_count ? analysis->entities[entity.value].type : C_TYPE_ID_INVALID;
         CType* type = type_id.value < analysis->type_count ? &analysis->types[type_id.value] : 0;
         bool indirect = type && type->kind == C_TYPE_POINTER;
@@ -5593,8 +5598,8 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
 
 // Skips the run of `_Alignas ( ... )` alignment specifiers at `index`. An
 // alignment specifier belongs to the declaration specifiers, so every scan
-// that walks the specifier prefix looking for the type — a builtin keyword, a
-// typedef name, or a struct/union/enum tag — has to step over it to reach the
+// that walks the specifier prefix looking for the type â a builtin keyword, a
+// typedef name, or a struct/union/enum tag â has to step over it to reach the
 // declarator. `c_parse_alignment_specifiers` is what actually collects and
 // evaluates the alignments; this only moves past them.
 //
@@ -6032,8 +6037,8 @@ BUSTER_C_INTERNAL bool c_parse_asm_label_at(CPreprocessResult preprocess, u32 in
 
 // True when `index` starts a C23 attribute specifier `[[ ... ]]`, with
 // `after_out` receiving the token past the closing `]]`. Two consecutive `[`
-// cannot begin anything else in C — a subscript needs an expression and an
-// array declarator a bound, a qualifier or `static` — so the opening pair
+// cannot begin anything else in C â a subscript needs an expression and an
+// array declarator a bound, a qualifier or `static` â so the opening pair
 // alone decides it, in every dialect: the syntax is a C23 addition, but
 // accepting it in the earlier `-std` modes is what clang does and what
 // system headers that spell it unconditionally need. The contents are a
@@ -6816,8 +6821,8 @@ BUSTER_C_SHARED bool c_parse_attribute_unsigned(String8 spelling, u32* value_out
 
 // The byte count of one `vector_size ( ... )` occurrence, with `index` at the
 // attribute spelling. A lone integer literal resolves without the constant
-// machinery; anything else — `16 * sizeof(float)` is the shape GCC's own
-// documentation uses — evaluates as an integer constant expression. Callers
+// machinery; anything else â `16 * sizeof(float)` is the shape GCC's own
+// documentation uses â evaluates as an integer constant expression. Callers
 // include type-parse machine steps, which cannot reenter the machine, so the
 // evaluation always takes the machineless path.
 BUSTER_C_INTERNAL bool c_parse_vector_size_argument(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 index, u32 end, u32* value_out)
@@ -8869,7 +8874,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_declarator_suffixes(CParseResult* 
 // typedef name, a named struct/union/enum tag, a primitive spelling, or an
 // `_Atomic ( T )` specifier over any of those.
 // `*index_out` lands past what was consumed. The type-parse machine is never
-// entered, so this is callable from inside one of its steps — which is what
+// entered, so this is callable from inside one of its steps â which is what
 // lets a sizeof inside an array bound resolve while an enum body is being
 // evaluated (the machine-bearing path uses c_parse_scalar_type instead).
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
@@ -9005,13 +9010,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
     return type;
 }
 // How many elements a brace initializer spells, counted from its tokens
-// alone — for the inferred-length arrays c_parse_infer_file_array_bounds has
+// alone â for the inferred-length arrays c_parse_infer_file_array_bounds has
 // not reached yet when a sizeof inside an enum-constant initializer needs
 // the array's layout mid-parse. Real inference cannot run there (its
 // designator and slot resolution reenters the type-parse machine), so this
 // counts only the shapes whose count is one top-level item per element:
-// no designators, no top-level assignment, and — when the element type is
-// itself an aggregate or array — every item a braced group, because a flat
+// no designators, no top-level assignment, and â when the element type is
+// itself an aggregate or array â every item a braced group, because a flat
 // item list fills members rather than elements. Everything else answers
 // zero and the caller stays unresolved, exactly as before the count.
 BUSTER_C_INTERNAL u64 c_parse_count_plain_initializer_items(CPreprocessResult preprocess, u32 start, u32 end, bool element_is_aggregate)
@@ -9077,7 +9082,7 @@ BUSTER_C_INTERNAL u64 c_parse_count_plain_initializer_items(CPreprocessResult pr
 // or enumerator name under redundant parentheses and leading dereferences,
 // extended by a postfix chain of subscripts and member selections. Anything
 // else stays unresolved and the caller fails the enumerator rather than
-// guessing — but these shapes cover the array-length idiom
+// guessing â but these shapes cover the array-length idiom
 // `enum { N = sizeof(table) / sizeof(table[0]) }`, whose failure used to
 // fail the whole enum type and leave every one of its enumerators
 // undeclared in function bodies (found by tools/differential_c_harness.py,
@@ -10313,9 +10318,9 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
     u32 name_search_start = declaration->declarator_count ? declaration->declarator_start : declaration->token_start;
     // The scan below keeps the last occurrence of the name so that a tag
     // repeating it (`struct head { ... } head;`) does not win over the
-    // declarator. An initializer may repeat it too — an object is in scope
+    // declarator. An initializer may repeat it too â an object is in scope
     // inside its own initializer, which is how `TAILQ_HEAD_INITIALIZER` names
-    // the list it initializes — and that occurrence is not a declarator, so
+    // the list it initializes â and that occurrence is not a declarator, so
     // stop the search at the top-level '=' that starts the initializer.
     u32 name_search_end = declarator_end;
     for (u32 index = name_search_start, depth = 0; index < declarator_end; index += 1)
@@ -14131,7 +14136,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         // `for` is reserved, so a token spelled that way followed by `(` is a for statement wherever
         // it appears; `statement_start` is deliberately not required. It is only set after `;`, `{`
         // and `}`, which misses every `for` that is itself the unbraced body of an enclosing
-        // control statement — `for (...) for (int j = ...) ...` and `if (c) for (int j = ...) ...`.
+        // control statement â `for (...) for (int j = ...) ...` and `if (c) for (int j = ...) ...`.
         if (shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_FOR) && index + 1 < body_end &&
             c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
@@ -16071,7 +16076,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             }
             // The composite of `char pad[]` and `char pad[5]` is the complete
             // array (C11 6.2.7p3): a redeclaration that completes an entity
-            // first declared with an unbounded array adopts its type — later
+            // first declared with an unbounded array adopts its type â later
             // declarations, sizeof, and the symbol's layout all read the
             // entity's type, not the declaration's. A defining redeclaration
             // whose own bound is inferred from its initializer counts too:
