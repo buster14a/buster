@@ -240,12 +240,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_alignment(UnitTestArguments* a
     return result;
 }
 
+// Issue #108 baseline reproduction: file_copy must neither destroy an aliased
+// source nor truncate or partially publish its destination on failure.
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_baseline_108(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 directory = buster_test_temporary_path(arena, S8("file-copy-baseline"), S8(""));
+    if (BUSTER_REQUIRE(arguments, directory.length != 0 && os_directory_delete(directory) && os_make_directory_attempt(directory)))
+    {
+        String8 source = string_format_z(arena, S8("{S8}/source.bin"), directory);
+        String8 content = S8("baseline source bytes that an aliasing copy must keep");
+        String8 aliases[] = {
+            string_format_z(arena, S8("{S8}/./source.bin"), directory),
+            string_format_z(arena, S8("{S8}/hard-link.bin"), directory),
+        };
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(content)));
+        u32 alias_count = 1;
+#if BUSTER_LINUX || BUSTER_MACOS
+        bool linked = link((const char*)source.pointer, (const char*)aliases[1].pointer) == 0;
+        BUSTER_TEST(arguments, linked);
+        if (linked) alias_count = 2;
+#endif
+        for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+        {
+            bool copied = file_copy((CopyFileArguments){.original_path = source, .new_path = aliases[alias_index]});
+            ByteSlice kept = file_read(arena, source, (FileReadOptions){0});
+            arguments->show(arguments, S8("FILE_COPY_BASELINE case=alias index={u32} copied={u32} source_bytes={u64}\n"), alias_index, (u32)copied,
+                            kept.length);
+            BUSTER_TEST(arguments, !copied);
+            BUSTER_TEST(arguments, kept.length == content.length && memory_compare(kept.pointer, content.pointer, content.length));
+        }
+
+        String8 destination = string_format_z(arena, S8("{S8}/destination.bin"), directory);
+        String8 absent = string_format_z(arena, S8("{S8}/absent.bin"), directory);
+        String8 old_content = S8("old destination bytes that a failed copy must keep");
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(content)));
+        BUSTER_TEST(arguments, file_write(destination, BUSTER_SLICE_TO_BYTE_SLICE(old_content)));
+        OsFileTestStep write_failure = {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345};
+        os_file_test_begin(destination, &write_failure, 1);
+        bool replaced = file_copy((CopyFileArguments){.original_path = source, .new_path = destination});
+        u32 consumed = os_file_test_end();
+        ByteSlice survivor = file_read(arena, destination, (FileReadOptions){0});
+        arguments->show(arguments, S8("FILE_COPY_BASELINE case=existing-write-failure copied={u32} consumed={u32} destination_bytes={u64}\n"), (u32)replaced,
+                        consumed, survivor.length);
+        BUSTER_TEST(arguments, !replaced && consumed == 1);
+        BUSTER_TEST(arguments, survivor.length == old_content.length && memory_compare(survivor.pointer, old_content.pointer, old_content.length));
+
+        os_file_test_begin(absent, &write_failure, 1);
+        bool published = file_copy((CopyFileArguments){.original_path = source, .new_path = absent});
+        consumed = os_file_test_end();
+        OsFileOpenResult partial = os_file_open_checked(absent, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        arguments->show(arguments, S8("FILE_COPY_BASELINE case=absent-write-failure copied={u32} consumed={u32} destination_exists={u32}\n"), (u32)published,
+                        consumed, (u32)(partial.file != 0));
+        BUSTER_TEST(arguments, !published && consumed == 1);
+        BUSTER_TEST(arguments, partial.file == 0);
+        if (partial.file) BUSTER_TEST(arguments, os_file_close(partial.file));
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+    return result;
+}
+
 UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, file_test_write_failures);
     BUSTER_TEST_FIXTURE(arguments, file_test_read_failures);
     BUSTER_TEST_FIXTURE(arguments, file_test_read_alignment);
+    BUSTER_TEST_FIXTURE(arguments, file_test_copy_baseline_108);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("file-test-source"), S8(".bin"));
     String8 destination_path = buster_test_temporary_path(arguments->arena, S8("file-test-destination"), S8(".bin"));
