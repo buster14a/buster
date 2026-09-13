@@ -307,7 +307,7 @@ jobs:
           if ('${{ matrix.sanitizer }}' -eq 'required') {
             $ResourceDir = (& clang.exe -print-resource-dir).Trim()
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $RuntimeDir = Join-Path $ResourceDir '${{ matrix.clang_arch }}-pc-windows-msvc'
+            $RuntimeDir = Join-Path $ResourceDir 'lib\${{ matrix.clang_arch }}-pc-windows-msvc'
             $RuntimeDll = Join-Path $RuntimeDir 'clang_rt.asan_dynamic-${{ matrix.clang_arch }}.dll'
             if (!(Test-Path $RuntimeDll)) {
               throw "Required Clang sanitizer runtime is missing: $RuntimeDll"
