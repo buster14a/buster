@@ -202,11 +202,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_failures(UnitTestArguments* ar
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("file-read-alignment"), S8(".bin"));
+    String8 content = S8("padded alignment read");
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content)));
+
+    u32 start_alignments[] = {0, 16};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(start_alignments); index += 1)
+    {
+        u64 mark = arguments->arena->position;
+        u64 effective_alignment = start_alignments[index] ? start_alignments[index] : 1;
+        FileReadOptions options = {
+            .start_padding = 3,
+            .start_alignment = start_alignments[index],
+            .end_padding = 5,
+            .end_alignment = 8,
+        };
+        ByteSlice bytes = file_read(arguments->arena, path, options);
+        if (BUSTER_REQUIRE(arguments, bytes.pointer != 0 && bytes.length == content.length))
+        {
+            u64 allocation_offset = (u64)(bytes.pointer - options.start_padding - (u8*)arguments->arena);
+            BUSTER_TEST(arguments, allocation_offset == align_forward(mark, effective_alignment));
+            BUSTER_TEST(arguments, memory_compare(bytes.pointer, content.pointer, content.length));
+            bool end_padding_zero = true;
+            for (u32 padding_index = 0; padding_index < options.end_padding; padding_index += 1)
+            {
+                end_padding_zero &= bytes.pointer[bytes.length + padding_index] == 0;
+            }
+            BUSTER_TEST(arguments, end_padding_zero);
+        }
+        arena_set_position(arguments->arena, mark);
+    }
+
+    BUSTER_TEST(arguments, os_file_delete(path));
+    return result;
+}
+
 UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, file_test_write_failures);
     BUSTER_TEST_FIXTURE(arguments, file_test_read_failures);
+    BUSTER_TEST_FIXTURE(arguments, file_test_read_alignment);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("file-test-source"), S8(".bin"));
     String8 destination_path = buster_test_temporary_path(arguments->arena, S8("file-test-destination"), S8(".bin"));

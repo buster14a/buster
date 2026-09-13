@@ -1051,7 +1051,6 @@ Top level:
 | `.forgejo/workflows/ci.yml` | CI pipeline for correctness, sanitizer/fuzz, self-host, and mobile tests. |
 | `PERFORMANCE_AUDITS.md` | Index of the performance audit history, newest first. |
 | `docs/performance-audits/` | One audit per file, named for its id: what was measured, what was fixed, and the reference numbers the next audit starts from. |
-| `lsan.supp` | LeakSanitizer suppressions. |
 | `build/` | Generated build output (ninja files, per-config dirs, `compile_commands.json`, `build/build`). Never edit. |
 
 `src/buster/lib/` — foundation modules (each `name.c` + `name.h`):

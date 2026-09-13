@@ -12,6 +12,7 @@
 #include <buster/lib/compiler/gpu/gpu.h>
 
 #include <buster/lib/arena.h>
+#include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -748,8 +749,9 @@ BUSTER_GLOBAL_LOCAL String8 gpu_path_without_extension(String8 path);
 
 BUSTER_GLOBAL_LOCAL GpuArgumentBuilder gpu_arguments_begin(Arena* arena, GpuPipelineOptions options, u32 additional_capacity)
 {
-    u64 capacity = 48 + (u64)options.include_path_count * 2 + (u64)options.system_include_path_count * 2 + options.definition_count +
-                   options.undefinition_count + options.extra_argument_count + additional_capacity;
+    u64 macro_count = options.macro_operation_count ? options.macro_operation_count : (u64)options.definition_count + options.undefinition_count;
+    u64 capacity = 48 + (u64)options.include_path_count * 2 + (u64)options.system_include_path_count * 2 + macro_count +
+                   options.extra_argument_count + additional_capacity;
     if (capacity > UINT32_MAX)
     {
         return (GpuArgumentBuilder){.overflow = true};
@@ -768,6 +770,35 @@ BUSTER_GLOBAL_LOCAL void gpu_argument_append(GpuArgumentBuilder* builder, String
         return;
     }
     builder->arguments[builder->count++] = argument;
+}
+
+BUSTER_GLOBAL_LOCAL void gpu_append_macro_operations(GpuArgumentBuilder* arguments, Arena* arena, GpuPipelineOptions options)
+{
+    if (options.macro_operation_count)
+    {
+        for (u32 operation_index = 0; operation_index < options.macro_operation_count; operation_index += 1)
+        {
+            CPreprocessorOperation operation = options.macro_operations[operation_index];
+            String8 prefix = operation.kind == C_PREPROCESSOR_OPERATION_DEFINE   ? S8("-D")
+                           : operation.kind == C_PREPROCESSOR_OPERATION_UNDEFINE ? S8("-U")
+                                                                                 : (String8){0};
+            if (prefix.length)
+            {
+                gpu_argument_append(arguments, string_format(arena, S8("{S8}{S8}"), prefix, operation.operand));
+            }
+        }
+    }
+    else
+    {
+        for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
+        {
+            gpu_argument_append(arguments, string_format(arena, S8("-D{S8}"), options.definitions[definition_index]));
+        }
+        for (u32 undefinition_index = 0; undefinition_index < options.undefinition_count; undefinition_index += 1)
+        {
+            gpu_argument_append(arguments, string_format(arena, S8("-U{S8}"), options.undefinitions[undefinition_index]));
+        }
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void gpu_plan_error(GpuPlanBuilder* builder, GpuPipelineError error, String8 diagnostic)
@@ -1002,14 +1033,7 @@ BUSTER_GLOBAL_LOCAL void gpu_append_clang_common(GpuArgumentBuilder* arguments, 
         gpu_argument_append(arguments, S8("-isystem"));
         gpu_argument_append(arguments, options.system_include_paths[include_index]);
     }
-    for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
-    {
-        gpu_argument_append(arguments, string_format(arena, S8("-D{S8}"), options.definitions[definition_index]));
-    }
-    for (u32 undefinition_index = 0; undefinition_index < options.undefinition_count; undefinition_index += 1)
-    {
-        gpu_argument_append(arguments, string_format(arena, S8("-U{S8}"), options.undefinitions[undefinition_index]));
-    }
+    gpu_append_macro_operations(arguments, arena, options);
     for (u32 argument_index = 0; argument_index < options.extra_argument_count; argument_index += 1)
     {
         gpu_argument_append(arguments, options.extra_arguments[argument_index]);
@@ -1596,14 +1620,7 @@ BUSTER_GLOBAL_LOCAL void gpu_append_metal_common(GpuArgumentBuilder* arguments, 
         gpu_argument_append(arguments, S8("-isystem"));
         gpu_argument_append(arguments, options.system_include_paths[include_index]);
     }
-    for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
-    {
-        gpu_argument_append(arguments, string_format(arena, S8("-D{S8}"), options.definitions[definition_index]));
-    }
-    for (u32 undefinition_index = 0; undefinition_index < options.undefinition_count; undefinition_index += 1)
-    {
-        gpu_argument_append(arguments, string_format(arena, S8("-U{S8}"), options.undefinitions[undefinition_index]));
-    }
+    gpu_append_macro_operations(arguments, arena, options);
     for (u32 argument_index = 0; argument_index < options.extra_argument_count; argument_index += 1)
     {
         gpu_argument_append(arguments, options.extra_arguments[argument_index]);
@@ -1759,14 +1776,7 @@ BUSTER_GLOBAL_LOCAL void gpu_append_dxc_common(GpuArgumentBuilder* arguments, Ar
         gpu_argument_append(arguments, S8("-I"));
         gpu_argument_append(arguments, options.system_include_paths[include_index]);
     }
-    for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
-    {
-        gpu_argument_append(arguments, string_format(arena, S8("-D{S8}"), options.definitions[definition_index]));
-    }
-    for (u32 undefinition_index = 0; undefinition_index < options.undefinition_count; undefinition_index += 1)
-    {
-        gpu_argument_append(arguments, string_format(arena, S8("-U{S8}"), options.undefinitions[undefinition_index]));
-    }
+    gpu_append_macro_operations(arguments, arena, options);
     for (u32 argument_index = 0; argument_index < options.extra_argument_count; argument_index += 1)
     {
         gpu_argument_append(arguments, options.extra_arguments[argument_index]);
