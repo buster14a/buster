@@ -1,0 +1,60 @@
+name: Native retirement history
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-retirement-history.yml
+      - tools/native_retirement_inventory.py
+      - tests/native_retirement_inventory_test.py
+      - docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json
+      - docs/performance-audits/evidence/2026-09-12-retirement/HISTORY.md
+  workflow_dispatch:
+
+concurrency:
+  group: native-retirement-history-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  history:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Original identities and durable history bytes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out submitted history gate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      # Reuse the archive owner's helper without copying or changing its active work.
+      - name: Check out pinned existing archive helper
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: buster14a/buster
+          ref: b1ef825124b6bda13217b6fde62eae03f4f189a3
+          path: .archive-helper
+          persist-credentials: false
+      - name: Run offline original-identity regressions
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.archive-helper/tools
+        run: python3 tests/native_retirement_inventory_test.py -v
+      - name: Independently download and check the durable history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: ${{ github.workspace }}/.archive-helper/tools
+        run: >-
+          python3 tools/native_retirement_inventory.py
+          --catalog docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json
+          --output "${{ runner.temp }}/retirement-history"
+      - name: Retain actual metadata and unsuccessful outcomes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: retirement-history-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/retirement-history
+          retention-days: 7
+          if-no-files-found: error
