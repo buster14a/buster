@@ -7238,7 +7238,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 u32 call_push_count = 0;
                 for (u32 physical_register = 0; physical_register < machine_target_x86_64()->register_count; physical_register += 1)
                 {
-                    call_push_count += (call_placement.callee_saved_mask >> physical_register) & 1u;
+                    call_push_count += (u32)((call_placement.callee_saved_mask >> physical_register) & 1u);
                 }
                 BUSTER_TEST(arguments, call_placement.valid && (call_placement.callee_saved_mask & rbx_mask) &&
                                                (call_placement.frame_size + 8 * call_push_count) % 16 == 0);
