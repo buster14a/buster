@@ -3,7 +3,10 @@
 // token selection, expansion interactions, and diagnostic source attribution.
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/file.h>
+#include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
@@ -111,6 +114,58 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         }
         scratch_end(temporary);
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 runtime_source = S8("#define ENABLED 1\n"
+                                "#define SELECT(x) x\n"
+                                "#define VALUES(...) __VA_ARGS__\n"
+                                "int main(void)\n"
+                                "{\n"
+                                "    int effects = 0;\n"
+                                "    int values[] = {VALUES(\n"
+                                "#if ENABLED\n"
+                                "        3, (4 + 5),\n"
+                                "#else\n"
+                                "        90, ), ((\n"
+                                "#endif\n"
+                                "        6)};\n"
+                                "    SELECT(\n"
+                                "#if ENABLED\n"
+                                "        effects += 1;\n"
+                                "#else\n"
+                                "        effects += 100;\n"
+                                "#endif\n"
+                                "    )\n"
+                                "    return effects != 1 || sizeof(values) / sizeof(values[0]) != 3 ||\n"
+                                "           values[0] != 3 || values[1] != 9 || values[2] != 6;\n"
+                                "}\n");
+    String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(frontend_flags); frontend_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source_path = buster_test_temporary_path(temporary.arena, S8("buster-c-macro-conditional"), S8(".c"));
+        String8 output_path = buster_test_temporary_path(temporary.arena, S8("buster-c-macro-conditional"), S8(""));
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source)));
+        String8 command[] = {
+            S8("-nostdinc"), frontend_flags[frontend_index], S8("-o"), output_path, source_path,
+        };
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {output_path};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
     return result;
 }
 #endif
