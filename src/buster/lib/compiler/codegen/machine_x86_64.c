@@ -4978,7 +4978,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         u32 preserved_vector_count = 0;
         for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
         {
-            preserved_vector_count += (preserved_vector_mask >> vector_register) & 1u;
+            preserved_vector_count += ((u32)preserved_vector_mask >> vector_register) & 1u;
         }
         u32 preserved_vector_slot = preserved_vector_count ? machine_x64_append_slot(selector, 16u * preserved_vector_count, 16) : UINT32_MAX;
         u32 first_operand = selector->inline_assembly_operands.total_count;
@@ -5074,13 +5074,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_assembly_identity(MachineX64Selector
     // tied-input permutation must not become sequential stores to locals.
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
-        if ((plan.matching_inputs >> index) & 1u)
+        if (((u32)plan.matching_inputs >> index) & 1u)
         {
             continue;
         }
         IrValueId source = instruction->operands[plan.source_operands[index]];
         u32 source_register;
-        if ((plan.read_write >> index) & 1u)
+        if (((u32)plan.read_write >> index) & 1u)
         {
             source_register = machine_x64_synthesize_register(selector);
             IrInstruction load = {.opcode = IR_OPCODE_LOAD, .canonical_type = selector->function->values[source.value].canonical_type,
@@ -5103,7 +5103,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_assembly_identity(MachineX64Selector
     }
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
-        if ((plan.outputs >> index) & 1u)
+        if (((u32)plan.outputs >> index) & 1u)
         {
             IrValueId place = instruction->operands[index];
             selected = machine_x64_select_scalar_store(selector, place, selector->place_kinds[place.value], plan.sizes[index],
@@ -10526,9 +10526,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prove(u32 template_id, Machi
                  probe_encoder->count == record->byte_count;
     for (u32 byte_index = 0; valid && byte_index < record->byte_count; byte_index += 1)
     {
-        u8 expected = byte_index >= record->patch_offset
-                          ? (u8)(probe_value >> ((byte_index - record->patch_offset) * 8u))
-                          : record->bytes[byte_index];
+        u8 expected = (u8)(byte_index >= record->patch_offset ? probe_value >> ((byte_index - record->patch_offset) * 8u) : record->bytes[byte_index]);
         valid = probe_encoder->bytes[byte_index] == expected;
     }
     if (record->valid && !valid) machine_x64_fixed_template_invalid_count += 1;
@@ -10906,9 +10904,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             u32 immediate_offset = emitted.byte_count - immediate_width;
             for (u32 byte_index = 0; byte_index < emitted.byte_count; byte_index += 1)
             {
-                u8 expected = byte_index >= immediate_offset
-                                  ? (u8)(probe_value >> ((byte_index - immediate_offset) * 8u))
-                                  : encoding->bytes[byte_index];
+                u8 expected = (u8)(byte_index >= immediate_offset ? probe_value >> ((byte_index - immediate_offset) * 8u) : encoding->bytes[byte_index]);
                 if (probe_bytes[byte_index] != expected) return 0;
             }
         }
@@ -10931,9 +10927,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             u32 displacement_offset = emitted.byte_count - (u32)sizeof(u32);
             for (u32 byte_index = 0; byte_index < emitted.byte_count; byte_index += 1)
             {
-                u8 expected = byte_index >= displacement_offset
-                                  ? (u8)(probe_value >> ((byte_index - displacement_offset) * 8u))
-                                  : encoding->bytes[byte_index];
+                u8 expected = (u8)(byte_index >= displacement_offset ? probe_value >> ((byte_index - displacement_offset) * 8u) : encoding->bytes[byte_index]);
                 if (probe_bytes[byte_index] != expected) return 0;
             }
         }
@@ -11080,9 +11074,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_variable_memory_encoding_table(
                 u32 probe_value = (u32)probe_displacements[displacement_class];
                 for (u32 byte_index = 0; byte_index < emitted.byte_count; byte_index += 1)
                 {
-                    u8 expected = byte_index >= patch_offset
-                                      ? (u8)(probe_value >> ((byte_index - patch_offset) * 8u))
-                                      : encoding->bytes[byte_index];
+                    u8 expected = (u8)(byte_index >= patch_offset ? probe_value >> ((byte_index - patch_offset) * 8u) : encoding->bytes[byte_index]);
                     if (probe_bytes[byte_index] != expected) return 0;
                 }
             }
@@ -11290,7 +11282,7 @@ MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
         {
             result.exact_rows += 1;
             bool variants_in_range = entry->variant_count > 0 && entry->variant_count <= 16;
-            u16 expected_mask = variants_in_range ? (u16)((1u << entry->variant_count) - 1u) : 0;
+            u16 expected_mask = (u16)(variants_in_range ? (1u << entry->variant_count) - 1u : 0u);
             bool variants_valid = variants_in_range && entry->variant_valid_mask == expected_mask;
             bool exact_row_valid = entry->exact_required && entry->plan_valid && variants_valid;
             if (is_exact_sequence)
@@ -14282,7 +14274,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             u32 preserved_vector_count = 0;
             for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
             {
-                preserved_vector_count += (preserved_vector_mask >> vector_register) & 1u;
+                preserved_vector_count += ((u32)preserved_vector_mask >> vector_register) & 1u;
             }
             capacity64 += assembly->bytes.length +
                           paths * ((u64)assembly->operand_count * 24u + (u64)preserved_vector_count * 24u + 16u);
@@ -14632,7 +14624,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 u32 push_count = 0;
                                 for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
                                 {
-                                    push_count += (placement->callee_saved_mask >> push_register) & 1u;
+                                    push_count += (u32)((placement->callee_saved_mask >> push_register) & 1u);
                                 }
                                 // System V retains its frame-relative restore.
                                 s64 frame_displacement = -(s64)(8u * push_count);

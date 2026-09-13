@@ -9790,8 +9790,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 scheduled_saved_registers = 0;
                         for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
                         {
-                            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
-                            scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
+                            placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
+                            scheduled_saved_registers += (u32)((scheduled_placement.callee_saved_mask >> physical_register) & 1u);
                         }
                         if (scheduled_placement.valid &&
                             scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
@@ -9855,7 +9855,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u32 machine_saved_register_count = 0;
                             for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                             {
-                                machine_saved_register_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                                machine_saved_register_count += (u32)((placement.callee_saved_mask >> saved_register) & 1u);
                             }
                             u32 machine_frame_total = placement.frame_size + 16u + 8u * machine_saved_register_count;
                             u32 machine_frame_chunks = machine_frame_total / A64_SP_ADJUST_CHUNK +
@@ -9881,7 +9881,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_push_count = 0;
                         for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                         {
-                            machine_push_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                            machine_push_count += (u32)((placement.callee_saved_mask >> saved_register) & 1u);
                         }
                         u32 machine_frame_area = placement.frame_size + 8 * machine_push_count;
                         bool machine_windows_frame = selected.function.windows_aarch64_frame;
