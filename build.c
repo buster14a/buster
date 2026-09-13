@@ -20708,7 +20708,10 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
     }
     if (prebuild_trampoline)
     {
-        *trampoline_built_out = true;
+        if (trampoline_built_out)
+        {
+            *trampoline_built_out = true;
+        }
         string_print(S8("CPYTHON_UNIT tree={S8} unit=Python/perf_jit_trampoline.o compiler=buster status=pass\n"), label);
     }
     String8 make = executable_resolve_in_path(arena, S8("make"));
