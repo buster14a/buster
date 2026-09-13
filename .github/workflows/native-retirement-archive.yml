@@ -75,11 +75,21 @@ jobs:
           VALIDATION_ASSET: ${{ matrix.validation_asset }}
           CANDIDATE_ASSET: ${{ matrix.candidate_asset }}
         run: |
-          mkdir "$RUNNER_TEMP/release-assets"
-          gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/release-assets" \
-            --pattern archive-manifest.json --pattern SHA256SUMS \
-            --pattern "$CENSUS_ASSET" --pattern "$VALIDATION_ASSET" \
-            --pattern "$CANDIDATE_ASSET" --pattern buster-direct-oracle-source-3e912a3.tar.gz
+          for attempt in 1 2 3; do
+            attempt_dir="$RUNNER_TEMP/release-assets-$attempt"
+            mkdir "$attempt_dir"
+            if gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$attempt_dir" \
+              --pattern archive-manifest.json --pattern SHA256SUMS \
+              --pattern "$CENSUS_ASSET" --pattern "$VALIDATION_ASSET" \
+              --pattern "$CANDIDATE_ASSET" --pattern buster-direct-oracle-source-3e912a3.tar.gz; then
+              mv "$attempt_dir" "$RUNNER_TEMP/release-assets"
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Verify destination bytes and extract census
         run: |
           python3 validation/tools/native_retirement_archive.py verify-census \
@@ -161,10 +171,20 @@ jobs:
           CANDIDATE_ASSET: ${{ matrix.candidate_asset }}
           STRICT_PATTERN: ${{ matrix.strict_pattern }}
         run: |
-          mkdir "$RUNNER_TEMP/release-assets"
-          gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/release-assets" \
-            --pattern archive-manifest.json --pattern SHA256SUMS \
-            --pattern "$STRICT_PATTERN" --pattern "$CANDIDATE_ASSET"
+          for attempt in 1 2 3; do
+            attempt_dir="$RUNNER_TEMP/release-assets-$attempt"
+            mkdir "$attempt_dir"
+            if gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$attempt_dir" \
+              --pattern archive-manifest.json --pattern SHA256SUMS \
+              --pattern "$STRICT_PATTERN" --pattern "$CANDIDATE_ASSET"; then
+              mv "$attempt_dir" "$RUNNER_TEMP/release-assets"
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Reconstruct and verify strict destination bytes
         run: |
           python3 validation/tools/native_retirement_archive.py verify-strict \

@@ -69,6 +69,9 @@ clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g \
   --out "$GITHUB_WORKSPACE/evidence/strict-differential"
 ```
 
+Release downloads are retried three times from a clean destination so a
+transient GitHub Releases response cannot leave a partial archive behind.
+
 The independent history gate runs no compiler and checks every durable copy
 directly against the frozen original Actions ZIP identity:
 
@@ -108,6 +111,20 @@ Failed repair attempts remain visible in Actions runs 34727739903, 34728409857,
 and 34729266820. They respectively record a receipt-publication mistake, an
 incorrect nested workspace, and replay against the wrong source checkout; none
 is relabeled as successful evidence.
+
+Pull-request run
+[34732963376](https://github.com/buster14a/buster/actions/runs/34732963376)
+then exposed two replay-harness reliability defects: GitHub Releases returned a
+transient HTTP 500 for one census asset, and the serial `eb1bef2` differential
+replay reached the 120-minute job limit. The final workflow retries release
+downloads from an empty destination.
+
+A four-worker retry in
+[34737929986](https://github.com/buster14a/buster/actions/runs/34737929986)
+finished promptly but made every archived compiler invocation terminate by
+signal (`signature=101`). The older compiler is therefore replayed only through
+the proven serial path; the concurrency experiment is preserved as a failed
+negative control.
 
 The final history gate subsequently detected two archives created by later
 #504 run 34731220185. CI transfer run
