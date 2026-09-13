@@ -682,6 +682,13 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
 #if BUSTER_LINUX
     if (host && !object_only) { argv[count++] = S8("-no-pie"); }
 #endif
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64
+    // The Arm64 UCRT does not export the legacy direct printf symbol used by
+    // the headerless observables and generated-source corpus. Keep those exact
+    // sources and link Microsoft's compatibility definitions into the
+    // independent Clang oracle instead of pruning the cases on this host.
+    if (host && !object_only && !test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }
+#endif
     argv[count++] = S8("-o");
     argv[count++] = object_only ? object : executable;
     DResult result = {0};
