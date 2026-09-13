@@ -444,20 +444,16 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_weak_alias_symb
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_input_load(ObjectFile* object)
 {
+    bool result = false;
     if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
     {
         ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
-        // Object-reader/disassembly sequence for int numeric_tied_output with an empty asm body:
-        // ldr w9, [x28, #0x18]; str w9, [x28, #0x10].  The adjacent load/store
-        // proves that the tied input reaches the reused output register and is
-        // then published through the output place.  (The frame shrank when
-        // operand lowering stopped pre-loading the place it recovers, which
-        // is what moved the slot from #0x20.)
-        static u8 const tied_sequence[] = {
-            0x89, 0x1b, 0x40, 0xb9,
-            0x89, 0x13, 0x00, 0xb9,
-        };
-        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+        // Empty tied assembly has no template bytes to observe.  Its machine
+        // transaction must instead load a private input image and immediately
+        // publish the same physical register to a distinct frame slot.  Match
+        // that architectural LDR/STR relationship without baking in allocator
+        // frame offsets or choosing W/X width on the observer's behalf.
+        for (u32 symbol_index = 0; symbol_index < object->symbol_count && !result; symbol_index += 1)
         {
             ObjectSymbol* symbol = object->symbols + symbol_index;
             if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || !string_equal(symbol->name, S8("numeric_tied_output")) ||
@@ -466,17 +462,110 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_in
                 continue;
             }
             u64 function_end = symbol->value + symbol->size;
-            for (u64 offset = symbol->value; offset + sizeof(tied_sequence) <= function_end; offset += 4)
+            for (u64 offset = symbol->value; offset + 2u * sizeof(u32) <= function_end && !result; offset += sizeof(u32))
             {
-                if (memcmp(text.pointer + offset, tied_sequence, sizeof(tied_sequence)) == 0)
+                u32 load = 0;
+                u32 store = 0;
+                memcpy(&load, text.pointer + offset, sizeof(load));
+                memcpy(&store, text.pointer + offset + sizeof(load), sizeof(store));
+                bool unsigned_load = (load & UINT32_C(0xbfc00000)) == UINT32_C(0xb9400000);
+                bool unsigned_store = (store & UINT32_C(0xbfc00000)) == UINT32_C(0xb9000000);
+                bool same_register = (load & 31u) == (store & 31u);
+                bool same_width = (load >> 30) == (store >> 30);
+                bool frame_bases = ((load >> 5) & 31u) == 28u && ((store >> 5) & 31u) == 28u;
+                bool distinct_slots = ((load >> 10) & 0xfffu) != ((store >> 10) & 0xfffu);
+                result = unsigned_load && unsigned_store && same_register && same_width && frame_bases && distinct_slots;
+            }
+        }
+    }
+
+    return result;
+}
+
+// Find a paired low-128 MOVDQU frame save/restore for every required Win64 XMM
+// register in one function. Matching the displacement as well as the register
+// keeps an unrelated vector spill from satisfying this object observer.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_inline_xmm_symbol_preserved(
+    ObjectFile* object, String8 name, u16 required_mask)
+{
+    bool result = false;
+    if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
+    {
+        ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, name);
+        if (symbol && symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->section == OBJECT_SECTION_TEXT && symbol->value <= text.length &&
+            symbol->size <= text.length - symbol->value)
+        {
+            u16 saved_mask = 0;
+            u16 restored_mask = 0;
+            s32 save_displacement[16] = {0};
+            u64 save_offset[16] = {0};
+            u64 function_end = symbol->value + symbol->size;
+            for (u64 offset = symbol->value; offset + 5 <= function_end; offset += 1)
+            {
+                u8* bytes = text.pointer + offset;
+                u64 cursor = 0;
+                bool movdqu = bytes[cursor++] == 0xf3;
+                u8 rex = 0;
+                if (movdqu && offset + cursor < function_end && (bytes[cursor] & 0xf0u) == 0x40u)
                 {
-                    return true;
+                    rex = bytes[cursor++];
+                }
+                movdqu = movdqu && offset + cursor + 3 <= function_end && bytes[cursor++] == 0x0f &&
+                          (bytes[cursor] == 0x6f || bytes[cursor] == 0x7f);
+                u8 opcode = movdqu ? bytes[cursor++] : 0;
+                u8 modrm = movdqu ? bytes[cursor++] : 0;
+                u32 mode = modrm >> 6;
+                u32 xmm = ((modrm >> 3) & 7u) | ((rex & 4u) ? 8u : 0u);
+                bool frame = !(rex & 1u) && (modrm & 7u) == 5u && (mode == 1 || mode == 2);
+                u32 displacement_bytes = mode == 1 ? 1u : 4u;
+                if (movdqu && frame && xmm >= 6 && xmm < 16 && offset + cursor + displacement_bytes <= function_end)
+                {
+                    s32 displacement = mode == 1 ? (s32)(s8)bytes[cursor] : 0;
+                    if (mode == 2)
+                    {
+                        memcpy(&displacement, bytes + cursor, sizeof(displacement));
+                    }
+                    u16 bit = (u16)(1u << xmm);
+                    if (opcode == 0x7f && !(saved_mask & bit))
+                    {
+                        saved_mask |= bit;
+                        save_displacement[xmm] = displacement;
+                        save_offset[xmm] = offset;
+                    }
+                    else if (opcode == 0x6f && (saved_mask & bit) && offset > save_offset[xmm] &&
+                             displacement == save_displacement[xmm])
+                    {
+                        restored_mask |= bit;
+                    }
+                }
+            }
+            result = (saved_mask & required_mask) == required_mask && (restored_mask & required_mask) == required_mask;
+            for (u32 left = 6; result && left < 16; left += 1)
+            {
+                for (u32 right = left + 1; result && right < 16; right += 1)
+                {
+                    if ((required_mask & (1u << left)) && (required_mask & (1u << right)))
+                    {
+                        result = save_displacement[left] != save_displacement[right];
+                    }
                 }
             }
         }
     }
 
-    return false;
+    return result;
+}
+
+// The operand pool reaches XMM6/XMM7, while explicit clobbers may name the
+// complete XMM6-XMM15 nonvolatile range. Require both paths in the same object.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_inline_xmm_preserved(ObjectFile* object)
+{
+    bool operands = compiler_driver_test_windows_x64_inline_xmm_symbol_preserved(
+        object, S8("asm_sse_eight_outputs"), (u16)((1u << 6) | (1u << 7)));
+    bool explicit_clobbers = compiler_driver_test_windows_x64_inline_xmm_symbol_preserved(
+        object, S8("asm_sse_explicit_clobbers"), (u16)((1u << 6) | (1u << 15)));
+    return operands && explicit_clobbers;
 }
 
 // Finds one symbol a module-level assembly block put in an object. The
@@ -777,68 +866,6 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_fallthrough_epilog(ByteSlice text, u64 offset, u64 function_end, bool windows)
-{
-    if (offset > function_end)
-    {
-        return false;
-    }
-    u64 remaining = function_end - offset;
-    if (windows)
-    {
-        bool pop_return = remaining >= 2 && text.pointer[offset] == 0x5d && text.pointer[offset + 1] == 0xc3;
-        bool add8_pop_return = remaining >= 6 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x83 &&
-                               text.pointer[offset + 2] == 0xc4 && text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
-        bool add32_pop_return = remaining >= 9 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x81 &&
-                                text.pointer[offset + 2] == 0xc4 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
-        bool lea8_pop_return = remaining >= 6 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
-                               text.pointer[offset + 2] == 0x65 && text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
-        bool lea32_pop_return = remaining >= 9 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
-                                text.pointer[offset + 2] == 0xa5 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
-        return pop_return || add8_pop_return || add32_pop_return || lea8_pop_return || lea32_pop_return;
-    }
-    return remaining >= 2 && text.pointer[offset] == 0xc9 && text.pointer[offset + 1] == 0xc3;
-}
-
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 compiler_driver_test_x64_restore_rbx_size(ByteSlice text, u64 offset, u64 function_end)
-{
-    if (text.pointer && offset <= function_end)
-    {
-        u64 remaining = function_end - offset;
-        // MOV rbx, [rbp+disp8] is the canonical compact form; a large frame
-        // uses the equivalent disp32 form.  Both restore the same callee-saved
-        // register and must be recognized by the semantic edge scan.
-        if (remaining >= 4 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x5d)
-        {
-            return 4;
-        }
-        if (remaining >= 7 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x9d)
-        {
-            return 7;
-        }
-    }
-
-    return 0;
-}
-
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_unconditional_jump(ByteSlice text, u64 offset, u64 function_end)
-{
-    bool result;
-    if (!text.pointer || offset > function_end)
-    {
-        result = false;
-    }
-    else
-    {
-        u64 remaining = function_end - offset;
-        // Canonical metadata may select either the short or near unconditional
-        // branch when the target displacement permits it.
-        result = (remaining >= 2 && text.pointer[offset] == 0xeb) || (remaining >= 5 && text.pointer[offset] == 0xe9);
-    }
-
-    return result;
-}
-
 #endif
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile* object)
@@ -870,6 +897,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
     u64 function_end = function->value + function->size;
     bool found_save = false;
     bool found_restore = false;
+    bool found_push = false;
+    bool found_pop = false;
     s32 save_displacement = 0;
     s32 restore_displacement = 0;
     // The canonical encoder uses the compact disp8 form whenever the frame
@@ -879,6 +908,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
     for (u64 offset = function->value; offset < function_end;)
     {
         u64 next_offset = offset + 1;
+        found_push |= offset - function->value < 32 && text.pointer[offset] == 0x53;
+        found_pop |= text.pointer[offset] == 0x5b;
         if (offset + 3 <= function_end && text.pointer[offset] == 0x48 &&
             (text.pointer[offset + 1] == 0x89 || text.pointer[offset + 1] == 0x8b))
         {
@@ -918,7 +949,9 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
         }
         offset = next_offset;
     }
-    if (!found_save || !found_restore || save_displacement != restore_displacement || save_displacement < 0)
+    bool frame_pair = found_save && found_restore && save_displacement == restore_displacement && save_displacement >= 0;
+    bool stack_pair = found_push && found_pop;
+    if (!frame_pair && !stack_pair)
     {
         return false;
     }
@@ -967,6 +1000,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
         u8 information = unwind >> 4;
         if (operation == 0 || operation == 3)
         {
+            found_rbx_unwind |= operation == 0 && information == 3;
             code_index += 1;
         }
         else if (operation == 1 && information == 0)
@@ -1036,7 +1070,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
             code_index += 1;
         }
     }
-    return found_rbx_unwind && frame_size != 0 && (u64)save_displacement + 8 <= frame_size;
+    return found_rbx_unwind && frame_size != 0 && (stack_pair || (u64)save_displacement + 8 <= frame_size);
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_label_relocations(ObjectFile* object, u32* count_out)
@@ -2767,6 +2801,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         {.path = S8("tests/basic_c_inline_hints.c")},
         {.path = S8("tests/basic_c_asm_identity.c")},
         {.path = S8("tests/basic_c_asm_goto_identity.c")},
+        {.path = S8("tests/basic_c_asm_goto_range.c")},
+        {.path = S8("tests/basic_c_asm.c")},
+        {.path = S8("tests/basic_c_cleanup.c")},
+        {.path = S8("tests/basic_c_labels.c")},
         {.path = S8("tests/basic_c_statement_expression_value.c"), .variadic_definitions = 1},
     };
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
@@ -7658,6 +7696,47 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(c_shape_temporary);
     }
+    // asm-goto behavior is a strict MIR acceptance gate, not merely one
+    // default-allocator smoke run. Every successor (including fallthrough and
+    // multiple taken labels) is observed by the fixture's result checks.
+    String8 asm_goto_modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+                                S8("-fregister-allocator=quality")};
+    String8 asm_goto_frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 asm_goto_fixtures[] = {
+        S8("tests/basic_c_asm_goto_identity.c"),
+#if BUSTER_CPU_ARCH_AARCH64
+        S8("tests/basic_c_asm_goto_range.c"),
+#endif
+    };
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(asm_goto_fixtures); fixture += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(asm_goto_modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(asm_goto_frontends); frontend += 1)
+            {
+                TemporalArena asm_goto_temporary = scratch_begin(&arguments->arena, 1);
+                String8 asm_goto_path = buster_test_temporary_path(asm_goto_temporary.arena, S8("buster-c-asm-goto-strict"),
+#if BUSTER_WINDOWS
+                                                                    string_format(asm_goto_temporary.arena, S8("-{u32}-{u32}-{u32}.exe"),
+                                                                                  fixture, mode, frontend));
+#else
+                                                                    string_format(asm_goto_temporary.arena, S8("-{u32}-{u32}-{u32}"),
+                                                                                  fixture, mode, frontend));
+#endif
+                String8 asm_goto_command[] = {asm_goto_modes[mode], asm_goto_frontends[frontend], S8("-fno-machine-fallback"),
+                                              S8("-fverify-codegen"), S8("-o"), asm_goto_path, asm_goto_fixtures[fixture]};
+                CompilerDriverResult asm_goto = compiler_driver_execute_invocation(
+                    asm_goto_temporary.arena,
+                    compiler_driver_parse_arguments(asm_goto_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_goto_command)));
+                BUSTER_TEST_RAW(arguments, asm_goto.error == COMPILER_DRIVER_ERROR_NONE, asm_goto.diagnostic);
+                if (asm_goto.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(asm_goto_temporary.arena, asm_goto_path));
+                }
+                scratch_end(asm_goto_temporary);
+            }
+        }
+    }
     // The <float.h> predefine vocabulary, pinned as static initializers and
     // compared against literal spellings so a predefine folding to the wrong
     // bits fails at run time rather than compiling quietly.
@@ -8478,13 +8557,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     memcpy(&movk32, long_text.pointer + byte_offset + 12, sizeof(movk32));
                     memcpy(&movk48, long_text.pointer + byte_offset + 16, sizeof(movk48));
                     memcpy(&add, long_text.pointer + byte_offset + 20, sizeof(add));
-                    bool is_adr_x9 = adr == UINT32_C(0x10000009);
-                    bool is_movz_x10 = (movz & UINT32_C(0xffe0001f)) == UINT32_C(0xd280000a);
-                    bool is_movk16_x10 = (movk16 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2a0000a);
-                    bool is_movk32_x10 = (movk32 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2c0000a);
-                    bool is_movk48_x10 = (movk48 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2e0000a);
-                    bool is_add_x9_x9_x10 = add == UINT32_C(0x8b0a0129);
-                    long_label_sequence |= is_adr_x9 && is_movz_x10 && is_movk16_x10 && is_movk32_x10 && is_movk48_x10 && is_add_x9_x9_x10;
+                    u32 address_register = adr & 31u;
+                    u32 offset_register = movz & 31u;
+                    bool is_adr = (adr & UINT32_C(0x9f000000)) == UINT32_C(0x10000000);
+                    bool is_movz = (movz & UINT32_C(0xffe00000)) == UINT32_C(0xd2800000);
+                    bool is_movk16 = (movk16 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2a00000) | offset_register);
+                    bool is_movk32 = (movk32 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2c00000) | offset_register);
+                    bool is_movk48 = (movk48 & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2e00000) | offset_register);
+                    bool is_add = (add & UINT32_C(0xffe0fc00)) == UINT32_C(0x8b000000) &&
+                                  (add & 31u) == address_register && ((add >> 5) & 31u) == address_register &&
+                                  ((add >> 16) & 31u) == offset_register;
+                    long_label_sequence |= is_adr && is_movz && address_register != offset_register &&
+                                           is_movk16 && is_movk32 && is_movk48 && is_add;
                 }
             }
         }
@@ -8515,43 +8599,60 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, label_artifact.error == OBJECT_ERROR_NONE);
         ObjectFile label_roundtrip = object_read(arguments->arena, label_artifact.bytes, c_labels_object.object.target);
         BUSTER_TEST(arguments, compiler_driver_test_label_relocations_roundtrip(&c_labels_object.object, &label_roundtrip));
-#if BUSTER_CPU_ARCH_X86_64
-        u64 function_offset = 0;
-        u64 function_size = 0;
-        bool function_found = false;
-        for (u32 symbol_index = 0; symbol_index < c_labels_object.object.symbol_count; symbol_index += 1)
-        {
-            ObjectSymbol* symbol = c_labels_object.object.symbols + symbol_index;
-            if (string_equal(symbol->name, S8("asm_goto_saved_register")) && symbol->section == OBJECT_SECTION_TEXT)
-            {
-                function_offset = symbol->value;
-                function_size = symbol->size;
-                function_found = true;
-                break;
-            }
-        }
-        BUSTER_TEST(arguments, function_found && function_offset <= text.length && function_size <= text.length - function_offset);
-        bool restored_before_taken_edge = false;
-        bool restored_before_fallthrough = false;
-        bool windows_target = c_labels_object.object.target.os == OPERATING_SYSTEM_WINDOWS;
-        if (function_found && function_offset <= text.length && function_size <= text.length - function_offset)
-        {
-            for (u64 byte_index = function_offset; byte_index < function_offset + function_size; byte_index += 1)
-            {
-                u64 function_end = function_offset + function_size;
-                u32 restore_size = compiler_driver_test_x64_restore_rbx_size(text, byte_index, function_end);
-                if (restore_size)
-                {
-                    u64 after_restore = byte_index + restore_size;
-                    restored_before_taken_edge |= compiler_driver_test_x64_unconditional_jump(text, after_restore, function_end);
-                    restored_before_fallthrough |= compiler_driver_test_x64_fallthrough_epilog(text, after_restore, function_end, windows_target);
-                }
-            }
-        }
-        BUSTER_TEST(arguments, restored_before_taken_edge);
-        BUSTER_TEST(arguments, restored_before_fallthrough);
-#endif
     }
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("asm_goto_short_branch_range"), false);
+    String8 asm_goto_range_path = buster_test_temporary_path(arguments->arena, S8("buster-c-asm-goto-range"), S8(".o"));
+    String8 asm_goto_range_command_line[] = {
+        S8("-c"), S8("-g0"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fregister-allocator=mir-stack"),
+        S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), asm_goto_range_path, S8("tests/basic_c_asm_goto_range.c"),
+    };
+    CompilerDriverResult asm_goto_range = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_goto_range_command_line)));
+    BUSTER_TEST(arguments, asm_goto_range.error == COMPILER_DRIVER_ERROR_NONE && asm_goto_range.has_object);
+    bool asm_goto_range_expanded = false;
+    if (asm_goto_range.has_object)
+    {
+        ByteSlice text = asm_goto_range.object.sections[OBJECT_SECTION_TEXT].data;
+        for (u32 symbol_index = 0; !asm_goto_range_expanded && symbol_index < asm_goto_range.object.symbol_count; symbol_index += 1)
+        {
+            ObjectSymbol* symbol = asm_goto_range.object.symbols + symbol_index;
+            if (!string_equal(symbol->name, S8("asm_goto_test_range")) || symbol->section != OBJECT_SECTION_TEXT ||
+                symbol->value > text.length || symbol->size > text.length - symbol->value)
+            {
+                continue;
+            }
+            u64 function_end = symbol->value + symbol->size;
+            for (u64 offset = symbol->value + sizeof(u32); !asm_goto_range_expanded && offset + 4u * sizeof(u32) <= function_end;
+                 offset += sizeof(u32))
+            {
+                u32 forward_internal = 0;
+                u32 inverse_test = 0;
+                u32 long_branch = 0;
+                u32 backward_internal = 0;
+                memcpy(&forward_internal, text.pointer + offset - sizeof(u32), sizeof(forward_internal));
+                memcpy(&inverse_test, text.pointer + offset, sizeof(inverse_test));
+                memcpy(&long_branch, text.pointer + offset + sizeof(u32), sizeof(long_branch));
+                memcpy(&backward_internal, text.pointer + offset + 3u * sizeof(u32), sizeof(backward_internal));
+                bool skip = (inverse_test & UINT32_C(0x7f000000)) == UINT32_C(0x37000000) &&
+                            ((inverse_test >> 5) & UINT32_C(0x3fff)) == 2u;
+                bool branch = (long_branch & UINT32_C(0xfc000000)) == UINT32_C(0x14000000);
+                s64 displacement = (s64)((s32)((long_branch & UINT32_C(0x03ffffff)) << 6) >> 4);
+                s64 target = (s64)(offset + sizeof(u32)) + displacement;
+                s64 forward_displacement = (s64)((s32)((forward_internal & UINT32_C(0x03ffffff)) << 6) >> 4);
+                s64 forward_target = (s64)(offset - sizeof(u32)) + forward_displacement;
+                s64 backward_displacement = (s64)((s32)((backward_internal & UINT32_C(0x03ffffff)) << 6) >> 4);
+                s64 backward_target = (s64)(offset + 3u * sizeof(u32)) + backward_displacement;
+                bool internal_labels = (forward_internal & UINT32_C(0xfc000000)) == UINT32_C(0x14000000) &&
+                                       (backward_internal & UINT32_C(0xfc000000)) == UINT32_C(0x14000000) &&
+                                       forward_target == (s64)(offset + 3u * sizeof(u32)) &&
+                                       backward_target == (s64)(offset - 2u * sizeof(u32));
+                asm_goto_range_expanded = skip && branch && internal_labels && target >= (s64)symbol->value &&
+                                          target < (s64)function_end && target - (s64)offset > INT32_C(0x7ffc);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, asm_goto_range_expanded);
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("invalid_asm_jump_path"), false);
     String8 invalid_asm_jump_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-jump"), S8(".o"));
@@ -8571,7 +8672,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         String8 unsupported_template_source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".c"));
         String8 unsupported_template_source = S8("int conditional_asm_goto(int value) {"
-                                                 " __asm__ goto (\"jne %l1\" : : \"r\"(value) : \"cc\" : taken);"
+                                                 " __asm__ goto (\"test %0, %0\\njne %l1\" : : \"r\"(value) : \"cc\" : taken);"
                                                  " return 0; taken: return 1; }\n");
         BUSTER_TEST(arguments, file_write(unsupported_template_source_path, BUSTER_SLICE_TO_BYTE_SLICE(unsupported_template_source)));
         String8 unsupported_template_object_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".o"));
@@ -8580,27 +8681,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         CompilerDriverResult unsupported_template = compiler_driver_execute_invocation(
             arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_template_command_line)));
-        BUSTER_TEST(arguments, unsupported_template.error == COMPILER_DRIVER_ERROR_CODEGEN);
-        BUSTER_TEST(arguments, unsupported_template.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+        BUSTER_TEST(arguments, unsupported_template.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, unsupported_template.tokenizer_error_count == 0 && unsupported_template.parser_diagnostic_count == 0 &&
                                unsupported_template.analysis_diagnostic_count == 0);
-        BUSTER_TEST(arguments, string_first_sequence(unsupported_template.diagnostic,
-            S8("inline assembly label references (%l) are unsupported in this template form")) != BUSTER_STRING_NO_MATCH);
-        BUSTER_TEST(arguments, unsupported_template.diagnostic_count == 1);
-        if (unsupported_template.diagnostic_count == 1)
+        BUSTER_TEST(arguments, unsupported_template.has_object && unsupported_template.diagnostic_count == 0);
+    }
+    {
+        struct
         {
-            CompilerDiagnostic diagnostic = unsupported_template.diagnostics[0];
-            BUSTER_TEST(arguments, string_equal(diagnostic.code, S8("codegen.unsupported-instruction")));
-            BUSTER_TEST(arguments, diagnostic.backend != 0 && diagnostic.primary.has_range);
-            if (diagnostic.backend)
-            {
-                BUSTER_TEST(arguments, string_equal(diagnostic.backend->opcode, S8("inline-assembly")));
-                BUSTER_TEST(arguments, string_equal(diagnostic.backend->operation, S8("not-applicable")));
-                BUSTER_TEST(arguments, string_equal(diagnostic.backend->function, S8("conditional_asm_goto")));
-                BUSTER_TEST(arguments, diagnostic.backend->opcode_id == IR_OPCODE_INLINE_ASSEMBLY);
-                BUSTER_TEST(arguments, diagnostic.backend->operation_id == UINT32_MAX);
-                BUSTER_TEST(arguments, diagnostic.backend->error_id == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
-            }
+            String8 target;
+            String8 source;
+        } unsupported_asm_goto_controls[] = {
+            {S8("x86_64-unknown-linux-gnu"),
+             S8("int f(void) { int r = 0; __asm__ goto (\"call %l0\" : : : : target); goto done; target: r = 1; done: return r; }\n")},
+            {S8("x86_64-unknown-linux-gnu"),
+             S8("int f(void) { int r = 0; __asm__ goto (\"xbegin %l0\" : : : : target); goto done; target: r = 1; done: return r; }\n")},
+            {S8("aarch64-unknown-linux-gnu"),
+             S8("int f(void) { int r = 0; __asm__ goto (\"adr x0, %l0\" : : : \"x0\" : target); goto done; target: r = 1; done: return r; }\n")},
+            {S8("aarch64-unknown-linux-gnu"),
+             S8("int f(void) { int r = 0; __asm__ goto (\"bl %l0\" : : : : target); goto done; target: r = 1; done: return r; }\n")},
+        };
+        for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(unsupported_asm_goto_controls); control += 1)
+        {
+            String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-unsupported-asm-goto-control"),
+                                                              string_format(arguments->arena, S8("-{u32}.c"), control));
+            String8 object_path = buster_test_temporary_path(arguments->arena, S8("buster-unsupported-asm-goto-control"),
+                                                              string_format(arguments->arena, S8("-{u32}.o"), control));
+            BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(unsupported_asm_goto_controls[control].source)));
+            String8 command[] = {S8("-c"), S8("-target"), unsupported_asm_goto_controls[control].target,
+                                 S8("-fregister-allocator=mir-stack"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                 S8("-o"), object_path, source_path};
+            CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, rejected.error == COMPILER_DRIVER_ERROR_CODEGEN &&
+                                           rejected.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !rejected.has_object,
+                            string_format(arguments->arena, S8("unsupported asm-goto control {u32}: driver {u32}, codegen {u32}, object {u32}, diagnostic {S8}"),
+                                          control, rejected.error, rejected.codegen_error, rejected.has_object, rejected.diagnostic));
         }
     }
     {
@@ -14290,10 +14406,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
-    // This audit checks the canonical emitter's exact frame/register sequence;
-    // the strict asm-identity corpus separately checks allocated MIR transport.
+    // This audit checks the selected AArch64 transaction's executable hint
+    // and tied-input transport independently in the linked image and object.
     String8 c_asm_aarch64_command_line[] = {
-        S8("-fregister-allocator=none"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
+        S8("-fregister-allocator=mir-stack"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+        S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
     };
     CompilerDriverResult c_asm_aarch64 = compiler_driver_execute_invocation(
         c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_aarch64_command_line)));
@@ -14323,6 +14440,33 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, c_asm_windows.has_object);
         BUSTER_TEST(arguments, compiler_driver_test_windows_x64_dynamic_rbx(&c_asm_windows.object));
+    }
+    {
+        String8 windows_sse_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(windows_sse_allocators); allocator_index += 1)
+        {
+            String8 windows_sse_path = buster_test_temporary_path(
+                c_asm_arena, S8("buster-c-asm-windows-sse"), string_format(c_asm_arena, S8("-{u32}.obj"), allocator_index));
+            String8 windows_sse_command_line[] = {
+                S8("-c"),
+                S8("-g0"),
+                S8("-target"),
+                S8("x86_64-pc-windows-msvc"),
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), windows_sse_allocators[allocator_index]),
+                S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
+                S8("-o"),
+                windows_sse_path,
+                S8("tests/basic_c_asm_sse_win64.c"),
+            };
+            CompilerDriverResult windows_sse = compiler_driver_execute_invocation(
+                c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_sse_command_line)));
+            BUSTER_TEST(arguments, windows_sse.error == COMPILER_DRIVER_ERROR_NONE && windows_sse.has_object);
+            if (windows_sse.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_windows_x64_inline_xmm_preserved(&windows_sse.object));
+            }
+        }
     }
     // A module-level assembly block that is the image's entry point, which is
     // what a libc's startup object is. Linked with `-e`, so the label the
@@ -14453,7 +14597,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         String8 inline_symbol_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-inline-asm-symbol"), S8(".o"));
         String8 inline_symbol_command_line[] = {
-            S8("-c"), S8("-g0"), S8("-o"), inline_symbol_path, S8("tests/basic_c_inline_asm_symbol.c"),
+            S8("-c"), S8("-g0"), S8("-fregister-allocator=mir-stack"), S8("-fno-machine-fallback"),
+            S8("-fverify-codegen"), S8("-o"), inline_symbol_path, S8("tests/basic_c_inline_asm_symbol.c"),
         };
         CompilerDriverResult inline_symbol = compiler_driver_execute_invocation(
             c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inline_symbol_command_line)));
@@ -14474,13 +14619,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     {
-        String8 inline_symbol_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 inline_symbol_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
         for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(inline_symbol_allocators); allocator_index += 1)
         {
             String8 inline_symbol_run_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-inline-asm-symbol-run"),
                                                                         string_format(c_asm_arena, S8("-{u32}"), allocator_index));
             String8 inline_symbol_run_command_line[] = {
                 string_format(c_asm_arena, S8("-fregister-allocator={S8}"), inline_symbol_allocators[allocator_index]),
+                S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
                 S8("-o"),
                 inline_symbol_run_path,
                 S8("tests/basic_c_inline_asm_symbol.c"),
@@ -14507,24 +14654,25 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     // The two register files an inline-assembly operand may name besides the
     // general registers: the SSE class musl's own x86-64 sqrt, fabs and lrint
-    // are written in, and the x87 stack its `long double` math is. All four
+    // are written in, and the x87 stack its `long double` math is. These
     // fixtures are programs rather than compilations: an operand carried into
     // the wrong register, or pushed into the wrong stack position, still
     // assembles and still hands back a number, so the answers are checked --
     // and `remquol`'s quotient, which is decoded out of the x87 status word, is
-    // the one that a plausible remainder would otherwise hide. Each runs under
-    // every allocator because the operand's frame slot is placed differently by
-    // each.
+    // the one that a plausible remainder would otherwise hide. The eight-SSE-
+    // output case also exhausts the closed operand pool. Each runs under every
+    // MIR allocator because the operand's frame slot is placed differently by each.
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     {
         String8 sse_operand_fixtures[] = {
             S8("tests/basic_c_asm_sse_output.c"),
             S8("tests/basic_c_asm_sse_input.c"),
+            S8("tests/basic_c_asm_sse_win64.c"),
             S8("tests/basic_c_asm_x87_output.c"),
             S8("tests/basic_c_asm_x87_clobber.c"),
             S8("tests/basic_c_asm_x87_control_word.c"),
         };
-        String8 sse_operand_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 sse_operand_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(sse_operand_fixtures); fixture_index += 1)
         {
             for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(sse_operand_allocators); allocator_index += 1)
@@ -14534,6 +14682,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                string_format(c_asm_arena, S8("-{u32}-{u32}"), fixture_index, allocator_index));
                 String8 sse_operand_command_line[] = {
                     string_format(c_asm_arena, S8("-fregister-allocator={S8}"), sse_operand_allocators[allocator_index]),
+                    S8("-fno-machine-fallback"),
+                    S8("-fverify-codegen"),
                     S8("-o"),
                     sse_operand_path,
                     sse_operand_fixtures[fixture_index],
@@ -14554,6 +14704,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     {
                         BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, sse_operand_spawn).result == PROCESS_RESULT_SUCCESS);
                     }
+                }
+            }
+        }
+    }
+#endif
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    {
+        String8 windows_sse_run_allocators[] = {S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(windows_sse_run_allocators); allocator_index += 1)
+        {
+            String8 windows_sse_run_path = buster_test_temporary_path(
+                c_asm_arena, S8("buster-c-asm-sse-win64-run"), string_format(c_asm_arena, S8("-{u32}.exe"), allocator_index));
+            String8 windows_sse_run_command_line[] = {
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), windows_sse_run_allocators[allocator_index]),
+                S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"),
+                S8("-o"),
+                windows_sse_run_path,
+                S8("tests/basic_c_asm_sse_win64.c"),
+            };
+            CompilerDriverResult windows_sse_run = compiler_driver_execute_invocation(
+                c_asm_arena,
+                compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_sse_run_command_line)));
+            BUSTER_TEST(arguments, windows_sse_run.error == COMPILER_DRIVER_ERROR_NONE);
+            if (windows_sse_run.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {windows_sse_run_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
+                                                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, spawn).result == PROCESS_RESULT_SUCCESS);
                 }
             }
         }

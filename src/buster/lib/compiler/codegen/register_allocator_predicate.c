@@ -257,11 +257,13 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
             {
                 MachineInstruction const* instruction = function->instructions + row;
                 MachineOpcodeInfo const* opcode = machine_opcode_info(instruction->opcode);
+                MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
                 MachinePoint before = machine_point_make(row, MACHINE_POINT_BEFORE);
                 bool legacy_mask_scratch = instruction->opcode == MACHINE_X64_VPCMP_MASK || instruction->opcode == MACHINE_X64_VPMOVB2M ||
                     instruction->opcode == MACHINE_X64_VLOAD_PTR_MASKED || instruction->opcode == MACHINE_X64_VSTORE_PTR_MASKED ||
                     instruction->opcode == MACHINE_X64_VCOMPRESS_STORE_PTR || instruction->opcode == MACHINE_X64_VPERMT2B || instruction->opcode == MACHINE_X64_VCOMPRESSB;
-                bool boundary = legacy_mask_scratch || (opcode->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
+                bool boundary = legacy_mask_scratch || (opcode->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0 ||
+                                (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
                 if (boundary)
                 {
                     for (u32 reg = 1; reg < MACHINE_PREDICATE_REGISTER_COUNT; reg += 1) machine_predicate_release(&state, before, reg);
@@ -326,7 +328,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
                 }
                 if (row + 1 == block_info->first_instruction + block_info->instruction_count)
                 {
-                    MachinePoint end = (opcode->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) ? before : machine_point_make(row, MACHINE_POINT_AFTER);
+                    MachinePoint end = (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) ? before : machine_point_make(row, MACHINE_POINT_AFTER);
                     for (u32 reg = 1; reg < MACHINE_PREDICATE_REGISTER_COUNT; reg += 1) machine_predicate_release(&state, end, reg);
                     // Capture all successor sources before publishing any
                     // destination: one outgoing edge can overwrite another's

@@ -730,6 +730,23 @@ typedef enum MachineOpcode
     // All explicit XMM/YMM frame rows use payload as a byte offset.
     MACHINE_X64_LOAD_YMM_FRAME256,
     MACHINE_X64_STORE_YMM_FRAME256,
+    // Closed inline-assembly transactions. The payload indexes the cold
+    // descriptor table; operands are staged through selector-owned frame
+    // slots so the hot row stays fixed-width and every allocator sees one
+    // simultaneous clobber point.
+    MACHINE_X64_INLINE_ASSEMBLY,
+    MACHINE_A64_INLINE_ASSEMBLY,
+    // Operand-free assembly keeps its actual zero-byte/hint payload separate
+    // from its independently modeled scheduler effects.  The four rows are
+    // contiguous so selectors can index them by memory | (flags << 1).
+    MACHINE_X64_INLINE_EFFECTS_NONE,
+    MACHINE_X64_INLINE_EFFECTS_MEMORY,
+    MACHINE_X64_INLINE_EFFECTS_FLAGS,
+    MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS,
+    MACHINE_A64_INLINE_EFFECTS_NONE,
+    MACHINE_A64_INLINE_EFFECTS_MEMORY,
+    MACHINE_A64_INLINE_EFFECTS_FLAGS,
+    MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1026,6 +1043,8 @@ BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
 #define MACHINE_OPCODE_ROW_INDIRECT_BRANCH (1u << 3)
 #define MACHINE_OPCODE_ROW_CLOBBERS (1u << 4)
 #define MACHINE_OPCODE_ROW_VARIABLE_BUDGET (1u << 5)
+#define MACHINE_OPCODE_ROW_FLAGS_DEFINE (1u << 6)
+#define MACHINE_OPCODE_ROW_FLAGS_USE (1u << 7)
 // The byte budget of an ordinary row: no encoding the tables publish is
 // longer, and the allocator's edits are budgeted separately.
 #define MACHINE_OPCODE_ROW_FLAT_BUDGET 24u
@@ -1122,6 +1141,86 @@ struct MachineTargetDescription
 // not selection output).
 typedef struct MachineFunction MachineFunction;
 
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT (1u << 0)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT (1u << 1)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY (1u << 2)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR (1u << 3)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP (1u << 4)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW (1u << 5)
+#define MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER (1u << 6)
+
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY (1u << 0)
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS (1u << 1)
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR (1u << 2)
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP (1u << 3)
+
+// One operand of a closed inline-assembly transaction. `stack_slot` owns the
+// value image (or the address for a memory operand); the encoder transfers it
+// to/from `physical_register` immediately around the encoded template.
+typedef struct MachineInlineAssemblyOperand MachineInlineAssemblyOperand;
+struct MachineInlineAssemblyOperand
+{
+    u32 stack_slot;
+    u8 physical_register;
+    u8 byte_size;
+    u8 constraint_class;
+    u8 flags;
+};
+
+// A relocation emitted by the shared assembler. External rows retain the
+// durable symbol spelling; block rows name a MIR block and are resolved by
+// the target encoder's ordinary branch-fixup machinery.
+typedef struct MachineInlineAssemblyRelocation MachineInlineAssemblyRelocation;
+struct MachineInlineAssemblyRelocation
+{
+    String8 symbol;
+    s64 addend;
+    u32 offset;
+    // Block rows name the final C label independently of the control landing
+    // continuation. Address materializations have no continuation; control
+    // rows use a distinct one per relocation so addends and duplicate label
+    // references cannot alias output-publication state.
+    u32 block;
+    u32 continuation_block;
+    u32 target_index;
+    u8 kind;
+    u8 is_block;
+    u8 is_control;
+    u8 reserved;
+};
+
+typedef struct MachineInlineAssembly MachineInlineAssembly;
+#define MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK 0xffc0u
+struct MachineInlineAssembly
+{
+    String8 source;
+    ByteSlice bytes;
+    // Win64 preserves the low 128 bits of XMM6-XMM15. This exact clobber mask
+    // identifies every operand or explicit clobber that needs a transaction
+    // save, without duplicating another register mask in this compact row.
+    u64 clobber_mask;
+    u32 first_operand;
+    u32 first_relocation;
+    u16 relocation_count;
+    // Number of consecutive continuation blocks beginning at
+    // `fallthrough_block`. General asm-goto retains one continuation for every
+    // declared successor, including labels not referenced by the template.
+    u16 successor_count;
+    // Prefix of `successor_count` owned by canonical fallthrough plus the
+    // declared label list. Remaining successors are per-control-reference
+    // publication continuations.
+    u16 declared_successor_count;
+    // Selectors cap the operand array at sixteen before constructing this row.
+    u8 operand_count;
+    u8 effects;
+    u32 preserved_vector_slot;
+    // General asm-goto's explicit fallthrough successor. The transaction
+    // encoder captures outputs and branches here before laying out taken-edge
+    // landing stubs. Meaningful only when EFFECT_TERMINATOR is set.
+    u32 fallthrough_block;
+};
+BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
+
 // Optional selector certificates for individual frame objects in a function
 // that also contains volatile accesses. Zero is deliberately UNKNOWN.
 #define MACHINE_STACK_SLOT_MEMORY_NONVOLATILE 1u
@@ -1195,6 +1294,9 @@ struct MachineFunction
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
     MachineVaArg* va_args;
+    MachineInlineAssembly* inline_assemblies;
+    MachineInlineAssemblyOperand* inline_assembly_operands;
+    MachineInlineAssemblyRelocation* inline_assembly_relocations;
     // The backend that selected this function; placement reads its register
     // file and special-opcode identities from here.
     MachineTargetDescription const* target;
@@ -1210,6 +1312,9 @@ struct MachineFunction
     u32 switch_case_count;
     u32 line_mark_count;
     u32 va_arg_count;
+    u32 inline_assembly_count;
+    u32 inline_assembly_operand_count;
+    u32 inline_assembly_relocation_count;
     // Fixed outgoing argument area, in bytes, or zero for a function whose
     // calls need none. Win64 owns its callees' shadow space and stack
     // arguments in its own frame rather than pushing them, so the stack
@@ -1526,11 +1631,13 @@ struct MachineEncodeResult
     // ahead of its reload edits, parallel to the instruction array.
     u32* row_offsets;
     MachineCallSite* call_sites;
+    MachineInlineAssemblyRelocation* inline_assembly_relocations;
     // Function-relative offset of each emitted epilogue's first
     // instruction, one per return row; the AArch64 encoder fills these for
     // the Windows unwind data, the x86-64 encoder leaves them empty.
     u32* epilog_offsets;
     u32 call_site_count;
+    u32 inline_assembly_relocation_count;
     u32 epilog_count;
     bool valid;
     // Win64 prologues fit the PE byte-sized offset. Dynamic frames
@@ -1672,6 +1779,8 @@ BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
 // below; the accessor fills it on a first serial touch for callers that reach
 // the allocators without going through codegen (tests, the assembler).
 BUSTER_F_DECL MachineOpcodeRow const* machine_opcode_row_table(void);
+BUSTER_F_DECL MachineOpcodeRow machine_instruction_opcode_row(struct MachineFunction const* function,
+                                                              MachineInstruction const* instruction);
 BUSTER_F_DECL void machine_opcode_rows_prewarm(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 // The Win64 register file: the same allocatable set with RSI and RDI moved
@@ -1851,6 +1960,9 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFun
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
+BUSTER_F_DECL bool machine_a64_test_expand_inline_short_branch(u8 kind, u32 word, u32 words[2]);
+BUSTER_F_DECL bool machine_a64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
 typedef enum MachineFastPickerTestCase
 {
     MACHINE_FAST_PICK_TEST_PREFERRED_FREE = 1u << 0,

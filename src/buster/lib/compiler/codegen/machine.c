@@ -14,6 +14,7 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -330,6 +331,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .tied_pair = (u8)(1u | (2u << 4)),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_ASSEMBLY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (UINT64_C(1) << MACHINE_X64_REGISTER_COUNT) - 1u,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_NONE] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS] = {
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
@@ -1117,6 +1137,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
+    [MACHINE_A64_INLINE_ASSEMBLY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (UINT64_C(1) << MACHINE_A64_REGISTER_COUNT) - 1u,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_NONE] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
     [MACHINE_A64_LEA_TLS] = {
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
@@ -1468,6 +1507,16 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_YIELD] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 74,
     [MACHINE_X64_ASM_IDENTITY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 75,
     [MACHINE_A64_ASM_IDENTITY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 76,
+    [MACHINE_X64_INLINE_ASSEMBLY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 77,
+    [MACHINE_A64_INLINE_ASSEMBLY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 78,
+    [MACHINE_X64_INLINE_EFFECTS_NONE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 79,
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 80,
+    [MACHINE_X64_INLINE_EFFECTS_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 81,
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 82,
+    [MACHINE_A64_INLINE_EFFECTS_NONE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 83,
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 84,
+    [MACHINE_A64_INLINE_EFFECTS_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 85,
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 86,
     [MACHINE_X64_KMOV_FROM_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 50,
     [MACHINE_X64_KMOV_TO_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 51,
     [MACHINE_X64_KMOV] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 52,
@@ -1540,6 +1589,8 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
         flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0u;
         flags |= (opcode == MACHINE_X64_INDIRECT_BRANCH || opcode == MACHINE_A64_INDIRECT_BRANCH) ? MACHINE_OPCODE_ROW_INDIRECT_BRANCH : 0u;
         flags |= info->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) ? MACHINE_OPCODE_ROW_FLAGS_DEFINE : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE) ? MACHINE_OPCODE_ROW_FLAGS_USE : 0u;
         // The encoder's per-row byte budget, which was a nine-arm switch over
         // the same opcode this row is keyed by. Switches and aggregate copies
         // expand with their side data and keep the flag; everything else is
@@ -1627,6 +1678,30 @@ MachineOpcodeRow const* machine_opcode_row_table(void)
 {
     machine_opcode_rows_once();
     return machine_opcode_row_records;
+}
+
+MachineOpcodeRow machine_instruction_opcode_row(MachineFunction const* function, MachineInstruction const* instruction)
+{
+    MachineOpcodeRow row = {0};
+    machine_opcode_rows_once();
+    if (instruction && instruction->opcode < MACHINE_OPCODE_COUNT)
+    {
+        row = machine_opcode_row_records[instruction->opcode];
+        bool inline_assembly = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY ||
+                               instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY;
+        if (inline_assembly && function && instruction->payload < function->inline_assembly_count)
+        {
+            MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
+            row.clobber_mask = assembly->clobber_mask;
+            row.flags &= (u8)~(MACHINE_OPCODE_ROW_CLOBBERS | MACHINE_OPCODE_ROW_TERMINATOR | MACHINE_OPCODE_ROW_FLAGS_DEFINE);
+            row.flags |= assembly->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0;
+            row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0;
+            row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS) ? MACHINE_OPCODE_ROW_FLAGS_DEFINE : 0;
+            row.schedule_flags = MACHINE_SCHEDULE_UNIT_BARRIER |
+                                 ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0);
+        }
+    }
+    return row;
 }
 
 u32 machine_x86_64_emit_registry_count(void)
@@ -2163,9 +2238,25 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
             MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            MachineInlineAssembly* inline_assemblies = function->inline_assemblies;
+            MachineInlineAssemblyRelocation* inline_assembly_relocations = function->inline_assembly_relocations;
+            result = (!function->inline_assembly_count || function->inline_assemblies) &&
+                     (!function->inline_assembly_relocation_count || function->inline_assembly_relocations);
             if (function->switch_case_count)
             {
                 memcpy(switch_cases, function->switch_cases, sizeof(*switch_cases) * function->switch_case_count);
+            }
+            if (result && function->inline_assembly_count)
+            {
+                inline_assemblies = arena_allocate(arena, MachineInlineAssembly, function->inline_assembly_count);
+                memcpy(inline_assemblies, function->inline_assemblies, sizeof(*inline_assemblies) * function->inline_assembly_count);
+            }
+            if (result && function->inline_assembly_relocation_count)
+            {
+                inline_assembly_relocations =
+                    arena_allocate(arena, MachineInlineAssemblyRelocation, function->inline_assembly_relocation_count);
+                memcpy(inline_assembly_relocations, function->inline_assembly_relocations,
+                       sizeof(*inline_assembly_relocations) * function->inline_assembly_relocation_count);
             }
             u64 scratch_position = arena->position;
             u32* old_to_new = arena_allocate(arena, u32, old_block_count);
@@ -2210,6 +2301,34 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                     if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
                     {
                         split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            for (u32 assembly_index = 0; result && assembly_index < function->inline_assembly_count; assembly_index += 1)
+            {
+                MachineInlineAssembly* assembly = inline_assemblies + assembly_index;
+                bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+                result = assembly->first_relocation <= function->inline_assembly_relocation_count &&
+                         assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
+                         (!terminator || assembly->fallthrough_block < old_block_count);
+                if (result && terminator)
+                {
+                    assembly->fallthrough_block = old_to_new[assembly->fallthrough_block];
+                }
+                for (u32 relocation_index = 0; result && relocation_index < assembly->relocation_count; relocation_index += 1)
+                {
+                    MachineInlineAssemblyRelocation* relocation =
+                        inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                    result = !relocation->is_block ||
+                             (relocation->block < old_block_count &&
+                              (!relocation->is_control || relocation->continuation_block < old_block_count));
+                    if (result && relocation->is_block)
+                    {
+                        relocation->block = old_to_new[relocation->block];
+                        if (relocation->is_control)
+                        {
+                            relocation->continuation_block = old_to_new[relocation->continuation_block];
+                        }
                     }
                 }
             }
@@ -2383,6 +2502,8 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->edges = edges;
                 function->edge_count = new_edge_count;
                 function->switch_cases = switch_cases;
+                function->inline_assemblies = inline_assemblies;
+                function->inline_assembly_relocations = inline_assembly_relocations;
             }
             arena_set_position(arena, scratch_position);
         }
@@ -2725,6 +2846,180 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && instruction->flags == 0 &&
                     (u64)instruction->payload + bytes <= function->stack_slot_sizes[slot];
         } break;
+        case MACHINE_X64_INLINE_ASSEMBLY:
+        case MACHINE_A64_INLINE_ASSEMBLY:
+        {
+            valid = instruction->payload < function->inline_assembly_count;
+            MachineInlineAssembly* assembly = valid ? function->inline_assemblies + instruction->payload : 0;
+            valid = valid && assembly->first_operand <= function->inline_assembly_operand_count &&
+                    assembly->operand_count <= function->inline_assembly_operand_count - assembly->first_operand &&
+                    assembly->first_relocation <= function->inline_assembly_relocation_count &&
+                    assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
+                    (assembly->effects & ~(MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY | MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS |
+                                           MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR | MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP)) == 0 &&
+                    (!assembly->bytes.length || assembly->bytes.pointer) && (!assembly->source.length || assembly->source.pointer);
+            if (valid && function->target)
+            {
+                valid = (assembly->clobber_mask >> function->target->register_count) == 0;
+            }
+            u32 x87_top_count = 0;
+            u32 x87_below_count = 0;
+            u16 expected_preserved_vector_mask = 0;
+            if (valid && instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows())
+            {
+                expected_preserved_vector_mask =
+                    (u16)((assembly->clobber_mask >> MACHINE_X64_ZMM0) & MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK);
+            }
+            u8 x87_top_flags = 0;
+            u8 x87_below_flags = 0;
+            u64 operand_register_mask = 0;
+            for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
+            {
+                MachineInlineAssemblyOperand* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
+                bool memory = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY) != 0;
+                bool vector = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR) != 0;
+                bool x87_top = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP) != 0;
+                bool x87_below = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW) != 0;
+                valid = operand->stack_slot < function->stack_slot_count && operand->byte_size && operand->byte_size <= 16 &&
+                        function->stack_slot_sizes[operand->stack_slot] >= operand->byte_size &&
+                        operand->constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT &&
+                        operand->physical_register < (function->target ? function->target->register_count : MACHINE_TARGET_REGISTER_LIMIT) &&
+                        (operand->flags & ~(MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER)) == 0 &&
+                        (operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) != 0 &&
+                        (!(operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER) ||
+                         (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) &&
+                        memory == IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(operand->constraint_class) &&
+                        vector == IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(operand->constraint_class) &&
+                        x87_top == (operand->constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T) &&
+                        x87_below == (operand->constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_U) && !(x87_top && x87_below);
+                if (valid && function->target)
+                {
+                    bool physical_vector = (function->target->vector_register_mask & (UINT64_C(1) << operand->physical_register)) != 0;
+                    valid = physical_vector == vector && ((!x87_top && !x87_below) || function->target == machine_target_x86_64());
+                }
+                operand_register_mask |= valid && !x87_top && !x87_below ? UINT64_C(1) << operand->physical_register : 0;
+                x87_top_count += x87_top;
+                x87_below_count += x87_below;
+                x87_top_flags |= x87_top ? operand->flags : 0;
+                x87_below_flags |= x87_below ? operand->flags : 0;
+                if (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows() &&
+                    vector && operand->physical_register >= MACHINE_X64_ZMM6 && operand->physical_register <= MACHINE_X64_ZMM15)
+                {
+                    expected_preserved_vector_mask |= (u16)(1u << (operand->physical_register - MACHINE_X64_ZMM0));
+                }
+                for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
+                {
+                    MachineInlineAssemblyOperand* previous = function->inline_assembly_operands + assembly->first_operand + previous_index;
+                    bool shared_register = previous->physical_register == operand->physical_register;
+                    bool shared_slot = previous->stack_slot == operand->stack_slot;
+                    bool early_conflict = shared_register && !shared_slot &&
+                        (((previous->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                          (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) ||
+                         ((operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                          (previous->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)));
+                    valid = !shared_slot || (shared_register && previous->byte_size == operand->byte_size);
+                    valid = valid && !early_conflict;
+                }
+            }
+            u32 preserved_vector_count = 0;
+            for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
+            {
+                preserved_vector_count += (expected_preserved_vector_mask >> vector_register) & 1u;
+            }
+            bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+            valid = valid && (assembly->clobber_mask & operand_register_mask) == operand_register_mask &&
+                    x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
+                    (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) ||
+                     (x87_top_count == 1 && x87_below_count == 0 &&
+                      (x87_top_flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) &&
+                    (!(x87_below_flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) ||
+                     instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY) &&
+                    (!preserved_vector_count ||
+                     (assembly->preserved_vector_slot < function->stack_slot_count &&
+                      function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u)) &&
+                    (terminator
+                         ? assembly->declared_successor_count && assembly->declared_successor_count <= assembly->successor_count &&
+                               assembly->successor_count && assembly->fallthrough_block < function->block_count &&
+                               assembly->successor_count <= function->block_count - assembly->fallthrough_block
+                         : assembly->successor_count == 0 && assembly->declared_successor_count == 0);
+            u32 control_relocation_count = 0;
+            for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
+            {
+                MachineInlineAssemblyRelocation* relocation =
+                    function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                valid = relocation->kind < ASSEMBLY_RELOCATION_COUNT && relocation->offset < assembly->bytes.length &&
+                        (relocation->is_block
+                             ? relocation->block < function->block_count && relocation->target_index < assembly->declared_successor_count
+                             : relocation->symbol.length && relocation->symbol.pointer && !relocation->is_control &&
+                                   relocation->block == UINT32_MAX && relocation->continuation_block == UINT32_MAX &&
+                                   relocation->target_index == UINT32_MAX);
+                if (valid && relocation->is_block)
+                {
+                    bool x64_kind = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY &&
+                                    relocation->kind == ASSEMBLY_RELOCATION_X86_PC32;
+                    bool a64_kind = instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY &&
+                                    relocation->kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26;
+                    u32 word = 0;
+                    if (a64_kind && relocation->offset <= assembly->bytes.length && sizeof(word) <= assembly->bytes.length - relocation->offset)
+                    {
+                        memcpy(&word, assembly->bytes.pointer + relocation->offset, sizeof(word));
+                    }
+                    bool a64_control = a64_kind && !(relocation->offset & 3u) &&
+                                       (word & UINT32_C(0xfc000000)) == UINT32_C(0x14000000);
+                    bool x64_control = x64_kind &&
+                                       ((relocation->offset && assembly->bytes.pointer[relocation->offset - 1u] == 0xe9u) ||
+                                        (relocation->offset >= 2u && assembly->bytes.pointer[relocation->offset - 2u] == 0x0fu &&
+                                         (assembly->bytes.pointer[relocation->offset - 1u] & 0xf0u) == 0x80u));
+                    bool x64_address = x64_kind && relocation->offset >= 2u &&
+                                       assembly->bytes.pointer[relocation->offset - 2u] == 0x8du &&
+                                       (assembly->bytes.pointer[relocation->offset - 1u] & 0xc7u) == 0x05u;
+                    valid = terminator && (x64_control || x64_address || a64_control) &&
+                            relocation->is_control == (x64_control || a64_control) &&
+                            relocation->offset <= assembly->bytes.length &&
+                            sizeof(u32) <= assembly->bytes.length - relocation->offset &&
+                            (!a64_kind || a64_control) &&
+                            (relocation->is_control
+                                 ? relocation->continuation_block == assembly->fallthrough_block + assembly->declared_successor_count +
+                                                                               control_relocation_count++
+                                 : relocation->continuation_block == UINT32_MAX);
+                    if (valid && relocation->is_control)
+                    {
+                        MachineBlock* continuation = function->blocks + relocation->continuation_block;
+                        MachineInstruction* branch = continuation->instruction_count
+                                                         ? function->instructions + continuation->first_instruction +
+                                                               continuation->instruction_count - 1u
+                                                         : 0;
+                        valid = branch &&
+                                (branch->opcode == MACHINE_X64_JMP || branch->opcode == MACHINE_A64_B) &&
+                                machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
+                                machine_ref_payload(branch->operands[0]) == relocation->block;
+                    }
+                }
+                else if (valid)
+                {
+                    valid = relocation->kind != ASSEMBLY_RELOCATION_AARCH64_CONDBR19 &&
+                            relocation->kind != ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 &&
+                            relocation->kind != ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                }
+            }
+            valid = valid && control_relocation_count == (u32)assembly->successor_count - (u32)assembly->declared_successor_count;
+        } break;
+        case MACHINE_X64_INLINE_EFFECTS_NONE:
+        case MACHINE_X64_INLINE_EFFECTS_MEMORY:
+        case MACHINE_X64_INLINE_EFFECTS_FLAGS:
+        case MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS:
+        case MACHINE_A64_INLINE_EFFECTS_NONE:
+        case MACHINE_A64_INLINE_EFFECTS_MEMORY:
+        case MACHINE_A64_INLINE_EFFECTS_FLAGS:
+        case MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS:
+            valid = instruction->payload <= 2;
+            break;
         case MACHINE_A64_LOAD_INCOMING:
             valid = instruction->flags == 0 || instruction->flags == 1 || instruction->flags == 2 ||
                     instruction->flags == 4 || instruction->flags == 8;
@@ -3158,7 +3453,10 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         (function->edge_copy_source_count && !function->edge_copy_sources) ||
         (function->switch_case_count && !function->switch_cases) || (function->immediate_count && !function->immediates) ||
         (function->stack_slot_count && !function->stack_slot_sizes) || (function->call_target_count && !function->call_targets) ||
-        (function->line_mark_count && !function->line_marks) || (function->va_arg_count && !function->va_args))
+        (function->line_mark_count && !function->line_marks) || (function->va_arg_count && !function->va_args) ||
+        (function->inline_assembly_count && !function->inline_assemblies) ||
+        (function->inline_assembly_operand_count && !function->inline_assembly_operands) ||
+        (function->inline_assembly_relocation_count && !function->inline_assembly_relocations))
     {
         result.error = MACHINE_VERIFY_STORAGE;
         return result;
@@ -3403,11 +3701,43 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             {
                 MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
             }
-            bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
+            bool is_terminator = (machine_instruction_opcode_row(function, instruction).flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
             bool is_last = offset == block->instruction_count - 1;
             if (is_terminator != is_last)
             {
                 MACHINE_VERIFY_REJECT(MACHINE_VERIFY_TERMINATOR);
+            }
+            if (is_terminator && (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY || instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY))
+            {
+                MachineInlineAssembly* assembly = function->inline_assemblies + instruction->payload;
+                for (u32 successor = 0; successor < assembly->successor_count; successor += 1)
+                {
+                    u32 destination = assembly->fallthrough_block + successor;
+                    bool edge_found = false;
+                    for (u32 edge_index = 0; !edge_found && edge_index < function->edge_count; edge_index += 1)
+                    {
+                        MachineEdge* edge = function->edges + edge_index;
+                        edge_found = edge->source_block == block_index && edge->destination_block == destination;
+                    }
+                    if (!edge_found)
+                    {
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
+                    }
+                }
+                for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+                {
+                    MachineEdge* edge = function->edges + edge_index;
+                    if (edge->source_block != block_index)
+                    {
+                        continue;
+                    }
+                    bool declared = edge->destination_block >= assembly->fallthrough_block &&
+                                    edge->destination_block - assembly->fallthrough_block < assembly->successor_count;
+                    if (!declared)
+                    {
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
+                    }
+                }
             }
             for (u32 operand_index = 0; operand_index < BUSTER_ARRAY_LENGTH(instruction->operands); operand_index += 1)
             {
@@ -3636,7 +3966,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
             {
                 return placement;
             }
-            placement.callee_saved_mask |= info->clobber_mask & target->callee_saved_mask;
+            placement.callee_saved_mask |= machine_instruction_opcode_row(function, function->instructions + instruction_index).clobber_mask &
+                                           target->callee_saved_mask;
         }
         u32 push_count = 0;
         for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)

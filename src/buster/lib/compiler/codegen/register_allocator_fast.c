@@ -1149,6 +1149,31 @@ BUSTER_GLOBAL_LOCAL MachineEdge const* machine_fast_indexed_edge(MachineFunction
     return edge_index != UINT32_MAX ? function->edges + edge_index : 0;
 }
 
+// General asm-goto keeps its successors in the compact side descriptor: the
+// inline row has no spare block operands, and each control reference also owns
+// a distinct landing continuation so output capture runs on precisely the path
+// that took it. Expose that contiguous successor range to the generic allocator
+// without teaching its hot row classification about either target's encoder.
+BUSTER_GLOBAL_LOCAL bool machine_fast_inline_assembly_successors(MachineFunction const* function,
+                                                                  MachineInstruction const* instruction,
+                                                                  u32* first_out, u32* count_out)
+{
+    bool valid = function && instruction && first_out && count_out &&
+                 (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY ||
+                  instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY) &&
+                 instruction->payload < function->inline_assembly_count;
+    MachineInlineAssembly const* assembly = valid ? function->inline_assemblies + instruction->payload : 0;
+    valid = valid && (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) &&
+            assembly->successor_count && assembly->fallthrough_block < function->block_count &&
+            assembly->successor_count <= function->block_count - assembly->fallthrough_block;
+    if (valid)
+    {
+        *first_out = assembly->fallthrough_block;
+        *count_out = assembly->successor_count;
+    }
+    return valid;
+}
+
 // The pin-independent half of the scan, computed once per function and read
 // by every scan of it. Two merged walks replace the former one-walk-per-fact
 // shape: the first collects everything a single forward pass can —
@@ -1261,7 +1286,6 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         memset(prepass.predecessor_offsets, 0, ((u64)function->block_count + 1u) * sizeof(*prepass.predecessor_offsets));
         u32 backward_edge_count = 0;
         bool block_references_only_in_terminators = true;
-        MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
         // The callee-saved question is asked of the union, once, instead of of
         // every row: the mask is a reduction and the row walk only needs to
         // add to it.
@@ -1282,7 +1306,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 // to ask of the 88-byte descriptor: the operand roles, the
                 // constraint predicate, the call/terminator attributes, the
                 // clobber set and the indirect-branch identity.
-                MachineOpcodeRow opcode_row = opcode_rows[opcode];
+                MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
                 clobber_union |= opcode_row.clobber_mask;
                 bool constrained = (opcode_row.flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0;
                 // The operand kinds are three compares of the four inline
@@ -1320,6 +1344,16 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                     u32 successor = machine_ref_payload(instruction->operands[slot]);
                     prepass.predecessor_offsets[successor + 1] += 1;
                     backward_edge_count += successor <= block_index;
+                }
+                u32 inline_successor = 0;
+                u32 inline_successor_count = 0;
+                if (machine_fast_inline_assembly_successors(function, instruction, &inline_successor, &inline_successor_count))
+                {
+                    for (u32 successor = inline_successor; successor - inline_successor < inline_successor_count; successor += 1)
+                    {
+                        prepass.predecessor_offsets[successor + 1u] += 1;
+                        backward_edge_count += successor <= block_index;
+                    }
                 }
                 for (u32 pending = virtual_lanes; pending; pending &= pending - 1u)
                 {
@@ -1481,6 +1515,26 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         }
                     }
                 }
+                u32 inline_successor = 0;
+                u32 inline_successor_count = 0;
+                if (machine_fast_inline_assembly_successors(function, instruction, &inline_successor, &inline_successor_count))
+                {
+                    for (u32 successor = inline_successor; successor - inline_successor < inline_successor_count; successor += 1)
+                    {
+                        prepass.predecessor_list[predecessor_cursors[successor]++] = block_index;
+                        // A branch inside the byte template selects the landing
+                        // after the allocator has emitted its boundary edits.
+                        // No path-specific register repair can run there, so all
+                        // of these landing contracts deliberately start empty.
+                        prepass.cold_blocks[successor] = 1;
+                        if (wants_quality_facts && successor <= block_index)
+                        {
+                            u32 loop_start = function->blocks[successor].first_instruction;
+                            u32 loop_end = block->first_instruction + block->instruction_count - 1u;
+                            prepass.loop_spans[prepass.loop_span_count++] = ((u64)loop_start << 32) | loop_end;
+                        }
+                    }
+                }
                 if (target_reference_count == 2 && target_references[0] <= block_index && target_references[1] <= block_index)
                 {
                     prepass.cold_blocks[target_references[0]] = 1;
@@ -1577,7 +1631,6 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         {
             return placement;
         }
-        MachineOpcodeRow const* placement_opcode_rows = machine_opcode_row_table();
         MachineBuilderStream edits;
         machine_stream_initialize(&edits, sizeof(MachineEdit));
         // Only the callee-saved pins cost a prologue save; a caller-saved pin
@@ -1997,7 +2050,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 // The three predicates and the clobber set come from the
                 // published row, one line, instead of six fields of the
                 // descriptor spread over two.
-                MachineOpcodeRow opcode_row = placement_opcode_rows[instruction->opcode];
+                MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
                 bool constrained = (opcode_row.flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0;
                 bool is_call = (opcode_row.flags & MACHINE_OPCODE_ROW_CALL) != 0;
                 bool is_terminator = (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
@@ -2201,7 +2254,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                     }
                 }
-                u64 clobber_mask = info->clobber_mask;
+                u64 clobber_mask = opcode_row.clobber_mask;
                 for (u32 physical_register = 0; clobber_mask; physical_register += 1)
                 {
                     if (clobber_mask & (1ull << physical_register))
@@ -2290,12 +2343,17 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     // consumed. A forward, not-yet-cold successor takes the
                     // state as it stands: the snapshot recorded below is what
                     // its own contract construction conforms retroactively.
-                    if (instruction->opcode == description->switch_opcode || instruction->opcode == MACHINE_X64_INDIRECT_BRANCH ||
-                        instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
+                    u32 inline_successor = 0;
+                    u32 inline_successor_count = 0;
+                    bool inline_assembly = machine_fast_inline_assembly_successors(function, instruction,
+                                                                                    &inline_successor, &inline_successor_count);
+                    if (inline_assembly || instruction->opcode == description->switch_opcode ||
+                        instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
                     {
-                        // Case targets and the default are all cold, so one
-                        // conform to the empty contract serves every edge the
-                        // dispatch fans out to.
+                        // Case targets, the default, and asm-goto landing
+                        // continuations are all cold, so one conform to the
+                        // empty contract serves every edge the dispatch or byte
+                        // template can select.
                         machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, &state.held_mask, &state.dirty_mask,
                                                   state.virtual_register_locations, machine_fast_empty_contract_owner, 0, 0, true);
                     }

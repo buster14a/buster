@@ -11235,6 +11235,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
     bool scratch_lifetime_arena_destroyed = arena_destroy(scratch_lifetime_arena, 1);
     BUSTER_TEST(arguments, scratch_lifetime_arena_destroyed);
     TemporalArena hardening_temporary = scratch_begin(0, 0);
+    Target hardening_target = target_native;
+    hardening_target.cpu_arch = CPU_ARCH_X86_64;
     CPreprocessResult hardening_tokens = c_preprocess(hardening_temporary.arena,
                                                       S8("typedef unsigned long Word;"
                                                          " typedef enum Kind"
@@ -11355,9 +11357,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                                          " int no_return(void)"
                                                          " { do { __builtin_unreachable();"
                                                          " } while (0); }"),
-                                                      (CPreprocessOptions){0});
+                                                      (CPreprocessOptions){
+                                                          .target = hardening_target,
+                                                          .data_layout = target_data_layout(hardening_target),
+                                                      });
     CParseResult hardening_parse = c_parse(hardening_temporary.arena, hardening_tokens);
-    CIRLowerResult hardening_ir = c_lower_to_ir(hardening_temporary.arena, S8("frontend-hardening.c"), hardening_tokens, hardening_parse, target_native);
+    CIRLowerResult hardening_ir =
+        c_lower_to_ir(hardening_temporary.arena, S8("frontend-hardening.c"), hardening_tokens, hardening_parse, hardening_target);
     BUSTER_TEST(arguments, hardening_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, hardening_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, hardening_ir.diagnostic_count == 0);
@@ -18017,6 +18023,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     {
         TemporalArena label_flow_temporary = scratch_begin(0, 0);
+        Target label_flow_target = target_native;
+        label_flow_target.cpu_arch = CPU_ARCH_X86_64;
         String8 label_flow_source = S8("int conditional_labels(int selector) {"
                                        " goto *(selector ? &&one : &&zero);"
                                        "zero: return 13;"
@@ -18073,12 +18081,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                        "}\n");
         CPreprocessResult label_flow_tokens = c_preprocess(label_flow_temporary.arena, label_flow_source,
                                                            (CPreprocessOptions){
-                                                               .target = target_native,
-                                                               .data_layout = target_data_layout(target_native),
+                                                               .target = label_flow_target,
+                                                               .data_layout = target_data_layout(label_flow_target),
                                                                .dialect = C_PREPROCESS_DIALECT_GNU23,
                                                            });
         CParseResult label_flow_parse = c_parse(label_flow_temporary.arena, label_flow_tokens);
-        CIRLowerResult label_flow_lowered = c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, label_flow_parse, target_native);
+        CIRLowerResult label_flow_lowered =
+            c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, label_flow_parse, label_flow_target);
         BUSTER_TEST(arguments, label_flow_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_flow_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, label_flow_lowered.diagnostic_count == 0);
@@ -18883,17 +18892,20 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     {
         TemporalArena conflicting_fixed_asm_temporary = scratch_begin(0, 0);
+        Target conflicting_fixed_asm_target = target_native;
+        conflicting_fixed_asm_target.cpu_arch = CPU_ARCH_X86_64;
         CPreprocessResult conflicting_fixed_asm_tokens = c_preprocess(
             conflicting_fixed_asm_temporary.arena,
             S8("int conflicting_fixed_asm(int left, int right) { __asm__(\"\" : \"+a\"(left) : \"a\"(right)); return left; }\n"),
             (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
+                .target = conflicting_fixed_asm_target,
+                .data_layout = target_data_layout(conflicting_fixed_asm_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
         CParseResult conflicting_fixed_asm_parse = c_parse(conflicting_fixed_asm_temporary.arena, conflicting_fixed_asm_tokens);
         CIRLowerResult conflicting_fixed_asm_lowered = c_lower_to_ir(conflicting_fixed_asm_temporary.arena, S8("conflicting-fixed-asm.c"),
-                                                                       conflicting_fixed_asm_tokens, conflicting_fixed_asm_parse, target_native);
+                                                                       conflicting_fixed_asm_tokens, conflicting_fixed_asm_parse,
+                                                                       conflicting_fixed_asm_target);
         BUSTER_TEST(arguments, conflicting_fixed_asm_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, conflicting_fixed_asm_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, conflicting_fixed_asm_lowered.diagnostic_count == 1);
@@ -18927,17 +18939,19 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     {
         TemporalArena same_fixed_asm_temporary = scratch_begin(0, 0);
+        Target same_fixed_asm_target = target_native;
+        same_fixed_asm_target.cpu_arch = CPU_ARCH_X86_64;
         CPreprocessResult same_fixed_asm_tokens = c_preprocess(
             same_fixed_asm_temporary.arena,
             S8("int same_fixed_asm(int value) { __asm__(\"\" : \"+a\"(value) : \"a\"(value)); return value; }\n"),
             (CPreprocessOptions){
-                .target = target_native,
-                .data_layout = target_data_layout(target_native),
+                .target = same_fixed_asm_target,
+                .data_layout = target_data_layout(same_fixed_asm_target),
                 .dialect = C_PREPROCESS_DIALECT_GNU23,
             });
         CParseResult same_fixed_asm_parse = c_parse(same_fixed_asm_temporary.arena, same_fixed_asm_tokens);
         CIRLowerResult same_fixed_asm_lowered = c_lower_to_ir(same_fixed_asm_temporary.arena, S8("same-fixed-asm.c"), same_fixed_asm_tokens,
-                                                               same_fixed_asm_parse, target_native);
+                                                               same_fixed_asm_parse, same_fixed_asm_target);
         BUSTER_TEST(arguments, same_fixed_asm_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, same_fixed_asm_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, same_fixed_asm_lowered.diagnostic_count == 1);
@@ -18954,7 +18968,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
         CPreprocessResult aarch64_clobber_tokens = c_preprocess(
             aarch64_clobber_temporary.arena,
-            S8("int invalid_aarch64_clobber(void) { __asm__(\"\" ::: \"x19\"); return 0; }\n"),
+            S8("int invalid_aarch64_clobber(void) { __asm__(\"\" ::: \"x28\"); return 0; }\n"),
             (CPreprocessOptions){
                 .target = aarch64_target,
                 .data_layout = target_data_layout(aarch64_target),
@@ -18972,6 +18986,59 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                S8("in function 'invalid_aarch64_clobber': unsupported GNU inline assembly clobber"));
         }
         scratch_end(aarch64_clobber_temporary);
+    }
+    {
+        TemporalArena reserved_clobber_temporary = scratch_begin(0, 0);
+        Target aarch64_target = target_native;
+        aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
+        CPreprocessResult aarch64_clobber_tokens = c_preprocess(
+            reserved_clobber_temporary.arena,
+            S8("int invalid_aarch64_stack_clobber(void) { __asm__(\"\" ::: \"sp\"); return 0; }\n"),
+            (CPreprocessOptions){
+                .target = aarch64_target,
+                .data_layout = target_data_layout(aarch64_target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult aarch64_clobber_parse = c_parse(reserved_clobber_temporary.arena, aarch64_clobber_tokens);
+        CIRLowerResult aarch64_clobber_lowered = c_lower_to_ir(reserved_clobber_temporary.arena, S8("aarch64-stack-clobber.c"),
+                                                               aarch64_clobber_tokens, aarch64_clobber_parse, aarch64_target);
+        BUSTER_TEST(arguments, aarch64_clobber_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_clobber_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_clobber_lowered.diagnostic_count == 1);
+        if (aarch64_clobber_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, aarch64_clobber_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_aarch64_stack_clobber': unsupported GNU inline assembly clobber"));
+        }
+        scratch_end(reserved_clobber_temporary);
+    }
+    {
+        TemporalArena reserved_clobber_temporary = scratch_begin(0, 0);
+        Target x86_64_target = target_native;
+        x86_64_target.cpu_arch = CPU_ARCH_X86_64;
+        CPreprocessResult x86_64_clobber_tokens = c_preprocess(
+            reserved_clobber_temporary.arena,
+            S8("int invalid_x86_64_frame_clobber(void) { __asm__(\"\" ::: \"rbp\"); return 0; }\n"
+               "int invalid_x86_64_stack_clobber(void) { __asm__(\"\" ::: \"rsp\"); return 0; }\n"),
+            (CPreprocessOptions){
+                .target = x86_64_target,
+                .data_layout = target_data_layout(x86_64_target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult x86_64_clobber_parse = c_parse(reserved_clobber_temporary.arena, x86_64_clobber_tokens);
+        CIRLowerResult x86_64_clobber_lowered = c_lower_to_ir(reserved_clobber_temporary.arena, S8("x86_64-reserved-clobber.c"),
+                                                              x86_64_clobber_tokens, x86_64_clobber_parse, x86_64_target);
+        BUSTER_TEST(arguments, x86_64_clobber_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, x86_64_clobber_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, x86_64_clobber_lowered.diagnostic_count == 2);
+        if (x86_64_clobber_lowered.diagnostic_count == 2)
+        {
+            BUSTER_STRING_TEST(arguments, x86_64_clobber_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_x86_64_frame_clobber': unsupported GNU inline assembly clobber"));
+            BUSTER_STRING_TEST(arguments, x86_64_clobber_lowered.diagnostics[1].message,
+                               S8("in function 'invalid_x86_64_stack_clobber': unsupported GNU inline assembly clobber"));
+        }
+        scratch_end(reserved_clobber_temporary);
     }
     {
         TemporalArena malformed_recovery_temporary = scratch_begin(0, 0);
@@ -19068,6 +19135,95 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(symbolic_array_operand_temporary);
     }
     {
+        TemporalArena early_clobber_temporary = scratch_begin(0, 0);
+        Target early_clobber_targets[] = {
+            target_native,
+            target_native,
+        };
+        early_clobber_targets[0].cpu_arch = CPU_ARCH_X86_64;
+        early_clobber_targets[0].cpu_model = CPU_MODEL_BASELINE;
+        early_clobber_targets[1].cpu_arch = CPU_ARCH_AARCH64;
+        early_clobber_targets[1].cpu_model = CPU_MODEL_BASELINE;
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(early_clobber_targets); target_index += 1)
+        {
+            CPreprocessResult early_clobber_tokens = {0};
+            CParseResult early_clobber_parse = {0};
+            CIRLowerResult early_clobber_lowered = c_test_lower_source(
+                early_clobber_temporary.arena,
+                S8("int early_output(int input) { int output; __asm__(\"\" : \"=&r\"(output) : \"r\"(input)); return output; }"
+                   "int early_read_write(int value) { __asm__(\"\" : \"+&r\"(value)); return value; }\n"),
+                S8("early-clobber.c"), early_clobber_targets[target_index], &early_clobber_tokens, &early_clobber_parse);
+            BUSTER_TEST(arguments, early_clobber_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, early_clobber_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, early_clobber_lowered.diagnostic_count == 0);
+            if (early_clobber_lowered.program)
+            {
+                IrModule* module = early_clobber_lowered.program->modules;
+                IrFunction* early_output = c_test_find_ir_function(module, S8("early_output"));
+                IrFunction* early_read_write = c_test_find_ir_function(module, S8("early_read_write"));
+                IrInstruction* output_assembly = 0;
+                IrInstruction* read_write_assembly = 0;
+                IrFunction* functions[] = {early_output, early_read_write};
+                IrInstruction** assemblies[] = {&output_assembly, &read_write_assembly};
+                for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(functions); function_index += 1)
+                {
+                    IrFunction* function = functions[function_index];
+                    for (u32 instruction_index = 0; function && instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                        {
+                            *assemblies[function_index] = function->instructions + instruction_index;
+                            break;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, output_assembly && output_assembly->operand_count == 2);
+                BUSTER_TEST(arguments, read_write_assembly && read_write_assembly->operand_count == 1);
+                if (output_assembly && output_assembly->operand_count == 2)
+                {
+                    u64 output_constraint = output_assembly->immediates[0];
+                    u64 input_constraint = output_assembly->immediates[1];
+                    BUSTER_TEST(arguments, output_constraint == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT |
+                                                                  IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER |
+                                                                  IR_INLINE_ASSEMBLY_CONSTRAINT_R));
+                    BUSTER_TEST(arguments, input_constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_R);
+                    output_assembly->immediates[0] = output_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(early_clobber_lowered.program, module).error != IR_VALIDATION_NONE);
+                    output_assembly->immediates[0] = output_constraint;
+                    output_assembly->immediates[1] = input_constraint | IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(early_clobber_lowered.program, module).error != IR_VALIDATION_NONE);
+                    output_assembly->immediates[1] = input_constraint;
+                }
+                if (read_write_assembly && read_write_assembly->operand_count == 1)
+                {
+                    BUSTER_TEST(arguments,
+                                read_write_assembly->immediates[0] == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT |
+                                                                        IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |
+                                                                        IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER |
+                                                                        IR_INLINE_ASSEMBLY_CONSTRAINT_R));
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(early_clobber_lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        String8 invalid_early_clobber_sources[] = {
+            S8("int invalid_early_input(int value) { __asm__(\"\" : : \"&r\"(value)); return value; }\n"),
+            S8("int invalid_early_missing_class(void) { int output; __asm__(\"\" : \"=&\"(output)); return output; }\n"),
+            S8("int invalid_early_duplicate(void) { int output; __asm__(\"\" : \"=&&r\"(output)); return output; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_early_clobber_sources); source_index += 1)
+        {
+            CPreprocessResult invalid_tokens = {0};
+            CParseResult invalid_parse = {0};
+            CIRLowerResult invalid_lowered = c_test_lower_source(early_clobber_temporary.arena, invalid_early_clobber_sources[source_index],
+                                                                  S8("invalid-early-clobber.c"), early_clobber_targets[0], &invalid_tokens,
+                                                                  &invalid_parse);
+            BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_lowered.diagnostic_count == 1);
+        }
+        scratch_end(early_clobber_temporary);
+    }
+    {
         TemporalArena tied_assembly_temporary = scratch_begin(0, 0);
         String8 tied_assembly_source = S8(
             "int numeric_tied(int input) { int output; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return output; }"
@@ -19137,7 +19293,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, (numeric_tied_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
             BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(numeric_tied_assembly->immediates[1]) == 0);
             u64 saved_constraint = numeric_tied_assembly->immediates[1];
-            numeric_tied_assembly->immediates[1] |= UINT64_C(1) << 11;
+            numeric_tied_assembly->immediates[1] |= UINT64_C(1) << 12;
             BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
             numeric_tied_assembly->immediates[1] = saved_constraint;
             numeric_tied_assembly->immediates[1] = (saved_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK) |
@@ -19504,6 +19660,85 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             scratch_end(bound_register_temporary);
         }
     }
+    // AArch64 local register variables carry a target-neutral physical index
+    // beside the ordinary R class. Cover both caller- and callee-saved
+    // allocator registers, and keep encoder/platform scratch names rejected.
+    {
+        typedef struct CTestA64BoundRegisterCase CTestA64BoundRegisterCase;
+        struct CTestA64BoundRegisterCase
+        {
+            String8 source;
+            u32 physical_register;
+        };
+        CTestA64BoundRegisterCase bound_register_cases[] = {
+            {S8("long f(long input) { register long value __asm__(\"x0\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 0},
+            {S8("long f(long input) { register long value __asm__(\"%x15\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 15},
+            {S8("long f(long input) { register long value __asm__(\"x19\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 19},
+            {S8("long f(long input) { register long value __asm__(\"x27\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"), 27},
+        };
+        Target bound_register_target = target_native;
+        bound_register_target.cpu_arch = CPU_ARCH_AARCH64;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(bound_register_cases); case_index += 1)
+        {
+            TemporalArena bound_register_temporary = scratch_begin(0, 0);
+            CPreprocessResult bound_register_tokens = {0};
+            CParseResult bound_register_parse = {0};
+            CIRLowerResult bound_register_lowered =
+                c_test_lower_source(bound_register_temporary.arena, bound_register_cases[case_index].source, S8("a64-bound-register.c"),
+                                    bound_register_target, &bound_register_tokens, &bound_register_parse);
+            BUSTER_TEST(arguments, !bound_register_tokens.diagnostic_count && !bound_register_parse.diagnostic_count &&
+                                       !bound_register_lowered.diagnostic_count && bound_register_lowered.program);
+            IrInstruction* assembly = 0;
+            IrModule* module = bound_register_lowered.program ? bound_register_lowered.program->modules : 0;
+            for (u32 function_index = 0; module && function_index < module->function_count && !assembly; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, assembly && assembly->operand_count == 2);
+            if (assembly && assembly->operand_count == 2)
+            {
+                u64 constraint = assembly->immediates[1];
+                BUSTER_TEST(arguments, (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R &&
+                                           IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint) &&
+                                           IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint) ==
+                                               bound_register_cases[case_index].physical_register);
+                u64 saved = constraint;
+                assembly->immediates[1] = (saved & ~IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) | IR_INLINE_ASSEMBLY_CONSTRAINT_M;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(bound_register_lowered.program, module).error != IR_VALIDATION_NONE);
+                assembly->immediates[1] = saved;
+            }
+            BUSTER_TEST(arguments, module && ir_validate_canonical_module(bound_register_lowered.program, module).error == IR_VALIDATION_NONE);
+            scratch_end(bound_register_temporary);
+        }
+        String8 invalid_sources[] = {
+            S8("long f(long input) { register long value __asm__(\"x16\") = input; __asm__(\"\" :: \"r\"(value)); return value; }\n"),
+            S8("long f(long input) { register long value __asm__(\"x28\") = input; __asm__(\"\" :: \"r\"(value)); return value; }\n"),
+            S8("long f(long input) { register long value __asm__(\"x19\") = input;"
+                " __asm__(\"\" : \"+r\"(value) : : \"x19\"); return value; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_sources); source_index += 1)
+        {
+            TemporalArena invalid_temporary = scratch_begin(0, 0);
+            CPreprocessResult invalid_tokens = {0};
+            CParseResult invalid_parse = {0};
+            CIRLowerResult invalid_lowered = c_test_lower_source(invalid_temporary.arena, invalid_sources[source_index], S8("invalid-a64-bound-register.c"),
+                                                                 bound_register_target, &invalid_tokens, &invalid_parse);
+            BUSTER_TEST(arguments, !invalid_tokens.diagnostic_count && !invalid_parse.diagnostic_count && invalid_lowered.diagnostic_count == 1);
+            scratch_end(invalid_temporary);
+        }
+    }
     // Call discovery must leave object-size pointer operands unevaluated,
     // even for nested calls and a query embedded in another call's argument.
     String8 unevaluated_predicates[] = {
@@ -19634,6 +19869,49 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             scratch_end(memory_temporary);
         }
     }
+    // AArch64 uses the same place-valued M class. Both input and output forms
+    // preserve the address in canonical IR rather than introducing a load.
+    {
+        String8 memory_constraint_sources[] = {
+            S8("void store(volatile int* p, int v) { __asm__ __volatile__(\"str %w1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"),
+            S8("int load(volatile int* p) { int v; __asm__ __volatile__(\"ldr %w0, %1\" : \"=r\"(v) : \"m\"(*p) : \"memory\"); return v; }\n"),
+        };
+        Target memory_target = target_native;
+        memory_target.cpu_arch = CPU_ARCH_AARCH64;
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(memory_constraint_sources); source_index += 1)
+        {
+            TemporalArena memory_temporary = scratch_begin(0, 0);
+            CPreprocessResult memory_tokens = {0};
+            CParseResult memory_parse = {0};
+            CIRLowerResult memory_lowered = c_test_lower_source(memory_temporary.arena, memory_constraint_sources[source_index], S8("a64-memory-constraint.c"),
+                                                               memory_target, &memory_tokens, &memory_parse);
+            BUSTER_TEST(arguments, !memory_tokens.diagnostic_count && !memory_parse.diagnostic_count && !memory_lowered.diagnostic_count &&
+                                       memory_lowered.program);
+            IrInstruction* assembly = 0;
+            IrModule* module = memory_lowered.program ? memory_lowered.program->modules : 0;
+            for (u32 function_index = 0; module && function_index < module->function_count && !assembly; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, assembly && assembly->operand_count == 2);
+            if (assembly && assembly->operand_count == 2)
+            {
+                u32 memory_operand = source_index ? 1 : 0;
+                BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(
+                                           assembly->immediates[memory_operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK));
+            }
+            BUSTER_TEST(arguments, module && ir_validate_canonical_module(memory_lowered.program, module).error == IR_VALIDATION_NONE);
+            scratch_end(memory_temporary);
+        }
+    }
     // What a template may not spell literally. A register the emitter can hand
     // to an operand stays out however it is written, and the two it can never
     // hand out are allowed only in the position where they cannot alias: the
@@ -19752,31 +20030,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             S8("aarch64-legacy-fixed.c"), aarch64_fixed_target, &aarch64_fixed_tokens, &aarch64_fixed_parse);
         BUSTER_TEST(arguments, aarch64_fixed_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, aarch64_fixed_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, aarch64_fixed_lowered.diagnostic_count == 0);
-        if (aarch64_fixed_lowered.program)
-        {
-            IrModule* module = aarch64_fixed_lowered.program->modules;
-            IrFunction* function = c_test_find_ir_function(module, S8("aarch64_legacy_fixed"));
-            IrInstruction* assembly = 0;
-            if (function)
-            {
-                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-                {
-                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
-                    {
-                        assembly = function->instructions + instruction_index;
-                        break;
-                    }
-                }
-            }
-            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED && assembly && assembly->operand_count == 2);
-            if (assembly)
-            {
-                BUSTER_TEST(arguments, (assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
-                BUSTER_TEST(arguments, (assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
-            }
-            BUSTER_TEST(arguments, ir_validate_canonical_module(aarch64_fixed_lowered.program, module).error == IR_VALIDATION_NONE);
-        }
+        // 'a' names x86's accumulator class. AArch64 fixed registers are
+        // expressed by a bound register variable and retain the general 'r'
+        // class plus the target-neutral physical-register payload.
+        BUSTER_TEST(arguments, aarch64_fixed_lowered.diagnostic_count == 1);
 
         CPreprocessResult aarch64_fixed_tie_tokens = {0};
         CParseResult aarch64_fixed_tie_parse = {0};
