@@ -565,6 +565,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                     .exact_byte_size = (u32)type->layout.size,
                     .aggregate = true,
                     .indirect = true,
+                    .stack_alignment = machine_x64_vector_stack_alignment(type, target),
                 };
             }
             else
@@ -5653,6 +5654,8 @@ struct MachineX64CallPlan
     u32 argument_count;
     u32 callee_register;
     u32 indirect_result_slot;
+    u32 indirect_result_backing_slot;
+    u32 indirect_result_pointer;
     u32 integer_count;
     u32 float_count;
     u32 stack_part_count;
@@ -5676,6 +5679,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
     IrFunction* function = selector->function;
 
     *plan = (MachineX64CallPlan){.callee_register = UINT32_MAX, .indirect_result_slot = UINT32_MAX,
+                               .indirect_result_backing_slot = UINT32_MAX, .indirect_result_pointer = UINT32_MAX,
                                .stack_alignment = 16, .saved_stack_register = UINT32_MAX};
     plan->argument_registers = selector->call_argument_registers;
     plan->argument_slots = selector->call_argument_slots;
@@ -5733,6 +5737,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
             {
                 // An unused indirect result still needs backing storage.
                 plan->indirect_result_slot = machine_x64_append_slot(selector, plan->return_shape.byte_size, 8);
+            }
+            if (planned && plan->return_shape.stack_alignment > 16)
+            {
+                u64 backing_size = (u64)plan->return_shape.byte_size + plan->return_shape.stack_alignment - 1;
+                planned = backing_size <= UINT32_MAX;
+                if (planned)
+                {
+                    // Internal aggregate slots are only eight-aligned. Give
+                    // an external callee enough slack for its naturally
+                    // aligned vector store, then copy back after the call.
+                    plan->indirect_result_backing_slot = machine_x64_append_slot(selector, (u32)backing_size, 8);
+                }
             }
         }
     }
@@ -6068,6 +6084,40 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             }
         }
     }
+    // Materialize every register-bound split reference before populating any
+    // fixed argument register. A derived piece is ordinary virtual-register
+    // work and may bind to RCX/RDX/R8/R9; emitting it after an earlier scalar
+    // or pointer was placed there would silently clobber that argument before
+    // the call. Keeping all bases and derived pointers live through this
+    // preparation lets every allocator resolve the later fixed copies safely.
+    u32 windows_piece_registers[BUSTER_ARRAY_LENGTH(machine_x64_windows_arguments)] = {0};
+    if (plan->windows_call)
+    {
+        for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
+        {
+            MachineX64ValueShape const* shape = plan->argument_shapes + argument_index;
+            MachineX64ArgumentPlacement const* placement = plan->argument_placements + argument_index;
+            if (!shape->indirect || !shape->vector_part_bytes)
+            {
+                continue;
+            }
+            for (u32 part = 0; part < placement->register_part_count; part += 1)
+            {
+                u32 pointer = plan->argument_registers[argument_index];
+                if (part)
+                {
+                    pointer = machine_x64_synthesize_register(selector);
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
+                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
+                        .payload = part * shape->vector_part_bytes,
+                        .opcode = MACHINE_X64_LEA_OFFSET,
+                    });
+                }
+                windows_piece_registers[(u32)placement->first_integer + part] = pointer;
+            }
+        }
+    }
     // Outgoing stack parts push right to left before any register is
     // placed (the pushes scratch only RAX), with alignment padding for
     // an odd part count.
@@ -6120,9 +6170,27 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             u32 result_pointer_register = machine_x64_synthesize_register(selector);
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_pointer_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, plan->indirect_result_slot)},
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT,
+                                                                               plan->indirect_result_backing_slot != UINT32_MAX
+                                                                                   ? plan->indirect_result_backing_slot
+                                                                                   : plan->indirect_result_slot)},
+                                                 .payload = plan->indirect_result_backing_slot != UINT32_MAX
+                                                                ? plan->return_shape.stack_alignment - 1
+                                                                : 0,
                                                  .opcode = MACHINE_X64_LEA_FRAME,
                                              });
+            if (plan->indirect_result_backing_slot != UINT32_MAX)
+            {
+                u32 mask = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask),
+                                 machine_ref_make(MACHINE_REF_IMMEDIATE,
+                                                  machine_x64_append_immediate(selector, 0ull - plan->return_shape.stack_alignment))},
+                    .opcode = MACHINE_X64_MOV_RI,
+                });
+                result_pointer_register = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, result_pointer_register, mask);
+            }
+            plan->indirect_result_pointer = result_pointer_register;
             machine_x64_select_row(selector,
                                    (MachineInstruction){
                                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, machine_x64_argument_register(plan->windows_call, 0)),
@@ -6149,17 +6217,8 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                     u32 register_parts = shape->vector_part_bytes ? placement->register_part_count : 1u;
                     for (u32 part = 0; part < register_parts; part += 1)
                     {
-                        u32 pointer = plan->argument_registers[argument_index];
-                        if (part)
-                        {
-                            pointer = machine_x64_synthesize_register(selector);
-                            machine_x64_select_row(selector, (MachineInstruction){
-                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
-                                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
-                                .payload = part * shape->vector_part_bytes,
-                                .opcode = MACHINE_X64_LEA_OFFSET,
-                            });
-                        }
+                        u32 pointer = shape->vector_part_bytes ? windows_piece_registers[next_integer + part]
+                                                               : plan->argument_registers[argument_index];
                         machine_x64_select_row(selector, (MachineInstruction){
                             .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
                                                          machine_x64_argument_register(plan->windows_call, next_integer + part)),
@@ -6327,9 +6386,19 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_receive_call_result(MachineX64Selector* sel
         }
         else if (plan->return_shape.indirect)
         {
-            // The callee already stored the value through the hidden
-            // pointer into the result slot.
-            received = true;
+            // Strongly aligned wide returns use a private buffer because
+            // ordinary SSA aggregate slots have only internal alignment.
+            // Copy exact object bytes back to the canonical result slot.
+            received = plan->indirect_result_slot != UINT32_MAX && plan->indirect_result_pointer != UINT32_MAX;
+            if (received && plan->indirect_result_backing_slot != UINT32_MAX)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, plan->indirect_result_slot),
+                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->indirect_result_pointer)},
+                    .payload = plan->return_shape.exact_byte_size,
+                    .opcode = MACHINE_X64_COPY_FRAME_FROM_PTR,
+                });
+            }
         }
         else if (plan->return_shape.vector_part_bytes)
         {

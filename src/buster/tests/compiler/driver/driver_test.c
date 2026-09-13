@@ -10208,7 +10208,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // Exchange the baseline split-reference vector fixture in both
             // directions. Clang and Buster independently compile provider
             // and consumer halves; wine observes the register/stack pieces,
-            // private copies, indirect calls, and hidden wide returns.
+            // private copies, indirect calls, and hidden wide returns. Disable
+            // Clang's large-frame probe so this freestanding ABI test does not
+            // acquire an unrelated __chkstk runtime dependency.
             if (wine_clang_available)
             {
                 String8 wide_defines[] = {S8("-DWIDE_VECTOR_PROVIDER_ONLY=1"), S8("-DWIDE_VECTOR_CONSUMER_ONLY=1")};
@@ -10221,7 +10223,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     wide_clang_objects[half] = buster_test_temporary_path(
                         wine_mixed_arena, S8("buster-win64-wide-clang"), string_format(wine_mixed_arena, S8("-{u32}.obj"), half));
                     String8 clang_command[] = {S8(BUSTER_HOST_C_COMPILER), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=x86-64"),
-                                              S8("-O0"), S8("-ffreestanding"), S8("-fno-builtin"), S8("-c"), wide_defines[half],
+                                              S8("-O0"), S8("-ffreestanding"), S8("-fno-builtin"), S8("-mno-stack-arg-probe"), S8("-c"), wide_defines[half],
                                               S8("tests/basic_c_vector_argument_wide.c"), S8("-o"), wide_clang_objects[half]};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_command), (SliceString8){0},
                                                                  (SliceString8){0}, wine_options);
