@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Read-only #510 history gate; publication and semantic replay stay in #504/#510.
+"""Read-only #510 history gate; semantic replay stays in its companion workflow.
 
-The archive owner supplies native_retirement_archive.checked (via PYTHONPATH).
+The integrated archive helper supplies native_retirement_archive.checked.
 origin_errors compares live Actions metadata with frozen identities; select_parts
 resolves only actual release assets; verify_parts binds retrieved bytes to the
 original ZIP, independently of the release's self-described manifest. No upload,

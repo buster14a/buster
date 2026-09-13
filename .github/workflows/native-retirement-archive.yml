@@ -1,8 +1,13 @@
-name: Native retirement durable archive
+name: Native retirement durable replay
 
 on:
-  push:
-    branches: [codex/issue510-durable-evidence]
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-retirement-archive.yml
+      - tools/native_retirement_archive.py
+      - docs/performance-audits/evidence/2026-09-12-retirement/archive-contract*.json
+      - docs/performance-audits/evidence/2026-09-12-retirement/RELEASE*.md
   workflow_dispatch:
 
 concurrency:
@@ -13,64 +18,6 @@ permissions:
   contents: read
 
 jobs:
-  publish_history:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Publish complete historical evidence bytes
-    runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Check out archival contract
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Transfer and verify every remaining archive
-        env:
-          GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-          HISTORY_TAG: native-retirement-evidence-history-20260912
-          CATALOG: docs/performance-audits/evidence/2026-09-12-retirement/history-catalog.json
-        run: |
-          if ! gh release view "$HISTORY_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release create "$HISTORY_TAG" --repo "${{ github.repository }}" \
-              --target "${{ github.sha }}" \
-              --title "Native-retirement evidence history from September 12, 2026" \
-              --notes-file docs/performance-audits/evidence/2026-09-12-retirement/HISTORY-RELEASE.md \
-              --prerelease
-          fi
-          for id in 10304875115 10304761452 10304213369 10308181383 10307414648 10305327992 10305232400 10304147437 10303853373 10303967670 10303806553 10303946160 10303052559; do
-            item=$(jq -c --argjson id "$id" '.artifacts[] | select(.id == $id)' "$CATALOG")
-            name=$(jq -r .name <<< "$item")
-            size=$(jq -r .size <<< "$item")
-            sha256=$(jq -r .sha256 <<< "$item")
-            archive="$RUNNER_TEMP/$name.zip"
-            gh api "repos/${{ github.repository }}/actions/artifacts/$id/zip" > "$archive"
-            test "$(stat -c %s "$archive")" = "$size"
-            test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$sha256"
-            assets=("$archive")
-            if (( size > 1900000000 )); then
-              split -b 1000000000 -d -a 2 "$archive" "$archive.part-"
-              rm "$archive"
-              assets=("$archive".part-*)
-            fi
-            for asset in "${assets[@]}"; do
-              asset_name=$(basename "$asset")
-              local_size=$(stat -c %s "$asset")
-              local_digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
-              remote=$(gh api "repos/${{ github.repository }}/releases/tags/$HISTORY_TAG" \
-                --jq ".assets[] | select(.name == \"$asset_name\") | [.size,.digest] | @tsv")
-              if [[ -n "$remote" ]]; then
-                read -r remote_size remote_digest <<< "$remote"
-                test "$remote_size" = "$local_size"
-                test "$remote_digest" = "$local_digest"
-              else
-                gh release upload "$HISTORY_TAG" "$asset" --repo "${{ github.repository }}"
-              fi
-              rm "$asset"
-            done
-          done
-
   census_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: Replay census archive (${{ matrix.label }})
@@ -174,14 +121,6 @@ jobs:
           --rebuilt-reference "$GITHUB_WORKSPACE/reference/build/Release/ide"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/census-replay-${{ matrix.label }}-${{ github.run_id }}.json"
-      - name: Publish census replay receipt
-        env:
-          GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-          EVIDENCE_TAG: ${{ matrix.tag }}
-        run: >-
-          gh release upload "$EVIDENCE_TAG"
-          "$RUNNER_TEMP/census-replay-${{ matrix.label }}-${{ github.run_id }}.json"
-          --repo "${{ github.repository }}"
       - name: Retain census replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -261,14 +200,6 @@ jobs:
           --replay "$GITHUB_WORKSPACE/evidence/strict-differential"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json"
-      - name: Publish strict replay receipt
-        env:
-          GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-          EVIDENCE_TAG: ${{ matrix.tag }}
-        run: >-
-          gh release upload "$EVIDENCE_TAG"
-          "$RUNNER_TEMP/strict-replay-${{ matrix.label }}-${{ github.run_id }}.json"
-          --repo "${{ github.repository }}"
       - name: Retain strict replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

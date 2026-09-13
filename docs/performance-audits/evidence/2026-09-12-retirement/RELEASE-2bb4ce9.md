@@ -28,8 +28,10 @@ The `Native retirement durable archive` workflow downloads these release assets
 on fresh GitHub-hosted runners. It reconstructs and verifies every archive byte,
 rebuilds the direct oracle from its exact Git identity, records both the archived
 and rebuilt binary hashes, reruns the census join and byte validator, compares
-the recorded and replayed joined trees, and reruns
-all 7,776 strict configurations with the archived compiler and sanitizer oracle.
+the recorded and replayed joined trees, and reruns all 7,776 strict
+configurations with the archived compiler and sanitizer oracle. Successful
+census and strict receipts from CI run 34730125413 are published back to this
+release. Exact commands and results are recorded in `RESULTS.md`.
 
 This evidence retains the original limits: inherited host/resource headers and
 the process environment were not frozen. It does not close dependency closure

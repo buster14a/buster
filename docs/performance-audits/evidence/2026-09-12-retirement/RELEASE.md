@@ -32,7 +32,9 @@ records both the archived and rebuilt binary hashes, reruns the join and byte
 validator, and compares the new joined tree with the recorded tree. Its strict
 job reconstructs and checks the original ZIP and packed evidence, then reruns
 the 7,776-configuration strict MIR differential with the archived compiler and
-sanitizer oracle. Successful replay receipts are published back to this release.
+sanitizer oracle. Successful census and strict receipts from CI runs
+34730125413 and 34727739903 are published back to this release. Exact commands
+and results are recorded in `RESULTS.md`.
 
 This evidence retains the original limits: inherited host/resource headers and
 the process environment were not frozen. It does not close the dependency

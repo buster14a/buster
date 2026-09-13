@@ -1,10 +1,11 @@
 # Native-retirement durable history gate
 
-This read-only companion to [#510](https://github.com/buster14a/buster/issues/510)
-uses the existing archive owner's `native_retirement_archive.checked` and
-`digest`. It neither publishes an archive nor replaces
-[#504](https://github.com/buster14a/buster/pull/504)'s census join/byte validator
-or the strict differential runner. Their active branches remain unchanged.
+This read-only half of [#510](https://github.com/buster14a/buster/issues/510)
+uses `native_retirement_archive.checked` and `digest` from the integrated
+archive/replay implementation. It complements the census join/byte validator
+and strict differential replay brought forward from
+[#504](https://github.com/buster14a/buster/pull/504); it does not publish or
+overwrite release assets.
 
 ## Frozen identity versus current availability
 
@@ -32,6 +33,13 @@ existing helper's per-asset size/hash checks, and hashes ordered split parts
 against each frozen original Actions ZIP identity. It never trusts only an
 internally consistent release manifest and never uploads or overwrites anything.
 
+Publication run
+[34730125413](https://github.com/buster14a/buster/actions/runs/34730125413)
+verified the complete transfer from the original Actions artifacts. The history
+release contains 21 release assets totaling 12,809,466,853 bytes; together the
+three releases preserve all seventeen original ZIP identities. Larger ZIPs are
+split into deterministic 1,000,000,000-byte parts.
+
 ## Reproduction and CI
 
 The `Native retirement history` workflow checks out the submitted revision and
@@ -58,6 +66,9 @@ The offline regressions include a self-consistent replacement whose per-asset
 check passes while its frozen-original check fails, modified downloads, missing
 and ambiguous parts, expiration drift, and preservation of failed history.
 Actual execution belongs to CI; source inspection alone is not a passed test.
+The durable replay workflow separately rebuilds the pinned oracle, validates
+the recorded and reproduced census joins, and reruns strict semantics. See
+`RESULTS.md` for commands, hashes, and the actual publication/replay results.
 
 ## Separate acceptance domains
 
@@ -67,10 +78,10 @@ to be absent from the catalog. A nonzero result retains verified entries as well
 as missing/failed ones; there is no `continue-on-error` success conversion.
 
 `source_reproduction`, `independent_join`, and `strict_semantic_replay` are always
-`NOT RUN` in this check. Those require the existing owner workflow's independent
-source rebuild, join/byte validation, and strict sanitized replay on the retrieved
-archives. The direct source snapshot/build recipe and missing host/resource
-header and environment closure remain separate obligations under #510/#508.
-An integrity pass does not change any historical compiler failure, make a failed
-reference usable, satisfy the dedicated 9700X performance gate, authorize a
-production cutover, or close #36. `retirement_accepted` remains false.
+`NOT RUN` inside this history-only report because the durable replay workflow
+owns those checks. The direct source snapshots and build recipes are preserved,
+while missing host/resource-header and process-environment closure remains
+explicit follow-up under #508. An integrity pass does not change any historical
+compiler failure, make a failed reference usable, satisfy the dedicated 9700X
+performance gate, authorize a production cutover, or close #36.
+`retirement_accepted` therefore remains false.
