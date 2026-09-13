@@ -2479,15 +2479,13 @@ struct CIntegerIrBuilder
     // its own rather than a construct this frontend has not implemented.
     u32 failure_kind_plus_one;
     u32 failure_token_index;
-    // Set by the sizeof-operand walkers when a member chain reached a
-    // resolved aggregate that has no member of the requested name.  An
-    // attempt returning false usually means "could not determine, try the
-    // next shape", but this one is a constraint violation: the fallback that
-    // would otherwise predict int for the operand reads it and refuses, so
-    // `sizeof v.missing` is an error rather than a silent 4 -- which is what
-    // every autoconf AC_CHECK_MEMBER fallback probe rests on.  Cleared by the
-    // sizeof/_Alignof lowering before it resolves an operand.
-    String8 sizeof_operand_missing_member;
+    // A proven constraint violation is not an unresolved type-query shape:
+    // keep it across fallback attempts so the legacy prediction cannot guess
+    // int and accept the operand. Missing members retain their operand-start
+    // location; named-call arity failures record the called identifier. The
+    // sizeof/_Alignof lowering clears both fields before each operand.
+    String8 sizeof_operand_constraint;
+    u32 sizeof_operand_constraint_token;
     u32 declaration_index;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
@@ -11978,16 +11976,7 @@ BUSTER_C_INTERNAL u32 c_ir_implicit_conversion_rank(CIntegerIrBuilder* builder, 
 // bound at all: it declares no parameters, so the call names its own.
 BUSTER_C_INTERNAL bool c_ir_signature_accepts_arity(CIrSignature signature, u32 argument_count)
 {
-    bool result;
-    if (signature.is_variadic || signature.is_unprototyped)
-    {
-        result = argument_count >= signature.parameter_count;
-    }
-    else
-    {
-        result = argument_count == signature.parameter_count;
-    }
-
+    bool result = c_semantic_call_accepts_arity(signature.parameter_count, signature.is_variadic, signature.is_unprototyped, argument_count);
     return result;
 }
 
@@ -13863,23 +13852,7 @@ BUSTER_C_INTERNAL bool c_ir_report_unsupported_signature(CIntegerIrBuilder* buil
    zero-parameter prototype this reports as declaring none. */
 BUSTER_C_INTERNAL String8 c_ir_call_arity_message(CIntegerIrBuilder* builder, String8 name, CIrSignature signature, u32 argument_count)
 {
-    if (!name.length)
-    {
-        name = S8("<function pointer>");
-    }
-    String8 direction = argument_count > signature.parameter_count ? S8("too many") : S8("too few");
-    String8 result;
-    if (!signature.parameter_count && !signature.is_variadic)
-    {
-        result = string_format(builder->arena, S8("{S8} arguments in the call to '{S8}': it declares no parameters"), direction, name);
-    }
-    else
-    {
-        result = string_format(builder->arena, S8("{S8} arguments in the call to '{S8}': it declares {S8}{u32} parameter{S8}"), direction, name,
-                               signature.is_variadic ? S8("at least ") : (String8){0}, signature.parameter_count,
-                               signature.parameter_count == 1 ? (String8){0} : S8("s"));
-    }
-
+    String8 result = c_semantic_call_arity_message(builder->arena, name, signature.parameter_count, signature.is_variadic, argument_count);
     return result;
 }
 
@@ -23673,9 +23646,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
             // A resolved aggregate that lacks the name is a constraint
             // violation, not a shape this resolver cannot read; record it so
             // the prediction fallback refuses instead of guessing int.
-            if (value->layout.resolved && !builder->sizeof_operand_missing_member.length)
+            if (value->layout.resolved && !builder->sizeof_operand_constraint.length)
             {
-                builder->sizeof_operand_missing_member =
+                builder->sizeof_operand_constraint =
                     string_format(builder->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), value->name,
                                   c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]), value->field_count);
             }
@@ -24862,9 +24835,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                 // Same constraint violation as the chain walker above: a
                 // resolved aggregate without the name must not fall through
                 // to the int prediction.
-                if (value->layout.resolved && !builder->sizeof_operand_missing_member.length)
+                if (value->layout.resolved && !builder->sizeof_operand_constraint.length)
                 {
-                    builder->sizeof_operand_missing_member =
+                    builder->sizeof_operand_constraint =
                         string_format(builder->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), value->name, member_name,
                                       value->field_count);
                 }
@@ -24899,17 +24872,30 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
 
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
-    CIrQueryFrame result = {0};
-    if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_SIZEOF}, &result) || !result.success)
+    CIrQueryFrame query = {0};
+    bool result = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_SIZEOF}, &query) && query.success;
+    if (result)
     {
-        return false;
+        // Resolve the operand first so an existing type-query diagnostic keeps
+        // its priority. A known result type is not proof that its unevaluated
+        // calls satisfy the language's argument-count constraint.
+        CCallArityDiagnostic checked = c_semantic_check_named_call_arities(builder->arena, &builder->parse, builder->preprocess, start, end);
+        if (checked.message.length)
+        {
+            builder->sizeof_operand_constraint = checked.message;
+            builder->sizeof_operand_constraint_token = checked.token_index;
+            result = false;
+        }
     }
-    *size_out = result.integer;
-    if (alignment_out)
+    if (result)
     {
-        *alignment_out = result.alignment;
+        *size_out = query.integer;
+        if (alignment_out)
+        {
+            *alignment_out = query.alignment;
+        }
     }
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end)
@@ -25748,7 +25734,8 @@ c_ir_expression_core_loop:
                     }
                 }
             }
-            builder->sizeof_operand_missing_member = (String8){0};
+            builder->sizeof_operand_constraint = (String8){0};
+            builder->sizeof_operand_constraint_token = UINT32_MAX;
             IrTypeId operand_type = builder->preprocess.tokens[operand_start].kind != C_TOKEN_IDENTIFIER ? IR_TYPE_ID_INVALID
                                     : parenthesized ? c_ir_group_type_name(builder, index + 1, operand_end)
                                                     : c_ir_type_name(builder, operand_start, operand_end);
@@ -25791,10 +25778,11 @@ c_ir_expression_core_loop:
                 // shape to guess either: it is the diagnostic the walkers
                 // recorded, and predicting int for it is what made every
                 // autoconf AC_CHECK_MEMBER fallback probe answer yes.
-                if (builder->sizeof_operand_missing_member.length)
+                if (builder->sizeof_operand_constraint.length)
                 {
-                    builder->failure_message = builder->sizeof_operand_missing_member;
-                    builder->failure_token_index = operand_start;
+                    builder->failure_message = builder->sizeof_operand_constraint;
+                    builder->failure_token_index = builder->sizeof_operand_constraint_token != UINT32_MAX
+                                                       ? builder->sizeof_operand_constraint_token : operand_start;
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
