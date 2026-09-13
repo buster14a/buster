@@ -52,6 +52,156 @@ BUSTER_GLOBAL_LOCAL IrFunction ir_cfg_test_function(Arena* arena, u32 degree, u3
     return function;
 }
 
+BUSTER_GLOBAL_LOCAL IrFunction ir_cfg_pool_test_function(IrInstruction* rows, u32 row_count, IrBlock* block)
+{
+    for (u32 index = 0; index < row_count; index += 1)
+    {
+        rows[index].next.value = index + 1 < row_count ? index + 1 : IR_ID_UNDERLYING_INVALID;
+        rows[index].result = IR_VALUE_ID_INVALID;
+    }
+    rows[row_count - 1].opcode = IR_OPCODE_RETURN;
+    *block = (IrBlock){.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = row_count - 1},
+                       .terminated = true, .sealed = true};
+    return (IrFunction){.blocks = block, .block_count = 1, .instructions = rows, .instruction_count = row_count,
+                        .state = IR_FUNCTION_LOWERED};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_pool_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 base_allocated_bytes = sizeof(IrPublishedCfg) + sizeof(IrCfgBlock);
+    u64 narrow_pool_count_bound = (u64)UINT32_MAX * (u64)UINT16_MAX;
+    BUSTER_TEST(arguments, narrow_pool_count_bound == UINT64_C(281470681677825));
+    BUSTER_TEST(arguments, narrow_pool_count_bound <= UINT64_MAX / sizeof(IrBlockId));
+    BUSTER_TEST(arguments, narrow_pool_count_bound <= UINT64_MAX / sizeof(u64));
+
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        IrInstruction rows[1] = {0};
+        IrBlock block = {0};
+        IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
+        BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+        IrPublishedCfg const* cfg = function.published_cfg;
+        if (BUSTER_REQUIRE(arguments, cfg != 0))
+        {
+            BUSTER_TEST(arguments, !cfg->operand_pool && !cfg->target_pool && !cfg->immediate_pool);
+            BUSTER_TEST(arguments, !cfg->operand_count && !cfg->target_count && !cfg->immediate_count);
+            BUSTER_TEST(arguments, cfg->allocated_bytes == base_allocated_bytes);
+        }
+        scratch_end(temporary);
+    }
+
+    for (u32 scattered_pool = 0; scattered_pool < 4; scattered_pool += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        IrValueId operands[] = {{.value = 10}, {.value = 11}, {.value = 12}, {.value = 13}, {.value = 13}};
+        IrBlockId targets[] = {{.value = 20}, {.value = 21}, {.value = 22}, {.value = 23}, {.value = 23}};
+        u64 immediates[] = {30, 31, 32, 33, 33};
+        IrInstruction rows[3] = {0};
+        IrBlock block = {0};
+        IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
+        if (scattered_pool == 0)
+        {
+            operands[2].value = 99;
+            operands[3].value = 12;
+        }
+        else if (scattered_pool == 1)
+        {
+            targets[2].value = 99;
+            targets[3].value = 22;
+        }
+        else if (scattered_pool == 2)
+        {
+            immediates[2] = 99;
+            immediates[3] = 32;
+        }
+        rows[0].operands = operands;
+        rows[0].operand_count = 2;
+        rows[0].targets = targets;
+        rows[0].target_count = 2;
+        rows[0].immediates = immediates;
+        rows[0].immediate_count = 2;
+        rows[1].operands = operands + (scattered_pool == 0 ? 3 : 2);
+        rows[1].operand_count = 2;
+        rows[1].targets = targets + (scattered_pool == 1 ? 3 : 2);
+        rows[1].target_count = 2;
+        rows[1].immediates = immediates + (scattered_pool == 2 ? 3 : 2);
+        rows[1].immediate_count = 2;
+        BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+        IrPublishedCfg const* cfg = function.published_cfg;
+        if (BUSTER_REQUIRE(arguments, cfg != 0))
+        {
+            u64 expected_allocated_bytes = base_allocated_bytes;
+            expected_allocated_bytes += scattered_pool == 0 ? 4 * sizeof(IrValueId) : 0;
+            expected_allocated_bytes += scattered_pool == 1 ? 4 * sizeof(IrBlockId) : 0;
+            expected_allocated_bytes += scattered_pool == 2 ? 4 * sizeof(u64) : 0;
+            BUSTER_TEST(arguments, cfg->operand_count == 4 && cfg->target_count == 4 && cfg->immediate_count == 4);
+            BUSTER_TEST(arguments, cfg->allocated_bytes == expected_allocated_bytes);
+            BUSTER_TEST(arguments, (cfg->operand_pool == operands) == (scattered_pool != 0));
+            BUSTER_TEST(arguments, (cfg->target_pool == targets) == (scattered_pool != 1));
+            BUSTER_TEST(arguments, (cfg->immediate_pool == immediates) == (scattered_pool != 2));
+            BUSTER_TEST(arguments, rows[0].operands == cfg->operand_pool);
+            BUSTER_TEST(arguments, rows[0].targets == cfg->target_pool);
+            BUSTER_TEST(arguments, rows[0].immediates == cfg->immediate_pool);
+            BUSTER_TEST(arguments, rows[1].operands == cfg->operand_pool + 2);
+            BUSTER_TEST(arguments, rows[1].targets == cfg->target_pool + 2);
+            BUSTER_TEST(arguments, rows[1].immediates == cfg->immediate_pool + 2);
+            for (u32 index = 0; index < 4; index += 1)
+            {
+                BUSTER_TEST(arguments, cfg->operand_pool[index].value == 10 + index);
+                BUSTER_TEST(arguments, cfg->target_pool[index].value == 20 + index);
+                BUSTER_TEST(arguments, cfg->immediate_pool[index] == 30 + index);
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    for (u32 missing_pool = 0; missing_pool < 3; missing_pool += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        IrInstruction rows[2] = {0};
+        IrBlock block = {0};
+        IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
+        rows[0].operand_count = missing_pool == 0;
+        rows[0].target_count = (u16)(missing_pool == 1);
+        rows[0].immediate_count = (u16)(missing_pool == 2);
+        IrValidationResult publication = ir_function_publish_cfg(arguments->arena, &function);
+        BUSTER_TEST(arguments, publication.error == IR_VALIDATION_OPERATION);
+        BUSTER_TEST(arguments, publication.boundary == IR_VALIDATION_BOUNDARY_CFG_PUBLICATION);
+        BUSTER_TEST(arguments, !function.published_cfg);
+        scratch_end(temporary);
+    }
+
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        IrBlockId* targets = arena_allocate(arguments->arena, IrBlockId, UINT16_MAX);
+        u64* immediates = arena_allocate(arguments->arena, u64, UINT16_MAX);
+        IrInstruction rows[2] = {0};
+        IrBlock block = {0};
+        IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
+        targets[0].value = 41;
+        targets[UINT16_MAX - 1].value = 42;
+        immediates[0] = 51;
+        immediates[UINT16_MAX - 1] = 52;
+        rows[0].targets = targets;
+        rows[0].target_count = UINT16_MAX;
+        rows[0].immediates = immediates;
+        rows[0].immediate_count = UINT16_MAX;
+        BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+        IrPublishedCfg const* cfg = function.published_cfg;
+        if (BUSTER_REQUIRE(arguments, cfg != 0))
+        {
+            BUSTER_TEST(arguments, cfg->target_count == UINT16_MAX && cfg->immediate_count == UINT16_MAX);
+            BUSTER_TEST(arguments, cfg->target_pool == targets && cfg->immediate_pool == immediates);
+            BUSTER_TEST(arguments, cfg->target_pool[0].value == 41 && cfg->target_pool[UINT16_MAX - 1].value == 42);
+            BUSTER_TEST(arguments, cfg->immediate_pool[0] == 51 && cfg->immediate_pool[UINT16_MAX - 1] == 52);
+            BUSTER_TEST(arguments, cfg->allocated_bytes == base_allocated_bytes);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -135,7 +285,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
 
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_publication_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = ir_cfg_instruction_span_tests(arguments);
+    UnitTestResult result = ir_cfg_pool_tests(arguments);
+    UnitTestResult spans = ir_cfg_instruction_span_tests(arguments);
+    result.test_count += spans.test_count;
+    result.succeeded_test_count += spans.succeeded_test_count;
     u32 degrees[] = {0, 1, 2, 17, 4096};
     u32 widths[] = {0, 1, 2, 32, 33};
     for (u32 di = 0; di < BUSTER_ARRAY_LENGTH(degrees); di += 1)
