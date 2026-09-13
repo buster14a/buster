@@ -35,7 +35,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir "$RUNNER_TEMP/release-assets"
-          gh release download "$EVIDENCE_TAG" --dir "$RUNNER_TEMP/release-assets" \
+          gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/release-assets" \
             --pattern archive-manifest.json --pattern SHA256SUMS \
             --pattern native-retirement-eb1bef2-34714527496.zip \
             --pattern buster-validation-source-38f150f.tar.gz \
@@ -116,7 +116,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir "$RUNNER_TEMP/release-assets"
-          gh release download "$EVIDENCE_TAG" --dir "$RUNNER_TEMP/release-assets" \
+          gh release download "$EVIDENCE_TAG" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/release-assets" \
             --pattern archive-manifest.json --pattern SHA256SUMS \
             --pattern 'strict-retirement-eb1bef2-34714527496.zip.part-*' \
             --pattern buster-candidate-source-eb1bef2.tar.gz
@@ -142,7 +142,7 @@ jobs:
       - name: Report first strict replay diagnostic after failure
         if: ${{ failure() }}
         run: |
-          diagnostic=$(find evidence/strict-differential -name '*.stderr' -type f -size +0c -print -quit)
+          diagnostic=$(find evidence/strict-differential -name '*.stderr' -type f -size +0c -print -quit 2>/dev/null || true)
           if [[ -n "$diagnostic" ]]; then
             sed -n '1,120p' "$diagnostic"
           fi
