@@ -36968,7 +36968,7 @@ BUSTER_C_INTERNAL void c_ir_store_pointer_bits(CIntegerIrBuilder* builder, IrTyp
     for (u64 byte_index = 0; byte_index < size; byte_index += 1)
     {
         u64 source_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : size - byte_index - 1;
-        bytes[offset + byte_index] = source_index < sizeof(value) ? (u8)(value >> (u32)(source_index * 8)) : 0;
+        bytes[offset + byte_index] = (u8)(source_index < sizeof(value) ? value >> (u32)(source_index * 8) : 0);
     }
 }
 
@@ -42976,7 +42976,7 @@ BUSTER_C_INTERNAL void c_ir_constant_store_unit_bits(IrProgram* program, u64 siz
     for (u64 byte_index = 0; byte_index < size; byte_index += 1)
     {
         u64 source_index = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : size - byte_index - 1;
-        u8 byte = source_index < sizeof(bits) ? (u8)(bits >> (u32)(source_index * 8)) : (sign_extend ? 0xff : 0);
+        u8 byte = (u8)(source_index < sizeof(bits) ? bits >> (u32)(source_index * 8) : (sign_extend ? 0xff : 0));
         bytes[offset + byte_index] = byte;
     }
 }
