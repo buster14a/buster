@@ -92,6 +92,7 @@ jobs:
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 0 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
           --out evidence/census-integrated-0
       - name: Execute complete assigned shard 1
         continue-on-error: true
@@ -104,6 +105,7 @@ jobs:
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 1 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
           --out evidence/census-integrated-1
       - name: Execute complete assigned shard 2
         continue-on-error: true
@@ -116,6 +118,7 @@ jobs:
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 2 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
           --out evidence/census-integrated-2
       - name: Execute complete assigned shard 3
         continue-on-error: true
@@ -128,6 +131,7 @@ jobs:
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 3 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
           --out evidence/census-integrated-3
       - name: Join and independently validate every census row
         if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
