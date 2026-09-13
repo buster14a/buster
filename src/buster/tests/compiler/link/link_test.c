@@ -2559,6 +2559,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_section_table_tail(UnitTestArgu
     {
         prefix_bytes[index] = (u8)(0x80 | index);
     }
+    // link_test_elf_section_find reads only an image with the ELF magic.
+    memcpy(prefix_bytes, "\x7f" "ELF", 4);
     u8 poisons[] = {0xa5, 0x5a};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     ArenaCreation creation = {.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}};
