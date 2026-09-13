@@ -70,6 +70,7 @@
 typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
+    BUILD_COMMAND_BENCH_SERVICE,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_GENERATE,
@@ -22447,6 +22448,7 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 }
 
 BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments);
+BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments);
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
@@ -22527,6 +22529,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     // Exercise the shared-library runner on every native desktop matrix host.
     String8 throughput_self_test[] = {S8("self-test")};
     bench_throughput_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(throughput_self_test));
+    bench_service_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(throughput_self_test));
+#if !BUSTER_WINDOWS
+    String8 service_sanitized_test[] = {S8("self-test"), S8("--sanitize")};
+    bench_service_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(service_sanitized_test));
+#endif
 
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
@@ -34144,9 +34151,9 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 // Compiler construction stays in the existing generate/build commands. This
 // command builds the small native measurement tool, then forwards its argv
 // without shell parsing. Only the shared foundation modules are linked.
-BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments)
+BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 arguments, bool service)
 {
-    make_directory_recursive(arena, S8("build/throughput-tools"));
+    make_directory_recursive(arena, service ? S8("build/bench-service-tools") : S8("build/throughput-tools"));
     bool sanitize = arguments.length == 2 && string_equal(arguments.pointer[0], S8("self-test")) && string_equal(arguments.pointer[1], S8("--sanitize"));
     bool self_test = sanitize || (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")));
 #if BUSTER_WINDOWS
@@ -34154,6 +34161,16 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
 #else
     String8 executable = sanitize ? S8("build/throughput-tools/throughput-tests-sanitized") : self_test ? S8("build/throughput-tools/throughput-tests") : S8("build/throughput-tools/throughput");
 #endif
+    if (service)
+    {
+        String8 name = sanitize ? S8("service-tests-sanitized") : self_test ? S8("service-tests") : S8("service");
+#if BUSTER_WINDOWS
+        String8 suffix = S8(".exe");
+#else
+        String8 suffix = S8("");
+#endif
+        executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"), name, suffix);
+    }
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
     String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
@@ -34170,7 +34187,7 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
     os_argument_builder_append(&builder, S8("-funsigned-char"));
     os_argument_builder_append(&builder, S8("-Isrc"));
     os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
-    os_argument_builder_append(&builder, self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"));
+    os_argument_builder_append(&builder, (service ? (self_test ? S8("tools/bench_service/tests.c") : S8("tools/bench_service/main.c")) : (self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"))));
     os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
     if (sanitize)
     {
@@ -34195,7 +34212,7 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
     os_argument_builder_append(&builder, executable);
     if (self_test)
     {
-        os_argument_builder_append(&builder, sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests"));
+        os_argument_builder_append(&builder, service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests")));
     }
     else
     {
@@ -34206,6 +34223,16 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
     }
     *measure = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
                             .spawn_options = {.use_process_environment = 1}};
+}
+
+BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments)
+{
+    native_foundation_tool_add(arena, arguments, false);
+}
+
+BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
+{
+    native_foundation_tool_add(arena, arguments, true);
 }
 
 // A same-runner CI comparison. A separately checked-out baseline is required;
@@ -34300,6 +34327,7 @@ ProcessResult process_arguments(void)
 
     BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
+        [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
@@ -34450,7 +34478,7 @@ ProcessResult process_arguments(void)
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
         String8 argument = arguments.pointer[argument_i];
-        if (command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
+        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
             string8_list_push(arena, &throughput_arguments, argument);
             argument_i += 1;
@@ -35372,6 +35400,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_BENCH_THROUGHPUT_CI:
         {
             result = bench_throughput_ci_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE:
+        {
+            bench_service_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_BENCH_THROUGHPUT:
