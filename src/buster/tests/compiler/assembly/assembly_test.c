@@ -5409,6 +5409,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                aarch64_inline_compare.bytes.length == sizeof(expected_aarch64_inline_compare) &&
                                memcmp(aarch64_inline_compare.bytes.pointer, expected_aarch64_inline_compare,
                                       sizeof(expected_aarch64_inline_compare)) == 0);
+    AssemblyEncodeResult aarch64_compare_aliases = assembly_encode(
+        arguments->arena, S8("cmp w9, w10\ncmp x9, x10, lsr #3\ncmn w9, #1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
+    static u8 const expected_aarch64_compare_aliases[] = {
+        0x3f, 0x01, 0x0a, 0x6b, 0x3f, 0x0d, 0x4a, 0xeb, 0x3f, 0x05, 0x00, 0x31,
+    };
+    BUSTER_TEST(arguments, aarch64_compare_aliases.diagnostic_count == 0 &&
+                               aarch64_compare_aliases.bytes.length == sizeof(expected_aarch64_compare_aliases) &&
+                               memcmp(aarch64_compare_aliases.bytes.pointer, expected_aarch64_compare_aliases,
+                                      sizeof(expected_aarch64_compare_aliases)) == 0);
     AssemblyEncodeResult aarch64_inline_bcond = assembly_encode(
         arguments->arena, S8("b.eq .Lbuster.inline.asm.0.2\n"), (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
     static u8 const expected_aarch64_inline_bcond[] = {0x00, 0x00, 0x00, 0x54};

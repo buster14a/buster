@@ -4046,6 +4046,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
                                                 .encoding_kind = ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS};
         }
+        else if (assembly_word_equal(mnemonic, S8("cmp")) || assembly_word_equal(mnemonic, S8("cmn")))
+        {
+            // CMP/CMN are architectural aliases of SUBS/ADDS with ZR as the
+            // destination.  The scalar parser materializes that implicit
+            // operand so the generated canonical encoder remains authoritative.
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER};
+        }
         else
         {
             if (assembly_aarch64_direct_simd_lookup(mnemonic, result))
@@ -8099,6 +8107,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     A64ScalarIntModifier parsed_modifiers[1] = {0};
     u32 operand_count = 0;
     u32 modifier_count = 0;
+    bool compare_alias = assembly_word_equal(mnemonic, S8("cmp"));
+    bool compare_negative_alias = assembly_word_equal(mnemonic, S8("cmn"));
     bool is_condcmp = assembly_word_equal(mnemonic, S8("ccmn")) || assembly_word_equal(mnemonic, S8("ccmp"));
     for (u32 index = 0; index < token_count; index += 1)
     {
@@ -8141,8 +8151,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
         }
         parsed_operands[operand_count++] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = value};
     }
+    String8 encoded_mnemonic = mnemonic;
+    if (compare_alias || compare_negative_alias)
+    {
+        if (!operand_count || operand_count >= BUSTER_ARRAY_LENGTH(parsed_operands) ||
+            parsed_operands[0].kind != A64_SCALAR_INT_OPERAND_REGISTER)
+        {
+            return false;
+        }
+        memmove(parsed_operands + 1, parsed_operands, sizeof(*parsed_operands) * operand_count);
+        parsed_operands[0] = (A64ScalarIntOperand){
+            .kind = A64_SCALAR_INT_OPERAND_REGISTER,
+            .width = parsed_operands[1].width,
+            .index = 31,
+        };
+        operand_count += 1;
+        encoded_mnemonic = compare_alias ? S8("subs") : S8("adds");
+    }
     u32 form_index = UINT32_MAX;
-    if (!buster_aarch64_arm_m1_scalar_integer_find_form(mnemonic, parsed_operands, operand_count, parsed_modifiers, modifier_count, &form_index))
+    if (!buster_aarch64_arm_m1_scalar_integer_find_form(encoded_mnemonic, parsed_operands, operand_count, parsed_modifiers, modifier_count,
+                                                         &form_index))
     {
         return false;
     }
