@@ -7069,7 +7069,7 @@ BUSTER_C_INTERNAL void c_preprocess_command_definition(Arena* arena, CSpellingSp
                                                          CPreprocessResult* result)
 {
     String8 prefix = S8("#define ");
-    String8 text = string_format(arena, S8("{S8}{S8} {S8}\n"), prefix, definition.name, definition.value);
+    String8 text = string_format(arena, S8("{S8}{S8} {S8} \n"), prefix, definition.name, definition.value);
     CLexResult lex = c_lex_space(arena, space, text);
     for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
     {

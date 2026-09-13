@@ -424,8 +424,13 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("restore-keys:", text)
         self.assertNotIn("install-vulkan-sdk", text)
         self.assertIn("hashFiles('.github/zig.json')", text)
-        self.assertIn("UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1", text)
+        workflow_environment = text.split("\njobs:", 1)[0]
+        self.assertNotIn("UBSAN_OPTIONS:", workflow_environment)
         self.assertNotIn("detect_leaks=0", text)
+        cmake = (ROOT / "CMakeLists.txt").read_text()
+        self.assertIn('set(BUSTER_UBSAN_OPTIONS "halt_on_error=1:exitcode=87:print_stacktrace=1")', cmake)
+        self.assertIn('list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")', cmake)
+        self.assertNotIn("ENV{UBSAN_OPTIONS}", cmake)
 
     def test_independent_suites_are_not_guarded_by_prior_test_success(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -630,7 +635,7 @@ printf '%s\n' "$checked"
             self.assertEqual(result.stdout.strip(), "633")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
-    def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):
+    def test_recoverable_ubsan_error_is_fatal_with_correctness_environment(self):
         compiler = shutil.which("clang")
         self.assertIsNotNone(compiler, "Clang is a CI prerequisite")
         with tempfile.TemporaryDirectory() as temporary:

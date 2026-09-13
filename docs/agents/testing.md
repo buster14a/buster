@@ -78,6 +78,16 @@
   `BUSTER_TEST_HEADERS` in `CMakeLists.txt`, and include both from
   `src/buster/tests/test.c` in the existing registration order (the
   implementation only in the `BUSTER_UNITY_BUILD` block).
+- `sanitizer_tests` is the executable contract for sanitized correctness
+  launches. Under the effective `BUSTER_TEST_ENV` it runs freed main- and
+  worker-thread controls, a fatal undefined-shift child, and Linux
+  main/worker-thread leak children. It requires the reserved UBSan/LSan exit
+  codes and their own diagnostics, so a
+  launch failure, crash, or unrelated stderr cannot pass. Unsupported
+  LeakSanitizer platforms emit an explicit `status=unsupported` record instead
+  of being reported as a canary pass. The canary environment variable is a
+  private subprocess seam; use the registered suite rather than invoking it as
+  standalone evidence.
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
