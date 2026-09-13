@@ -3980,7 +3980,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_abi_is_f80_complex_result(IrProgr
 // in as many registers as it takes, which is the lowering clang emits for the
 // same declaration: xmm0 through xmm3 for a 64-byte vector without AVX, ymm0
 // and ymm1 with it. Zero means the target cannot carry the part at all.
-BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size)
+u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size)
 {
     // Every x86-64 target has a sixteen-byte vector register -- the psABI puts
     // one in the baseline -- so only a part wider than that has to ask the
@@ -4017,7 +4017,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_vector_part_registers(Target const
 // width exactly when the count is more than one. Zero pieces means the model
 // cannot split the width evenly, which no power-of-two signature type
 // produces.
-BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size)
+u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size)
 {
     *piece_size = 0;
     if (!type || type->kind != IR_TYPE_VECTOR || !type->layout.resolved || type->layout.size < 8 || type->layout.size > UINT32_MAX ||
@@ -9083,11 +9083,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // bottom out in target_data_layout's 1..16 table (aggregates take
             // a max of member alignments, vectors a power-of-two byte size),
             // and requested value alignments pass c_ir_alignment_evaluate's
-            // power-of-two check. That licenses align_forward's mask here and
+            // power-of-two check. That licenses align_forward_unchecked's mask here and
             // in the offset-assignment loop below; a `%` compiles to a
             // hardware divide in a loop that visits every value of every
             // function.
-            function_value_bytes = align_forward(function_value_bytes, slot_alignment);
+            function_value_bytes = align_forward_unchecked(function_value_bytes, slot_alignment);
             function_value_bytes += slot_size & slot_after_align;
             if (value.alignment > 16 && value.definition.value < function_instruction_count &&
                 instructions[value.definition.value].opcode == IR_OPCODE_LOCAL)
@@ -9340,7 +9340,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 value_bytes += slot_size;
             }
             // Power-of-two slot_alignment; see the capacity-estimation loop.
-            value_bytes = align_forward(value_bytes, slot_alignment);
+            value_bytes = align_forward_unchecked(value_bytes, slot_alignment);
             if (value_bytes > UINT32_MAX)
             {
                 result.error = CODEGEN_ERROR_CAPACITY;

@@ -1,0 +1,1 @@
+cc: error: issue564-evidence/invalid.c:1:22: use of undeclared identifier 'missing'

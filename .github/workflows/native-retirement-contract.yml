@@ -13,6 +13,7 @@ on:
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
+      - tools/native_retirement_contract_test.py
       - tests/**
   workflow_dispatch:
 
@@ -39,6 +40,8 @@ jobs:
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
           "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Prove unreviewed input drift fails closed
         run: |

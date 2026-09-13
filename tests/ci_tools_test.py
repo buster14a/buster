@@ -636,7 +636,14 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_bootstrap_keeps_every_native_gate_in_order(self):
         text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
-        commands = re.findall(r"(?m)^        run: '\"\$RUNNER_TEMP/buster-build\" (.+)'$", text)
+        command_text = text[:text.index(
+            "      - name: Check the bootstrap probe against independent compiler oracles")]
+        matches = re.findall(
+            r"(?m)^(?:        run: '\"\$RUNNER_TEMP/buster-build\" ([^']+)'|"
+            r"            \"\$RUNNER_TEMP/buster-build\" ([^\n]+))$",
+            command_text,
+        )
+        commands = [inline or block for inline, block in matches]
         self.assertEqual(commands, [
             "self_host_audit_self_test",
             "generate --cc clang --ci --linker DEFAULT",
@@ -696,6 +703,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("--compiler-revision 2bb4ce939d99c3956848ca7bc9c347f3ae8db231", text)
         self.assertEqual(text.count('test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"'), 2)
         self.assertEqual(text.count('--resource-include "$(clang -print-resource-dir)/include"'), 4)
+        census_validation = text.split("      - name: Independently validate every census shard and row", 1)[1].split(
+            "      - name: Retain raw evidence and build recipes", 1)[0]
+        self.assertIn("../validation/tools/native_retirement_contract.py validate-shards", census_validation)
+        self.assertEqual(len(re.findall(r"evidence/census-integrated-[0-3]", census_validation)), 4)
+        self.assertIn("--out evidence/census-validation-v2.json", census_validation)
+        self.assertIn("--require-clean-candidate", census_validation)
+        self.assertNotIn("join-census.py", census_validation)
+        self.assertNotIn("validate-census-v2.py", census_validation)
         strict = text.split("\n  strict_differential:", 1)[1]
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)\n            slug: (.+)\n            platform: (.+)$", strict)
         self.assertEqual(entries, [
@@ -718,6 +733,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("oracle_sanitizer_runtime=$RuntimeDll", strict)
         self.assertIn('$env:PATH = "$RuntimeDir;$env:PATH"', strict)
         self.assertIn("$DifferentialArgs += '--sanitize-oracle'", strict)
+        self.assertIn("$LibraryPaths = @($env:LIB -split ';'", strict)
+        self.assertIn("$DifferentialArgs += @('--library-path', $LibraryPath)", strict)
         self.assertIn("BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'strict_windows' ||", strict)
         self.assertIn("strict-retirement-${{ env.BUSTER_RETIREMENT_CANDIDATE }}-${{ matrix.slug }}", strict)
         complete = text.split("\n  complete:", 1)[1]
@@ -725,15 +742,32 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("name: Native retirement acceptance complete", complete)
         self.assertIn('[[ "$CENSUS_RESULT" == success && "$STRICT_RESULT" == success ]]', complete)
 
-    def test_windows_arm64_oracle_keeps_the_full_corpus_with_required_link_shims(self):
+    def test_windows_oracle_keeps_the_full_corpus_with_required_link_shims(self):
         differential = (ROOT / "tools/differential.c").read_text()
-        clear_cache = (ROOT / "tests/differential/clear_cache_host.c").read_text()
-        self.assertIn("#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64", differential)
+        frontend = (ROOT / "src/buster/lib/compiler/frontend/c/c_gen.c").read_text()
+        machine_test = (ROOT / "src/buster/tests/compiler/codegen/machine_test.c").read_text()
+        clear_cache_subject = (ROOT / "tests/differential/clear_cache.c").read_text()
+        clear_cache_host = (ROOT / "tests/differential/clear_cache_host.c").read_text()
+        self.assertIn("#if BUSTER_WINDOWS", differential)
         self.assertIn('if (!object_only && !test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }', differential)
         self.assertNotIn('if (host && !object_only && !test.host.length)', differential)
-        self.assertIn("defined(_WIN32)", clear_cache)
-        self.assertIn("defined(_M_ARM64) || defined(__aarch64__)", clear_cache)
-        self.assertIn("void __clear_cache(void *begin, void *end)", clear_cache)
+        self.assertIn('S8("-L{S8}")', differential)
+        self.assertIn('string_equal(arg, S8("--library-path"))', differential)
+        self.assertIn("library_path_count={u64}", differential)
+        self.assertIn("builder->target.cpu_arch == CPU_ARCH_AARCH64", frontend)
+        self.assertIn("builder->target.os == OPERATING_SYSTEM_WINDOWS", frontend)
+        self.assertIn('S8("__clear_cache")', frontend)
+        self.assertIn("defined(_WIN32)", clear_cache_host)
+        self.assertIn("defined(_M_ARM64) || defined(__aarch64__)", clear_cache_host)
+        self.assertIn("void __clear_cache(void *begin, void *end)", clear_cache_host)
+        self.assertIn("FlushInstructionCache(GetCurrentProcess(), begin, size)", clear_cache_host)
+        self.assertIn("ExitProcess(1)", clear_cache_host)
+        self.assertIn("__builtin___clear_cache(p + 3, p + 65)", clear_cache_subject)
+        self.assertNotIn("__builtin___clear_cache(p + 3, p + 3)", clear_cache_subject)
+        self.assertIn("clear_arguments(bytes + start, 65, &first, &second)", clear_cache_host)
+        self.assertIn("clear_instruction_count == (target_index == 2 ? 0u : 3u)", machine_test)
+        self.assertIn("direct_maintenance_words == 0", machine_test)
+        self.assertIn("CODEGEN_MODULE_RELOCATION_AARCH64_CALL26", machine_test)
 
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()

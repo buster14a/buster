@@ -878,6 +878,7 @@ buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 set(BUSTER_TEST_SOURCES
     src/buster/tests/byte_writer_test.c
     src/buster/tests/arena_test.c
+    src/buster/tests/integer_test.c
     src/buster/tests/sanitizer_test.c
     src/buster/tests/hash_test.c
     src/buster/tests/simd_test.c
@@ -888,6 +889,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/truetype_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
+    src/buster/tests/compiler/frontend/c/macro_conditional_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
@@ -930,6 +932,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
     src/buster/tests/arena_test.h
+    src/buster/tests/integer_test.h
     src/buster/tests/sanitizer_test.h
     src/buster/tests/sanitizer_test_internal.h
     src/buster/tests/hash_test.h
@@ -943,6 +946,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
     src/buster/tests/compiler/frontend/c/c_test.h
+    src/buster/tests/compiler/frontend/c/macro_conditional_test.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
@@ -1773,6 +1777,15 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
+# The headless compiler has no production font consumer.  Keep the reusable
+# module registered above, but add it to ide only when its registered tests are
+# present.  A future product target using font_provider must name truetype in
+# its own module inventory rather than relying on ide's test dependency.
+set(BUSTER_COMPILER_TEST_MODULES)
+if (BUSTER_INCLUDE_TESTS)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+endif()
+
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
@@ -1782,7 +1795,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     integer
     string
     float
-    truetype
+    ${BUSTER_COMPILER_TEST_MODULES}
     compiler_c_frontend
     compiler_aarch64_encoding
     compiler_aarch64_exact_bridge

@@ -178,6 +178,25 @@ python3 tools/native_retirement_contract.py compare build/census-reference build
   --out build/common-row-transitions.json --require-clean-candidate
 ```
 
+For a sharded census, `validate-shards` independently validates each directory,
+requires byte-exact equality of the full `rows.tsv` identity map and the full
+`inputs.tsv` recipe ledger, then proves a disjoint complete selected-row
+partition. Its aggregate report is written even when a disposition is dirty so
+reference, setup and candidate failures remain inspectable. Passing
+`--require-clean-candidate` additionally rejects every supported candidate
+failure, nonzero fallback or invalid function/target/counter telemetry, and
+every unresolved semantic baseline/reference row. Rows whose exact
+`execution_obligation` is `unavailable-platform-control` remain explicit
+inapplicable controls; they are retained in the report and waive only the
+separate native-execution obligation. They do not excuse a reference compile,
+process status, object, fallback or telemetry defect.
+
+The acceptance workflow invokes this current validator directly from its second
+exact-candidate checkout. It does not reuse the historical archive's older join
+or schema reader. The retained `census-validation-v2.json` therefore records the
+complete current-schema partition even when `--require-clean-candidate` rejects
+real compiler or reference gaps.
+
 The report records added and removed identities separately from the common-row
 disposition transitions. The strict option rejects any common candidate row that
 is not a baseline-supported, strict-success or strict-empty-unit result, or that
@@ -263,11 +282,18 @@ workflow prepends Clang's matching resource-runtime directory on Windows so a
 different installed ASan DLL cannot satisfy the run. The Windows Arm64 runner's
 LLVM package does not ship an AArch64 ASan runtime, so that lane records
 `oracle_sanitizer=not-run` and the exact reason instead of reporting an
-unsanitized run as a sanitizer pass. That lane still executes the complete
-corpus: its independent oracle links the Arm64 UCRT legacy stdio definitions
-for the intentionally headerless programs, and the clear-cache caller supplies
-the compiler-rt boundary omitted by the runner package. No case or matrix row
-is pruned for either host-toolchain limitation. The stable
+unsanitized run as a sanitizer pass. Both Windows lanes preserve every Visual
+Studio `LIB` directory as an explicit, ordered `--library-path` input in the
+harness manifest and child argv. This lets the Buster driver find the UCRT
+legacy stdio definitions used by the intentionally headerless programs without
+silently inheriting the parent environment. The Arm64 clear-cache caller also
+supplies the compiler-rt `__clear_cache` boundary omitted by the runner package,
+backed by Windows' `FlushInstructionCache`. Windows Arm64 lowering calls that
+boundary because hosted processes cannot execute DC CVAU / IC IVAU directly;
+the original empty and nonempty ranges, argument side effects and live-register
+checks all remain. Other native hosts retain inline maintenance, and the
+independent Linux AArch64 byte oracle continues to check its complete sequence.
+No case or matrix row is pruned for either host-toolchain limitation. The stable
 `Native retirement acceptance complete` check rejects a missing, skipped,
 cancelled or failed census or native matrix. The archived direct reference
 remains separately pinned.

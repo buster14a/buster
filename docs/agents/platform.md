@@ -32,6 +32,16 @@
   contracts, including scale-sensitive curve goldens, the subdivision cap and
   a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
   configurations.
+- The active headless `ide` target has no production TrueType caller. It adds
+  the `truetype` module exactly when `BUSTER_INCLUDE_TESTS` is enabled, for the
+  registered `truetype_tests` consumer; use value tests (`#if`), because CMake
+  always defines this macro as either zero or one. Android and iOS add `window`
+  for process lifecycle only and do not add a font consumer. The reusable
+  `truetype` module and dormant `font_provider` source remain available for a
+  future product target, which must register both dependencies explicitly.
+  `tests/truetype_dependency_test.py` checks the generated split graphs,
+  builds the tests-disabled split compiler in Debug and Release, and checks
+  the actual Release unity preprocessing closure for tests on and off.
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 

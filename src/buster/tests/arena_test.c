@@ -66,7 +66,11 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
     String8 failure_mode = os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE"));
-    if (string_equal(failure_mode, S8("commit")) || string_equal(failure_mode, S8("bound")))
+    if (string_equal(failure_mode, S8("commit")) || string_equal(failure_mode, S8("bound")) ||
+        string_equal(failure_mode, S8("alignment_zero")) || string_equal(failure_mode, S8("alignment_three")) ||
+        string_equal(failure_mode, S8("alignment_huge")) || string_equal(failure_mode, S8("cursor_low")) ||
+        string_equal(failure_mode, S8("cursor_high")) || string_equal(failure_mode, S8("decommit_low")) ||
+        string_equal(failure_mode, S8("decommit_high")))
     {
         Arena* arena = arena_create((ArenaCreation){
             .reserved_size = BUSTER_MB(1),
@@ -79,11 +83,41 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             arena_test_fail_next_commit();
             arena_allocate_bytes(arena, BUSTER_KB(128), 1);
         }
-        else
+        else if (string_equal(failure_mode, S8("bound")))
         {
             // This is caller-derived validation, not an invariant. It must
             // still fail in an optimized build rather than becoming UB.
             arena_allocate_bytes(arena, arena->reserved_size, 1);
+        }
+        else if (string_equal(failure_mode, S8("alignment_zero")))
+        {
+            arena_allocate_bytes(arena, 1, 0);
+        }
+        else if (string_equal(failure_mode, S8("alignment_three")))
+        {
+            arena_allocate_bytes(arena, 1, 3);
+        }
+        else if (string_equal(failure_mode, S8("alignment_huge")))
+        {
+            // This alignment is valid by itself, but its rounded offset is
+            // outside the reservation and must be rejected before committing.
+            arena_allocate_bytes(arena, 1, (u64)1 << 63);
+        }
+        else if (string_equal(failure_mode, S8("cursor_low")))
+        {
+            arena_set_position(arena, arena_minimum_position - 1);
+        }
+        else if (string_equal(failure_mode, S8("cursor_high")))
+        {
+            arena_set_position(arena, arena->reserved_size + 1);
+        }
+        else if (string_equal(failure_mode, S8("decommit_low")))
+        {
+            arena_set_position_and_decommit(arena, arena_minimum_position - 1);
+        }
+        else
+        {
+            arena_set_position_and_decommit(arena, arena->position + 1);
         }
         BUSTER_UNREACHABLE();
     }
@@ -107,6 +141,36 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, arena->position == arena->reserved_size);
 
             arena_destroy(arena, 1);
+        }
+    }
+
+    // Checked alignment is side-effect free, while a valid allocation and
+    // rewind update the cursor and dirty watermark in their usual order.
+    {
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            u64 start = arena->position;
+            u64 committed = arena->os_position;
+            u64 dirty = arena_dirty_position(arena);
+            u64 rounded = UINT64_MAX;
+            bool valid = align_forward_checked(start, 3, &rounded);
+            BUSTER_TEST(arguments, !valid && rounded == UINT64_MAX && arena->position == start && arena->os_position == committed &&
+                                       arena_dirty_position(arena) == dirty);
+
+            void* empty = arena_allocate_bytes(arena, 0, 1);
+            BUSTER_TEST(arguments, empty != 0 && arena->position == start);
+            u8* bytes = (u8*)arena_allocate_bytes(arena, 17, 16);
+            u64 high_water = arena->position;
+            BUSTER_TEST(arguments, bytes != 0 && ((u64)bytes & 15) == 0 && high_water > start);
+            arena_set_position(arena, arena_minimum_position);
+            BUSTER_TEST(arguments, arena->position == arena_minimum_position);
+            arena_set_position(arena, arena->reserved_size);
+            BUSTER_TEST(arguments, arena->position == arena->reserved_size);
+            BUSTER_TEST(arguments, arena_dirty_position(arena) == arena->reserved_size);
+            arena_set_position(arena, start);
+            BUSTER_TEST(arguments, arena->position == start && arena_dirty_position(arena) == arena->reserved_size);
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
         }
     }
 
@@ -311,8 +375,15 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             program_state->input.arguments.pointer[0],
             S8("test"),
         };
-        String8 modes[] = {S8("commit"), S8("bound")};
-        String8 diagnostics[] = {S8("arena commit failed"), S8("validation failed")};
+        String8 modes[] = {
+            S8("commit"), S8("bound"), S8("alignment_zero"), S8("alignment_three"), S8("alignment_huge"),
+            S8("cursor_low"), S8("cursor_high"), S8("decommit_low"), S8("decommit_high"),
+        };
+        String8 diagnostics[] = {
+            S8("arena commit failed"), S8("validation failed"), S8("validation failed"), S8("validation failed"),
+            S8("validation failed"), S8("validation failed"), S8("validation failed"), S8("validation failed"),
+            S8("validation failed"),
+        };
         for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
         {
             String8 environment_keys[] = {S8("BUSTER_ARENA_FAILURE_MODE")};

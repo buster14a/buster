@@ -20362,10 +20362,7 @@ BUSTER_GLOBAL_LOCAL void test_musl_action_add(Arena* arena, TestMuslOptions opti
 // _testinternalcapi, whose static build cannot link into the _freeze_module
 // bootstrap under ANY toolchain, since it references getpath.o's
 // _Py_Get_Getpath_CodeObject while the bootstrap deliberately links
-// getpath_noop.o); Python/perf_jit_trampoline.o, which is compiled with
-// clang -fno-pic -gdwarf-4 in BOTH trees (conditional directives inside a
-// macro argument, issue 838; DWARF 5 reader, issue 840; GOTPCRELX
-// conversion, issue 841); refleak hunting; the resource-gated suite
+// getpath_noop.o); refleak hunting; the resource-gated suite
 // surface; and performance.  pyconfig.h must match the Clang configure
 // exactly except for the three expected divergences asserted below.
 
@@ -20522,23 +20519,24 @@ BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_di
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content));
 }
 
-// The one object neither tree lets `ide cc` build: perf_jit_trampoline.c
-// nests conditional directives inside a macro argument (issue 838), and the
-// object clang produces must avoid DWARF 5 (issue 840) and PIE-style GOT
-// references (issue 841) for the Buster linker to read it.  Substituting it
-// in BOTH trees keeps the comparison about everything else.
-BUSTER_GLOBAL_LOCAL bool cpython_substitute_trampoline(Arena* arena, String8 clang, String8 source_directory, String8 tree_directory)
+// Keep the established object-specific non-PIE constraint while making Buster
+// compile the source itself with its supported debug mode. The conditional
+// directives inside its macro argument are the compatibility surface this
+// unit exercises (#76).
+BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 ide, String8 source_directory, String8 tree_directory,
+                                                          String8 allocator_flag)
 {
     make_directory_recursive(arena, path_join(arena, tree_directory, S8("Python")));
     String8 include_internal = path_join(arena, path_join(arena, source_directory, S8("Include")), S8("internal"));
     String8 arguments[] = {
-        clang,
+        ide,
+        S8("cc"),
         S8("-fno-pic"),
-        S8("-ftls-model=local-exec"),
-        S8("-gdwarf-4"),
+        S8("-g"),
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),
         S8("-O3"),
+        allocator_flag,
         S8("-std=c11"),
         string_format(arena, S8("-I{S8}"), include_internal),
         string_format(arena, S8("-I{S8}"), path_join(arena, include_internal, S8("mimalloc"))),
@@ -20665,9 +20663,14 @@ BUSTER_GLOBAL_LOCAL bool cpython_run_workload(Arena* arena, String8 tree_directo
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 source_directory, String8 tree_directory, String8 cc, String8 clang,
-                                                      String8 label, String8 allocator_flag, bool substitute_trampoline)
+BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 source_directory, String8 tree_directory, String8 cc, String8 trampoline_ide,
+                                                      String8 label, String8 allocator_flag, bool prebuild_trampoline,
+                                                      bool* trampoline_built_out)
 {
+    if (trampoline_built_out)
+    {
+        *trampoline_built_out = false;
+    }
     make_directory_recursive(arena, tree_directory);
     u64 configure_start = os_now_microseconds();
     // The allocator flag rides CFLAGS rather than CC: driver options follow
@@ -20695,14 +20698,21 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
         string_print(S8("error: test_cpython could not write Modules/Setup.local for tree={S8}\n"), label);
         return false;
     }
-    // Only the Buster trees take the substitute: its -fno-pic spelling is
-    // what the Buster linker can read (issues 838/840/841), and the same
-    // object breaks the Clang tree's PIE link.  The reference compiles the
-    // unit natively with the same clang anyway.
-    if (substitute_trampoline && !cpython_substitute_trampoline(arena, clang, source_directory, tree_directory))
+    // Only the Buster trees prebuild this unit. The Clang reference compiles
+    // it through the generated make rules; Buster uses the same source and
+    // preserves the established object-specific flags above.
+    if (prebuild_trampoline && !cpython_build_buster_trampoline(arena, trampoline_ide, source_directory, tree_directory, allocator_flag))
     {
-        string_print(S8("error: test_cpython could not build the clang perf_jit_trampoline.o substitute for tree={S8}\n"), label);
+        string_print(S8("error: test_cpython could not build perf_jit_trampoline.o with Buster for tree={S8}\n"), label);
         return false;
+    }
+    if (prebuild_trampoline)
+    {
+        if (trampoline_built_out)
+        {
+            *trampoline_built_out = true;
+        }
+        string_print(S8("CPYTHON_UNIT tree={S8} unit=Python/perf_jit_trampoline.o compiler=buster status=pass\n"), label);
     }
     String8 make = executable_resolve_in_path(arena, S8("make"));
     if (!make.length)
@@ -20865,7 +20875,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     // The Clang reference first: a reference that cannot build or answer the
     // workload means the environment, not the compiler, is what broke.
     String8 clang_tree = path_join(arena, output_directory, S8("clang"));
-    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang"), (String8){0}, false))
+    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang"), (String8){0}, false, 0))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -20881,16 +20891,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
     SliceString8 buster_failed = {0};
     SliceString8 clang_failed = {0};
+    bool compatibility_failed = false;
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(allocators); allocator_index += 1)
     {
         String8 mode = allocators[allocator_index];
         String8 tree = path_join(arena, output_directory, string_format(arena, S8("buster-{S8}"), mode));
         String8 cc = string_format(arena, S8("{S8} cc"), ide);
         String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
-        if (!cpython_configure_and_build(arena, source_directory, tree, cc, clang, mode, allocator_flag, true))
+        bool trampoline_built = false;
+        if (!cpython_configure_and_build(arena, source_directory, tree, cc, ide, mode, allocator_flag, true, &trampoline_built))
         {
             string_print(S8("error: test_cpython allocator={S8} build failed\n"), mode);
-            return PROCESS_RESULT_FAILED;
+            if (trampoline_built)
+            {
+                string_print(S8("CPYTHON_REMAINDER allocator={S8} status=fail unit_status=pass\n"), mode);
+            }
+            compatibility_failed = true;
+            continue;
         }
         String8 workload_output = {0};
         if (!cpython_run_workload(arena, tree, workload_path, &workload_output))
@@ -20917,6 +20934,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
                 return PROCESS_RESULT_FAILED;
             }
         }
+    }
+    if (compatibility_failed)
+    {
+        return PROCESS_RESULT_FAILED;
     }
 
     // The gate: a test the Buster build fails that the Clang build passes.
@@ -29137,11 +29158,11 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_chunk_accessor(Arena* output, St
     arena_append_string8(output, S8("_BYTE_COUNT, offset);\n}\n"));
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_u16_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 2u)) return 0;\n    return (u16)"));
+    arena_append_string8(output, S8("_u16_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 2u)) return 0;\n    return (u16)("));
     arena_append_string8(output, name);
     arena_append_string8(output, S8("_u8_counted(byte_count, offset) | ((u16)"));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_u8_counted(byte_count, offset + 1u) << 8);\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
+    arena_append_string8(output, S8("_u8_counted(byte_count, offset + 1u) << 8));\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
     arena_append_string8(output, name);
     arena_append_string8(output, S8("_u16(u64 offset)\n{\n    return "));
     arena_append_string8(output, name);

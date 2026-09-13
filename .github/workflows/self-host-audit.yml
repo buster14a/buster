@@ -36,6 +36,11 @@ jobs:
         run: |
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+      - name: Verify the TrueType dependency boundary
+        run: >-
+          python3 tests/truetype_dependency_test.py
+          --driver "$RUNNER_TEMP/buster-build"
+          --output-directory "$RUNNER_TEMP/truetype-dependency"
       - name: Test the bootstrap checker
         run: '"$RUNNER_TEMP/buster-build" self_host_audit_self_test'
       - name: Configure production compiler
@@ -47,7 +52,13 @@ jobs:
         run: '"$RUNNER_TEMP/buster-build" test_self_host_audit --config Release'
       - name: Run compiler regressions
         if: ${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}
-        run: '"$RUNNER_TEMP/buster-build" build --config Release -t test_all'
+        run: |
+          set -o pipefail
+          mkdir -p build/self-host-audit
+          {
+            "$RUNNER_TEMP/buster-build" build --config Release -t test_all
+          } 2>&1 | tee build/self-host-audit/truetype-tests.log
+          grep -F 'module=truetype_tests ' build/self-host-audit/truetype-tests.log
       - name: Check the bootstrap probe against independent compiler oracles
         # A failed audit must not suppress its independent semantic evidence.
         # These steps remain required failures; no continue-on-error is used.
