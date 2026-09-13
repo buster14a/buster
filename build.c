@@ -29137,11 +29137,11 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_chunk_accessor(Arena* output, St
     arena_append_string8(output, S8("_BYTE_COUNT, offset);\n}\n"));
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_u16_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 2u)) return 0;\n    return (u16)"));
+    arena_append_string8(output, S8("_u16_counted(u64 byte_count, u64 offset)\n{\n    if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 2u)) return 0;\n    return (u16)("));
     arena_append_string8(output, name);
     arena_append_string8(output, S8("_u8_counted(byte_count, offset) | ((u16)"));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_u8_counted(byte_count, offset + 1u) << 8);\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
+    arena_append_string8(output, S8("_u8_counted(byte_count, offset + 1u) << 8));\n}\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 "));
     arena_append_string8(output, name);
     arena_append_string8(output, S8("_u16(u64 offset)\n{\n    return "));
     arena_append_string8(output, name);

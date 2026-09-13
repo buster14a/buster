@@ -251,7 +251,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_coverage_blob
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 buster_aarch64_generated_coverage_blob_u16_counted(u64 byte_count, u64 offset)
 {
     if (!buster_aarch64_generated_blob_range_valid(byte_count, offset, 2u)) return 0;
-    return (u16)buster_aarch64_generated_coverage_blob_u8_counted(byte_count, offset) | ((u16)buster_aarch64_generated_coverage_blob_u8_counted(byte_count, offset + 1u) << 8);
+    return (u16)(buster_aarch64_generated_coverage_blob_u8_counted(byte_count, offset) | ((u16)buster_aarch64_generated_coverage_blob_u8_counted(byte_count, offset + 1u) << 8));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u16 buster_aarch64_generated_coverage_blob_u16(u64 offset)
 {
