@@ -54,13 +54,13 @@ shared-object import, and the driver has no `-shared`) plus
 `_Py_Get_Getpath_CodeObject`, defined only by getpath.o, while the bootstrap
 deliberately links getpath_noop.o. Both trees carry the same file, so their
 suites skip the same tests. Buster compiles `Python/perf_jit_trampoline.o`
-itself with the object-specific `-fno-pic -gdwarf-4` flags; this directly
-exercises source conditional directives inside a macro argument (GitHub #76)
-without using a substituted Clang object. The Clang reference compiles the
-same unit through CPython's generated make rules. The ELF reader now accepts
-the ordinary DWARF 5 section family (GitHub #77); this harness retains its
-existing `-gdwarf-4` pin until the full CPython workflow is revalidated without
-it. `test_gdb`'s two tests are the expected buster-only
+itself with the object-specific `-fno-pic` constraint and its supported `-g`
+debug mode; this directly exercises source conditional directives inside a
+macro argument (GitHub #76) without using a substituted Clang object. The
+Clang reference compiles the same unit through CPython's generated make rules.
+The removed substitute's Clang-specific `-gdwarf-4` spelling is no longer
+needed; the ELF reader accepts the ordinary DWARF 5 section family (GitHub
+#77). `test_gdb`'s two tests are the expected buster-only
 suite divergence: gdb inspects a running python and Buster-linked
 executables carry no `.symtab` (issue 843). Refleak hunting, the
 resource-gated suite surface (`-u all`), and performance are out of scope.

@@ -20519,10 +20519,10 @@ BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_di
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content));
 }
 
-// Keep the established object-specific non-PIE and DWARF 4 pins while making
-// Buster compile the source itself. The conditional directives inside its
-// macro argument are the compatibility surface this unit exercises (#76);
-// the remaining flags retain the independently tracked linker/debug policy.
+// Keep the established object-specific non-PIE constraint while making Buster
+// compile the source itself with its supported debug mode. The conditional
+// directives inside its macro argument are the compatibility surface this
+// unit exercises (#76).
 BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 ide, String8 source_directory, String8 tree_directory,
                                                           String8 allocator_flag)
 {
@@ -20532,7 +20532,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
         ide,
         S8("cc"),
         S8("-fno-pic"),
-        S8("-gdwarf-4"),
+        S8("-g"),
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),
         S8("-O3"),
