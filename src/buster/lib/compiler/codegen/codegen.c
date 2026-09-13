@@ -2,23 +2,18 @@
 // codegen_generate_canonical_module near the bottom of the file turns an
 // IrModule into a CodegenModule — code bytes, global data images,
 // relocations, unwind actions, debug locations, and statistics — for x86-64
-// and AArch64. "Canonical" names the register-allocation-free baseline
-// emitter that keeps every value in its own frame slot; eligible functions
-// are routed through the machine path first (machine_select_canonical_-
-// function, then MIR_STACK/FAST/QUALITY placement and the machine encoder
-// in machine.c and its included backends), and any function the machine
-// subset cannot express falls back per function to the canonical emitter,
-// counted once in statistics.fallback_reason_counts with selection opcodes
-// retained in fallback_opcode_counts. codegen_statistics_add preserves the
-// full census across driver translation units.
+// and AArch64. Every public allocator spelling routes through machine
+// selection, placement, and metadata-backed emission. The legacy NONE
+// spelling is an alias for MIR_STACK; a machine failure is returned to the
+// caller and never rerouted to the direct canonical emitter.
 //
 // Nearly everything here sits under one function:
 // codegen_generate_canonical_module_attempt lays out global data (read-only
 // / writable / thread-local / zero-fill images plus initializer
-// relocations), then per function sizes the frame, tries the machine path,
-// and otherwise walks each block's instructions emitting native code
-// directly. codegen_generate_canonical_module wraps it in a retry loop that
-// grows the code-buffer capacity scale when an attempt runs out.
+// relocations), then per function runs the machine path. The now-unreachable
+// direct-emitter body remains temporarily for the separately staged deletion
+// in #514. codegen_generate_canonical_module wraps the attempt in a retry loop
+// that grows the code-buffer capacity scale when an attempt runs out.
 //
 // The helper regions above it, in file order; anchors are definitions:
 //   codegen_inline_assembly_*                    GNU inline-assembly template
@@ -9141,16 +9136,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_capacity) : 0;
     result.debug_info = options.debug_info;
-    if (options.record_fallbacks && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
-    {
-        result.fallback_records = arena_allocate(arena, CodegenFallbackRecord, module->function_count);
-    }
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
         result.failed_function = (IrFunctionId){
             .value = function_index,
         };
+        result.failed_instruction = IR_INSTRUCTION_ID_INVALID;
+        result.failed_opcode = IR_OPCODE_COUNT;
         if (function->state != IR_FUNCTION_LOWERED)
         {
             continue;
@@ -9215,19 +9208,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
-        // Selection is attempted before canonical-only frame, ABI, and call
-        // metadata is built. A supported machine function never needs that
-        // preparation; the fallback edge below enters it exactly once.
+        // Selection is attempted before the retired direct-only frame, ABI,
+        // and call metadata is built. No production edge enters that body.
         goto machine_attempt;
 
-    canonical_prep:
         ;
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             codegen_buffer_ensure_x64_metadata_cache(&buffer, &x64_metadata_cache_tried, arena, module->function_count);
         }
-        // This state is reached only for NONE/PE-unwind paths or a machine
-        // attempt that could not be kept. It owns all canonical emitter data.
+        // This retired direct-emitter body has no production entry and is
+        // removed separately by #514.
         bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target_uses_pe_unwind(target);
         bool windows_dynamic_stack = false;
         if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS &&
@@ -9615,17 +9606,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         goto canonical_emit;
 
     machine_attempt:
-        // The descriptor is a shell until this path knows its unwind shape;
-        // canonical fallback fills the same shell after its sizing pass.
-        // MIR_STACK routes eligible functions through machine selection,
-        // stack placement, and the machine encoder; everything else falls
-        // back to the canonical path below and is counted. ELF/Mach-O frames
-        // retain their established shape. PE AArch64
+        // The descriptor is a shell until this path knows its unwind shape.
+        // Every public allocator mode reaches machine selection, placement,
+        // and encoding; a failure leaves this attempt unpublished and returns
+        // a structured error to the caller. ELF/Mach-O frames retain their
+        // established shape. PE AArch64
         // uses a compact chain/save area and bounded probe, with every
         // prologue instruction represented in its unwind description.
-        if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
-             options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
-            (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64))
+        if (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64)
         {
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
@@ -9638,9 +9626,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     // Do not let a selector certificate bypass a failed
                     // audit verifier and feed invalid MIR to allocation.
-                    buffer.error = CODEGEN_ERROR_INVALID_IR;
-                    scratch_end(machine_scratch);
-                    break;
+                    fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                    selected.supported = false;
                 }
             }
             machine_simd_operation_count = selected.simd_operation_count;
@@ -9663,9 +9650,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 result.statistics.verified_mir_function_count += 1;
                 if (verify_error != MACHINE_VERIFY_NONE)
                 {
-                    buffer.error = CODEGEN_ERROR_INVALID_IR;
-                    scratch_end(machine_scratch);
-                    break;
+                    fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                    selected.supported = false;
                 }
             }
             if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
@@ -9702,38 +9688,41 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     MachineScheduleResult scheduled = machine_schedule_function(machine_scratch.arena, &selected.function);
                     if (scheduled.moved)
                     {
+                        bool scheduled_valid = true;
                         if (options.verify_invariants)
                         {
                             result.statistics.verified_scheduled_function_count += 1;
                             if (machine_verify_function(&scheduled.function).error != MACHINE_VERIFY_NONE)
                             {
-                                buffer.error = CODEGEN_ERROR_INVALID_IR;
-                                scratch_end(machine_scratch);
-                                break;
+                                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                                scheduled_valid = false;
+                                placement.valid = false;
                             }
                         }
-                        result.statistics.allocator_scheduled_function_count += 1;
-                        MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
-                        if (options.verify_invariants && !scheduled_placement.valid)
+                        if (scheduled_valid)
                         {
-                            buffer.error = CODEGEN_ERROR_INVALID_IR;
-                            scratch_end(machine_scratch);
-                            break;
-                        }
-                        u32 placement_saved_registers = 0;
-                        u32 scheduled_saved_registers = 0;
-                        for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
-                        {
-                            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
-                            scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
-                        }
-                        if (scheduled_placement.valid &&
-                            scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
-                                placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
-                        {
-                            result.statistics.allocator_schedule_kept_count += 1;
-                            selected.function = scheduled.function;
-                            placement = scheduled_placement;
+                            result.statistics.allocator_scheduled_function_count += 1;
+                            MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
+                            if (options.verify_invariants && !scheduled_placement.valid)
+                            {
+                                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                                placement.valid = false;
+                            }
+                            u32 placement_saved_registers = 0;
+                            u32 scheduled_saved_registers = 0;
+                            for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
+                            {
+                                placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
+                                scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
+                            }
+                            if (scheduled_placement.valid &&
+                                scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
+                                    placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
+                            {
+                                result.statistics.allocator_schedule_kept_count += 1;
+                                selected.function = scheduled.function;
+                                placement = scheduled_placement;
+                            }
                         }
                     }
                 }
@@ -9742,9 +9731,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
                     if (options.verify_invariants)
                     {
-                        buffer.error = CODEGEN_ERROR_INVALID_IR;
-                        scratch_end(machine_scratch);
-                        break;
+                        fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                     }
                 }
                 if (placement.valid)
@@ -9759,7 +9746,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
 
                     // Keep exact-form telemetry even when the encoder fails;
-                    // the function may still fall back to the canonical path.
+                    // the failure is returned without publishing this attempt.
                     result.statistics.exact_attempts += encoded.exact_attempts;
                     result.statistics.exact_successes += encoded.exact_successes;
                     result.statistics.exact_failures += encoded.exact_failures;
@@ -10178,33 +10165,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, machine_stack_frame_size);
             continue;
         }
-        if (options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
+        if (buffer.error != CODEGEN_ERROR_NONE)
         {
-            if (result.fallback_records)
-            {
-                result.fallback_records[result.fallback_record_count++] = (CodegenFallbackRecord){
-                    .function = {.value = function_index}, .opcode = fallback_opcode, .reason = fallback_reason,
-                };
-            }
-            if (!result.statistics.fallback_function_count)
-            {
-                result.first_fallback_function = (IrFunctionId){.value = function_index};
-                result.first_fallback_opcode = fallback_opcode;
-                result.first_fallback_reason = fallback_reason;
-            }
-            result.statistics.fallback_function_count += 1;
-            result.statistics.fallback_reason_counts[fallback_reason] += 1;
-            if (fallback_reason == CODEGEN_FALLBACK_SIGNATURE || fallback_reason == CODEGEN_FALLBACK_OPCODE ||
-                fallback_reason == CODEGEN_FALLBACK_SELECTION_OTHER)
-            {
-                result.statistics.fallback_opcode_counts[fallback_opcode] += 1;
-            }
-            result.statistics.fallback_verify_count += fallback_reason == CODEGEN_FALLBACK_VERIFICATION;
-            result.statistics.fallback_placement_count += fallback_reason == CODEGEN_FALLBACK_PLACEMENT;
-            result.statistics.fallback_encode_count += fallback_reason == CODEGEN_FALLBACK_ENCODING ||
-                                                       fallback_reason == CODEGEN_FALLBACK_OUTPUT_CAPACITY || fallback_reason == CODEGEN_FALLBACK_UNWIND;
+            result.failure_reason = codegen_fallback_reason_string(fallback_reason);
+            result.error = buffer.error;
+            return result;
         }
-        goto canonical_prep;
+        result.failed_opcode = fallback_opcode;
+        result.failure_reason = codegen_fallback_reason_string(fallback_reason);
+        if (fallback_opcode < IR_OPCODE_COUNT)
+        {
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                if (function->instructions[instruction_index].opcode == fallback_opcode)
+                {
+                    result.failed_instruction = (IrInstructionId){.value = instruction_index};
+                    break;
+                }
+            }
+        }
+        result.error = fallback_reason == CODEGEN_FALLBACK_SIGNATURE ? CODEGEN_ERROR_UNSUPPORTED_ABI
+                       : fallback_reason == CODEGEN_FALLBACK_VERIFICATION ? CODEGEN_ERROR_INVALID_IR
+                       : fallback_reason == CODEGEN_FALLBACK_PLACEMENT || fallback_reason == CODEGEN_FALLBACK_OUTPUT_CAPACITY
+                           ? CODEGEN_ERROR_CAPACITY
+                           : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return result;
 
     canonical_emit:
         // A machine attempt that bailed after describing part of its prologue
@@ -20649,6 +20634,18 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
         result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
         return result;
     }
+    if (options.register_allocator >= CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT)
+    {
+        result.error = CODEGEN_ERROR_INVALID_IR;
+        return result;
+    }
+    // NONE is retained as a command-line/API compatibility spelling. It no
+    // longer exposes the direct emitter: its deliberately low-complexity
+    // meaning is the machine selector plus MIR_STACK placement.
+    if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE)
+    {
+        options.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;
+    }
     codegen_prewarm_for_target(target);
     // Reserve the active ABI contexts before retries. Classification stays lazy,
     // but filling a reserved page retains no allocation from an attempt that
@@ -20671,19 +20668,8 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
             result.error = CODEGEN_ERROR_CAPACITY;
             return result;
         }
-        // Every row the cache holds is keyed on instruction shape alone, so it
-        // stays valid across a retry and, when every function takes the
-        // canonical emitter, it is allocated before the temporal scope opens
-        // rather than being rebuilt by each attempt. Under a register
-        // allocator the machine encoder emits the code and the canonical
-        // emitter sees only the functions it refuses -- none, on the self-host
-        // stage -- so the attempt allocates the cache the first time one of
-        // those, or a module-level assembly block, asks for it: inside its own
-        // scope, which a retry rewinds, so every attempt starts without it.
-        if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE)
-        {
-            x64_metadata_cache = codegen_canonical_x64_metadata_cache_allocate(arena, module->function_count);
-        }
+        // Function emission uses the machine encoder. Module-level assembly
+        // allocates this direct-assembly cache lazily inside each attempt.
     }
     // The capacity estimate's per-type slot table: like the f80 cache it
     // depends on the program alone, so it is built once before the temporal
@@ -20704,7 +20690,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     // on the program and the target alone, so it is built once here, outside
     // the attempt scope, rather than by every function or every attempt.
     MachineSelectionModule* machine_module = 0;
-    if (target.cpu_arch == CPU_ARCH_X86_64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
+    if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         machine_module = machine_select_module_prepare(arena, program, target);
     }

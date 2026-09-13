@@ -6698,7 +6698,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Stage 2: x86-64 selection, MIR_STACK placement, and encoding over the
     // scalar subset. Selection and encoding are host-independent; execution
     // requires a non-sanitized x86-64 host and runs the same functions
-    // through the canonical NONE path as the differential oracle.
+    // through the MIR_STACK compatibility spelling and optimized allocators.
     Target machine_target = {
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,
@@ -6907,9 +6907,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    int result = __c11_atomic_compare_exchange_strong(cell, &expected, desired, 5, 5);\n"
                                   "    return result + variadic_named(0);\n"
                                   "}\n"
-                                  "int variadic_unsupported_first(int first, ...) { __asm__ volatile(\"\" : : \"a\"(first));\n"
-                                  "    va_list arguments; __builtin_va_start(arguments, first); return __builtin_va_arg(arguments, int); }\n"
                                   "#endif\n");
+    String8 machine_c_source_unsupported = S8(
+                                  "int unsupported_inline_assembly(int value) { __asm__ volatile(\"\" : : \"a\"(value)); return value; }\n");
     // The AArch64 variadic segment, appended only to the stage-11 source:
     // the alias preserves the builtin va_list identity. Eleven anonymous
     // parts against eight registers exercise both the register path and
@@ -6988,11 +6988,46 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                               machine_c_source_extra, machine_c_source_i128, machine_c_source_variadic);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
+    IrProgram* unsupported_program =
+        machine_test_compile_c(arguments->arena, S8("machine-unsupported.c"), machine_c_source_unsupported, machine_target);
+    BUSTER_TEST(arguments, unsupported_program != 0);
+    if (unsupported_program && unsupported_program->module_count)
+    {
+        IrModule* unsupported_module = unsupported_program->modules;
+        IrFunction* unsupported_function = machine_test_ir_function_find(unsupported_module, S8("unsupported_inline_assembly"));
+        BUSTER_TEST(arguments, unsupported_function != 0);
+        if (unsupported_function)
+        {
+            MachineSelectResult unsupported_selected =
+                machine_select_canonical_function(arguments->arena, unsupported_program, unsupported_function, machine_target);
+            BUSTER_TEST(arguments, !unsupported_selected.supported && unsupported_selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
+        }
+        CodegenRegisterAllocatorMode unsupported_modes[] = {
+            CODEGEN_REGISTER_ALLOCATOR_NONE,
+            CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+            CODEGEN_REGISTER_ALLOCATOR_FAST,
+            CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+        };
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(unsupported_modes); mode_index += 1)
+        {
+            CodegenModule unsupported_result = codegen_generate_canonical_module(
+                arguments->arena, unsupported_program, unsupported_module, machine_target,
+                (CodegenModuleOptions){.register_allocator = (u8)unsupported_modes[mode_index], .record_fallbacks = true});
+            BUSTER_TEST_RAW(arguments,
+                            unsupported_result.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !unsupported_result.code.length &&
+                                unsupported_result.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                                unsupported_result.statistics.fallback_function_count == 0 && unsupported_result.fallback_record_count == 0,
+                            string_format(arguments->arena, S8("unsupported mode {S8}: error={u32} code={u64} opcode={u32} fallback={u32}"),
+                                          codegen_register_allocator_mode_string(unsupported_modes[mode_index]), (u32)unsupported_result.error,
+                                          unsupported_result.code.length, (u32)unsupported_result.failed_opcode,
+                                          unsupported_result.statistics.fallback_function_count));
+        }
+    }
     if (machine_program && machine_program->module_count)
     {
         IrModule* machine_module = machine_program->modules;
-        // The whole-module NONE oracle: identical IR through the canonical
-        // path, executed at each function's entry offset.
+        // NONE is the public compatibility spelling for MIR_STACK. Keep it in
+        // the whole-module matrix so the alias cannot regain a direct path.
         CodegenModule none_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
                                                                       (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, none_module.error == CODEGEN_ERROR_NONE);
@@ -7533,11 +7568,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         IrFunction* variadic_named_caller_function = machine_test_ir_function_find(machine_module, S8("variadic_named_caller"));
         IrFunction* variadic_observe_function = machine_test_ir_function_find(machine_module, S8("variadic_observe"));
         IrFunction* variadic_observe_caller_function = machine_test_ir_function_find(machine_module, S8("variadic_observe_caller"));
-        IrFunction* variadic_unsupported_first_function = machine_test_ir_function_find(machine_module, S8("variadic_unsupported_first"));
         BUSTER_TEST(arguments, variadic_named_function && variadic_named_caller_function && variadic_observe_function &&
-                                   variadic_observe_caller_function && variadic_unsupported_first_function);
-        if (variadic_named_function && variadic_named_caller_function && variadic_observe_function && variadic_observe_caller_function &&
-            variadic_unsupported_first_function)
+                                   variadic_observe_caller_function);
+        if (variadic_named_function && variadic_named_caller_function && variadic_observe_function && variadic_observe_caller_function)
         {
             MachineSelectResult variadic_named_selected =
                 machine_select_canonical_function(arguments->arena, machine_program, variadic_named_function, machine_target);
@@ -7547,8 +7580,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_function, machine_target);
             MachineSelectResult variadic_observe_caller_selected =
                 machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_caller_function, machine_target);
-            MachineSelectResult variadic_unsupported_first_selected =
-                machine_select_canonical_function(arguments->arena, machine_program, variadic_unsupported_first_function, machine_target);
             BUSTER_TEST(arguments, variadic_named_selected.supported && variadic_named_caller_selected.supported &&
                                        variadic_observe_caller_selected.supported);
             // SysV variadic bodies are now selected by the machine path.  The
@@ -7594,8 +7625,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult windows_variadic_selected =
                 machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_function, windows_machine_target);
             BUSTER_TEST(arguments, !windows_variadic_selected.supported);
-            BUSTER_TEST(arguments, !variadic_unsupported_first_selected.supported &&
-                                       variadic_unsupported_first_selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
         }
         // The lifted non-vector gaps: a thread-local address (ELF local-exec
         // fs sequence), an rvalue compound-literal array base, a variadic
@@ -8163,9 +8192,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         codegen_release_executable(none_executable);
 #endif
         // Stage 3 wiring: the same module generated under MIR_STACK routes
-        // every eligible function through the machine path and counts the
-        // rest as explicit fallbacks; the canonical NONE module is the
-        // execution oracle for both kinds.
+        // every function through the machine path. NONE above is the same
+        // low-complexity placement policy through its compatibility spelling.
         CodegenModule mir_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
                                                                      (CodegenModuleOptions){
                                                                          .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
@@ -8175,7 +8203,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, mir_module.statistics.exact_successes == mir_module.statistics.exact_attempts);
         BUSTER_TEST(arguments, mir_module.statistics.exact_failures == 0);
         BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 1,
+        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 0,
                         string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
         IrFunction* mir_add_function = machine_test_ir_function_find(machine_module, S8("add"));
         if (mir_add_function)
