@@ -52,6 +52,7 @@
   },
   "identities": {
     "candidate_binary_sha256": "71e8879bf5cbf36648cb741147e784c3d855e9188f1f97ddb2480b62b49b3f97",
+    "strict_candidate_binary_sha256": "60ba044e6c33fb5e9519fa0d860d785be63f5cc1f5824e5ece57454228813a20",
     "direct_oracle_binary_sha256": "33a9987f7d582d9012d2512b48efd0574896575af52fb2269541ca115876f01c",
     "census_rows": 76608,
     "census_groups": 19152,
