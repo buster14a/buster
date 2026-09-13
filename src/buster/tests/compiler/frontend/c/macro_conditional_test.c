@@ -1,0 +1,116 @@
+// GCC/Clang-compatible source conditional directives inside function-like
+// macro arguments. These tests exercise the real preprocessor and pin active
+// token selection, expansion interactions, and diagnostic source attribution.
+#include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/string.h>
+
+UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#define ENABLED 1\n"
+                        "#define MISSING_VALUE 0\n"
+                        "#define ID(x) x\n"
+                        "#define INNER(x,y) x y\n"
+                        "#define STR(x) #x\n"
+                        "#define CAT(a,b) a##b\n"
+                        "#define VAR(first,...) first __VA_ARGS__\n"
+                        "ID(\n#if ENABLED\nif_value\n#endif\n)\n"
+                        "ID(\n#ifdef ENABLED\nifdef_value\n#endif\n)\n"
+                        "ID(\n#ifndef ABSENT\nifndef_value\n#endif\n)\n"
+                        "ID(\n#if MISSING_VALUE\ninactive_if, ), ((\n#elif ENABLED\nelif_value\n#else\ninactive_else, ), ((\n#endif\n)\n"
+                        "ID(\n#if MISSING_VALUE\ninactive\n#else\nelse_value\n#endif\n)\n"
+                        "ID(\n#if ENABLED\n#if defined(ENABLED)\nINNER(nested_a, (nested_b, nested_c))\n#else\ninactive_nested, )\n#endif\n#endif\n)\n"
+                        "ID(\n#if ENABLED\n#else\nnot_selected\n#endif\n) after_empty\n"
+                        "STR(\n#if ENABLED\nalpha beta\n#else\nwrong, )\n#endif\n)\n"
+                        "CAT(\n#if ENABLED\npre\n#endif\n,\n#if ENABLED\nfix\n#endif\n)\n"
+                        "VAR(head,\n#if ENABLED\n+ tail\n#else\n, wrong, )\n#endif\n)\n"
+                        "ID(\nordinary\n)\n");
+    String8 expected_source = S8("if_value ifdef_value ifndef_value elif_value else_value "
+                                 "nested_a (nested_b, nested_c) after_empty \"alpha beta\" prefix head + tail ordinary");
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                    (CPreprocessOptions){
+                                                        .source_path = S8("macro-conditional-arguments.c"),
+                                                        .dialect = dialects[dialect_index],
+                                                    });
+        CLexResult expected = c_lex(temporary.arena, expected_source);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == expected.token_count);
+        for (u64 index = 0; index + 1 < expected.token_count && index < preprocess.token_count; index += 1)
+        {
+            CToken actual = preprocess.tokens[index];
+            CToken reference = expected.tokens[index];
+            BUSTER_TEST(arguments, actual.kind == reference.kind);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, actual),
+                               c_token_spelling(expected.spelling_base, reference));
+            CSourceLocation location = c_preprocess_token_location(&preprocess, actual);
+            if (BUSTER_REQUIRE(arguments, location.file < preprocess.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, preprocess.files[location.file], S8("macro-conditional-arguments.c"));
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    struct
+    {
+        String8 source;
+        CDiagnosticKind first_kind;
+        u32 first_line;
+        u32 first_column;
+        CDiagnosticKind second_kind;
+        u32 second_line;
+        u32 second_column;
+    } invalid[] = {
+        {S8("#define ID(x) x\n#line 40 \"macro-conditional-error.c\"\nID(\n#if 1\nvalue\n#endif\n"),
+         C_DIAGNOSTIC_INVALID_MACRO_INVOCATION, 40, 1, C_DIAGNOSTIC_KIND_COUNT, 0, 0},
+        {S8("#define ID(x) x\n#line 70 \"macro-conditional-error.c\"\nID(\n#if 1\nvalue\n"),
+         C_DIAGNOSTIC_UNMATCHED_CONDITIONAL, 71, 2, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION, 70, 1},
+        {S8("#define ID(x) x\n#line 90 \"macro-conditional-error.c\"\nID(\n#endif\nvalue\n)\n"),
+         C_DIAGNOSTIC_UNMATCHED_CONDITIONAL, 91, 2, C_DIAGNOSTIC_KIND_COUNT, 0, 0},
+        {S8("#define ID(x) x\n#line 110 \"macro-conditional-error.c\"\nID(\n#if (\nvalue\n#endif\n)\n"),
+         C_DIAGNOSTIC_INVALID_CONDITIONAL, 111, 2, C_DIAGNOSTIC_KIND_COUNT, 0, 0},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+                                                    (CPreprocessOptions){.source_path = S8("macro-conditional-input.c")});
+        BUSTER_TEST(arguments, preprocess.diagnostic_count >= 1);
+        if (preprocess.diagnostic_count >= 1)
+        {
+            CDiagnostic diagnostic = preprocess.diagnostics[0];
+            BUSTER_TEST(arguments, diagnostic.kind == invalid[case_index].first_kind);
+            BUSTER_TEST(arguments, diagnostic.location.line == invalid[case_index].first_line);
+            BUSTER_TEST(arguments, diagnostic.location.column == invalid[case_index].first_column);
+            if (BUSTER_REQUIRE(arguments, diagnostic.location.file < preprocess.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, preprocess.files[diagnostic.location.file], S8("macro-conditional-error.c"));
+            }
+        }
+        if (invalid[case_index].second_kind != C_DIAGNOSTIC_KIND_COUNT)
+        {
+            BUSTER_TEST(arguments, preprocess.diagnostic_count >= 2);
+            if (preprocess.diagnostic_count >= 2)
+            {
+                CDiagnostic diagnostic = preprocess.diagnostics[1];
+                BUSTER_TEST(arguments, diagnostic.kind == invalid[case_index].second_kind);
+                BUSTER_TEST(arguments, diagnostic.location.line == invalid[case_index].second_line);
+                BUSTER_TEST(arguments, diagnostic.location.column == invalid[case_index].second_column);
+                if (BUSTER_REQUIRE(arguments, diagnostic.location.file < preprocess.file_count))
+                {
+                    BUSTER_STRING_TEST(arguments, preprocess.files[diagnostic.location.file], S8("macro-conditional-error.c"));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+#endif

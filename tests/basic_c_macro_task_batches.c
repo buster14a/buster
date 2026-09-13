@@ -16,6 +16,7 @@
 #define TASK_CAT(a, b) a ## b
 #define TASK_STR(x) #x
 #define TASK_VALUES(first, ...) first, __VA_ARGS__
+#define TASK_CONDITIONAL(...) __VA_ARGS__
 #define task_self task_self
 #define task_cycle_a task_cycle_b
 #define task_cycle_b task_cycle_a
@@ -39,9 +40,44 @@ static int same_text(char const* left, char const* right)
 int main(void)
 {
     int result = 0;
+    int selected_effects = 0;
     int task_self = 19;
     int task_cycle_a = 23;
     int values[] = {TASK_VALUES(3, TASK_FN(3), TASK_ID(TASK_VALUE))};
+    int conditional_values[] = {
+        TASK_CONDITIONAL(
+#if TASK_VALUE
+            5,
+#else
+            90, ), ((
+#endif
+#ifdef TASK_VALUE
+            TASK_FN(5),
+#endif
+#ifndef TASK_MISSING
+            TASK_ID(7),
+#endif
+#if 0
+            91, ), ((
+#elif TASK_VALUE
+            TASK_CAT(,8),
+#else
+            92,
+#endif
+#if TASK_VALUE
+#if defined(TASK_VALUE)
+            9,
+#endif
+#endif
+        )
+    };
+    TASK_ID(
+#if TASK_VALUE
+        selected_effects += 1;
+#else
+        selected_effects += 100;
+#endif
+    )
     result |= task_sum != 256;
     result |= TASK_ID(TASK_FN)(7) != 8;
     result |= TASK_ALIAS(11) != 12;
@@ -55,5 +91,9 @@ int main(void)
     result |= !same_text(TASK_STR(task_self /* gap */ + TASK_VALUE), "task_self + TASK_VALUE");
     result |= sizeof(values) / sizeof(values[0]) != 3;
     result |= values[0] != 3 || values[1] != 4 || values[2] != 1;
+    result |= sizeof(conditional_values) / sizeof(conditional_values[0]) != 5;
+    result |= conditional_values[0] != 5 || conditional_values[1] != 6 || conditional_values[2] != 7 ||
+              conditional_values[3] != 8 || conditional_values[4] != 9;
+    result |= selected_effects != 1;
     return result;
 }
