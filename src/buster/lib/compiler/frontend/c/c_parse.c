@@ -36,6 +36,7 @@
 //   c_parse_builtin_type_layout,                  target-dependent type
 //   c_parse_type_layout                           sizes/alignments, aggregate
 //                                                 and bit-field layout
+//   c_semantic_check_named_call_arities          bound call constraints without IR
 //   c_parse_direct_expression_base ..             expression typing without
 //   c_parse_conditional_expression_type           lowering (usual arithmetic
 //                                                 conversions, precedence,
@@ -2220,11 +2221,12 @@ BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* 
             continue;
         }
         CEntityId entity = analysis->identifier_uses[use_index].entity;
-        CType* type = entity.value < analysis->entity_count ? c_type_from_id(analysis, analysis->entities[entity.value].type) : 0;
+        CTypeId type_id = entity.value < analysis->entity_count ? analysis->entities[entity.value].type : C_TYPE_ID_INVALID;
+        CType* type = type_id.value < analysis->type_count ? &analysis->types[type_id.value] : 0;
         bool indirect = type && type->kind == C_TYPE_POINTER;
         if (indirect)
         {
-            type = c_type_from_id(analysis, type->element_type);
+            type = type->element_type.value < analysis->type_count ? &analysis->types[type->element_type.value] : 0;
         }
         if (!type || type->kind != C_TYPE_FUNCTION)
         {
