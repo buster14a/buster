@@ -456,6 +456,90 @@ BUSTER_GLOBAL_LOCAL void bq_test_cli_acknowledgment(void)
         bq_test_end(&fixture);
     }
 }
+
+BUSTER_GLOBAL_LOCAL void bq_test_completion_failures(void)
+{
+    for (u32 scenario = 0; scenario < 3; scenario += 1)
+    {
+        BqFixture fixture;
+        if (bq_test_begin(&fixture))
+        {
+            BqQueue* queue = &fixture.queue;
+            BqRequest request = bq_test_request(1, false), next_request = bq_test_request(2, false);
+            u64 id = 0, token = 0, next_id = 0;
+            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_submit(queue, &next_request, &next_id) == BQ_OK);
+            BQ_CHECK(bq_reserve(queue, &id, &token) == BQ_OK);
+            for (u32 phase = BQ_PREPARING; phase <= BQ_CLEANING; phase += 1)
+            {
+                BQ_CHECK(bq_fake_step(queue, id, token) == BQ_OK);
+            }
+            u64 before = queue->state.sequence;
+            BQ_CHECK(bq_cancel(queue, id) == BQ_OK && queue->state.sequence == before);
+            queue->fault.fail_write_at = scenario == 0 ? 2 : 0;
+            queue->fault.after_sync = scenario == 1;
+            queue->fault.before_sync = scenario == 2;
+            BQ_CHECK(bq_fake_step(queue, id, token) == BQ_IO && queue->state.active_id == id);
+            u64 ignored_id = 0, ignored_token = 0;
+            BQ_CHECK(bq_reserve(queue, &ignored_id, &ignored_token) == BQ_IO);
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.path) == BQ_OK);
+            if (scenario == 0)
+            {
+                BQ_CHECK(queue->needs_reconciliation);
+                BQ_CHECK(bq_reserve(queue, &ignored_id, &ignored_token) == BQ_RECONCILIATION_REQUIRED);
+                BQ_CHECK(bq_fake_reconcile(queue, id, token) == BQ_OK);
+            }
+            BqJob* job = bq_job(&queue->state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_SUCCEEDED && job->validity == BQ_NOT_EVALUATED);
+            BQ_CHECK(bq_fake_run(queue, &ignored_id) == BQ_OK && ignored_id == next_id);
+            bq_test_end(&fixture);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_protocol_mutations(void)
+{
+    BqFixture fixture;
+    if (bq_test_begin(&fixture))
+    {
+        BqQueue* queue = &fixture.queue;
+        BqRequest submission = bq_test_request(1, false);
+        BqPacket request, response;
+        bq_packet(&request, BQ_OP_SUBMIT, 9, submission.bytes, submission.size);
+        for (u32 prefix = 0; prefix < request.size; prefix += 1)
+        {
+            BQ_CHECK(bq_dispatch(queue, request.bytes, prefix, &response) == BQ_BAD_REQUEST);
+            BQ_CHECK(queue->state.job_count == 0);
+        }
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_OK);
+        u64 id = bq_u64(response.bytes + BQ_CONTROL_HEADER + 4);
+        /* Drop that response, restart, and retry identical wire bytes. */
+        bq_close(queue);
+        BQ_CHECK(bq_open(queue, fixture.path) == BQ_OK);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_OK);
+        BQ_CHECK(bq_u64(response.bytes + BQ_CONTROL_HEADER + 4) == id && queue->state.job_count == 1);
+        u64 sequence = queue->state.sequence;
+        u8 concatenated[BQ_CONTROL_CAP * 2];
+        memcpy(concatenated, request.bytes, request.size);
+        memcpy(concatenated + request.size, request.bytes, request.size);
+        BQ_CHECK(bq_dispatch(queue, concatenated, request.size * 2, &response) == BQ_BAD_REQUEST);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size + 1, &response) == BQ_BAD_REQUEST);
+        bq_put32(request.bytes + BQ_CONTROL_HEADER, UINT32_MAX);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+        bq_packet(&request, 999, 10, NULL, 0);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+        u8 body[16] = {0};
+        bq_put64(body, id);
+        bq_packet(&request, BQ_OP_STATUS, 10, body, 9);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+        bq_put64(body + 8, UINT64_MAX);
+        bq_packet(&request, BQ_OP_LOGS, 10, body, 16);
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+        BQ_CHECK(queue->state.sequence == sequence);
+        bq_test_end(&fixture);
+    }
+}
 #endif
 
 int main(int argc, char** argv)
@@ -468,6 +552,8 @@ int main(int argc, char** argv)
     bq_test_prefixes_and_corruption();
     bq_test_faults();
     bq_test_phase_restarts();
+    bq_test_completion_failures();
+    bq_test_protocol_mutations();
     bq_test_lifetime_and_logs();
     bq_test_cli_acknowledgment();
     char const* storage = "posix-real-journal";

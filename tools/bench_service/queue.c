@@ -122,7 +122,10 @@ BqError bq_request_make(String8 const fields[BQ_FIELD_COUNT], BqRequest* request
         {
             bq_put32(request->bytes + request->size, (u32)fields[i].length);
             request->size += 4;
-            memcpy(request->bytes + request->size, fields[i].pointer, (size_t)fields[i].length);
+            if (fields[i].length)
+            {
+                memcpy(request->bytes + request->size, fields[i].pointer, (size_t)fields[i].length);
+            }
             request->size += (u32)fields[i].length;
             if (i + 1 < BQ_FIELD_COUNT && request->size > BQ_REQUEST_CAP - 4)
             {
@@ -252,7 +255,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
             }
             else if (kind == BQ_CANCEL)
             {
-                if (job->phase == BQ_FINISHED || job->cancel_requested)
+                if (job->phase >= BQ_FINALIZING || job->cancel_requested)
                 {
                     error = BQ_INVALID_TRANSITION;
                 }
@@ -272,8 +275,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
             }
             else if (kind == BQ_RECONCILE)
             {
+                job->outcome = job->cancel_requested ? BQ_CANCELLED : job->outcome != BQ_NO_OUTCOME ? job->outcome : BQ_INTERRUPTED;
                 job->phase = BQ_FINISHED;
-                job->outcome = job->cancel_requested ? BQ_CANCELLED : BQ_INTERRUPTED;
                 state->active_id = 0;
             }
             else
@@ -656,7 +659,7 @@ BqError bq_cancel(BqQueue* queue, u64 id)
 {
     BqJob* job = bq_job(&queue->state, id);
     BqError error = queue->poisoned ? BQ_IO : !job ? BQ_NOT_FOUND : BQ_OK;
-    if (error == BQ_OK && job->phase != BQ_FINISHED && !job->cancel_requested)
+    if (error == BQ_OK && job->phase < BQ_FINALIZING && !job->cancel_requested)
     {
         u8 body[8];
         bq_put64(body, id);

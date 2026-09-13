@@ -6,7 +6,7 @@
 #define BQ_CONTROL_HEADER 24u
 #define BQ_CONTROL_BODY 512u
 #define BQ_CONTROL_CAP (BQ_CONTROL_HEADER + BQ_CONTROL_BODY)
-#define BQ_LOG_PAGE 8u
+#define BQ_LOG_PAGE 4u
 
 typedef enum BqOperation
 {
