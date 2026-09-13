@@ -60,6 +60,43 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         }
         scratch_end(temporary);
     }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 reference_names[] = {S8("clang"), S8("gcc")};
+    for (u32 reference_index = 0; reference_index < BUSTER_ARRAY_LENGTH(reference_names); reference_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 compiler = executable_resolve_in_path(temporary.arena, reference_names[reference_index]);
+        String8 source_path = buster_test_temporary_path(temporary.arena, S8("macro-conditional-reference"), S8(".c"));
+        BUSTER_TEST(arguments, compiler.length != 0);
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        if (compiler.length)
+        {
+            String8 command[] = {compiler, S8("-E"), S8("-P"), S8("-std=gnu17"), source_path};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){
+                                                            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                            .use_process_environment = true,
+                                                        });
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                CLexResult reference = c_lex(temporary.arena, BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
+                CLexResult expected = c_lex(temporary.arena, expected_source);
+                BUSTER_TEST(arguments, reference.diagnostic_count == 0);
+                BUSTER_TEST(arguments, reference.token_count == expected.token_count);
+                for (u64 index = 0; index < reference.token_count && index < expected.token_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, reference.tokens[index].kind == expected.tokens[index].kind);
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(reference.spelling_base, reference.tokens[index]),
+                                       c_token_spelling(expected.spelling_base, expected.tokens[index]));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
 
     struct
     {

@@ -164,6 +164,17 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   named parameters and ordinary macros retain it.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- Source `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, and `#endif` lines may
+  cross an in-progress function-like macro invocation as the GCC/Clang
+  compatibility extension. The source driver processes each conditional once
+  and gives only active source-token segments to the existing iterative macro
+  argument collector; inactive delimiters do not affect argument shape. Other
+  directive categories retain their ordinary line-level contract and still do
+  not execute inside an invocation. C17 and GNU17 share this compatibility
+  behavior; no separate strict-mode diagnostic is added. The registered
+  `c_macro_conditional_tests` module compares semantic token sequences with
+  independent Clang/GCC preprocessors and runs a Buster-built selected-branch
+  fixture through both C lowering modes (GitHub #76).
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a
