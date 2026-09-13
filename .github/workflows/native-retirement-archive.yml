@@ -17,6 +17,52 @@ env:
   CONTRACT: docs/performance-audits/evidence/2026-09-12-retirement/archive-contract.json
 
 jobs:
+  publish_current:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Publish current immutable evidence bytes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out archival implementation and source history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Retrieve expiring Actions archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/archive-input"
+          gh api repos/${{ github.repository }}/actions/artifacts/10305878954/zip > "$RUNNER_TEMP/archive-input/native-retirement-2bb4ce9-34718946098.zip"
+          gh api repos/${{ github.repository }}/actions/artifacts/10305707825/zip > "$RUNNER_TEMP/archive-input/strict-retirement-2bb4ce9-34718946098.zip"
+      - name: Freeze validation, candidate and direct-oracle source
+        run: |
+          git archive --format=tar.gz --prefix=buster-validation-cfa63d6/ cfa63d6dd4ec60b32b7de29ba52b241181065dc5 > "$RUNNER_TEMP/archive-input/buster-validation-source-cfa63d6.tar.gz"
+          git archive --format=tar.gz --prefix=buster-candidate-2bb4ce9/ 2bb4ce939d99c3956848ca7bc9c347f3ae8db231 > "$RUNNER_TEMP/archive-input/buster-candidate-source-2bb4ce9.tar.gz"
+          git archive --format=tar.gz --prefix=buster-direct-oracle-3e912a3/ 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e > "$RUNNER_TEMP/archive-input/buster-direct-oracle-source-3e912a3.tar.gz"
+      - name: Verify originals and prepare release assets
+        run: >-
+          python3 tools/native_retirement_archive.py prepare
+          --contract docs/performance-audits/evidence/2026-09-12-retirement/archive-contract-2bb4ce9.json
+          --source "$RUNNER_TEMP/archive-input"
+          --output "$RUNNER_TEMP/release-assets"
+      - name: Publish durable release
+        env:
+          GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
+          CURRENT_TAG: native-retirement-evidence-2bb4ce9
+        run: |
+          gh release create "$CURRENT_TAG" \
+            --target cfa63d6dd4ec60b32b7de29ba52b241181065dc5 \
+            --title "Native-retirement evidence for 2bb4ce9" \
+            --notes-file docs/performance-audits/evidence/2026-09-12-retirement/RELEASE-2bb4ce9.md \
+            --prerelease
+          for asset in "$RUNNER_TEMP/release-assets"/*; do
+            gh release upload "$CURRENT_TAG" "$asset"
+          done
+
   census_replay:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: Download and replay census archive
@@ -60,15 +106,17 @@ jobs:
             --pattern buster-candidate-source-eb1bef2.tar.gz \
             --pattern buster-direct-oracle-source-3e912a3.tar.gz
       - name: Verify destination bytes and extract census
-        run: >-
-          python3 validation/tools/native_retirement_archive.py verify-census
-          --assets "$RUNNER_TEMP/release-assets"
-          --output "$RUNNER_TEMP/census"
-          --cleanup
+        run: |
+          python3 validation/tools/native_retirement_archive.py verify-census \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --output "$RUNNER_TEMP/census" \
+            --cleanup
+          test ! -e candidate/evidence
+          mv "$RUNNER_TEMP/census/candidate/evidence" candidate/evidence
       - name: Restore tracked input omitted by Actions hidden-file packaging
         run: >-
           python3 validation/tools/native_retirement_archive.py restore-census-inputs
-          --evidence "$RUNNER_TEMP/census/candidate/evidence"
+          --evidence candidate/evidence
           --source candidate
       - name: Rebuild the direct oracle from its archived source
         working-directory: reference
@@ -78,7 +126,7 @@ jobs:
           "$RUNNER_TEMP/reference-build" generate --cc clang --ci --linker DEFAULT
           "$RUNNER_TEMP/reference-build" build --config Release -t ide
       - name: Replay census join and byte validator
-        working-directory: ${{ runner.temp }}/census/candidate/evidence
+        working-directory: candidate/evidence
         run: |
           mv census-integrated-joined-v3 census-integrated-joined-recorded-v3
           cp "$GITHUB_WORKSPACE/replay-validation/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py" .
@@ -91,17 +139,17 @@ jobs:
         run: >-
           python3 validation/tools/native_retirement_archive.py census-receipt
           --manifest "$RUNNER_TEMP/release-assets/archive-manifest.json"
-          --report "$RUNNER_TEMP/census/candidate/evidence/census-integrated-validated-v2.json"
-          --recorded "$RUNNER_TEMP/census/candidate/evidence/census-integrated-joined-recorded-v3"
-          --replayed "$RUNNER_TEMP/census/candidate/evidence/census-integrated-joined-v3"
-          --archived-reference "$RUNNER_TEMP/census/candidate/evidence/census-integrated-0/baseline-ide.exe"
+          --report "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-validated-v2.json"
+          --recorded "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-joined-recorded-v3"
+          --replayed "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-joined-v3"
+          --archived-reference "$GITHUB_WORKSPACE/candidate/evidence/census-integrated-0/baseline-ide.exe"
           --rebuilt-reference "$GITHUB_WORKSPACE/reference/build/Release/ide"
           --run-id "${{ github.run_id }}"
           --output "$RUNNER_TEMP/census-replay-${{ github.run_id }}.json"
       - name: Publish census replay receipt
         env:
           GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-        run: gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/census-replay-${{ github.run_id }}.json"
+        run: gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/census-replay-${{ github.run_id }}.json" --repo "${{ github.repository }}"
       - name: Retain census replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -173,7 +221,7 @@ jobs:
       - name: Publish strict replay receipt
         env:
           GH_TOKEN: ${{ secrets.BUSTER_NATIVE_ARCHIVE_TOKEN }}
-        run: gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/strict-replay-${{ github.run_id }}.json"
+        run: gh release upload "$EVIDENCE_TAG" "$RUNNER_TEMP/strict-replay-${{ github.run_id }}.json" --repo "${{ github.repository }}"
       - name: Retain strict replay receipt with the CI run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

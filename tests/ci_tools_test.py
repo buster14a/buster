@@ -470,6 +470,8 @@ class NativeRetirementArchiveTests(unittest.TestCase):
         native_retirement_archive.prepare(contract, self.source, self.assets)
         manifest = json.loads((self.assets / native_retirement_archive.MANIFEST_NAME).read_text())
         self.assertGreater(len(manifest["artifacts"]["strict"]["release_assets"]), 1)
+        self.assertEqual(manifest["identities"]["strict_candidate_binary_sha256"],
+                         hashlib.sha256(self.compiler).hexdigest())
         census_output = self.root / "census-output"
         native_retirement_archive.verify_census(self.assets, census_output, False)
         self.assertEqual((census_output / "candidate/evidence/manifest.txt").read_text(), "complete=1\n")
@@ -480,6 +482,43 @@ class NativeRetirementArchiveTests(unittest.TestCase):
         damaged.write_bytes(b"damage" + damaged.read_bytes())
         with self.assertRaisesRegex(ValueError, "size mismatch"):
             native_retirement_archive.verify_strict(self.assets, self.root / "damaged", False)
+
+    def test_census_receipt_records_a_nonidentical_clean_rebuild(self):
+        contract = self.make_inputs()
+        value = json.loads(contract.read_text())
+        archived = self.root / "archived-direct"
+        rebuilt = self.root / "rebuilt-direct"
+        archived.write_bytes(b"archived direct compiler\n")
+        rebuilt.write_bytes(b"clean rebuilt direct compiler\n")
+        archived_sha256 = hashlib.sha256(archived.read_bytes()).hexdigest()
+        value["identities"]["direct_oracle_binary_sha256"] = archived_sha256
+        contract.write_text(json.dumps(value))
+        native_retirement_archive.prepare(contract, self.source, self.assets)
+        manifest = json.loads((self.assets / native_retirement_archive.MANIFEST_NAME).read_text())
+        report = self.root / "report.json"
+        report.write_text(json.dumps({
+            "rows_validated": 1,
+            "binaries_sha256": {
+                "candidate-ide.exe": manifest["identities"]["candidate_binary_sha256"],
+                "baseline-ide.exe": archived_sha256,
+            },
+            "inputs_sha256": {"tests/input.c": "3" * 64},
+        }))
+        recorded = self.root / "recorded"
+        replayed = self.root / "replayed"
+        recorded.mkdir()
+        replayed.mkdir()
+        (recorded / "results.tsv").write_text("same\n")
+        (replayed / "results.tsv").write_text("same\n")
+        receipt = self.root / "receipt.json"
+        native_retirement_archive.census_receipt(
+            self.assets / native_retirement_archive.MANIFEST_NAME, report, recorded, replayed,
+            archived, rebuilt, "123", receipt)
+        result = json.loads(receipt.read_text())
+        self.assertFalse(result["rebuilt_matches_archived"])
+        self.assertEqual(result["archived_direct_oracle_sha256"], archived_sha256)
+        self.assertEqual(result["rebuilt_direct_oracle_sha256"],
+                         hashlib.sha256(rebuilt.read_bytes()).hexdigest())
 
 
 class WorkflowPolicyTests(unittest.TestCase):
