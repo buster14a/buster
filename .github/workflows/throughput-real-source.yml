@@ -3,7 +3,7 @@ name: Real-source throughput qualification
 on:
   workflow_dispatch:
   push:
-    branches: [bench/423-real-source-20260912]
+    branches: ['bench/423-real-source-20260912']
     paths:
       - .github/workflows/throughput-real-source.yml
       - tools/throughput/**
