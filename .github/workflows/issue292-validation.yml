@@ -1,0 +1,175 @@
+name: Issue 292 registered red green evidence
+
+on:
+  push:
+    branches: [astra/issue292-transport-20260912]
+    paths: [.github/workflows/issue292-validation.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue292-registered-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      CANDIDATE: f482f5634bdb3a60b662950a1a27fc01f40320f6
+      BASELINE: 15b19813ca51cf993d3526acb6f66c1f51f7c377
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: f482f5634bdb3a60b662950a1a27fc01f40320f6
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Establish exact source and machine provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue292-validation"
+          { git rev-parse HEAD HEAD^{tree}; uname -a; lscpu; free -m; clang --version; gcc --version; } > "$RUNNER_TEMP/issue292-validation/provenance.txt"
+          git diff "$BASELINE" "$CANDIDATE" > "$RUNNER_TEMP/issue292-validation/candidate.patch"
+          git diff --check "$BASELINE" "$CANDIDATE"
+          cat > "$RUNNER_TEMP/issue292-run-tests.py" <<'PY'
+          import json, os, pathlib, subprocess, sys
+          label = sys.argv[1]
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-validation'
+          command = ['build/Release/ide', 'test', '--verbose=1', '--ci=1']
+          with (root / (label + '-tests.log')).open('w') as log:
+              completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=1800)
+          text = (root / (label + '-tests.log')).read_text(errors='replace')
+          failures = [line for line in text.splitlines() if ' failed at ' in line]
+          registered_red = [line for line in failures if ':c_test_unevaluated_call_arity_diagnostics:' in line]
+          record = {'command': command, 'returncode': completed.returncode, 'failures': failures,
+                    'registered_arity_failures': len(registered_red),
+                    'other_failures': [line for line in failures if line not in registered_red]}
+          (root / (label + '-tests.json')).write_text(json.dumps(record, indent=2) + '\n')
+          print(json.dumps(record, indent=2), flush=True)
+          if label == 'baseline-regression':
+              if completed.returncode <= 0 or not registered_red:
+                  raise SystemExit('Registered baseline regression did not demonstrate its expected failure')
+          elif completed.returncode != 0:
+              raise SystemExit('Candidate repository tests failed; complete log retained')
+          PY
+      - name: Build exact uninstrumented baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$BASELINE"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/issue292-build"
+          "$RUNNER_TEMP/issue292-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
+          "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/baseline-build.log"
+          git diff --exit-code
+          cp build/Release/ide "$RUNNER_TEMP/issue292-validation/baseline-ide"
+          cp build/CMakeCache.txt "$RUNNER_TEMP/issue292-validation/baseline-CMakeCache.txt"
+      - name: Demonstrate the registered regression failing on baseline implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, pathlib, subprocess
+          path = pathlib.Path('src/buster/tests/compiler/frontend/c/c_test.c')
+          candidate = subprocess.check_output(['git', 'show', os.environ['CANDIDATE'] + ':' + str(path)], text=True)
+          first = '// The type-only sizeof query used to take'
+          last = '// This narrow semantic seam'
+          fixture = candidate[candidate.index(first):candidate.index(last)]
+          source = path.read_text()
+          anchor = 'BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_body_sizeof_expression('
+          registration = '    BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);'
+          if source.count(anchor) != 1 or source.count(registration) != 1:
+              raise RuntimeError('Baseline test anchors changed')
+          source = source.replace(anchor, fixture + anchor, 1)
+          source = source.replace(registration, '    BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);\n' + registration, 1)
+          path.write_text(source)
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-validation'
+          (root / 'registered-regression.c').write_text(fixture)
+          (root / 'regression.sha256').write_text(hashlib.sha256(fixture.encode()).hexdigest() + '\n')
+          PY
+          git diff --check
+          git diff > "$RUNNER_TEMP/issue292-validation/baseline-tests-only.patch"
+          test "$(git diff --name-only)" = src/buster/tests/compiler/frontend/c/c_test.c
+          "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/baseline-regression-build.log"
+          python3 "$RUNNER_TEMP/issue292-run-tests.py" baseline-regression
+      - name: Build and test unchanged submitted candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore --source=HEAD -- src/buster/tests/compiler/frontend/c/c_test.c
+          git checkout --detach "$CANDIDATE"
+          git diff --exit-code
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/candidate-build.log"
+          cp build/Release/ide "$RUNNER_TEMP/issue292-validation/candidate-ide"
+          cp build/CMakeCache.txt "$RUNNER_TEMP/issue292-validation/candidate-CMakeCache.txt"
+          python3 "$RUNNER_TEMP/issue292-run-tests.py" candidate
+      - name: Existing paired frontend scaling benchmark without instrumentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/benchmark_frontend_scaling.py \
+            --baseline "$RUNNER_TEMP/issue292-validation/baseline-ide" \
+            --candidate "$RUNNER_TEMP/issue292-validation/candidate-ide" \
+            --suite bindings --warmups 1 --repetitions 3 \
+            --out "$RUNNER_TEMP/issue292-validation/scaling" \
+            2>&1 | tee "$RUNNER_TEMP/issue292-validation/scaling.log"
+      - name: Capture fresh small and large syntax-only time and peak RSS
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-validation'
+          sources = {'small': root / 'scaling/small-1.c', 'large': pathlib.Path('tests/c_abi_cfuncs.c').resolve()}
+          manifest = {name: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'bytes': path.stat().st_size} for name, path in sources.items()}
+          header = pathlib.Path('tests/c_abi.h')
+          manifest['large-header'] = {'path': str(header), 'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}
+          records = []
+          for size, source in sources.items():
+              for form in ['-ffrontend-ssa', '-fno-frontend-ssa']:
+                  for pair in range(5):
+                      order = ['baseline', 'candidate'] if pair % 2 == 0 else ['candidate', 'baseline']
+                      for label in order:
+                          compiler = root / (label + '-ide')
+                          sample = root / ('time-' + size + '-' + form.lstrip('-') + '-' + str(pair) + '-' + label + '.txt')
+                          command = [str(compiler), 'cc', '-g0', '-std=gnu23', form, '-fsyntax-only', str(source)]
+                          run = subprocess.run(['/usr/bin/time', '-f', '%e %U %S %M', '-o', str(sample), *command], capture_output=True, text=True, timeout=120)
+                          record = {'size': size, 'form': form, 'pair': pair, 'label': label, 'command': command,
+                                    'returncode': run.returncode, 'stdout': run.stdout, 'stderr': run.stderr,
+                                    'time_raw': sample.read_text()}
+                          records.append(record)
+                          (root / 'syntax-time-rss.json').write_text(json.dumps({'hosted_observation_not_dedicated_9700X': True, 'sources': manifest, 'samples': records}, indent=2) + '\n')
+          if any(record['returncode'] != 0 for record in records):
+              raise SystemExit('Timing input failed; preserve failures and do not claim speedup')
+          for name, source in sources.items():
+              if hashlib.sha256(source.read_bytes()).hexdigest() != manifest[name]['sha256']:
+                  raise SystemExit('Timing source changed')
+          PY
+      - name: Run IR work-counter assertions in separate diagnostic build
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/issue292-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/issue292-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/issue292-validation/counter-build.log"
+          python3 "$RUNNER_TEMP/issue292-run-tests.py" candidate-counters
+          for form in -ffrontend-ssa -fno-frontend-ssa; do
+            build/Release/ide cc -g0 -std=gnu23 "$form" -fsyntax-only \
+              "-fsource-metrics=$RUNNER_TEMP/issue292-validation/current-$form.metrics" \
+              "$RUNNER_TEMP/issue292-validation/scaling/small-1.c"
+          done
+      - name: Retain all results, including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue292-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue292-validation/
+          if-no-files-found: error
+          retention-days: 7
