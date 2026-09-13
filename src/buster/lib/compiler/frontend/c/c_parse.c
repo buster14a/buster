@@ -2166,6 +2166,120 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
 
 BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end);
 
+// Shared by evaluated calls and type-only operand checking. A prototype fixes
+// the count, a variadic prototype sets a floor, and the pre-C23 unprototyped
+// form has no declared parameters. The dialect is already recorded in CType.
+BUSTER_C_SHARED bool c_semantic_call_accepts_arity(u32 parameter_count, bool is_variadic, bool is_unprototyped, u32 argument_count)
+{
+    bool result = is_variadic || is_unprototyped ? argument_count >= parameter_count : argument_count == parameter_count;
+    return result;
+}
+
+BUSTER_C_SHARED String8 c_semantic_call_arity_message(Arena* arena, String8 name, u32 parameter_count, bool is_variadic, u32 argument_count)
+{
+    if (!name.length)
+    {
+        name = S8("<function pointer>");
+    }
+    String8 direction = argument_count > parameter_count ? S8("too many") : S8("too few");
+    String8 result;
+    if (!parameter_count && !is_variadic)
+    {
+        result = string_format(arena, S8("{S8} arguments in the call to '{S8}': it declares no parameters"), direction, name);
+    }
+    else
+    {
+        result = string_format(arena, S8("{S8} arguments in the call to '{S8}': it declares {S8}{u32} parameter{S8}"), direction, name,
+                               is_variadic ? S8("at least ") : (String8){0}, parameter_count, parameter_count == 1 ? (String8){0} : S8("s"));
+    }
+    return result;
+}
+
+// Check entity-bound named calls, including calls through a named function
+// pointer, without evaluating their operands. Members, computed callees and
+// builtin-only names have their own resolvers; absence of a diagnostic here
+// does not certify those other shapes or any other expression constraint.
+// Each argument-count walk skips indexed nested groups, while the outer walk
+// still visits their calls. Deeply nested calls therefore do not rescan every
+// token of every enclosing argument list and need no recursive stack.
+BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
+                                                                      CPreprocessResult preprocess, u32 start, u32 end)
+{
+    CCallArityDiagnostic result = {0};
+    for (u32 index = start; index + 1 < end && !result.message.length; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            continue;
+        }
+        u32 use_index = c_parse_identifier_use_index(analysis, index);
+        if (use_index == C_ID_UNDERLYING_INVALID)
+        {
+            continue;
+        }
+        CEntityId entity = analysis->identifier_uses[use_index].entity;
+        CType* type = entity.value < analysis->entity_count ? c_type_from_id(analysis, analysis->entities[entity.value].type) : 0;
+        bool indirect = type && type->kind == C_TYPE_POINTER;
+        if (indirect)
+        {
+            type = c_type_from_id(analysis, type->element_type);
+        }
+        if (!type || type->kind != C_TYPE_FUNCTION)
+        {
+            continue;
+        }
+        u32 close = c_parse_matching_delimiter_indexed(analysis, preprocess, index + 1);
+        if (close >= end)
+        {
+            continue;
+        }
+        u32 argument_count = index + 2 < close;
+        bool complete = true;
+        for (u32 argument = index + 2; argument < close && complete; argument += 1)
+        {
+            CToken current = preprocess.tokens[argument];
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET) ||
+                c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                u32 nested_close = c_parse_matching_delimiter_indexed(analysis, preprocess, argument);
+                complete = nested_close < close;
+                argument = complete ? nested_close : argument;
+            }
+            else if (c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+            {
+                argument_count += 1;
+            }
+        }
+        if (complete && !c_semantic_call_accepts_arity(type->parameter_count, type->is_variadic, type->is_unprototyped, argument_count))
+        {
+            result.message = c_semantic_call_arity_message(arena, indirect ? (String8){0} : c_token_spelling(preprocess.spelling_base, token),
+                                                          type->parameter_count, type->is_variadic, argument_count);
+            result.token_index = index;
+        }
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    CCallArityDiagnostic checked = c_semantic_check_named_call_arities(arena, analysis, preprocess, start, end);
+    CDiagnostic result = {0};
+    if (checked.message.length)
+    {
+        result = (CDiagnostic){
+            .message = checked.message,
+            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[checked.token_index]),
+            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        };
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                          u32 base_start, u32 base_end)
 {

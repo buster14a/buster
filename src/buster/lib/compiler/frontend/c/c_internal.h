@@ -250,6 +250,20 @@ BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candid
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
+
+// One language constraint, not a claim that an expression or translation unit
+// has passed all semantic checks. These helpers use C bindings/types only;
+// neither a canonical program nor a lowered function is an input.
+typedef struct CCallArityDiagnostic CCallArityDiagnostic;
+struct CCallArityDiagnostic
+{
+    String8 message;
+    u32 token_index;
+};
+BUSTER_C_EXTERN bool c_semantic_call_accepts_arity(u32 parameter_count, bool is_variadic, bool is_unprototyped, u32 argument_count);
+BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name, u32 parameter_count, bool is_variadic, u32 argument_count);
+BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
+                                                                      CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
 // `_Atomic T`'s size and alignment, given T's own; both layout engines ask it
 // (see c_atomic_promoted_layout in c_parse.c).

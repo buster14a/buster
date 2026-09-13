@@ -8820,6 +8820,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArgumen
     return result;
 }
 
+// The type-only sizeof query used to take a callee's return type without
+// checking the call. Both C lowering forms must diagnose the same source;
+// valid controls include nested commas that are not argument separators.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unevaluated_call_arity_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        CPreprocessDialect dialect;
+        String8 message;
+    } cases[] = {
+        {S8("int f(int);\nint g(void)\n{\n    return sizeof(f());\n}\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'g': too few arguments in the call to 'f': it declares 1 parameter")},
+        {S8("int f(void);\nint g(void)\n{\n    return sizeof(f(1));\n}\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'g': too many arguments in the call to 'f': it declares no parameters")},
+        {S8("int f(int, ...);\nint g(void)\n{\n    return sizeof(f());\n}\n"), C_PREPROCESS_DIALECT_C23,
+         S8("in function 'g': too few arguments in the call to 'f': it declares at least 1 parameter")},
+        {S8("int (*p)(int);\nint g(void)\n{\n    return sizeof(p());\n}\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'g': too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+        {S8("int (*p)(int);\nint g(void)\n{\n    return sizeof(p(1, 2));\n}\n"), C_PREPROCESS_DIALECT_C23,
+         S8("in function 'g': too many arguments in the call to '<function pointer>': it declares 1 parameter")},
+        {S8("int f();\nint g(void)\n{\n    return sizeof(f(1));\n}\n"), C_PREPROCESS_DIALECT_C23,
+         S8("in function 'g': too many arguments in the call to 'f': it declares no parameters")},
+        {S8("int f(int); int h(int);\nint g(void) { return sizeof(h(f())); }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'g': too few arguments in the call to 'f': it declares 1 parameter")},
+        {S8("int f(int);\nint g(void) { return sizeof(f(1)); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+        {S8("int f(int, ...);\nint g(void) { return sizeof(f(1, 2, 3)); }\n"), C_PREPROCESS_DIALECT_C23, {0}},
+        {S8("int f();\nint g(void) { return sizeof(f(1, 2)); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+        {S8("int (*p)(int);\nint g(void) { return sizeof(p(1)); }\n"), C_PREPROCESS_DIALECT_C23, {0}},
+        {S8("int f(int); int h(int, int);\nint g(void) { return sizeof(f(h(1, 2))); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+        {S8("int f(int);\nint g(void) { return sizeof(f((1, 2))); }\n"), C_PREPROCESS_DIALECT_C23, {0}},
+        {S8("int f(int);\nint g(void) { return sizeof(f((int[2]){1, 2}[0])); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+        {S8("int f(void);\nint g(void) { int (*f)(int); return sizeof(f(1)); }\n"), C_PREPROCESS_DIALECT_C23, {0}},
+    };
+    Target targets[] = {
+        target_native,
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                        (CPreprocessOptions){
+                                                            .target = targets[target_index],
+                                                            .data_layout = target_data_layout(targets[target_index]),
+                                                            .dialect = cases[case_index].dialect,
+                                                        });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult checked = c_analyze_with_options(temporary.arena, S8("unevaluated-call-arity.c"), tokens, syntax,
+                                                                targets[target_index],
+                                                                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+                BUSTER_TEST(arguments, checked.diagnostic_count == (cases[case_index].message.length ? 1u : 0u));
+                if (cases[case_index].message.length)
+                {
+                    if (BUSTER_REQUIRE(arguments, checked.diagnostic_count == 1))
+                    {
+                        CDiagnostic diagnostic = checked.diagnostics[0];
+                        BUSTER_STRING_TEST(arguments, diagnostic.message, cases[case_index].message);
+                        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                        BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                        if (case_index < 6)
+                        {
+                            BUSTER_TEST(arguments, diagnostic.location.line == 4 && diagnostic.location.column == 19);
+                        }
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, checked.program != 0 && checked.canonical_ir_certified);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// This narrow semantic seam has C bindings/types as inputs, not a canonical
+// program. It is not an assertion that syntax-only as a whole is IR-free.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {S8("int f(int); int g(void) { return sizeof(f()); }"),
+         S8("too few arguments in the call to 'f': it declares 1 parameter")},
+        {S8("int (*p)(int); int g(void) { return sizeof(p()); }"),
+         S8("too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+        {S8("int f(int); int g(void) { return sizeof(f(1)); }"), {0}},
+        {S8("int f(int); int h(int, int); int g(void) { return sizeof(f(h(1, 2))); }"), {0}},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source,
+                                                (CPreprocessOptions){.target = target_native,
+                                                                     .data_layout = target_data_layout(target_native),
+                                                                     .dialect = C_PREPROCESS_DIALECT_C23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && analysis.diagnostic_count == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters before = ir_construction_counters();
+#endif
+        CDiagnostic checked = c_test_check_named_call_arities(temporary.arena, &analysis, tokens, 0, (u32)tokens.token_count);
+        BUSTER_STRING_TEST(arguments, checked.message, cases[index].message);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters after = ir_construction_counters();
+        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+        for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+        {
+            BUSTER_TEST(arguments, before.values[counter] == after.values[counter]);
+        }
+#endif
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 /* Function-body sizeof over an expression operand must fold through the resolved
    operand types with the usual arithmetic conversions, never through the
    type-prediction guess: narrow operands promote to int, shifts keep the promoted
@@ -16295,6 +16426,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
