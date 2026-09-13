@@ -1,0 +1,70 @@
+name: Issue 292 test seam correction
+on:
+  push:
+    branches: [astra/issue292-transport-20260912]
+    paths: [.github/workflows/issue292-repair-seam.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: f482f5634bdb3a60b662950a1a27fc01f40320f6
+          persist-credentials: false
+      - name: Correct only the registered fixture's public entry point
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, urllib.request
+          path = pathlib.Path('src/buster/tests/compiler/frontend/c/c_test.c')
+          before = path.read_bytes()
+          if hashlib.sha256(before).hexdigest() != '713bcfe343e961c2d0c06aa025fffed1c3d12ec1c29ffddf73ed2c064749e076':
+              raise RuntimeError('Preimage changed')
+          old = ('        CParserResult syntax = c_parse_ast(temporary.arena, tokens);\n'
+                 '        CAnalysisResult analysis = c_analyze_semantics(temporary.arena, tokens, syntax);\n'
+                 '        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && analysis.diagnostic_count == 0);\n')
+          new = ('        CAnalysisResult analysis = c_parse(temporary.arena, tokens);\n'
+                 '        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && analysis.diagnostic_count == 0);\n')
+          if before.decode().count(old) != 1:
+              raise RuntimeError('Ambiguous correction')
+          source = before.decode().replace(old, new, 1)
+          if hashlib.sha256(source.encode()).hexdigest() != 'd02151fe873e2e08b48bbfcba7c2b9baf39370aea99f37b9b71702107cd4ef76':
+              raise RuntimeError('Postimage changed')
+          path.write_text(source)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          def post(endpoint, body):
+              request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/' + endpoint,
+                  data=json.dumps(body).encode(), method='POST', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  return json.load(response)
+          blob = post('git/blobs', {'content': source, 'encoding': 'utf-8'})
+          if blob['sha'] != 'fc1410b9ea6a30b4016d1a5b15af46195caee164':
+              raise RuntimeError('Remote blob mismatch')
+          tree = post('git/trees', {'base_tree': '0111e0d577e44ec1d957a73466efe95a19ff9eda',
+              'tree': [{'path': str(path), 'mode': '100644', 'type': 'blob', 'sha': blob['sha']}]})
+          commit = post('git/commits', {'message': 'test: use public C analysis entry in arity seam',
+              'tree': tree['sha'], 'parents': ['f482f5634bdb3a60b662950a1a27fc01f40320f6']})
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'issue292-seam-correction'
+          root.mkdir()
+          result = {'commit': commit['sha'], 'tree': tree['sha'], 'parent': 'f482f5634bdb3a60b662950a1a27fc01f40320f6'}
+          (root / 'publication.json').write_text(json.dumps(result, indent=2) + '\n')
+          (root / 'correction.patch').write_bytes(subprocess.check_output(['git', 'diff']))
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: issue292-seam-correction-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue292-seam-correction/
+          if-no-files-found: error
+          retention-days: 7
