@@ -306,11 +306,16 @@ jobs:
           if ('${{ matrix.sanitizer }}' -eq 'required') {
             $ResourceDir = (& clang.exe -print-resource-dir).Trim()
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $RuntimeDir = Join-Path $ResourceDir 'lib\${{ matrix.clang_arch }}-pc-windows-msvc'
-            $RuntimeDll = Join-Path $RuntimeDir 'clang_rt.asan_dynamic-${{ matrix.clang_arch }}.dll'
-            if (!(Test-Path $RuntimeDll)) {
-              throw "Required Clang sanitizer runtime is missing: $RuntimeDll"
+            $RuntimeDlls = @(
+              Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-${{ matrix.clang_arch }}.dll' -File -Recurse |
+                Sort-Object FullName
+            )
+            if ($RuntimeDlls.Count -ne 1) {
+              throw "Expected exactly one matching Clang sanitizer runtime under ${ResourceDir}; found $($RuntimeDlls.Count)"
             }
+            $RuntimeDll = $RuntimeDlls[0].FullName
+            $RuntimeDir = Split-Path -Parent $RuntimeDll
+            "oracle_sanitizer_runtime=$RuntimeDll" | Add-Content -Encoding ascii 'evidence\strict-binary\source.txt'
             $env:PATH = "$RuntimeDir;$env:PATH"
             $DifferentialArgs += '--sanitize-oracle'
           }
