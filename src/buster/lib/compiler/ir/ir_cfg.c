@@ -139,6 +139,7 @@ BUSTER_GLOBAL_LOCAL void ir_cfg_remap_extras(Arena* scratch, IrFunction* functio
 }
 
 #define IR_CFG_NARROW_POOL_COUNT_BOUND ((u64)UINT32_MAX * (u64)UINT16_MAX)
+BUSTER_CT_CHECK(IR_CFG_NARROW_POOL_COUNT_BOUND == UINT64_C(281470681677825));
 BUSTER_CT_CHECK(sizeof(((IrFunction*)0)->instruction_count) == sizeof(u32));
 BUSTER_CT_CHECK(sizeof(((IrInstruction*)0)->target_count) == sizeof(u16));
 BUSTER_CT_CHECK(sizeof(((IrInstruction*)0)->immediate_count) == sizeof(u16));
