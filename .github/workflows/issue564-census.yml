@@ -63,7 +63,8 @@ jobs:
           exec > >(tee issue564-evidence/census.log) 2>&1
           set -x
           printf 'int add(int a, int b) { return a + b; }\n' > issue564-evidence/small.c
-          sha256sum issue564-evidence/small.c >> issue564-evidence/inputs.sha256
+          printf 'int f(void) { return missing; }\n' > issue564-evidence/invalid.c
+          sha256sum issue564-evidence/small.c issue564-evidence/invalid.c >> issue564-evidence/inputs.sha256
           COMMON=(-Isrc -Ibuild-prod/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 -g -v)
           ./build-prod/Release/ide cc "${COMMON[@]}" -fsource-metrics=issue564-evidence/unity-prod.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-prod
           ./build-census/Release/ide cc "${COMMON[@]}" -fsource-metrics=issue564-evidence/unity-census.metrics src/buster/apps/ide/ide.c -lm -o issue564-evidence/unity-census
@@ -71,11 +72,25 @@ jobs:
           ./build-prod/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-prod.metrics issue564-evidence/small.c -o issue564-evidence/small-prod.o
           ./build-census/Release/ide cc -march=znver3 -g0 -O0 -c -fsource-metrics=issue564-evidence/small-census.metrics issue564-evidence/small.c -o issue564-evidence/small-census.o
           cmp issue564-evidence/small-prod.o issue564-evidence/small-census.o
+          set +e
+          ./build-prod/Release/ide cc -march=znver3 -c issue564-evidence/invalid.c -o issue564-evidence/invalid-prod.o \
+            > issue564-evidence/invalid-prod.stdout 2> issue564-evidence/invalid-prod.stderr
+          PROD_STATUS=$?
+          ./build-census/Release/ide cc -march=znver3 -c issue564-evidence/invalid.c -o issue564-evidence/invalid-census.o \
+            > issue564-evidence/invalid-census.stdout 2> issue564-evidence/invalid-census.stderr
+          CENSUS_STATUS=$?
+          set -e
+          test "$PROD_STATUS" -ne 0
+          test "$PROD_STATUS" -eq "$CENSUS_STATUS"
+          cmp issue564-evidence/invalid-prod.stdout issue564-evidence/invalid-census.stdout
+          cmp issue564-evidence/invalid-prod.stderr issue564-evidence/invalid-census.stderr
           ! grep -q '^ir_construction\.' issue564-evidence/unity-prod.metrics
           ! grep -q '^ir_construction\.' issue564-evidence/small-prod.metrics
           grep -q '^ir_construction\.validation_calls=' issue564-evidence/unity-census.metrics
           grep -q '^ir_construction\.validation_calls=' issue564-evidence/small-census.metrics
           sha256sum issue564-evidence/unity-prod issue564-evidence/unity-census issue564-evidence/small-prod.o issue564-evidence/small-census.o > issue564-evidence/outputs.sha256
+          sha256sum issue564-evidence/invalid-prod.stdout issue564-evidence/invalid-census.stdout \
+            issue564-evidence/invalid-prod.stderr issue564-evidence/invalid-census.stderr >> issue564-evidence/outputs.sha256
       - name: Attribute ordinary-producer instruction references
         shell: bash
         run: |
