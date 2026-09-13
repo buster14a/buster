@@ -23,13 +23,19 @@
   they do not silently replace the native harness's ordinary CI guard. Before
   any timing verdict, validate the complete immutable binding record with
   `python3 tools/native_retirement_performance_binding.py <record.json>
-  --evidence-root <bundle>`; this structural check does not itself accept a
-  performance result. The evidence-root form also parses the versioned
-  canonical performance-row artifact, recomputes the required population and
-  statistical family, and checks #510 provenance/replay receipts. A run without
-  the evidence root is reported as `proof=structural-only`. The acceptance
-  service must use the server-authoritative supervisor lease protocol; the
-  existing cooperative throughput lock is not a substitute.
+  --evidence-root <bundle> --repository-root <immutable-checkout>`; the
+  evidence-root form joins the exact #508 declaration, manifest, inputs,
+  dependencies, environment, rows, independent validator report and
+  versioned canonical performance-row artifact. It recomputes unique row
+  identities, eligibility and the round-1/round-2/pooled statistical family,
+  then checks structured #437 service/profile/A-A/lease receipts and #510
+  publication/download/replay receipts. `--repository-root` is an immutable
+  checkout used to verify commit-to-tree and source/build/harness identities;
+  without it the result is explicitly downgraded and cannot prove those
+  relations. This validation does not itself accept a performance result.
+  A run without the evidence root is reported as `proof=structural-only`.
+  The acceptance service must use the server-authoritative supervisor lease
+  protocol; the existing cooperative throughput lock is not a substitute.
 
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted

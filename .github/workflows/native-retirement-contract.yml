@@ -8,13 +8,18 @@ on:
       - .github/workflows/native-retirement-contract.yml
       - build.c
       - docs/agents/build.md
+      - docs/agents/benchmarking.md
       - docs/native-retirement-census.md
+      - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
+      - tools/native_retirement_archive.py
       - tools/native_retirement_performance_binding.py
       - tools/native_retirement_performance_binding_test.py
+      - tools/throughput/stats.h
+      - tools/throughput/throughput.c
       - tests/**
   workflow_dispatch:
 
@@ -74,7 +79,7 @@ jobs:
           grep -Fx 'unfrozen_dependencies=none-for-object-census' evidence/resource-smoke/manifest.txt
           grep -q -F $'resource-header\t' evidence/resource-smoke/dependencies.tsv
           python3 tools/native_retirement_contract.py validate evidence/resource-smoke
-      - name: Retain contract diagnostics
+      - name: Retain seven-day contract diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -82,3 +87,8 @@ jobs:
           path: evidence/
           retention-days: 7
           if-no-files-found: error
+      - name: State durable evidence boundary
+        if: ${{ !cancelled() }}
+        run: |
+          echo 'The seven-day workflow artifact is diagnostic only.'
+          echo 'Final acceptance evidence must be published, downloaded, and independently replayed through #510.'

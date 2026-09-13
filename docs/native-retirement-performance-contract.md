@@ -80,50 +80,69 @@ root recomputes, all of the following:
 The validator rejects unknown fields so an unreviewed policy extension cannot
 silently change the experiment. It also rejects branch names, `HEAD`,
 abbreviated IDs, duplicate artifact paths, path traversal, and evidence digest
-mismatches. The canonical support root digest is SHA-256 over the sorted JSON
-array of `{name,path,bytes,sha256}` file descriptors using compact, sorted-key
+mismatches. The canonical support root digest is SHA-256 over the complete
+support set (declared files, validator source and six #508 closure artifacts)
+as sorted `{name,path,bytes,sha256}` file descriptors using compact, sorted-key
 JSON encoding. The requested-work root uses the same encoding over sorted
 `{kind,name,path,bytes,sha256}` descriptors.
 
-`support.files[performance_rows]` is a canonical UTF-8 JSON artifact with
-schema `buster-native-retirement-performance-rows-v1`, integer version `1`,
-the exact `row_identity_fields` list, and an array of rows with contiguous
-zero-based IDs. A row contains every identity field plus explicit boolean
-eligibility for compiler wall time, peak RSS, deterministic code-section bytes
-and generated runtime. Runtime eligibility must name an independent native
-executable oracle; code eligibility must name deterministic code sections.
-There is intentionally no trusted row-count field: validation parses the whole
-array, rejects duplicate identities, recomputes its count and all axes, and
-derives the aggregate/slice/cell statistical-family members before comparing
-the bound `population` fields. A one-line declaration claiming `999999` rows
-cannot satisfy this check.
+`support.files[performance_rows]` is the independent #508-produced canonical
+UTF-8 JSON artifact with schema
+`buster-native-retirement-performance-rows-v1`, integer version `1`, the exact
+`row_identity_fields` list, a `sources` map for the #508 declaration, manifest,
+inputs, dependencies, environment and validator report digests, and an array
+of rows with contiguous zero-based IDs. A row contains every identity field
+plus explicit boolean eligibility for compiler wall time, peak RSS,
+deterministic code-section bytes and generated runtime. Runtime eligibility
+must name an independent native executable oracle; code eligibility must name
+deterministic code sections. The bound `population.source_digests` must identify
+the complete #508 output, including its versioned performance declaration;
+rewriting six self-consistent artifacts or omitting the independent validator
+report is rejected. Validation parses the whole array, rejects duplicate
+identities, recomputes its count and all axes, and derives the aggregate,
+slice and cell members for each simultaneous `round-1`, `round-2` and `pooled`
+statistical family. The family also binds cell counts and canonical identity
+digests. A one-line declaration claiming `999999` rows cannot satisfy this
+check.
 
 `requested_work` is schema `native-retirement-requested-work-v1`, version `1`.
 Its closure must contain exactly identified items for #508's `inputs`,
 `dependencies`, `resources`, `sysroot`, `sdk` and `workloads` categories (and
 any additional source/generated/header/tool items), and its `manifest_sha256`
-must match the bound #508 manifest. Two dummy entries are therefore not a
-closed performance population.
+must match the bound #508 manifest. Each required closure item is joined by
+name, byte count and digest to the independent #508 closure and to one
+requested-work artifact. Two dummy entries are therefore not a closed
+performance population.
 
-The binding also carries versioned relation and replay receipt artifacts. With
-an evidence root, the validator parses the receipts and compares every
-commit/tree/source-snapshot/binary/build/toolchain/harness digest to the bound
-record, then requires the #510 replay producer, candidate/contract IDs, and
-successful identity/evidence replay marker. Without an evidence root the
-result is explicitly `proof=structural-only`; it is never an acceptance or
-provenance claim.
+The binding also carries versioned relation, source/build, host/service and
+replay receipt artifacts. With an evidence root, the validator parses the
+receipts and compares every commit/tree/source-snapshot/binary/build/toolchain/
+harness digest to the bound record. With `--repository-root`, it additionally
+resolves the bound commits and trees in an immutable checkout and checks the
+contract and validator source blobs; the #510 bundle digest and replay receipts
+must match the downloaded bytes. Opaque self-attestation, arbitrary commit or
+tree IDs, or a digest that merely repeats a receipt field is not proof. The
+structured #437 receipts must prove supervisor ownership, CLOEXEC isolation
+and descendant cgroup cleanup. Without repository or evidence input the result
+is explicitly downgraded (`proof=structural-only` or
+`proof=evidence-and-receipts-checked-without-independent-git`); it is never an
+acceptance or provenance claim.
 
 An evidence bundle must be checked before publication:
 
 ```sh
 python3 tools/native_retirement_performance_binding.py \
-  evidence/performance-binding.json --evidence-root evidence
+  evidence/performance-binding.json --evidence-root evidence \
+  --repository-root /path/to/immutable-checkout
 ```
 
 No unbound JSON template is checked in. A record that is not fully populated by
 the admitted #508/#509/#512/#437 producers cannot pass this command, and the
 command itself does not run measurements or turn a structural/evidence
-validation into the approved `pass` outcome.
+validation into the approved `pass` outcome. The pull-request workflow uploads
+its bundle for seven days as a diagnostic; that artifact is not the durable
+#510 publication and does not bind an experiment or supply a performance
+verdict.
 
 The direct baseline is the final integrated, semantically accepted pre-cutover
 tree with direct native dispatch still available. The candidate is the exact
