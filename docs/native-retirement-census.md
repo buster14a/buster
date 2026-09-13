@@ -278,6 +278,24 @@ fixed points, independent mixed-compiler/runtime correctness, native unwinding,
 representative external workloads and accepted throughput/memory/size/runtime
 budgets remain separate requirements of #36.
 
+The `Native retirement evidence` workflow is the exact-candidate execution
+entry point for this census and the strict semantic differential. A pull request
+uses GitHub's exact integration commit; a manual dispatch uses its selected
+revision. The workflow rejects a checkout that does not match that identity and
+carries the commit, tree and compiler binary digest in the retained evidence.
+Its strict differential is a native six-host matrix: Linux, macOS and Windows
+on both x86-64 and AArch64. A successful object census on the Linux x86-64
+coordinator is therefore not mislabeled as runtime evidence for the other five
+hosts. Each host builds its own immutable candidate and sanitized independent
+oracle. The stable `Native retirement acceptance complete` check rejects a
+missing, skipped, cancelled or failed census or native matrix. The archived
+direct reference remains separately pinned.
+
+The workflow does not synthesize #508's support decision or make the census a
+retirement verdict. After that manifest is approved, the final candidate run
+must be joined to its exact manifest identity and archived through the durable
+evidence pipeline before #509 or #36 can be closed.
+
 `--self-test` checks exact exclusions and language recipes, strict decimal/counter/attribution protocols,
 revision/path fields and complete, disjoint shard selection without needing a
 compiler. Real smoke runs must additionally exercise successful objects, known
