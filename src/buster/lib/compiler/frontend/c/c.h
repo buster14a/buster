@@ -1144,14 +1144,17 @@ struct CTokenPositionIndex
     u32* attribute_positions;
     // Per token: the position of the matching closer for every opening
     // (/[/{ whose whole group is properly nested across all three delimiter
-    // kinds, else UINT32_MAX. A mismatched closer unmatches everything still
-    // open, so scans over malformed regions keep their exact scalar walks.
-    u32* matching_delimiters;
+    // kinds, plus one; zero where there is none. A mismatched closer unmatches
+    // everything still open, so scans over malformed regions keep their exact
+    // scalar walks. The stored bias makes the unmatched majority the zero a
+    // fresh arena page already holds, and every reader subtracts one, which
+    // turns that zero back into the UINT32_MAX the range tests already reject.
+    u32* matching_delimiters_plus_one;
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
     u32 attribute_count;
-    // Delimiter scan verdicts that matching_delimiters alone cannot carry:
+    // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is
     // properly nested, which is what lets a consumer trust the array for any
@@ -1189,9 +1192,12 @@ struct CParseResult
     CAggregateLookup* aggregate_lookup;
     CTokenPositionIndex* position_index;
     CIdentifierUse* identifier_uses;
-    u32* identifier_use_by_token;
+    // First recorded use of each token, plus one, so an unused token is the
+    // zero the operating system already supplied; c_parse_identifier_use_index
+    // subtracts one and returns C_ID_UNDERLYING_INVALID for it unchanged.
+    u32* identifier_use_by_token_plus_one;
     // Lazily computed per-token spelling-predicate bits, indexed like
-    // identifier_use_by_token; see C_TOKEN_CLASS_* in c.c.
+    // identifier_use_by_token_plus_one; see C_TOKEN_CLASS_* in c.c.
     u8* token_classes;
     // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.

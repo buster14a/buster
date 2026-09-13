@@ -18,11 +18,11 @@ BUSTER_F_DECL bool c_test_translate_plain_run_paths_agree(String8 source);
 BUSTER_F_DECL bool c_test_pp_class_masks_agree(Arena* arena, String8 source);
 BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type);
 BUSTER_F_DECL CEntityId c_test_ir_constant_entity_at(CParseResult* parse, CPreprocessResult preprocess,
-                                                      CEntityId* token_entities, u32 token_index);
+                                                      u32* token_entities_plus_one, u32 token_index);
 BUSTER_F_DECL bool c_test_ir_constant_entity_index_equivalent(CParseResult* parse, CPreprocessResult preprocess,
-                                                               CEntityId* token_entities, u32 token_count);
+                                                               u32* token_entities_plus_one, u32 token_count);
 BUSTER_F_DECL bool c_test_ir_constant_entity_index_lifetime(CParseResult* parse, CPreprocessResult preprocess,
-                                                             CEntityId* token_entities, u32 token_count);
+                                                             u32* token_entities_plus_one, u32 token_count);
 BUSTER_F_DECL bool c_test_lex_compact_tables_ready(void);
 BUSTER_F_DECL bool c_test_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 BUSTER_F_DECL bool c_test_decode_quoted_paths_agree(Arena* arena, String8 spelling, u8 delimiter, bool* accepted_out);
