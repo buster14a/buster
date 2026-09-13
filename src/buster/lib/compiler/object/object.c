@@ -4269,13 +4269,14 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
             if (placing)
             {
                 u64 alignment = records[next].alignment ? records[next].alignment : 1;
-                base = align_forward(base, alignment);
-                if (records[next].size > UINT64_MAX - base)
+                u64 aligned_base = 0;
+                if (!align_forward_checked(base, alignment, &aligned_base) || records[next].size > UINT64_MAX - aligned_base)
                 {
                     result = false;
                 }
                 else
                 {
+                    base = aligned_base;
                     section_bases[records[next].index] = base;
                     base += records[next].size;
                     placed_priority = records[next].priority;
@@ -4519,10 +4520,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             u64 base = 0;
             if (read_ok)
             {
-                base = align_forward(section_sizes[kind], alignment);
-                if (base < section_sizes[kind] || size > UINT64_MAX - base)
+                u64 aligned_base = 0;
+                if (!align_forward_checked(section_sizes[kind], alignment, &aligned_base) || size > UINT64_MAX - aligned_base)
                 {
                     read_ok = false;
+                }
+                else
+                {
+                    base = aligned_base;
                 }
             }
             if (read_ok)
@@ -5498,10 +5503,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             u64 base = 0;
             if (read_ok)
             {
-                base = align_forward(section_sizes[kind], alignment);
-                if (base < section_sizes[kind] || raw_size > UINT64_MAX - base)
+                u64 aligned_base = 0;
+                if (!align_forward_checked(section_sizes[kind], alignment, &aligned_base) || raw_size > UINT64_MAX - aligned_base)
                 {
                     read_ok = false;
+                }
+                else
+                {
+                    base = aligned_base;
                 }
             }
             if (read_ok)
@@ -6512,10 +6521,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     u64 base = 0;
                     if (read_ok)
                     {
-                        base = align_forward(section_sizes[output_kind], alignment);
-                        if (base < section_sizes[output_kind] || output_size > UINT64_MAX - base)
+                        u64 aligned_base = 0;
+                        if (!align_forward_checked(section_sizes[output_kind], alignment, &aligned_base) ||
+                            output_size > UINT64_MAX - aligned_base)
                         {
                             read_ok = false;
+                        }
+                        else
+                        {
+                            base = aligned_base;
                         }
                     }
                     if (read_ok)

@@ -70,8 +70,10 @@ struct TemporalArena
 };
 
 #define arena_minimum_position ((u64)sizeof(Arena))
-// Every reservation is capped here so that positions, sizes and their sums
-// stay far below 2^64 and the arithmetic in arena_allocate_bytes cannot wrap.
+// Every reservation is capped far below 2^64. Allocation additionally checks
+// the cursor and alignment rounding, then subtracts the rounded offset from
+// the reservation before adding the request, so valid bump arithmetic cannot
+// wrap.
 #define ARENA_MAX_RESERVATION ((u64)1 << 48)
 
 BUSTER_F_DECL Arena* arena_create(ArenaCreation initialization);
@@ -164,20 +166,20 @@ BUSTER_F_DECL void arena_benchmark_flush(bool final);
 #define arena_allocate_zeroed_bytes arena_benchmark_allocate_zeroed_bytes_raw
 #endif
 
-// The bump is inline and the commit is not. Every allocation performs the same
-// four operations -- align the position, add the size, test the committed
-// high-water mark, publish the new position -- and the test fails on the order
-// of once per arena page, so the branch is predicted and the call it used to
-// make was most of the cost of an allocation that never touches the OS. The
-// bounds reasoning the outlined body carried stays with it in arena.c. The
-// caller-controlled reservation bound remains validation in every build; the
-// final committed-position relation is an established invariant.
+// The bump is inline and the commit is not. The valid allocation path checks
+// the cursor, checked alignment rounding, and remaining capacity before it
+// adds the size, tests the committed high-water mark, and publishes the new
+// position. The checked alignment helper is header-inline, while commit-only
+// work and its reservation-bound validation remain outlined in arena.c.
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
     BUSTER_VALIDATE(size <= ARENA_MAX_RESERVATION);
-    u64 aligned_offset = align_forward(arena->position, alignment);
+    BUSTER_VALIDATE(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
+    u64 aligned_offset;
+    BUSTER_VALIDATE(align_forward_checked(arena->position, alignment, &aligned_offset));
+    BUSTER_VALIDATE(aligned_offset <= arena->reserved_size);
+    BUSTER_VALIDATE(size <= arena->reserved_size - aligned_offset);
     u64 aligned_size_after = aligned_offset + size;
-    BUSTER_VALIDATE(aligned_size_after <= arena->reserved_size);
     if (BUSTER_UNLIKELY(aligned_size_after > arena->os_position))
     {
         arena_allocate_commit(arena, aligned_size_after);
