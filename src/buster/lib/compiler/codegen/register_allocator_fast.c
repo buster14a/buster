@@ -2475,7 +2475,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         u32 push_count = 0;
         for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
         {
-            push_count += (placement.callee_saved_mask >> physical_register) & 1u;
+            push_count += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
         }
         // Zero where the callee-saved pushes precede the frame pointer (Win64):
         // the saves then live at the frame pointer's positive offsets, so no

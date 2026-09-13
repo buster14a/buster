@@ -122,7 +122,7 @@ bool machine_selection_assembly_identity_plan(IrProgram* program, IrFunction* fu
             if (selected && matching)
             {
                 u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
-                selected = match < index && ((plan->outputs >> match) & 1u) && !((plan->read_write >> match) & 1u) &&
+                selected = match < index && (((u32)plan->outputs >> match) & 1u) && !(((u32)plan->read_write >> match) & 1u) &&
                            plan->source_operands[match] == UINT8_MAX && plan->sizes[match] == type->layout.size;
                 if (selected)
                 {
