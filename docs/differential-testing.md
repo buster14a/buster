@@ -336,3 +336,27 @@ same compiler, corpus, sanitizer policy and quota. Normalize only the output
 root and `elapsed_us` when comparing process records; argv paths also contain
 the output root. Source, observations, configuration sets and case order must
 match exactly.
+
+### Registered admission controls
+
+The native `--self-test` requests one, two and four workers, followed by the
+existing failure-injection pass. Each request is clamped by the same host and
+`BUSTER_TEST_JOBS` policy as the corpus; `DIFFERENTIAL_WORKER_CONTROL` records
+the requested and effective counts separately. Single-threaded and TCC drivers
+therefore report one effective lane, not an unexecuted parallel pass.
+
+The controls rendezvous an initial cohort and keep its first successful case
+active until all other cases finish. This forces unequal case lifetimes without
+a wall-time performance assertion, detects a fixed per-lane partition that
+strands work behind the long case, and still requires registry-order output.
+An independent thirty-second rendezvous deadline releases a broken control as
+a failure; the existing child deadlines are not enlarged. Live-case peaks must
+equal the effective budget, completion ordinals must be unique and exhaustive,
+and all cases and case-owned arenas must be inactive after the lane barrier.
+These are self-test-only counters, not process RSS or corpus instrumentation.
+Existing crash, timeout, failed-launch, sanitizer, missing/duplicate completion,
+damaged-stream and evidence-write controls remain registered.
+
+These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
+policy remains one worker, and #408's matched full-CI latency, aggregate runner
+time and concurrent peak-memory acceptance remain separate requirements.
