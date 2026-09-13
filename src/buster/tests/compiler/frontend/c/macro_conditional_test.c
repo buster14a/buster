@@ -9,8 +9,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
-BUSTER_GLOBAL_LOCAL void c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected)
 {
+    UnitTestResult result = {0};
     u64 actual_count = 0;
     u64 expected_count = 0;
     for (u64 index = 0; index < actual.token_count; index += 1)
@@ -43,6 +44,7 @@ BUSTER_GLOBAL_LOCAL void c_macro_conditional_compare_semantic_tokens(UnitTestArg
             expected_index += 1;
         }
     }
+    return result;
 }
 
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
@@ -121,7 +123,9 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 CLexResult reference = c_lex(temporary.arena, BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
                 CLexResult expected = c_lex(temporary.arena, expected_source);
                 BUSTER_TEST(arguments, reference.diagnostic_count == 0);
-                c_macro_conditional_compare_semantic_tokens(arguments, reference, expected);
+                UnitTestResult reference_result = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected);
+                result.test_count += reference_result.test_count;
+                result.succeeded_test_count += reference_result.succeeded_test_count;
             }
         }
         scratch_end(temporary);
