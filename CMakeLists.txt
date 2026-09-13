@@ -878,6 +878,7 @@ buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 set(BUSTER_TEST_SOURCES
     src/buster/tests/byte_writer_test.c
     src/buster/tests/arena_test.c
+    src/buster/tests/integer_test.c
     src/buster/tests/sanitizer_test.c
     src/buster/tests/hash_test.c
     src/buster/tests/simd_test.c
@@ -931,6 +932,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
     src/buster/tests/arena_test.h
+    src/buster/tests/integer_test.h
     src/buster/tests/sanitizer_test.h
     src/buster/tests/sanitizer_test_internal.h
     src/buster/tests/hash_test.h

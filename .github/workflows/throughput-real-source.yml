@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir -p evidence
           git rev-parse HEAD > evidence/revision.txt
-          git rev-parse HEAD^{tree} > evidence/tree.txt
+          git rev-parse 'HEAD^{tree}' > evidence/tree.txt
           git archive --format=tar HEAD > evidence/source.tar
           sha256sum evidence/source.tar > evidence/source.tar.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
