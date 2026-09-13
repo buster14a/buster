@@ -203,7 +203,11 @@ workflow prepends Clang's matching resource-runtime directory on Windows so a
 different installed ASan DLL cannot satisfy the run. The Windows Arm64 runner's
 LLVM package does not ship an AArch64 ASan runtime, so that lane records
 `oracle_sanitizer=not-run` and the exact reason instead of reporting an
-unsanitized run as a sanitizer pass. The stable
+unsanitized run as a sanitizer pass. That lane still executes the complete
+corpus: its independent oracle links the Arm64 UCRT legacy stdio definitions
+for the intentionally headerless programs, and the clear-cache caller supplies
+the compiler-rt boundary omitted by the runner package. No case or matrix row
+is pruned for either host-toolchain limitation. The stable
 `Native retirement acceptance complete` check rejects a missing, skipped,
 cancelled or failed census or native matrix. The archived direct reference
 remains separately pinned.
