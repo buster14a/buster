@@ -1,0 +1,68 @@
+name: Queue 437 one-shot authoring transport
+on:
+  push:
+    branches: [astra/437-durable-fake-queue-20260913]
+    paths:
+      - .github/workflows/queue437-transport.yml
+      - .github/queue437-transport.py
+permissions:
+  contents: write
+concurrency:
+  group: queue437-owned-transport-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  integrate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 1
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Apply guarded integration and publish only the owned candidate branch
+        id: integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/queue437-evidence"
+          python3 .github/queue437-transport.py
+          git add build.c tools/bench_service/queue.c tools/bench_service/protocol.c tools/bench_service/tests.c
+          git rm .github/queue437-transport.py .github/workflows/queue437-transport.yml
+          git diff --cached --check
+          git -c user.name='Buster queue integration' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'bench service: integrate durable fake queue and native CI gates'
+          git push origin HEAD:refs/heads/astra/437-durable-fake-queue-published-20260913
+          git rev-parse HEAD | tee "$RUNNER_TEMP/queue437-evidence/revision.txt"
+          git diff 15b19813ca51cf993d3526acb6f66c1f51f7c377 HEAD --stat | tee "$RUNNER_TEMP/queue437-evidence/diff-stat.txt"
+          git diff 15b19813ca51cf993d3526acb6f66c1f51f7c377 HEAD -- build.c > "$RUNNER_TEMP/queue437-evidence/build-integration.patch"
+          git archive HEAD tools/bench_service build.c > "$RUNNER_TEMP/queue437-evidence/source.tar"
+      - name: Native queue regressions on the published revision
+        if: ${{ !cancelled() && steps.integration.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh bench_service self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-normal.log"
+      - name: Native queue address and undefined behavior sanitizers
+        if: ${{ !cancelled() && steps.integration.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/queue-sanitized.log"
+      - name: Existing throughput harness regressions
+        if: ${{ !cancelled() && steps.integration.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh bench_throughput self-test 2>&1 | tee "$RUNNER_TEMP/queue437-evidence/throughput-normal.log"
+      - name: Preserve exact revision, source and successful or failed validation logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: queue437-software-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/queue437-evidence
+          if-no-files-found: error
+          retention-days: 14
