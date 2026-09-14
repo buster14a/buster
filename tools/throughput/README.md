@@ -51,6 +51,48 @@ measurement host. Use a new output directory for every run; existing results
 are not silently overwritten. Comparison never downloads historical numbers
 from a different runner and never automatically updates a golden baseline.
 
+### Real-source descriptor preflight
+
+The opt-in `check-workload` command validates a real-source descriptor and an
+already staged input tree without compiling, linking, executing or measuring
+anything:
+
+```sh
+./build.sh bench_throughput check-workload tools/throughput/workloads/cjson-1.7.19.workload \
+  --source-root /absolute/cjson-staging \
+  --compiler /absolute/ide \
+  --evidence /absolute/oracle.log \
+  --evidence-outcome pass
+```
+
+Descriptors for cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 bind their exact
+upstream identities, complete staged-file inventory, aggregate tree hash,
+requested translation-unit bytes, dependency/resource/sysroot/SDK/environment
+identities, target/ABI/features, C lowerings, PIC and allocator modes,
+operations, artifacts, oracle and ordered compile/link argv templates. The
+preflight independently hashes the descriptor, every declared input, the
+complete tree, compiler binary and caller-supplied oracle evidence, and repeats
+the identities and exact templates in its receipt.
+Missing, changed, duplicated or undeclared inputs; unsafe paths; malformed
+templates; missing evidence; and unknown evidence outcomes are hard failures.
+
+This command deliberately emits `scope=descriptor-and-input-preflight`,
+`admitted=false`, `performed_work=null` and `fresh_admission_required=true`.
+The evidence outcome is limited to `pass`, `failed`, `inconclusive` or
+`unavailable`; recording a failed oracle never turns it into a pass. In
+particular, the Lua descriptor preserves run 34727853592's missing-readline
+failure. A new qualification must run the existing build.c oracle after
+installing the declared native dependencies before Lua can be admitted.
+
+The branch-only `throughput-real-source.yml` workflow stages these exact roots,
+runs the existing cJSON/Lua/SQLite oracles, then writes the preflight receipts
+to its evidence artifact. It does not enlarge the default CI corpus, run on a
+dedicated benchmark host or make a performance/admission claim. A later
+performance admission must additionally freeze the runtime resource headers,
+sysroot/SDK and native library closure named as runtime-required by these
+descriptors, expand the templates into exact argv/working directories, and
+bind the admitted host and experiment policy.
+
 ## Shared library boundary
 
 `build.c::bench_throughput_add` constructs both executables with `shared.c`,

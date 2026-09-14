@@ -66,7 +66,8 @@ class ActionPinsTest(unittest.TestCase):
 
     def test_scalar_lists_and_empty_mappings_are_allowed(self):
         for value in ("on: [push]", "branches: [main]", "runner: [linux, windows, macos]", "needs: []",
-                      "tags: ['**']", "workflows: [Buster CI]", "permissions: {}", "paths:\n  - '.github/workflows/ci.yml'"):
+                      "branches: ['bench/423-real-source-20260912']", "tags: ['**']", "workflows: [Buster CI]",
+                      "permissions: {}", "paths:\n  - '.github/workflows/ci.yml'"):
             with self.subTest(value=value):
                 self.assertEqual(PINS.check_text(value, "case.yml"), [])
 

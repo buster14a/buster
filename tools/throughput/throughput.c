@@ -1,7 +1,8 @@
 /* Reproducible compiler-throughput harness, not a generated-program benchmark.
  * Ownership: this executable owns deterministic inputs and per-process timing;
  * build.c owns compiler construction. No third-party library is required.
- * Map: tp_generate (workloads), tp_measure (commands), tp_run (paired trials),
+ * Map: tp_generate (synthetic workloads), tp_workload_check (real-source
+ * descriptor preflight), tp_measure (commands), tp_run (paired trials),
  * tp_compare (strict raw-sample replay and CI decision), tp_self_test (tests).
  * qualification.h owns optional dedicated-host admission and cooperative locks.
  */
@@ -64,6 +65,11 @@ typedef struct TpConfig
     char const* self_host_generated;
     char const* allocation_baseline;
     char const* allocation_candidate;
+    char const* descriptor;
+    char const* source_root;
+    char const* compiler;
+    char const* evidence;
+    char const* evidence_outcome;
     char const* flags[TP_MAX_FLAGS];
     unsigned flag_count;
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
@@ -192,7 +198,11 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     for (int i = 2; i < argc && ok; ++i)
     {
         char const* key = argv[i];
-        if (!strcmp(key, "--pmu"))
+        if (!strcmp(config->command, "check-workload") && i == 2 && key[0] != '-')
+        {
+            config->descriptor = key;
+        }
+        else if (!strcmp(key, "--pmu"))
         {
             config->pmu = 1;
         }
@@ -229,6 +239,10 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--self-host-generated")) config->self_host_generated = value;
             else if (!strcmp(key, "--allocation-baseline")) config->allocation_baseline = value;
             else if (!strcmp(key, "--allocation-candidate")) config->allocation_candidate = value;
+            else if (!strcmp(key, "--source-root")) config->source_root = value;
+            else if (!strcmp(key, "--compiler")) config->compiler = value;
+            else if (!strcmp(key, "--evidence")) config->evidence = value;
+            else if (!strcmp(key, "--evidence-outcome")) config->evidence_outcome = value;
             else if (!strcmp(key, "--pairs")) ok = tp_number(value, &config->pairs);
             else if (!strcmp(key, "--warmups")) ok = tp_number(value, &config->warmups);
             else if (!strcmp(key, "--timeout")) ok = tp_number(value, &config->timeout);
@@ -310,6 +324,12 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         !!config->self_host_root != !!config->self_host_generated)
     {
         tp_error("both allocation compilers, or both self-host root/generated paths, must be supplied together");
+        ok = 0;
+    }
+    if (!strcmp(config->command, "check-workload") &&
+        (!config->descriptor || !config->source_root || !config->compiler || !config->evidence || !config->evidence_outcome))
+    {
+        tp_error("check-workload requires DESCRIPTOR, --source-root, --compiler, --evidence and --evidence-outcome");
         ok = 0;
     }
     if (config->machine_id || config->lock_file || !strcmp(config->command, "qualify"))
@@ -1278,6 +1298,7 @@ static int tp_compare(char const* root)
 }
 
 #include "tree.h"
+#include "workload.h"
 
 static int tp_mkdirs(char const* path)
 {
@@ -1665,6 +1686,7 @@ static void tp_help(void)
           "  throughput run --baseline IDE --candidate IDE --output NEW_DIR [options]\n"
           "  throughput compare --output RESULT_DIR\n"
           "  throughput self-test\n"
+          "  throughput check-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome OUTCOME\n"
           "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
@@ -1673,6 +1695,8 @@ static void tp_help(void)
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
           "--no-guard (required for custom workload runs; no performance pass claimed).\n"
+          "Descriptor outcomes: pass|failed|inconclusive|unavailable. check-workload verifies exact staged inputs,\n"
+          "compiler and evidence identities, but never executes the oracle or admits a workload.\n"
           "Workloads: tiny_startup, large_function, many_functions, symbol_table, control_flow, backend_pressure,\n"
           "macros, aggregate-abi. Default: the first six, in fixed corpus order regardless of selection order.\n"
           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
@@ -1729,6 +1753,12 @@ int main(int argc, char** argv)
             ok = fputc('\n', stdout) != EOF && ok;
             ok = fflush(stdout) == 0 && ok;
             result = ok ? 0 : 2;
+        }
+        else if (!strcmp(config.command, "check-workload"))
+        {
+            TpWorkloadCheckOptions options = {
+                config.descriptor, config.source_root, config.compiler, config.evidence, config.evidence_outcome};
+            result = tp_workload_check(options) ? 0 : 2;
         }
         else if (!strcmp(config.command, "run"))
         {

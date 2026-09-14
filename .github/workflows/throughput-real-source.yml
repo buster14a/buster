@@ -1,0 +1,187 @@
+name: Real-source throughput qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/423-real-source-20260912']
+    paths:
+      - .github/workflows/throughput-real-source.yml
+      - tools/throughput/**
+      - build.c
+      - tests/basic_cjson_roundtrip.c
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-source-throughput-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compatibility:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Retain exact source for review and reproduction
+        shell: bash
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          git rev-parse 'HEAD^{tree}' > evidence/tree.txt
+          git archive --format=tar HEAD > evidence/source.tar
+          sha256sum evidence/source.tar > evidence/source.tar.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: real-source-qualification-source-${{ github.sha }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
+      - name: Prepare pristine cJSON input outside timing
+        id: cjson
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          persist-credentials: false
+      - name: Prepare pristine Lua Git input outside timing
+        id: lua_git
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lua/lua
+          ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
+          path: external/lua-git
+          persist-credentials: false
+      - name: Prepare authenticated Lua release outside timing
+        id: lua_release
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+      - name: Prepare explicit native dependencies and descriptor inputs
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes libreadline-dev
+          mkdir -p external/cjson-throughput/generated evidence
+          cp external/cjson/cJSON.c external/cjson/cJSON.h external/cjson/cJSON_Utils.c external/cjson/cJSON_Utils.h external/cjson-throughput/
+          cp tests/basic_cjson_roundtrip.c external/cjson-throughput/generated/roundtrip.c
+          : > evidence/cjson.log
+          : > evidence/lua.log
+          : > evidence/sqlite.log
+      - name: Prepare SQLite inputs outside timing
+        id: sqlite
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
+          curl --fail --location https://www.sqlite.org/2026/sqlite-src-3530400.zip -o external/sqlite-src.zip
+          sha256sum external/sqlite-amalgamation.zip external/sqlite-src.zip > evidence/sqlite-archives.sha256
+          unzip -q external/sqlite-amalgamation.zip -d external
+          unzip -q external/sqlite-src.zip -d external
+          # Admission uses test_sqlite's existing per-file/manifest pins, not
+          # these freshly recorded transport hashes as expected identities.
+      - name: Build trusted compiler and native harness serially
+        id: compiler
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-tools
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT
+          .ci-tools/build build --config Release -t ide
+          .ci-tools/build bench_throughput self-test
+          clang --version > evidence/toolchain.txt
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - name: Existing cJSON correctness oracle
+        id: oracle_cjson
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.cjson.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_cjson --config Release "$PWD/external/cjson" 2>&1 | tee evidence/cjson.log
+      - name: Existing Lua correctness oracle
+        id: oracle_lua
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.lua_git.outcome == 'success' && steps.lua_release.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_lua --config Release "$PWD/external/lua-5.4.8/src" "$PWD/external/lua-git" 2>&1 | tee evidence/lua.log
+      - name: Existing SQLite correctness oracle
+        id: oracle_sqlite
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.sqlite.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_sqlite --config Release "$PWD/external/sqlite-amalgamation-3530400" "$PWD/external/sqlite-src-3530400" 2>&1 | tee evidence/sqlite.log
+      - name: Record admission outcomes without promoting failures
+        if: always()
+        shell: bash
+        env:
+          COMPILER: ${{ steps.compiler.outcome }}
+          CJSON: ${{ steps.oracle_cjson.outcome }}
+          LUA: ${{ steps.oracle_lua.outcome }}
+          SQLITE: ${{ steps.oracle_sqlite.outcome }}
+        run: |
+          printf 'compiler=%s\ncjson=%s\nlua=%s\nsqlite=%s\n' "$COMPILER" "$CJSON" "$LUA" "$SQLITE" | tee evidence/outcomes.txt
+          printf 'Hosted functional qualification only; no dedicated-host timing acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
+          cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify descriptor and staged-input preflights
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        env:
+          CJSON: ${{ steps.oracle_cjson.outcome }}
+          LUA: ${{ steps.oracle_lua.outcome }}
+          SQLITE: ${{ steps.oracle_sqlite.outcome }}
+        run: |
+          set -euo pipefail
+          outcome() {
+            case "$1" in
+              success) printf 'pass\n' ;;
+              failure) printf 'failed\n' ;;
+              *) printf 'unavailable\n' ;;
+            esac
+          }
+          .ci-tools/build bench_throughput check-workload tools/throughput/workloads/cjson-1.7.19.workload \
+            --source-root external/cjson-throughput --compiler build/Release/ide --evidence evidence/cjson.log \
+            --evidence-outcome "$(outcome "$CJSON")" > evidence/cjson-preflight.json
+          .ci-tools/build bench_throughput check-workload tools/throughput/workloads/lua-5.4.8.workload \
+            --source-root external/lua-5.4.8/src --compiler build/Release/ide --evidence evidence/lua.log \
+            --evidence-outcome "$(outcome "$LUA")" > evidence/lua-preflight.json
+          .ci-tools/build bench_throughput check-workload tools/throughput/workloads/sqlite-3.53.4.workload \
+            --source-root external/sqlite-amalgamation-3530400 --compiler build/Release/ide --evidence evidence/sqlite.log \
+            --evidence-outcome "$(outcome "$SQLITE")" > evidence/sqlite-preflight.json
+          grep -F '"admitted":false' evidence/cjson-preflight.json evidence/lua-preflight.json evidence/sqlite-preflight.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: real-source-qualification-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            evidence
+            build/cjson-v1.7.19-*
+            build/lua-v5.4.8-*
+            build/sqlite-3.53.4-*
+            build/throughput-tool-tests
+            build/CMakeCache.txt
+            build/compile_commands.json
+          retention-days: 14
+          if-no-files-found: error
