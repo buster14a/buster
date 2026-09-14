@@ -998,6 +998,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         u64 input_count = 0;
         NrcInput* inputs = nrc_inventory(&settings, &input_count);
         u64 groups = nrc_manifest(&settings, inputs, input_count, false);
+        u64 subject_count = 0;
+        for (u64 index = 0; index < input_count; index += 1)
+        {
+            subject_count += string_equal(inputs[index].role, S8("subject"));
+        }
+        bool full_profile = !settings.fixture_filter.length && !settings.target_filter.length && settings.shard_count == 4 &&
+                            subject_count == 402 && groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77184;
+        String8 profile = full_profile ? S8("full-census") : S8("focused");
         u64 compiler_hash = 0, compiler_bytes = 0, baseline_hash = 0, baseline_bytes = 0;
         String8 compiler_sha256 = {0}, baseline_sha256 = {0};
         if (!settings.manifest_only && !settings.child.io_failed)
@@ -1033,15 +1041,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             "support_contract=docs/native-retirement-support-v1.tsv\nsupport_contract_sha256={S8}\n"
             "compiler_revision_claim={S8}\nbaseline_revision_claim={S8}\ncompiler_hash={u64}\ncompiler_bytes={u64}\n"
             "compiler_sha256={S8}\nbaseline_hash={u64}\nbaseline_bytes={u64}\nbaseline_sha256={S8}\n"
-            "cpu={S8}\nresource_include_sha256={S8}\nsysroot=none\nsystem_include=none\ninputs={u64}\nrows={u64}\n"
+            "cpu={S8}\nresource_include_sha256={S8}\nsysroot=none\nsystem_include=none\ninputs={u64}\nsubjects={u64}\nrows={u64}\n"
+            "profile={S8}\nsupported_gap_count={u64}\nsupported_gap_sha256={S8}\n"
             "fixture_filter={S8}\ntarget_filter={S8}\nshard_index={u32}\nshard_count={u32}\nmanifest_only={u32}\ntimeout_seconds={u32}\n"
             "function_evidence=all-observed-fallbacks-plus-first-fatal-diagnostic\n"
             "fixture_flags=exact-path-recipes-in-inputs.tsv\nsource_dependencies=tracked-tests-plus-snapshotted-resource-include\n"
             "environment={S8}\nunfrozen_dependencies={S8}\n"
             "flags=-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem SNAPSHOT\n"),
             settings.contract_sha256, settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
-            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, input_count,
-            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), settings.fixture_filter, settings.target_filter,
+            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, input_count, subject_count,
+            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, full_profile ? 192 : 0,
+            full_profile ? S8("a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec") : S8(""),
+            settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds,
             environment_state, dependency_state);
         d_write(&settings.child, path_join(arena, settings.child.out, S8("manifest.txt")), metadata);
