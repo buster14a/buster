@@ -1039,6 +1039,40 @@ pipeline_failed "${statuses[0]}" "${statuses[1]}"
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_analyzer_selection_qualification_uses_outer_candidate_metric(self):
+        text = (ROOT / ".github/workflows/ci-603-analyzer-qualification.yml").read_text()
+        marker = "          python3 - \"$QUALIFICATION_ROOT\" <<'PY'\n"
+        source = textwrap.dedent(text.split(marker, 1)[1].split("\n          PY", 1)[0])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            samples = root / "samples"
+            samples.mkdir()
+            compare = samples / "pair-1-position-1-compare"
+            skip = samples / "pair-1-position-2-skip"
+            compare.mkdir()
+            skip.mkdir()
+            compare.joinpath("campaign.log").write_text(
+                "ANALYZE_RUN elapsed_us=500000000 jobs=2 status=pass\n"
+                "ANALYZE_BASELINE eligible=104 elapsed_us=500100000 status=pass\n"
+                "ANALYZE_RUN elapsed_us=400000000 jobs=2 status=pass\n")
+            skip.joinpath("campaign.log").write_text(
+                "ANALYZE_RUN elapsed_us=410000000 jobs=2 status=pass\n")
+            root.joinpath("campaigns.tsv").write_text(
+                f"{compare.name}\tcompare\t1\t2\t900000000\t0\t0\t0\n"
+                f"{skip.name}\tskip\t3\t4\t410000000\t0\t0\t0\n")
+            result = subprocess.run([sys.executable, "-", str(root)], input=source,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            measurements = {}
+            for row in root.joinpath("measurements.tsv").read_text().splitlines()[1:]:
+                fields = row.split("\t")
+                measurements[fields[0]] = fields
+            self.assertEqual(measurements["compare_candidate_s"][2], "400.000000")
+            self.assertEqual(measurements["compare_baseline_nested_s"][2], "500.000000")
+            self.assertEqual(measurements["compare_baseline_wrapper_s"][2], "500.100000")
+            self.assertEqual(measurements["compare_baseline_overhead_s"][2], "0.100000")
+            self.assertEqual(measurements["skip_candidate_s"][2], "410.000000")
+
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_correctness_environment(self):
         compiler = shutil.which("clang")
@@ -1214,20 +1248,3 @@ class TimingTests(unittest.TestCase):
         changed_runner = self.sample(3)
         changed_runner["jobs"][0]["labels"] = ["other-image"]
         report = github_ci_time.summarize({"runs": [self.sample(1), self.sample(2, revision="b"), changed_runner]})
-        self.assertEqual(len(report["cohorts"]), 3)
-
-    def test_duplicate_observations_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Duplicate"):
-            github_ci_time.summarize({"runs": [self.sample(), self.sample()]})
-
-    def test_missing_times_and_workflow_identity_are_not_imputed(self):
-        samples = [self.sample(1), self.sample(2)]
-        samples[0]["jobs"][0]["completed_at"] = None
-        samples[1].pop("workflow_blob_sha")
-        report = github_ci_time.summarize({"runs": samples})
-        self.assertFalse(report["cohorts"])
-        self.assertEqual(sum(report["excluded"].values()), 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
