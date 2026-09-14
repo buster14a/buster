@@ -2287,6 +2287,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* argume
         }
     }
 
+    if (aarch64)
+    {
+        u32 page_text[] = {UINT32_C(0x90000008), UINT32_C(0x91000100), UINT32_C(0xd65f03c0)};
+        u8 page_data[256] = {0};
+        ObjectSymbol page_symbols[] = {
+            {.name = S8("UefiMain"), .size = sizeof(page_text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("page_data"), .value = 100, .size = 1, .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation page_relocations[] = {
+            {.addend = 7, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.addend = 7, .offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A},
+        };
+        ByteSlice page_text_bytes = {.pointer = (u8*)page_text, .length = sizeof(page_text)};
+        ObjectFile page_object = link_test_object_make(arguments->arena, target, page_text_bytes, page_symbols, BUSTER_ARRAY_LENGTH(page_symbols),
+                                                       page_relocations, BUSTER_ARRAY_LENGTH(page_relocations));
+        page_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(page_data);
+        page_object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(page_data);
+        NativeExecutableLinkResult page_linked = link_native_executable(arguments->arena, &page_object, (NativeExecutableLinkOptions){0});
+        LinkTestUefiPeSection page_text_section = {0};
+        LinkTestUefiPeSection page_data_section = {0};
+        bool page_valid = page_linked.error == LINK_ERROR_NONE &&
+                          link_test_uefi_pe_section_find(page_linked.executable, S8(".text"), &page_text_section) &&
+                          link_test_uefi_pe_section_find(page_linked.executable, S8(".data"), &page_data_section);
+        BUSTER_TEST(arguments, page_valid);
+        if (page_valid)
+        {
+            A64MCInst page = {0};
+            u32 low = 0;
+            BUSTER_TEST(arguments, a64_mc_decode(link_read_u32(page_linked.executable.pointer, page_text_section.raw_offset), &page) &&
+                                       page.opcode == A64_OPCODE_ADRP);
+            BUSTER_TEST(arguments, a64_add_lo12_read(link_read_u32(page_linked.executable.pointer, page_text_section.raw_offset + 4), &low));
+            u64 actual = ((u64)page_text_section.virtual_address & ~UINT64_C(0xfff)) + (u64)page.operands[1].value + low;
+            BUSTER_TEST(arguments, actual == (u64)page_data_section.virtual_address + 107 && low == 107);
+        }
+        page_text[1] = UINT32_C(0x91400100);
+        NativeExecutableLinkResult malformed = link_native_executable(arguments->arena, &page_object, (NativeExecutableLinkOptions){0});
+        BUSTER_TEST(arguments, malformed.error == LINK_ERROR_RELOCATION && !malformed.executable.length);
+    }
+
     NativeExecutableLinkResult missing_entry =
         link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){.entry_symbol = S8("MissingEntry")});
     BUSTER_TEST(arguments, missing_entry.error == LINK_ERROR_ENTRY_SYMBOL);
@@ -3108,6 +3147,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 .kind = OBJECT_RELOCATION_COFF_SECREL32,
             };
             relocations[index * 2 + 1] = (ObjectRelocation){
+                .addend = index,
                 .offset = (u64)index * 8 + 4,
                 .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
                 .symbol = index,
@@ -3139,10 +3179,14 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 s64 addend = (s64)index - 2;
                 u32 expected_section_offset = (u32)((s64)symbols[index].value + (s64)expected_section_offsets[index] + addend);
                 BUSTER_TEST(arguments, section_offset == expected_section_offset);
-                BUSTER_TEST(arguments, section_number == expected_output_sections[index] + 1);
+                BUSTER_TEST(arguments, section_number == expected_output_sections[index] + 1 + index);
             }
         }
         object_output_sections[OBJECT_SECTION_DATA] = UINT32_MAX;
+        BUSTER_TEST(arguments,
+                    link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
+        object_output_sections[OBJECT_SECTION_DATA] = expected_output_sections[2];
+        relocations[1].addend = UINT16_MAX;
         BUSTER_TEST(arguments,
                     link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
     }
@@ -3867,6 +3911,155 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                    a64_pe_executable.executable.pointer[a64_xdata_raw + 5] == 0xcc &&
                                    a64_pe_executable.executable.pointer[a64_xdata_raw + 6] == 0x01 &&
                                    a64_pe_executable.executable.pointer[a64_xdata_raw + 7] == 0xe4);
+    }
+    {
+        u32 page_code[] = {
+            0x90000008, // adrp x8, target
+            0x91000100, // add x0, x8, :lo12:target
+            0x52800000, // mov w0, #0
+            0xd65f03c0, // ret
+        };
+        u8 page_data[8192] = {0};
+        u8 page_marker[] = {0x71, 0x4b, 0x29, 0xd3, 0x5e, 0x86, 0xa1, 0x0c};
+        memcpy(page_data + 4093, page_marker, sizeof(page_marker));
+        ObjectSymbol page_symbols[] = {
+            {.name = S8("main"), .size = sizeof(page_code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("page_data"), .value = 4093, .size = sizeof(page_marker), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation page_relocations[] = {
+            {.addend = 0x7000, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.addend = 7, .offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A},
+        };
+        ByteSlice page_code_bytes = {.pointer = (u8*)page_code, .length = sizeof(page_code)};
+        ObjectFile page_object = link_test_object_make(arguments->arena, a64_pe_target, page_code_bytes, page_symbols,
+                                                       BUSTER_ARRAY_LENGTH(page_symbols), page_relocations, BUSTER_ARRAY_LENGTH(page_relocations));
+        page_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(page_data);
+        page_object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(page_data);
+        NativeExecutableLinkResult page_linked = link_native_executable(arguments->arena, &page_object,
+                                                                        (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, page_linked.error == LINK_ERROR_NONE);
+        u32 text_rva = 0;
+        u32 text_raw = 0;
+        u32 data_rva = 0;
+        u32 data_raw = 0;
+        bool sections_found = page_linked.error == LINK_ERROR_NONE &&
+                              link_test_pe_section_find(page_linked.executable, S8(".text"), &text_rva, &text_raw) &&
+                              link_test_pe_section_find(page_linked.executable, S8(".data"), &data_rva, &data_raw);
+        BUSTER_TEST(arguments, sections_found);
+        if (sections_found)
+        {
+            u32 code_raw = UINT32_MAX;
+            for (u32 offset = text_raw; offset + 16 <= page_linked.executable.length; offset += 4)
+            {
+                u32 candidate_page = link_read_u32(page_linked.executable.pointer, offset);
+                u32 candidate_low = link_read_u32(page_linked.executable.pointer, offset + 4);
+                if ((candidate_page & UINT32_C(0x9f00001f)) == UINT32_C(0x90000008) &&
+                    (candidate_low & UINT32_C(0xffc003ff)) == UINT32_C(0x91000100) &&
+                    link_read_u32(page_linked.executable.pointer, offset + 8) == UINT32_C(0x52800000) &&
+                    link_read_u32(page_linked.executable.pointer, offset + 12) == UINT32_C(0xd65f03c0))
+                {
+                    code_raw = offset;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, code_raw != UINT32_MAX);
+            u32 page_word = code_raw != UINT32_MAX ? link_read_u32(page_linked.executable.pointer, code_raw) : 0;
+            u32 low_word = code_raw != UINT32_MAX ? link_read_u32(page_linked.executable.pointer, code_raw + 4) : 0;
+            A64MCInst page_instruction = {0};
+            u32 low = 0;
+            bool decoded = a64_mc_decode(page_word, &page_instruction) && page_instruction.opcode == A64_OPCODE_ADRP &&
+                           a64_add_lo12_read(low_word, &low);
+            BUSTER_TEST(arguments, decoded);
+            if (decoded)
+            {
+                u64 place_rva = (u64)text_rva + code_raw - text_raw;
+                u64 actual = (place_rva & ~UINT64_C(0xfff)) + (u64)page_instruction.operands[1].value + low;
+                String8 data_contents = {(char8*)page_linked.executable.pointer + data_raw, page_linked.executable.length - data_raw};
+                String8 marker = {(char8*)page_marker, sizeof(page_marker)};
+                u64 marker_raw = string_first_sequence(data_contents, marker);
+                BUSTER_TEST(arguments, marker_raw != BUSTER_STRING_NO_MATCH);
+                if (marker_raw != BUSTER_STRING_NO_MATCH)
+                {
+                    u64 target_address = (u64)data_rva + marker_raw;
+                    u64 expected = ((target_address + 0x7000) & ~UINT64_C(0xfff)) + ((target_address + 7) & UINT64_C(0xfff));
+                    BUSTER_TEST(arguments, actual == expected);
+                    BUSTER_TEST(arguments, (page_word & 31) == 8 && (low_word & 31) == 0 && ((low_word >> 5) & 31) == 8 &&
+                                               low == (((u64)data_rva + marker_raw + 7) & A64_IMM12_MAX));
+                }
+            }
+        }
+
+        u32 helper_word = 0;
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, UINT32_C(0x90000008), 0x1000,
+                                                      UINT64_C(0x100001000), 0, &helper_word));
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, UINT32_C(0x90000008), 1, 0x1000, 0,
+                                                      &helper_word));
+        BUSTER_TEST(arguments,
+                    object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, UINT32_C(0x90000008), 0x1000, 0x2fff, 1,
+                                                     &helper_word));
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, UINT32_C(0x91000100), 0, 0, -1,
+                                                      &helper_word));
+        BUSTER_TEST(arguments,
+                    object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, UINT32_C(0x91000100), 0, 0xfff, 1,
+                                                     &helper_word) &&
+                        a64_add_lo12_read(helper_word, &text_rva) && text_rva == 0);
+
+        page_code[1] = UINT32_C(0x91400100);
+        String8 failed_output = link_test_temporary_executable_path(arguments->arena, S8("buster-arm64-page-failure"), S8(".exe"));
+        String8 sentinel_text = S8("existing output survives ARM64 relocation failure");
+        ByteSlice sentinel = {.pointer = (u8*)sentinel_text.pointer, .length = sentinel_text.length};
+        BUSTER_TEST(arguments, file_write(failed_output, sentinel));
+        NativeExecutableLinkResult malformed = link_native_executable(arguments->arena, &page_object,
+                                                                       (NativeExecutableLinkOptions){
+                                                                           .output_path = failed_output,
+                                                                           .entry_symbol = S8("main"),
+                                                                       });
+        BUSTER_TEST(arguments, malformed.error == LINK_ERROR_RELOCATION && !malformed.executable.length);
+        ByteSlice retained = file_read(arguments->arena, failed_output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, retained.length == sentinel.length && memory_compare(retained.pointer, sentinel.pointer, sentinel.length));
+        page_code[1] = UINT32_C(0x91000100);
+        page_symbols[1].section = OBJECT_SECTION_UNDEFINED;
+        page_symbols[1].global = true;
+        NativeExecutableLinkResult undefined = link_native_executable(arguments->arena, &page_object,
+                                                                       (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, undefined.error == LINK_ERROR_RELOCATION && !undefined.executable.length);
+
+        u32 tls_code[] = {
+            UINT32_C(0x90000009), UINT32_C(0xb9400129), UINT32_C(0xf9402e4a), UINT32_C(0xf8697949),
+            UINT32_C(0x91000129), UINT32_C(0x52800000), UINT32_C(0xd65f03c0),
+        };
+        u32 tls_value = 1;
+        ObjectSymbol tls_symbols[] = {
+            {.name = S8("main"), .size = sizeof(tls_code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("tls_value"), .size = sizeof(tls_value), .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectRelocation tls_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP},
+            {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12},
+            {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12},
+        };
+        ByteSlice tls_code_bytes = {.pointer = (u8*)tls_code, .length = sizeof(tls_code)};
+        ObjectFile tls_object = link_test_object_make(arguments->arena, a64_pe_target, tls_code_bytes, tls_symbols, BUSTER_ARRAY_LENGTH(tls_symbols),
+                                                      tls_relocations, BUSTER_ARRAY_LENGTH(tls_relocations));
+        tls_object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = (u8*)&tls_value, .length = sizeof(tls_value)};
+        tls_object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_value);
+        ObjectArtifact tls_artifact = object_write(arguments->arena, &tls_object, OBJECT_FORMAT_COFF);
+        ObjectFile tls_roundtrip = object_read(arguments->arena, tls_artifact.bytes, a64_pe_target);
+        bool tls_bound = tls_artifact.error == OBJECT_ERROR_NONE && tls_roundtrip.error == OBJECT_ERROR_NONE &&
+                         tls_roundtrip.relocation_count == 3 &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[0].symbol].name, S8("__tls_index")) &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[1].symbol].name, S8("__tls_index")) &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[2].symbol].name, S8("tls_value"));
+        BUSTER_TEST(arguments, tls_bound);
+        if (tls_bound)
+        {
+            NativeExecutableLinkResult tls_linked = link_native_executable(arguments->arena, &tls_roundtrip,
+                                                                            (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+            BUSTER_TEST(arguments, tls_linked.error == LINK_ERROR_NONE && tls_linked.executable.length);
+        }
     }
 #endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});

@@ -115,6 +115,11 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
     OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12,
     OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12,
+    // Ordinary Windows ARM64 page-address pairs.  Keep these separate from
+    // the loader-owned TLS sequence even though COFF gives PAGEBASE_REL21
+    // the same numeric type as the __tls_index ADRP relocation.
+    OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21,
+    OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A,
     OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
     OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12,
     OBJECT_RELOCATION_X86_64_MACH_TLV_PC32,
@@ -135,6 +140,12 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_X86_64_GOTPCREL,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
+
+// Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
+// one canonical instruction.  The reader removes COFF's inline addend; the
+// PE linker supplies it here after final placement is known.
+BUSTER_F_DECL bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched);
+BUSTER_F_DECL bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 target, s64 addend, u32* patched);
 
 #define OBJECT_SECTION_UNDEFINED UINT32_MAX
 

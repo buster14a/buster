@@ -5836,18 +5836,57 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
             }
             else if (relocation->kind == OBJECT_RELOCATION_COFF_SECTION16)
             {
-                if (offset + 2 > debug_module->symbols_size)
+                u64 section = (u64)object_output_sections[symbol->section] + 1;
+                if (offset + 2 > debug_module->symbols_size || relocation->addend < 0 ||
+                    (u64)relocation->addend > UINT16_MAX - section)
                 {
                     return (ByteSlice){0};
                 }
-                u16 section = (u16)(object_output_sections[symbol->section] + 1);
-                memcpy(bytes + offset, &section, sizeof(section));
+                u16 resolved_section = (u16)(section + (u64)relocation->addend);
+                memcpy(bytes + offset, &resolved_section, sizeof(resolved_section));
             }
         }
         result = (ByteSlice){.pointer = bytes, .length = debug_module->symbols_size};
     }
 
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_pe_aarch64_tls_index_symbol(ObjectFile* object, u32 symbol_index)
+{
+    if (!object || symbol_index >= object->symbol_count)
+    {
+        return false;
+    }
+    ObjectSymbol* symbol = object->symbols + symbol_index;
+    if (symbol->section != OBJECT_SECTION_UNDEFINED || !symbol->global || symbol->kind != OBJECT_SYMBOL_DATA ||
+        !string_equal(symbol->name, S8("__tls_index")))
+    {
+        return false;
+    }
+    u32 page_count = 0;
+    u32 low_count = 0;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        if (relocation->symbol != symbol_index)
+        {
+            continue;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
+        {
+            page_count += 1;
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+        {
+            low_count += 1;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return page_count && page_count == low_count;
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
@@ -6027,6 +6066,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             import_groups[symbol_index] = UINT32_MAX;
             ObjectSymbol* symbol = &object->symbols[symbol_index];
             if (symbol->section != OBJECT_SECTION_UNDEFINED)
+            {
+                continue;
+            }
+            if (aarch64 && link_pe_aarch64_tls_index_symbol(object, symbol_index))
             {
                 continue;
             }
@@ -7094,45 +7137,57 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 data_import = false;
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    u32 import_index = import_indices[relocation->symbol];
-                    bool call_relocation = (!aarch64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
-                                           (aarch64 && (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
-                                                        relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26));
-                    if (import_index == UINT32_MAX)
+                    if (aarch64 && link_pe_aarch64_tls_index_symbol(object, relocation->symbol))
                     {
-                        result.error = LINK_ERROR_RELOCATION;
-                        result.symbol = symbol->name;
+                        // __tls_index is owned by the PE loader rather than an
+                        // import library.  The two relocation handlers below
+                        // resolve it to this image's synthesized index slot.
+                        symbol_rva = 0;
                     }
-                    if (result.error == LINK_ERROR_NONE)
+                    else
                     {
-                        if (symbol->kind == OBJECT_SYMBOL_DATA)
+                        u32 import_index = import_indices[relocation->symbol];
+                        bool call_relocation = (!aarch64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
+                                               (aarch64 && (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
+                                                            relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26));
+                        if (import_index == UINT32_MAX)
                         {
-                            if ((!aarch64 && relocation->kind != OBJECT_RELOCATION_X86_64_PC32) ||
-                                (aarch64 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
-                            {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
-                            }
-                            u64 import_slot = (u64)import_slots[relocation->symbol] * sizeof(u64);
-                            if (!link_u64_add(import_section_rva, runtime_address_offset, &symbol_rva) || !link_u64_add(symbol_rva, import_slot, &symbol_rva))
-                            {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
-                            }
-                            data_import = true;
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
                         }
-                        else
+                        if (result.error == LINK_ERROR_NONE)
                         {
-                            if (!call_relocation)
+                            if (symbol->kind == OBJECT_SYMBOL_DATA)
                             {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
+                                if ((!aarch64 && relocation->kind != OBJECT_RELOCATION_X86_64_PC32) ||
+                                    (aarch64 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
+                                u64 import_slot = (u64)import_slots[relocation->symbol] * sizeof(u64);
+                                if (!link_u64_add(import_section_rva, runtime_address_offset, &symbol_rva) ||
+                                    !link_u64_add(symbol_rva, import_slot, &symbol_rva))
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
+                                data_import = true;
                             }
-                            u64 thunk_delta = (u64)import_index * thunk_entry_size;
-                            if (!link_u64_add(section_rvas[PE_SECTION_TEXT], thunk_offset, &symbol_rva) || !link_u64_add(symbol_rva, thunk_delta, &symbol_rva))
+                            else
                             {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
+                                if (!call_relocation)
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
+                                u64 thunk_delta = (u64)import_index * thunk_entry_size;
+                                if (!link_u64_add(section_rvas[PE_SECTION_TEXT], thunk_offset, &symbol_rva) ||
+                                    !link_u64_add(symbol_rva, thunk_delta, &symbol_rva))
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
                             }
                         }
                     }
@@ -7239,9 +7294,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 {
                     u64 target_address = pe_image_base + import_section_rva + tls_index_offset;
                     u64 place_address = pe_image_base + place_rva;
-                    bool valid_adrp = true;
-                    u32 encoded = link_aarch64_adrp(9, place_address, target_address, &valid_adrp);
-                    if (!valid_adrp)
+                    u32 instruction = link_read_u32(bytes, output_offset);
+                    u32 encoded = 0;
+                    if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, instruction, place_address,
+                                                          target_address, relocation->addend, &encoded))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                     }
@@ -7252,14 +7308,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
                 {
-                    u32 page_offset = (u32)((import_section_rva + tls_index_offset) & 0xfff);
-                    if (page_offset % 4)
+                    u64 target_address = pe_image_base + import_section_rva + tls_index_offset;
+                    u32 instruction = link_read_u32(bytes, output_offset);
+                    u32 encoded = 0;
+                    if (!object_aarch64_pe_tls_index_lo12_relocate(instruction, target_address, relocation->addend, &encoded))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                     }
                     if (result.error == LINK_ERROR_NONE)
                     {
-                        link_write_u32(bytes, output_offset, 0xb9400129 | ((page_offset / 4) << 10));
+                        link_write_u32(bytes, output_offset, encoded);
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
@@ -7270,18 +7328,40 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         result.symbol = symbol->name;
                     }
                     u64 tls_offset = 0;
-                    if (result.error == LINK_ERROR_NONE)
+                    if (result.error == LINK_ERROR_NONE && !link_u64_add(object_section_offsets[symbol->section], symbol->value, &tls_offset))
                     {
-                        tls_offset = 0;
-                        if (!link_u64_add(object_section_offsets[symbol->section], symbol->value, &tls_offset) ||
-                            !link_address_addend(tls_offset, relocation->addend, &tls_offset) || tls_offset > 4095)
-                        {
-                            result.error = LINK_ERROR_RELOCATION;
-                        }
+                        result.error = LINK_ERROR_RELOCATION;
                     }
                     if (result.error == LINK_ERROR_NONE)
                     {
-                        link_write_u32(bytes, output_offset, 0x91000129 | ((u32)tls_offset << 10));
+                        u32 instruction = link_read_u32(bytes, output_offset);
+                        u32 encoded = 0;
+                        if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, instruction, output_offset, tls_offset,
+                                                              relocation->addend, &encoded))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                        }
+                        else
+                        {
+                            link_write_u32(bytes, output_offset, encoded);
+                        }
+                    }
+                }
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+                {
+                    u32 instruction = link_read_u32(bytes, output_offset);
+                    u32 encoded = 0;
+                    if (symbol->section == OBJECT_SECTION_UNDEFINED ||
+                        !object_aarch64_pe_page_relocate(relocation->kind, instruction, pe_image_base + place_rva,
+                                                          pe_image_base + symbol_rva, relocation->addend, &encoded))
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    if (result.error == LINK_ERROR_NONE)
+                    {
+                        link_write_u32(bytes, output_offset, encoded);
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
@@ -7712,6 +7792,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             result.error = LINK_ERROR_FILE_WRITE;
         }
+    }
+    if (result.error != LINK_ERROR_NONE)
+    {
+        // A failed relocation or artifact write must not look like a usable
+        // in-memory image to callers.  Disk publication happens only above,
+        // after every relocation and debug record has been finalized.
+        result.executable = (ByteSlice){0};
+        result.pdb = (ByteSlice){0};
     }
     return result;
 }
@@ -8484,6 +8572,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                         link_write_u32(bytes, output_offset, (u32)(s32)value);
                     }
                 }
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+                {
+                    u32 instruction = 0;
+                    u32 patched = 0;
+                    u64 place_address = 0;
+                    u64 symbol_address = 0;
+                    if (!aarch64 || relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u32) ||
+                        output_offset > file_size || sizeof(u32) > file_size - output_offset || !link_u64_add(image_base, place_rva, &place_address) ||
+                        !link_u64_add(image_base, symbol_rva, &symbol_address))
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    if (result.error == LINK_ERROR_NONE)
+                    {
+                        instruction = link_read_u32(bytes, output_offset);
+                        if (!object_aarch64_pe_page_relocate(relocation->kind, instruction, place_address, symbol_address, relocation->addend,
+                                                              &patched))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
+                        }
+                    }
+                    if (result.error == LINK_ERROR_NONE)
+                    {
+                        link_write_u32(bytes, output_offset, patched);
+                    }
+                }
                 else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
                 {
                     u64 address = 0;
@@ -8869,6 +8986,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
         {
             result.error = LINK_ERROR_FILE_WRITE;
         }
+    }
+    if (result.error != LINK_ERROR_NONE)
+    {
+        result.executable = (ByteSlice){0};
+        result.pdb = (ByteSlice){0};
     }
     return result;
 }

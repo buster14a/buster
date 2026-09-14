@@ -314,6 +314,131 @@ bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 p
     return valid;
 }
 
+// COFF's ARM64 PAGEBASE_REL21 addend is the signed, unscaled imm21 already
+// present in the ADRP word. This deliberately differs from the instruction's
+// architectural page displacement: the COFF linker adds this byte offset to
+// the target before calculating the page delta. PAGEOFFSET_12A carries an
+// unsigned ADD immediate. Canonical ObjectFile bytes hold zero in either field
+// and retain the decoded value in ObjectRelocation.addend.
+BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_page_addend_decode(ObjectRelocationKind kind, u32 word, s64* addend, u32* canonical)
+{
+    bool valid = addend && canonical;
+    if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21)
+    {
+        u32 encoded = ((word >> 29) & 3) | (((word >> 5) & UINT32_C(0x7ffff)) << 2);
+        valid = a64_signed_scaled_immediate_decode(encoded, 21, 0, addend) &&
+                a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, canonical);
+    }
+    else if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+    {
+        u32 immediate = 0;
+        valid = a64_add_lo12_read(word, &immediate) && a64_add_lo12_patch(word, 0, canonical);
+        if (valid)
+        {
+            *addend = immediate;
+        }
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_page_addend_encode(ObjectRelocationKind kind, u32 word, s64 addend, u32* patched)
+{
+    s64 inline_addend = 0;
+    u32 canonical = 0;
+    bool valid = patched && object_aarch64_pe_page_addend_decode(kind, word, &inline_addend, &canonical) && inline_addend == 0;
+    if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21)
+    {
+        u32 encoded = 0;
+        valid = a64_signed_scaled_immediate_encode(addend, 21, 0, &encoded);
+        if (valid)
+        {
+            *patched = canonical | ((encoded & 3) << 29) | (((encoded >> 2) & UINT32_C(0x7ffff)) << 5);
+        }
+    }
+    else if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+    {
+        valid = addend >= 0 && addend <= A64_IMM12_MAX && a64_add_lo12_patch(canonical, (u32)addend, patched);
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
+
+bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched)
+{
+    s64 inline_addend = 0;
+    u32 canonical = 0;
+    u64 address = 0;
+    u32 represented = 0;
+    bool valid = patched && !(place & 3) && object_aarch64_pe_page_addend_decode(kind, word, &inline_addend, &canonical) && inline_addend == 0 &&
+                 object_aarch64_pe_page_addend_encode(kind, canonical, addend, &represented) && object_address_addend(target, addend, &address);
+    if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21)
+    {
+        s64 displacement = 0;
+        valid = a64_pc_relative_displacement(address & ~UINT64_C(0xfff), place & ~UINT64_C(0xfff), 0, &displacement) &&
+                a64_pc_relative_patch(A64_OPCODE_ADRP, canonical, displacement, patched);
+    }
+    else if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+    {
+        valid = a64_add_lo12_patch(canonical, (u32)(address & A64_IMM12_MAX), patched);
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
+
+// The Windows TLS-index low relocation is the one PAGEOFFSET_12L form this
+// object model admits: an unsigned-immediate 32-bit LDR.  Its inline addend is
+// scaled by the four-byte access width, and the linker preserves both operand
+// registers while replacing only imm12.
+BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_tls_index_lo12_addend_decode(u32 word, s64* addend, u32* canonical)
+{
+    bool valid = addend && canonical && (word & UINT32_C(0xffc00000)) == UINT32_C(0xb9400000);
+    if (valid)
+    {
+        *addend = (s64)((word >> 10) & A64_IMM12_MAX) * 4;
+        *canonical = word & ~(A64_IMM12_MAX << 10);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_tls_index_lo12_addend_encode(u32 word, s64 addend, u32* patched)
+{
+    s64 inline_addend = 0;
+    u32 canonical = 0;
+    bool valid = patched && object_aarch64_pe_tls_index_lo12_addend_decode(word, &inline_addend, &canonical) && inline_addend == 0 && addend >= 0 &&
+                 addend <= (s64)A64_IMM12_MAX * 4 && !(addend & 3);
+    if (valid)
+    {
+        *patched = canonical | ((u32)(addend / 4) << 10);
+    }
+    return valid;
+}
+
+bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 target, s64 addend, u32* patched)
+{
+    s64 inline_addend = 0;
+    u32 canonical = 0;
+    u64 address = 0;
+    u32 represented = 0;
+    bool valid = patched && object_aarch64_pe_tls_index_lo12_addend_decode(word, &inline_addend, &canonical) && inline_addend == 0 &&
+                 object_aarch64_pe_tls_index_lo12_addend_encode(canonical, addend, &represented) &&
+                 object_address_addend(target, addend, &address) && !(address & 3);
+    if (valid)
+    {
+        *patched = canonical | ((u32)((address & A64_IMM12_MAX) / 4) << 10);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
 {
     if (patch && !(place & 3))
@@ -1188,9 +1313,21 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
     u32 word = 0;
     memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
     u32 immediate = 0;
-    if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 && !a64_add_lo12_read(word, &immediate))
+    if ((relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 ||
+         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12) &&
+        !a64_add_lo12_read(word, &immediate))
     {
         return false;
+    }
+    if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+    {
+        s64 addend = 0;
+        u32 canonical = 0;
+        if (!object_aarch64_pe_tls_index_lo12_addend_decode(word, &addend, &canonical))
+        {
+            return false;
+        }
     }
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
     {
@@ -1345,11 +1482,15 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGE21:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
+        case OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21:
         {
             u32 word = 0;
             memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
             u32 canonical = 0;
-            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && !a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, &canonical)) ||
+            bool pe_adrp = relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                           relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21;
+            if (((relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || pe_adrp) &&
+                 !a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, &canonical)) ||
                 (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word)))
             {
                 return false;
@@ -1377,6 +1518,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+        case OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A:
         {
             String8 modifier = relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ? S8("@TLVPPAGEOFF")
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12      ? S8("@PAGEOFF")
@@ -5878,7 +6020,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     if (codeview_section)
                     {
                         relocation_width = relocation_type == (target.cpu_arch == CPU_ARCH_X86_64 ? 0x000b : 0x0008) ? 4
-                                           : relocation_type == (target.cpu_arch == CPU_ARCH_X86_64 ? 0x000a : 0x0007) ? 2
+                                           : relocation_type == (target.cpu_arch == CPU_ARCH_X86_64 ? 0x000a : 0x000d) ? 2
                                                                                                                        : 0;
                     }
                     else if (target.cpu_arch == CPU_ARCH_X86_64)
@@ -5890,8 +6032,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     else
                     {
                         relocation_width = relocation_type == 0xe ? 8
-                                           : relocation_type == 2 || relocation_type == 3 || relocation_type == 4 || relocation_type == 7 ||
-                                                     relocation_type == 0xf
+                                           : relocation_type == 2 || relocation_type == 3 || relocation_type == 4 || relocation_type == 6 ||
+                                                     relocation_type == 7 || relocation_type == 9 || relocation_type == 0xf
                                                  ? 4
                                                  : 0;
                     }
@@ -5905,7 +6047,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     if (codeview_section)
                     {
                         u16 secrel_type = target.cpu_arch == CPU_ARCH_X86_64 ? 0x000b : 0x0008;
-                        u16 section_type = target.cpu_arch == CPU_ARCH_X86_64 ? 0x000a : 0x0007;
+                        u16 section_type = target.cpu_arch == CPU_ARCH_X86_64 ? 0x000a : 0x000d;
                         kind = relocation_type == secrel_type    ? OBJECT_RELOCATION_COFF_SECREL32
                                : relocation_type == section_type ? OBJECT_RELOCATION_COFF_SECTION16
                                                                  : OBJECT_RELOCATION_COUNT;
@@ -5918,9 +6060,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                             read_ok = false;
                         }
+                        if (read_ok && kind == OBJECT_RELOCATION_COFF_SECREL32)
+                        {
+                            u32 stored = 0;
+                            read_ok = object_read_u32(bytes, (u64)raw_offset + source_offset, &stored);
+                            addend = (s32)stored;
+                        }
+                        else if (read_ok)
+                        {
+                            u16 stored = 0;
+                            read_ok = object_read_u16(bytes, (u64)raw_offset + source_offset, &stored);
+                            addend = stored;
+                        }
                         if (read_ok)
                         {
                             result.relocations[result.relocation_count++] = (ObjectRelocation){
+                                .addend = addend,
                                 .offset = section_bases[section_index] + source_offset - section_prefix_sizes[section_index],
                                 .section = section_kinds[section_index],
                                 .symbol = symbol_map[source_symbol],
@@ -5980,9 +6135,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     {
                         kind = relocation_type == 2     ? OBJECT_RELOCATION_COFF_ADDR32NB
                                : relocation_type == 3   ? OBJECT_RELOCATION_AARCH64_CALL26
-                               : relocation_type == 4   ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
-                               : relocation_type == 7   ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
-                               : relocation_type == 0xf ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                               : relocation_type == 4   ? (referenced->section == OBJECT_SECTION_UNDEFINED && referenced->global &&
+                                                                  referenced->kind == OBJECT_SYMBOL_DATA &&
+                                                                  string_equal(referenced->name, S8("__tls_index"))
+                                                               ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
+                                                               : OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21)
+                               : relocation_type == 6   ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A
+                               : relocation_type == 7 && referenced->section == OBJECT_SECTION_UNDEFINED && referenced->global &&
+                                     referenced->kind == OBJECT_SYMBOL_DATA &&
+                                     string_equal(referenced->name, S8("__tls_index"))
+                                   ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
+                               : relocation_type == 9 && referenced->section < result.section_count &&
+                                     (result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                      result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+                                   ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
                                : relocation_type == 0xe ? OBJECT_RELOCATION_ABSOLUTE64
                                                         : OBJECT_RELOCATION_COUNT;
                         if (relocation_type == 0xe)
@@ -6016,6 +6182,50 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             }
                             kind = decoded.opcode == A64_OPCODE_B ? OBJECT_RELOCATION_AARCH64_JUMP26 : OBJECT_RELOCATION_AARCH64_CALL26;
                             referenced->kind = OBJECT_SYMBOL_FUNCTION;
+                        }
+                        else if (relocation_type == 4 || relocation_type == 6 || relocation_type == 9)
+                        {
+                            ObjectRelocationKind page_kind = relocation_type == 4 ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
+                                                               : OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A;
+                            u32 stored = 0;
+                            u32 canonical = 0;
+                            if (((section_bases[section_index] + source_offset) & 3) ||
+                                result.sections[section_kinds[section_index]].alignment < 4 ||
+                                !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
+                                !object_aarch64_pe_page_addend_decode(page_kind, stored, &addend, &canonical))
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            if (read_ok && relocation_type == 4 && kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP && addend != 0)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            if (read_ok)
+                            {
+                                memcpy(result.sections[section_kinds[section_index]].data.pointer + section_bases[section_index] + source_offset,
+                                       &canonical, sizeof(canonical));
+                            }
+                        }
+                        else if (relocation_type == 7)
+                        {
+                            u32 stored = 0;
+                            u32 canonical = 0;
+                            if (kind != OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
+                                ((section_bases[section_index] + source_offset) & 3) ||
+                                result.sections[section_kinds[section_index]].alignment < 4 ||
+                                !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
+                                !object_aarch64_pe_tls_index_lo12_addend_decode(stored, &addend, &canonical))
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            if (read_ok)
+                            {
+                                memcpy(result.sections[section_kinds[section_index]].data.pointer + section_bases[section_index] + source_offset,
+                                       &canonical, sizeof(canonical));
+                            }
                         }
                     }
                 }
@@ -10843,13 +11053,14 @@ BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocati
                                                                     : 0;
     }
     return kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ? 0x0003
-           : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ? 0x0004
+           : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP || kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ? 0x0004
+           : kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ? 0x0006
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ? 0x0007
-           : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12   ? 0x000f
+           : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12   ? 0x0009
            : kind == OBJECT_RELOCATION_ABSOLUTE64                ? 0x000e
            : kind == OBJECT_RELOCATION_ABSOLUTE32                ? 0x0001
            : kind == OBJECT_RELOCATION_COFF_SECREL32             ? 0x0008
-           : kind == OBJECT_RELOCATION_COFF_SECTION16            ? 0x0007
+           : kind == OBJECT_RELOCATION_COFF_SECTION16            ? 0x000d
            : kind == OBJECT_RELOCATION_COFF_ADDR32NB             ? 0x0002
                                                                  : 0;
 }
@@ -10870,6 +11081,78 @@ BUSTER_GLOBAL_LOCAL void object_coff_name_write(ObjectBuffer* buffer, u64 offset
     }
 }
 
+// Codegen associates all three Windows TLS address relocations with the TLS
+// variable so the in-memory linker can resolve the variable's final offset.
+// COFF's index pair instead names the loader-provided __tls_index symbol.
+// Rewrite only the serialized view; the SECREL low relocation continues to
+// reference the variable itself.
+BUSTER_GLOBAL_LOCAL bool object_coff_bind_aarch64_tls_index(Arena* arena, ObjectFile* object)
+{
+    u32 page_count = 0;
+    u32 low_count = 0;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocationKind kind = object->relocations[index].kind;
+        page_count += kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP;
+        low_count += kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
+    }
+    if (!page_count && !low_count)
+    {
+        return true;
+    }
+    if (page_count != low_count)
+    {
+        return false;
+    }
+
+    u32 symbol_index = UINT32_MAX;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        if (string_equal(symbol->name, S8("__tls_index")))
+        {
+            if (symbol_index != UINT32_MAX || symbol->section != OBJECT_SECTION_UNDEFINED || !symbol->global ||
+                symbol->kind != OBJECT_SYMBOL_DATA)
+            {
+                return false;
+            }
+            symbol_index = index;
+        }
+    }
+
+    if (symbol_index == UINT32_MAX && object->symbol_count == UINT32_MAX)
+    {
+        return false;
+    }
+    u32 output_symbol_count = object->symbol_count + (symbol_index == UINT32_MAX);
+    ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, output_symbol_count);
+    memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+    if (symbol_index == UINT32_MAX)
+    {
+        symbol_index = object->symbol_count;
+        symbols[symbol_index] = (ObjectSymbol){
+            .name = S8("__tls_index"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        };
+    }
+    ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+    memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(*relocations));
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocationKind kind = relocations[index].kind;
+        if (kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+        {
+            relocations[index].symbol = symbol_index;
+        }
+    }
+    object->symbols = symbols;
+    object->symbol_count = output_symbol_count;
+    object->relocations = relocations;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* object)
 {
     ObjectArtifact result = {
@@ -10882,6 +11165,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     // writer's body nothing.
     ObjectFile split_object = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_COFF);
     object = &split_object;
+    if (object->target.cpu_arch == CPU_ARCH_AARCH64 && !object_coff_bind_aarch64_tls_index(arena, object))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        return result;
+    }
     u64 capacity = object_writer_capacity(object);
     ObjectBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
@@ -10925,6 +11213,42 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
             if (source->kind == OBJECT_RELOCATION_ABSOLUTE64)
             {
                 object_write_s64_at(&buffer, raw_offsets[section] + source->offset, addend);
+            }
+            else if (source->kind == OBJECT_RELOCATION_COFF_SECTION16)
+            {
+                object_write_u16_at(&buffer, raw_offsets[section] + source->offset, (u16)addend);
+            }
+            else if (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                     source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                     source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                     source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+            {
+                ObjectRelocationKind page_kind = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
+                                                     ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
+                                                     : source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                                         ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A
+                                                         : source->kind;
+                u32 word = 0;
+                u32 patched = 0;
+                memcpy(&word, buffer.bytes + raw_offsets[section] + source->offset, sizeof(word));
+                if (!object_aarch64_pe_page_addend_encode(page_kind, word, addend, &patched))
+                {
+                    buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    break;
+                }
+                object_write_u32_at(&buffer, raw_offsets[section] + source->offset, patched);
+            }
+            else if (source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+            {
+                u32 word = 0;
+                u32 patched = 0;
+                memcpy(&word, buffer.bytes + raw_offsets[section] + source->offset, sizeof(word));
+                if (!object_aarch64_pe_tls_index_lo12_addend_encode(word, addend, &patched))
+                {
+                    buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    break;
+                }
+                object_write_u32_at(&buffer, raw_offsets[section] + source->offset, patched);
             }
             else if (addend && source->kind != OBJECT_RELOCATION_AARCH64_CALL26 && source->kind != OBJECT_RELOCATION_AARCH64_JUMP26)
             {
@@ -11031,11 +11355,14 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                                                                                : 0xc0500040;
         object_write_u32_at(&buffer, offset + 36, characteristics);
     }
-    result.bytes = (ByteSlice){
-        .pointer = buffer.bytes,
-        .length = buffer.count,
-    };
     result.error = buffer.error;
+    if (result.error == OBJECT_ERROR_NONE)
+    {
+        result.bytes = (ByteSlice){
+            .pointer = buffer.bytes,
+            .length = buffer.count,
+        };
+    }
     return result;
 }
 
@@ -11407,7 +11734,7 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
         ObjectRelocation* source = object->relocations + relocation;
-        u64 relocation_size = source->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+        u64 relocation_size = object_assembly_relocation_size(source->kind);
         u64 section_length = source->section < object->section_count ? object->sections[source->section].data.length : 0;
         if (source->section >= object->section_count || source->symbol >= object->symbol_count || source->kind >= OBJECT_RELOCATION_COUNT ||
             source->offset > section_length || relocation_size > section_length - source->offset)
@@ -11421,6 +11748,54 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
                 return result;
             }
             if (source->addend < INT32_MIN || source->addend > INT32_MAX)
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+        }
+        if (source->kind == OBJECT_RELOCATION_COFF_SECTION16)
+        {
+            if (format != OBJECT_FORMAT_COFF || source->addend < 0 || source->addend > UINT16_MAX)
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+        }
+        if (source->kind == OBJECT_RELOCATION_COFF_SECREL32 &&
+            (format != OBJECT_FORMAT_COFF || source->addend < INT32_MIN || source->addend > INT32_MAX))
+        {
+            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            return result;
+        }
+        if (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+            source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+            source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+            source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+        {
+            ObjectRelocationKind page_kind = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
+                                                 ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
+                                                 : source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                                     ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A
+                                                     : source->kind;
+            u32 word = 0;
+            u32 encoded = 0;
+            memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            if (format != OBJECT_FORMAT_COFF || object->target.cpu_arch != CPU_ARCH_AARCH64 || (source->offset & 3) ||
+                object->sections[source->section].alignment < 4 ||
+                !object_aarch64_pe_page_addend_encode(page_kind, word, source->addend, &encoded))
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+        }
+        if (source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+        {
+            u32 word = 0;
+            u32 encoded = 0;
+            memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            if (format != OBJECT_FORMAT_COFF || object->target.cpu_arch != CPU_ARCH_AARCH64 || (source->offset & 3) ||
+                object->sections[source->section].alignment < 4 ||
+                !object_aarch64_pe_tls_index_lo12_addend_encode(word, source->addend, &encoded))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
@@ -11704,6 +12079,20 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             memcpy(&word, patch, sizeof(word));
             if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
                                                 relocation->addend, &patched))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            memcpy(patch, &patched, sizeof(patched));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+        {
+            u32 word = 0;
+            u32 patched = 0;
+            memcpy(&word, patch, sizeof(word));
+            if (!object_aarch64_pe_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                  relocation->addend, &patched))
             {
                 result.error = OBJECT_ERROR_CAPACITY;
                 break;
