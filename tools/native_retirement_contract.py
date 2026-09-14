@@ -37,6 +37,13 @@ APPLICABILITY_CLASSES = ("admitted-supported", "retained-control", "retained-ref
 MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "0df1ff3ccc3d776a17143aa8b1336efcb6fc3dcd77f6defc7eb987711634771a"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "9cfbe0faa6d63990a011137bf5af61b4f3878eb5f460c56d7c8c91c044c47556"
+FULL_DEPENDENCY_PROJECT_SHA256 = "00f987ac3dcaf2768f761bd118a7f607b24e83169246c24f03b12ee355e63c56"
+FULL_DEPENDENCY_LEDGER_SHA256 = "7035bf416d79982bd83d58771dc96d06a29cc7058e41fc9d6016dd8311522340"
+FULL_ARCHIVED_INPUT_SHA256 = "bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500"
+FULL_ARCHIVED_FIXTURE_MAP_SHA256 = "8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f"
+FULL_ARCHIVED_ROW_SHA256 = "9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6"
 APPLICABILITY_FIELDS = ("row", "group", "fixture", "target", "cpu", "frontend", "allocator", "PIC",
                         "applicability", "admission", "disposition", "reason", "ownership",
                         "candidate_failure", "reference_failure", "acceptance_failure")
@@ -195,25 +202,114 @@ def validate_environment(directory):
 
 def validate_dependencies(directory, manifest):
     rows = table(directory / "dependencies.tsv")
-    assert rows and all(row["kind"] == "resource-header" for row in rows)
-    assert [row["path"] for row in rows] == sorted(row["path"] for row in rows)
-    assert len({row["path"] for row in rows}) == len(rows)
-    closure = hashlib.sha256()
-    expected_files = set()
-    root = directory / "dependencies" / "resource-include"
+    assert rows and all(row["kind"] in {"resource-header", "project-header"} for row in rows)
+    include_namespace = {}
     for row in rows:
-        relative = relative_path(row["path"])
-        path = root / relative
-        exact_sha(path, row["bytes"], row["sha256"])
-        data = path.read_bytes()
-        closure.update(row["path"].encode())
-        closure.update(b"\0")
-        closure.update(struct.pack("<Q", len(data)))
-        closure.update(data)
-        expected_files.add(relative.as_posix())
-    actual_files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
-    assert actual_files == expected_files, "resource snapshot and ledger differ"
-    assert closure.hexdigest() == manifest["resource_include_sha256"]
+        path = row["path"]
+        relative = relative_path(path)
+        assert relative.as_posix() == path and not path.startswith("dependencies/"), \
+            f"dependency path is not include-relative: {path!r}"
+        if "destination" in row:
+            root_name = "resource-include" if row["kind"] == "resource-header" else "project-include"
+            assert row["destination"] == f"dependencies/{root_name}/{path}", \
+                f"dependency kind/root mismatch: {path!r}"
+        previous = include_namespace.get(path)
+        assert previous is None, f"global include namespace collision: {path}"
+        include_namespace[path] = row["kind"]
+    for kind in ("resource-header", "project-header"):
+        selected = [row for row in rows if row["kind"] == kind]
+        assert [row["path"] for row in selected] == sorted(row["path"] for row in selected)
+        assert len({row["path"] for row in selected}) == len(selected)
+        closure = hashlib.sha256()
+        expected_files = set()
+        root_name = "resource-include" if kind == "resource-header" else "project-include"
+        root = directory / "dependencies" / root_name
+        for row in selected:
+            relative = relative_path(row["path"])
+            path = root / relative
+            exact_sha(path, row["bytes"], row["sha256"])
+            data = path.read_bytes()
+            closure.update(row["path"].encode())
+            closure.update(b"\0")
+            closure.update(struct.pack("<Q", len(data)))
+            closure.update(data)
+            expected_files.add(relative.as_posix())
+        actual_files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} if root.is_dir() else set()
+        assert actual_files == expected_files, f"{kind} snapshot and ledger differ"
+        manifest_key = "resource_include_sha256" if kind == "resource-header" else "project_include_sha256"
+        if selected:
+            assert closure.hexdigest() == manifest.get(manifest_key, "")
+        else:
+            assert not manifest.get(manifest_key, "")
+
+
+def validate_dependency_binding(directory, manifest, profile, inputs):
+    required = profile == FULL_CENSUS_PROFILE or bool(manifest.get("project_include_sha256", ""))
+    if not required:
+        return
+    assert manifest.get("dependency_manifest") == "docs/native-retirement-dependencies-v1.json"
+    assert manifest.get("dependency_receipt") == "dependency-receipt.json"
+    descriptor = directory / "dependency-descriptor.json"
+    receipt_path = directory / "dependency-receipt.json"
+    ledger = directory / "dependency-materializer.tsv"
+    assert sha256(descriptor) == manifest.get("dependency_manifest_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
+    assert sha256(receipt_path) == manifest.get("dependency_receipt_sha256") == FULL_DEPENDENCY_RECEIPT_SHA256
+    assert sha256(ledger) == manifest.get("dependency_ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt.get("schema") == "buster-native-retirement-dependencies-v1" and receipt.get("version") == 1
+    assert receipt.get("descriptor_path") == "docs/native-retirement-dependencies-v1.json"
+    assert receipt.get("descriptor_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
+    assert receipt.get("project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
+    assert receipt.get("ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    assert manifest.get("dependency_project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
+    assert manifest.get("archived_input_identity_sha256") == FULL_ARCHIVED_INPUT_SHA256
+    assert manifest.get("archived_fixture_map_sha256") == FULL_ARCHIVED_FIXTURE_MAP_SHA256
+    assert manifest.get("archived_row_identity_sha256") == FULL_ARCHIVED_ROW_SHA256
+    replay = receipt.get("archived_replay", {})
+    expected_axes = {
+        "targets": list(TARGETS),
+        "frontend_lowering": ["local-backed-canonical", "direct-ssa"],
+        "PIC": ["0", "1"],
+        "allocators": list(ALLOCATORS[1:]),
+    }
+    assert replay.get("axes") == expected_axes
+    assert replay.get("projection") == {
+        "fixtures": 28,
+        "mir_candidate_rows": 4032,
+        "repo_owned_project_header_rows_closed": 264,
+        "remaining_diagnostic_rows": 3768,
+        "ios_simd_rows_pending_targetconditionals": 24,
+    }
+    assert replay.get("input_identity_sha256") == FULL_ARCHIVED_INPUT_SHA256
+    assert replay.get("fixture_map_sha256") == FULL_ARCHIVED_FIXTURE_MAP_SHA256
+    assert replay.get("row_identity_sha256") == FULL_ARCHIVED_ROW_SHA256
+    fixtures = replay.get("fixtures")
+    rows = replay.get("rows")
+    assert isinstance(fixtures, list) and len(fixtures) == 28
+    assert isinstance(rows, list) and len(rows) == 4032
+    fixture_map = {item["fixture"]: item for item in fixtures}
+    assert len(fixture_map) == len(fixtures)
+    project_destinations = {
+        path[len("dependencies/project-include/"):]
+        for path in receipt.get("files_by_destination", [])
+        if path.startswith("dependencies/project-include/")
+    }
+    for item in fixtures:
+        fixture = item["fixture"]
+        assert fixture in inputs and inputs[fixture]["role"] == "subject"
+        assert inputs[fixture]["sha256"] == item["input_sha256"]
+        assert item["project_headers"] and set(item["project_headers"]).issubset(project_destinations)
+    assert canonical_digest({item["fixture"]: item["input_sha256"] for item in fixtures}) == replay["input_identity_sha256"]
+    assert canonical_digest(fixtures) == replay["fixture_map_sha256"]
+    assert canonical_digest(rows) == replay["row_identity_sha256"]
+    assert [row["row"] for row in rows] == list(range(len(rows)))
+    assert all(row["fixture"] in fixture_map for row in rows)
+    assert sum(row["disposition"] == "repo-owned-project-header" for row in rows) == 264
+    assert sum(row["disposition"] != "repo-owned-project-header" for row in rows) == 3768
+    assert sum(row["disposition"] == "ios-simd-pending-targetconditionals" for row in rows) == 24
+    for row in rows:
+        expected_headers = fixture_map[row["fixture"]]["project_headers"] if row["disposition"] == "repo-owned-project-header" else []
+        assert row["project_headers"] == expected_headers
 
 
 def validate_inputs(directory, manifest):
@@ -331,8 +427,11 @@ def validate_argv(directory, manifest, row, recipes):
                 "-fmachine-fallback" if baseline else "-fno-machine-fallback", "-nostdinc",
                 "-isystem", str(recorded_root / "dependencies" / "resource-include"),
                 "-I" + str(recorded_root / "inputs" / "tests"),
-                str(recorded_root / "inputs" / row["fixture"]), "-o",
-                str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))]
+                ]
+    if manifest.get("project_include_sha256", ""):
+        expected.append("-I" + str(recorded_root / "dependencies" / "project-include"))
+    expected.extend([str(recorded_root / "inputs" / row["fixture"]), "-o",
+                str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))])
     expected.extend(recipes[row["fixture"]])
     if not baseline:
         expected.append("-fcodegen-fallback-census")
@@ -735,6 +834,7 @@ def validate(directory):
     assert row_fields == ROW_FIELDS
     assert result_fields == RESULT_FIELDS
     profile, subject_count = validate_profile(manifest, inputs, len(rows))
+    validate_dependency_binding(directory, manifest, profile, inputs)
     gap_ledger_identities, declared_gap_rows, gap_ledger_sha256 = validate_supported_gap_ledger(
         directory, manifest, rows, profile)
     manifest_rows = unsigned_decimal(manifest["rows"], 64, "manifest rows")

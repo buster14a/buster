@@ -6,8 +6,13 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-evidence.yml
+      - docs/native-retirement-dependencies-v1.json
       - docs/native-retirement-supported-gaps-v1.tsv
       - docs/performance-audits/evidence/2026-09-12-retirement/**
+      - tools/native_retirement_materializer.py
+      - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_census.c
+      - tools/native_retirement_contract.py
   workflow_dispatch:
 
 
@@ -52,6 +57,13 @@ jobs:
         working-directory: candidate
         run: |
           test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer.py materialize \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" \
+            --output "$(pwd)/evidence/dependency-materialized"
+          test -s evidence/dependency-materialized/dependencies.tsv
+          test -s evidence/dependency-materialized/dependency-manifest.json
           printf 'candidate_commit=%s\ncandidate_tree=%s\n' \
             "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" > evidence-candidate.txt
           clang --version
@@ -94,6 +106,9 @@ jobs:
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 0 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
           --out evidence/census-integrated-0
       - name: Execute complete assigned shard 1
         continue-on-error: true
@@ -107,6 +122,9 @@ jobs:
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 1 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
           --out evidence/census-integrated-1
       - name: Execute complete assigned shard 2
         continue-on-error: true
@@ -120,6 +138,9 @@ jobs:
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 2 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
           --out evidence/census-integrated-2
       - name: Execute complete assigned shard 3
         continue-on-error: true
@@ -133,6 +154,9 @@ jobs:
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 3 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
           --out evidence/census-integrated-3
       - name: Independently validate every census shard and row
         if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}

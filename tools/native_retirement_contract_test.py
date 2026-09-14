@@ -219,6 +219,18 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(report["clean_acceptance"])
         self.assertEqual(report["rows_identity_sha256"], contract.validate(self.shards[0])["rows_identity_sha256"])
         self.assertTrue(json.loads((self.root / "report.json").read_text(encoding="utf-8"))["complete_row_partition"])
+        fields, dependencies = read_table(self.shards[0] / "dependencies.tsv")
+        same = b"/* same include name */\n"
+        (self.shards[0] / "dependencies/resource-include/same.h").write_bytes(same)
+        (self.shards[0] / "dependencies/project-include").mkdir(parents=True)
+        (self.shards[0] / "dependencies/project-include/same.h").write_bytes(same)
+        dependencies.extend([
+            {"kind": "resource-header", "path": "same.h", "bytes": str(len(same)), "sha256": sha(same)},
+            {"kind": "project-header", "path": "same.h", "bytes": str(len(same)), "sha256": sha(same)},
+        ])
+        write_table(self.shards[0] / "dependencies.tsv", fields, dependencies)
+        with self.assertRaisesRegex(AssertionError, "global include namespace collision"):
+            contract.validate(self.shards[0])
 
     def test_clean_self_test_cannot_satisfy_production_acceptance(self):
         with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
