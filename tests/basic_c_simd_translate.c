@@ -11,6 +11,54 @@ void* memcpy(void* restrict destination, void const* restrict source, size_t cou
 
 _Static_assert(sizeof(UINT64_C(1)) == 8, "mask constants need 64-bit arithmetic");
 _Static_assert(UINT64_C(1) << 63 == 0x8000000000000000ULL, "the last lane remains unsigned");
+#if defined(__x86_64__) && defined(__AVX512F__) && defined(__AVX512BW__) && (!defined(__AVX512VBMI__) || !defined(__AVX512VBMI2__))
+_Static_assert(BUSTER_SIMD_512_BASE == 1, "F/BW selects the base SIMD tier");
+_Static_assert(BUSTER_SIMD_512 == 0, "VBMI/VBMI2 remain excluded from the base SIMD tier");
+#endif
+
+typedef union SimdTranslateWordLanes SimdTranslateWordLanes;
+union SimdTranslateWordLanes
+{
+    Simd512 vector;
+    u32 words[16];
+};
+
+BUSTER_GLOBAL_LOCAL Mask64 word_less_oracle(u32 const* left, u32 const* right)
+{
+    Mask64 result = 0;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        result |= left[lane] < right[lane] ? (Mask64)1 << lane : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL Mask64 word_equal_oracle(u32 const* left, u32 const* right)
+{
+    Mask64 result = 0;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        result |= left[lane] == right[lane] ? (Mask64)1 << lane : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void word_compress_oracle(u32* result, Mask64 mask, u32 const* source)
+{
+    u32 count = 0;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        if ((mask >> lane) & 1)
+        {
+            result[count] = source[lane];
+            count += 1;
+        }
+    }
+    for (u32 lane = count; lane < 16; lane += 1)
+    {
+        result[lane] = 0;
+    }
+}
 
 u64 buster_simd_translate_block(u8* destination, u8 const* source, u64* newlines)
 {
@@ -104,6 +152,50 @@ int main(void)
     for (u32 lane = 1; lane < 64; lane += 1)
     {
         failure |= packed[lane] != 0;
+    }
+
+    // This body never preprocesses away: baseline exercises the scalar
+    // struct, skylake-avx512 the F/BW exact builtins, and znver5 the complete
+    // vocabulary. Keep the expectations independent of the production header.
+    SimdTranslateWordLanes word_left;
+    SimdTranslateWordLanes word_right;
+    SimdTranslateWordLanes word_result;
+    u32 word_values[] = {0, 1, 0x7fffffffU, 0x80000000U, 0xffffffffU};
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        word_left.words[lane] = lane < 5 ? word_values[lane] : 0x9e3779b9U * lane;
+        word_right.words[lane] = word_values[(lane * 3 + 1) % 5] ^ (0x01020408U * lane);
+    }
+    Mask64 observed = simd512_less_word(word_left.vector, word_right.vector);
+    failure |= observed != word_less_oracle(word_left.words, word_right.words);
+    failure |= (observed & ~0xffffULL) != 0;
+    SimdTranslateWordLanes equal_right;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        equal_right.words[lane] = word_left.words[lane];
+        if (lane % 3 == 0)
+        {
+            equal_right.words[lane] ^= 0x80000001U;
+        }
+    }
+    observed = simd512_equal_word(word_left.vector, equal_right.vector);
+    failure |= observed != word_equal_oracle(word_left.words, equal_right.words);
+    failure |= (observed & ~0xffffULL) != 0;
+    for (u32 value = 0; value < 5; value += 1)
+    {
+        word_result.vector = simd512_splat_word(word_values[value]);
+        for (u32 lane = 0; lane < 16; lane += 1)
+        {
+            failure |= word_result.words[lane] != word_values[value];
+        }
+    }
+    Mask64 compact_mask = 0xfedcba987654a5c3ULL;
+    u32 expected_compacted[16];
+    word_compress_oracle(expected_compacted, compact_mask, word_left.words);
+    word_result.vector = simd512_compress_word(compact_mask, word_left.vector);
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        failure |= word_result.words[lane] != expected_compacted[lane];
     }
     return failure;
 }
