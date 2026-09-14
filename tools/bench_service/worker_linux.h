@@ -91,7 +91,9 @@ typedef struct BqWorkerConfig
 } BqWorkerConfig;
 
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);
-BUSTER_F_DECL BqError bq_worker_unit(String8 lease_file, int lease_fd);
+BUSTER_F_DECL BqError bq_worker_unit(String8 lease_file, int lease_fd, String8 job_id, String8 attempt_token,
+                                     String8 workspace_root, String8 base_revision, String8 candidate_revision,
+                                     String8 result_root);
 BUSTER_F_DECL void bq_worker_backend_systemd(BqWorkerBackend* backend);
 
 #endif

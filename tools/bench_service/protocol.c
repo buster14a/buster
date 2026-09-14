@@ -36,9 +36,14 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
     "schema=2 journal=3 materialization-journal=2 legacy-journal=1 executor=linux-supervisor pending=8 jobs=64\n"
-    "recipes=fake-success-v1,fake-failure-v1,validate-buster-v1 workload=fake-steps-v1\n"
-    "profile=unmeasured validity=not-evaluated materialization=installed-read-only workspace=per-attempt\n"
-    "worker=fixed-systemd-scope recipe-execution=not-admitted transport=none authentication=none\n"
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 workload=not-admitted\n"
+    "profile=smoke-slice validity=not-evaluated materialization=installed-read-only workspace=per-attempt\n"
+    "worker=fixed-systemd-scope recipe-execution=fixed-validate-buster-v1 validation=vertical-slice "
+#ifdef __linux__
+    "transport=unix-seqpacket authentication=peer-uid-gid\n"
+#else
+    "transport=unsupported authentication=none\n"
+#endif
 #ifdef _WIN32
     "storage=unsupported-on-windows\n";
 #else

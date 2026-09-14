@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 
 #define BQ_WORKER_EXECUTABLE "/usr/local/libexec/buster-bench-service"
+#define BQ_RECIPE_EXECUTABLE "/usr/local/libexec/buster-bench-build"
 #define BQ_SYSTEMD_RUN "/usr/bin/systemd-run"
 #define BQ_SYSTEMCTL "/usr/bin/systemctl"
 #define BQ_WORKER_COMMAND_MILLISECONDS 5000u
@@ -21,6 +22,11 @@ typedef struct BqSystemdContext
 } BqSystemdContext;
 
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_cancel_signal;
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_shutdown_signal;
+/* Set by the transport handler while ownership is being handed to this
+ * worker.  Once bq_worker_run installs its own handlers, SIGTERM/SIGINT are
+ * observed directly there; this flag closes the small pre-install window. */
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_transport_stop_signal;
 
 BUSTER_GLOBAL_LOCAL u64 bq_worker_monotonic_milliseconds(void)
 {
@@ -62,11 +68,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_sleep_until(u64 deadline)
 
 BUSTER_GLOBAL_LOCAL void bq_worker_cancel_handler(int signal_number)
 {
-    (void)signal_number;
+    if (signal_number == SIGTERM || signal_number == SIGINT)
+    {
+        bq_worker_shutdown_signal = 1;
+    }
     bq_worker_cancel_signal = 1;
 }
 
 typedef struct BqWorkerLease { int descriptor; } BqWorkerLease;
+typedef struct BqWorkerFinalization BqWorkerFinalization;
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_directory_owner(int fd, bool final_private, bool allow_sticky)
 {
@@ -266,6 +276,17 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_read_regular(char const* path, char* output, 
         output[used] = 0;
     }
     return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_path(String8 workspace_root, u64 id, u64 token,
+                                                char output[BQ_PATH_CAP + 1])
+{
+    char workspace[BQ_PATH_CAP + 1];
+    bool ok = bq_worker_text(workspace_root, workspace, sizeof(workspace)) &&
+              bq_string_path(workspace_root, workspace);
+    int length = ok ? snprintf(output, BQ_PATH_CAP + 1, "%s/results/job-%" PRIu64 "-attempt-%" PRIu64,
+                               workspace, (uint64_t)id, (uint64_t)token) : -1;
+    return length > 0 && (u32)length < BQ_PATH_CAP + 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_boot_valid(char const* boot)
@@ -1030,16 +1051,71 @@ void bq_worker_backend_systemd(BqWorkerBackend* backend)
                                 bq_systemd_delay, bq_systemd_clock};
 }
 
-typedef struct BqWorkerFinalization
+struct BqWorkerFinalization
 {
     sigset_t prior_mask;
     bool masked;
-} BqWorkerFinalization;
+    BqWorkerConfig const* config;
+    int result_directory;
+    dev_t result_device;
+    ino_t result_inode;
+    char result_root[BQ_PATH_CAP + 1];
+    bool result_bound;
+    char result_digest[SHA256_HEX_CAPACITY];
+};
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_open(BqWorkerConfig const* config, BqJob const* job,
+                                                   BqWorkerFinalization* finalization, bool create)
+{
+    char result_root[BQ_PATH_CAP + 1], name[64];
+    BqError error = config && job && finalization && bq_worker_result_path(config->workspace_root, job->id, job->token, result_root) &&
+                    bq_workspace_name(name, job->id, job->token) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    int workspace = error == BQ_OK ? bq_worker_open_trusted_directory(config->workspace_root, true, false) : -1;
+    int results = workspace >= 0 ? openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool made_results = false;
+    bool made_result = false;
+    if (results < 0 && create && workspace >= 0 && errno == ENOENT)
+    {
+        made_results = mkdirat(workspace, "results", 0700) == 0;
+        if (made_results)
+            results = openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    if (error == BQ_OK && (workspace < 0 || results < 0 || !bq_worker_directory_owner(results, true, false)))
+        error = BQ_CONFIGURATION_MISMATCH;
+    int result = error == BQ_OK ? openat(results, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (result < 0 && create && error == BQ_OK && errno == ENOENT)
+    {
+        made_result = mkdirat(results, name, 0700) == 0;
+        if (made_result)
+            result = openat(results, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    struct stat info = {0};
+    if (error == BQ_OK && (result < 0 || fstat(result, &info) != 0 || !bq_worker_directory_owner(result, true, false)))
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK && made_results && fsync(workspace) != 0) error = BQ_IO;
+    if (error == BQ_OK && made_result && fsync(results) != 0) error = BQ_IO;
+    if (error == BQ_OK)
+    {
+        if (finalization->result_directory >= 0) close(finalization->result_directory);
+        finalization->result_directory = result;
+        finalization->result_device = info.st_dev;
+        finalization->result_inode = info.st_ino;
+        snprintf(finalization->result_root, sizeof(finalization->result_root), "%s", result_root);
+        result = -1;
+    }
+    if (result >= 0) close(result);
+    if (results >= 0) close(results);
+    if (workspace >= 0) close(workspace);
+    return error;
+}
 
 #ifdef BUSTER_BENCH_SERVICE_TEST
 BUSTER_GLOBAL_LOCAL u32 bq_worker_test_finish_checkpoints;
 BUSTER_GLOBAL_LOCAL u32 bq_worker_test_cancel_during_finish;
 #endif
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
+                                                       BqWorkerFinalization* finalization);
 
 BUSTER_GLOBAL_LOCAL void bq_worker_finish_checkpoint(void)
 {
@@ -1078,6 +1154,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_before_terminal(BqQueue* queue, BqJob* job
     if (error == BQ_OK && sigpending(&pending) != 0) error = BQ_IO;
     if (error == BQ_OK && (sigismember(&pending, SIGTERM) == 1 || sigismember(&pending, SIGINT) == 1))
         bq_worker_cancel_signal = 1;
+    if (error == BQ_OK && finalization->config && !finalization->config->backend)
+        error = bq_worker_result_validate(finalization->config, job, finalization);
     if (error == BQ_OK) error = bq_worker_finish_cancel(queue, &job);
     return error;
 }
@@ -1093,11 +1171,171 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finalization_restore(BqWorkerFinalization*
     return error;
 }
 
+#define BQ_WORKER_RESULT_CAP 32768u
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_line(char const* body, char const* expected)
+{
+    size_t length = strlen(expected);
+    char const* cursor = body;
+    bool found = false;
+    while (!found && cursor && *cursor)
+    {
+        char const* end = strchr(cursor, '\n');
+        size_t line_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        found = line_length == length && !memcmp(cursor, expected, length);
+        cursor = end ? end + 1 : NULL;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_hex(char const* bytes, u32 length)
+{
+    bool ok = length == SHA256_HEX_CAPACITY - 1;
+    for (u32 index = 0; ok && index < length; index += 1)
+    {
+        char value = bytes[index];
+        ok = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_digest_line(char const* body, char const* prefix,
+                                                      char output[SHA256_HEX_CAPACITY])
+{
+    size_t prefix_length = strlen(prefix);
+    char const* cursor = body;
+    bool found = false;
+    bool valid = true;
+    while (valid && cursor && *cursor)
+    {
+        char const* end = strchr(cursor, '\n');
+        size_t line_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (line_length >= prefix_length && !memcmp(cursor, prefix, prefix_length))
+        {
+            valid = !found && line_length == prefix_length + SHA256_HEX_CAPACITY - 1 &&
+                    bq_worker_result_hex(cursor + prefix_length, SHA256_HEX_CAPACITY - 1);
+            if (valid)
+            {
+                memcpy(output, cursor + prefix_length, SHA256_HEX_CAPACITY - 1);
+                output[SHA256_HEX_CAPACITY - 1] = 0;
+                found = true;
+            }
+        }
+        cursor = end ? end + 1 : NULL;
+    }
+    return valid && found;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
+                                                       BqWorkerFinalization* finalization)
+{
+    char bytes[BQ_WORKER_RESULT_CAP + 1];
+    char job_line[64], token_line[64], workspace_line[BQ_PATH_CAP + 32], result_line[BQ_PATH_CAP + 32];
+    char base_line[80], candidate_line[80], base_binary_line[BQ_PATH_CAP + 64], candidate_binary_line[BQ_PATH_CAP + 64];
+    char base_digest[SHA256_HEX_CAPACITY], candidate_digest[SHA256_HEX_CAPACITY], result_digest[SHA256_HEX_CAPACITY];
+    char workspace_text[BQ_PATH_CAP + 1], workspace_name[64];
+    BqError error = job && config && finalization && finalization->result_directory >= 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    int job_length = 0, token_length = 0, workspace_length = 0, result_length = 0, base_length = 0, candidate_length = 0;
+    int base_binary_length = 0, candidate_binary_length = 0;
+    if (error == BQ_OK)
+    {
+        bool workspace_valid = bq_worker_text(config->workspace_root, workspace_text, sizeof(workspace_text)) &&
+                               bq_workspace_name(workspace_name, job->id, job->token);
+        job_length = snprintf(job_line, sizeof(job_line), "job-id=%" PRIu64, (uint64_t)job->id);
+        token_length = snprintf(token_line, sizeof(token_line), "attempt-token=%" PRIu64, (uint64_t)job->token);
+        workspace_length = snprintf(workspace_line, sizeof(workspace_line), "workspace-root=%.*s",
+                                    (int)config->workspace_root.length, config->workspace_root.pointer);
+        result_length = snprintf(result_line, sizeof(result_line), "result-root=%s", finalization->result_root);
+        String8 base = bq_field(&job->request, 3), candidate = bq_field(&job->request, 4);
+        base_length = snprintf(base_line, sizeof(base_line), "base-revision=%.*s", (int)base.length, base.pointer);
+        candidate_length = snprintf(candidate_line, sizeof(candidate_line), "candidate-revision=%.*s",
+                                    (int)candidate.length, candidate.pointer);
+        base_binary_length = workspace_valid ? snprintf(base_binary_line, sizeof(base_binary_line),
+                                                        "base-binary=%s/%s/base/build/Release/ide",
+                                                        workspace_text, workspace_name) : -1;
+        candidate_binary_length = workspace_valid ? snprintf(candidate_binary_line, sizeof(candidate_binary_line),
+                                                             "candidate-binary=%s/%s/candidate/build/Release/ide",
+                                                             workspace_text, workspace_name) : -1;
+        if (!workspace_valid || job_length <= 0 || token_length <= 0 || workspace_length <= 0 || result_length <= 0 ||
+            base_length <= 0 || candidate_length <= 0 || base_binary_length <= 0 ||
+            (size_t)base_binary_length >= sizeof(base_binary_line) || candidate_binary_length <= 0 ||
+            (size_t)candidate_binary_length >= sizeof(candidate_binary_line))
+            error = BQ_CONFIGURATION_MISMATCH;
+    }
+    int descriptor = error == BQ_OK ? openat(finalization->result_directory, "validate-buster-v1.manifest",
+                                              O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat directory_info = {0}, file_info = {0};
+    if (error == BQ_OK)
+    {
+        error = fstat(finalization->result_directory, &directory_info) == 0 && directory_info.st_dev == finalization->result_device &&
+                directory_info.st_ino == finalization->result_inode && descriptor >= 0 && fstat(descriptor, &file_info) == 0 &&
+                S_ISREG(file_info.st_mode) && file_info.st_nlink == 1 && (file_info.st_uid == 0 || file_info.st_uid == geteuid()) &&
+                (file_info.st_mode & 0222) == 0 &&
+                (u64)file_info.st_size <= BQ_WORKER_RESULT_CAP ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    u32 used = 0;
+    while (error == BQ_OK && used < BQ_WORKER_RESULT_CAP)
+    {
+        ssize_t count = read(descriptor, bytes + used, BQ_WORKER_RESULT_CAP - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) error = BQ_IO;
+        else if (!count) break;
+        else used += (u32)count;
+    }
+    if (error == BQ_OK)
+    {
+        char extra;
+        error = read(descriptor, &extra, 1) == 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
+    if (error == BQ_OK)
+    {
+        bytes[used] = 0;
+        char const* prefix = "schema=1\nrecipe=validate-buster-v1\nstatus=succeeded\nstage=throughput\nprocess-result=success\n";
+        bool lines = used >= strlen(prefix) && !memcmp(bytes, prefix, strlen(prefix)) &&
+                     bq_worker_result_line((char const*)bytes, job_line) && bq_worker_result_line((char const*)bytes, token_line) &&
+                     bq_worker_result_line((char const*)bytes, workspace_line) && bq_worker_result_line((char const*)bytes, result_line) &&
+                     bq_worker_result_line((char const*)bytes, base_line) && bq_worker_result_line((char const*)bytes, candidate_line) &&
+                     bq_worker_result_line((char const*)bytes, base_binary_line) &&
+                     bq_worker_result_line((char const*)bytes, candidate_binary_line) &&
+                     bq_worker_result_line((char const*)bytes, "driver=/usr/local/libexec/buster-bench-build") &&
+                     bq_worker_result_line((char const*)bytes, "throughput=/usr/local/libexec/buster-bench-throughput") &&
+                     bq_worker_result_line((char const*)bytes, "trusted-source-scope=operator-installed-read-only") &&
+                     bq_worker_result_line((char const*)bytes, "namespace-policy=private-workspace-post-run-identity") &&
+                     bq_worker_result_digest_line((char const*)bytes, "base-binary-sha256=", base_digest) &&
+                     bq_worker_result_digest_line((char const*)bytes, "candidate-binary-sha256=", candidate_digest);
+        error = lines ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (error == BQ_OK && memchr(bytes, 0, used) != NULL) error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK)
+    {
+        Sha256 digest;
+        sha256_init(&digest);
+        sha256_add(&digest, bytes, used);
+        sha256_finish_hex(&digest, (char8*)result_digest);
+        if (finalization->result_bound)
+        {
+            error = !memcmp(finalization->result_digest, result_digest, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+        }
+        else
+        {
+            memcpy(finalization->result_digest, result_digest, sizeof(finalization->result_digest));
+            finalization->result_bound = true;
+        }
+    }
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig const* config, BqJob* job,
                                               BqOutcome outcome, BqError reason,
                                               BqWorkerFinalization* finalization)
 {
     BqError error = outcome == BQ_SUCCEEDED && !finalization ? BQ_BAD_REQUEST : BQ_OK;
+    bool production = config && !config->backend;
+    if (error == BQ_OK && production && outcome == BQ_SUCCEEDED &&
+        (!finalization || finalization->result_directory < 0 || finalization->result_root[0] == 0))
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK && production && outcome == BQ_SUCCEEDED) error = bq_worker_result_validate(config, job, finalization);
     if (outcome == BQ_SUCCEEDED)
     {
         for (BqPhase phase = (BqPhase)(job->phase + 1); error == BQ_OK && phase <= BQ_CLEANING; phase = (BqPhase)(phase + 1))
@@ -1299,6 +1537,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
 
 BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
 {
+    sigset_t handoff_signals = {0};
+    sigset_t prior_signals = {0};
+    bool handoff_blocked = sigemptyset(&handoff_signals) == 0 &&
+                           sigaddset(&handoff_signals, SIGTERM) == 0 &&
+                           sigaddset(&handoff_signals, SIGINT) == 0 &&
+                           sigprocmask(SIG_BLOCK, &handoff_signals, &prior_signals) == 0;
+    bool handoff_failed = !handoff_blocked;
+    sig_atomic_t transport_stop = bq_worker_transport_stop_signal;
+    bq_worker_transport_stop_signal = 0;
     *id = queue->state.active_id;
     char lease_path[BQ_PATH_CAP + 1], boot_path[BQ_PATH_CAP + 1], current_boot[BQ_WORKER_BOOT_CAP];
     BqWorkerBackend systemd;
@@ -1316,6 +1563,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                     !backend->start || !backend->observe || !backend->signal || !backend->join ||
                     !backend->cleanup_launcher ||
                     !backend->delay || !backend->clock || !config->quarantine ? BQ_BAD_REQUEST : BQ_OK;
+    if (error == BQ_OK && production && handoff_failed) error = BQ_IO;
     if (error == BQ_OK && (!bq_worker_read_regular(boot_path, current_boot, sizeof(current_boot)) ||
                            !bq_worker_boot_valid(current_boot))) error = BQ_CONFIGURATION_MISMATCH;
     struct sigaction cancel_action = {0}, old_term = {0}, old_interrupt = {0};
@@ -1325,13 +1573,24 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     {
         cancel_action.sa_handler = bq_worker_cancel_handler;
         sigemptyset(&cancel_action.sa_mask);
-        bq_worker_cancel_signal = 0;
+        bq_worker_cancel_signal = transport_stop ? 1 : 0;
+        bq_worker_shutdown_signal = transport_stop ? 1 : 0;
         term_handler = sigaction(SIGTERM, &cancel_action, &old_term) == 0;
         interrupt_handler = term_handler && sigaction(SIGINT, &cancel_action, &old_interrupt) == 0;
         if (!interrupt_handler) error = BQ_IO;
     }
+    if (handoff_blocked && (!production || interrupt_handler || error != BQ_OK))
+    {
+        if (sigprocmask(SIG_SETMASK, &prior_signals, NULL) != 0) error = BQ_IO;
+        handoff_blocked = false;
+    }
+    if (transport_stop)
+    {
+        bq_worker_cancel_signal = 1;
+        bq_worker_shutdown_signal = 1;
+    }
     BqWorkerLease lease = {.descriptor = -1};
-    BqWorkerFinalization finalization = {0};
+    BqWorkerFinalization finalization = {.config = config, .result_directory = -1};
     bool launched = false;
     bool instance_bound = false;
     BqJob* job = *id ? bq_job(&queue->state, *id) : NULL;
@@ -1353,6 +1612,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
             }
         }
     }
+    if (error == BQ_OK && recovering && production && job && job->phase >= BQ_FINALIZING && job->outcome == BQ_SUCCEEDED)
+        error = bq_worker_result_open(config, job, &finalization, false);
     if (error == BQ_OK && recovering)
         error = bq_worker_recover(queue, config, backend, lease_path, current_boot, job, &lease,
                                   &finalization);
@@ -1361,6 +1622,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     u64 token = 0;
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
     if (!recovering) job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
+    if (error == BQ_OK && !recovering && job) error = bq_worker_result_open(config, job, &finalization, true);
     char unit[BQ_WORKER_UNIT_CAP];
     if (error == BQ_OK && !recovering && (!job || !bq_worker_unit_name(unit, job->id, job->token))) error = BQ_WORKER_MISMATCH;
     if (error == BQ_OK && !recovering) error = bq_worker_record_write(queue, job, current_boot, unit);
@@ -1374,7 +1636,27 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     int old_flags = error == BQ_OK && !recovering ? fcntl(lease.descriptor, F_GETFD) : -1;
     if (error == BQ_OK && !recovering && (old_flags < 0 || fcntl(lease.descriptor, F_SETFD, old_flags & ~FD_CLOEXEC) != 0)) error = BQ_IO;
     char unit_option[128], cpu_property[64], memory_property[64], swap_property[64], tasks_property[64], runtime_property[64];
-    char lease_fd[32];
+    char lease_fd[32], job_id[32], attempt_token[32], workspace_root[BQ_PATH_CAP + 1], result_root[BQ_PATH_CAP + 1], workspace_name[64];
+    char base_revision_text[65], candidate_revision_text[65];
+    String8 base_revision = {0}, candidate_revision = {0};
+    if (error == BQ_OK && !recovering)
+    {
+        int workspace_length = bq_workspace_name(workspace_name, job->id, job->token) &&
+                               bq_worker_text(config->workspace_root, workspace_root, sizeof(workspace_root)) ?
+                               snprintf(workspace_root + strlen(workspace_root), sizeof(workspace_root) - strlen(workspace_root), "/%s", workspace_name) : -1;
+        int result_length = finalization.result_root[0] ? snprintf(result_root, sizeof(result_root), "%s", finalization.result_root) : -1;
+        int job_length = snprintf(job_id, sizeof(job_id), "%" PRIu64, (uint64_t)job->id);
+        int token_length = snprintf(attempt_token, sizeof(attempt_token), "%" PRIu64, (uint64_t)job->token);
+        base_revision = bq_field(&job->request, 3);
+        candidate_revision = bq_field(&job->request, 4);
+        if (workspace_length <= 0 || (size_t)workspace_length >= sizeof(workspace_root) || result_length <= 0 ||
+            (size_t)result_length >= sizeof(result_root) || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
+            token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) || !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
+            !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
+        {
+            error = BQ_WORKSPACE_MISMATCH;
+        }
+    }
     if (error == BQ_OK && !recovering)
     {
         snprintf(unit_option, sizeof(unit_option), "--unit=%s", unit);
@@ -1387,7 +1669,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         char const* arguments[] = {BQ_SYSTEMD_RUN, "--quiet", "--scope", unit_option, "--slice=buster-bench.slice",
             "--property=KillMode=control-group", "--property=SendSIGKILL=yes", "--property=TimeoutStopSec=10s",
             cpu_property, memory_property, swap_property, tasks_property, runtime_property,
-            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, lease_fd, NULL};
+            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, lease_fd, job_id, attempt_token, workspace_root,
+            base_revision_text, candidate_revision_text, result_root, NULL};
         error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
         launched = error == BQ_OK;
     }
@@ -1532,21 +1815,38 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         lease.descriptor = -1;
     }
     bq_worker_lease_release(&lease);
+    if (finalization.result_directory >= 0) close(finalization.result_directory);
+    if (handoff_blocked && sigprocmask(SIG_SETMASK, &prior_signals, NULL) != 0) error = BQ_IO;
     return error;
 }
 
-BqError bq_worker_unit(String8 lease_file, int lease_fd)
+BqError bq_worker_unit(String8 lease_file, int lease_fd, String8 job_id, String8 attempt_token, String8 workspace_root,
+                       String8 base_revision, String8 candidate_revision, String8 result_root)
 {
     char path[BQ_PATH_CAP + 1];
+    char job_id_text[32], attempt_token_text[32], workspace_text[BQ_PATH_CAP + 1], base_text[65], candidate_text[65], result_text[BQ_PATH_CAP + 1];
     BqWorkerLease lease = {.descriptor = -1};
-    BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' || lease_fd < 3 ? BQ_BAD_REQUEST : BQ_OK;
+    BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' || lease_fd < 3 ||
+                    !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
+                    !bq_worker_text(workspace_root, workspace_text, sizeof(workspace_text)) || workspace_text[0] != '/' ||
+                    !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||
+                    !bq_worker_text(result_root, result_text, sizeof(result_text)) || result_text[0] != '/' ? BQ_BAD_REQUEST : BQ_OK;
     if (error == BQ_OK && bq_worker_lease_adopt(path, lease_fd, &lease) != 0) error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK)
     {
+        int flags = fcntl(lease.descriptor, F_GETFD);
+        if (flags < 0 || fcntl(lease.descriptor, F_SETFD, flags & ~FD_CLOEXEC) != 0)
+        {
+            error = BQ_IO;
+        }
+    }
+    if (error == BQ_OK)
+    {
         raise(SIGSTOP);
-        /* PR3 installs the fixed recipe executor here.  Returning unsupported
-         * is intentional and can never be interpreted as a measurement. */
-        error = BQ_UNSUPPORTED;
+        char const* arguments[] = {BQ_RECIPE_EXECUTABLE, "bench_service_recipe", job_id_text, attempt_token_text,
+                                   workspace_text, base_text, candidate_text, result_text, NULL};
+        execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
+        error = BQ_CONFIGURATION_MISMATCH;
     }
     bq_worker_lease_release(&lease);
     return error;
@@ -1567,10 +1867,17 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     return BQ_UNSUPPORTED;
 }
 
-BqError bq_worker_unit(String8 lease_file, int lease_fd)
+BqError bq_worker_unit(String8 lease_file, int lease_fd, String8 job_id, String8 attempt_token, String8 workspace_root,
+                       String8 base_revision, String8 candidate_revision, String8 result_root)
 {
     (void)lease_file;
     (void)lease_fd;
+    (void)job_id;
+    (void)attempt_token;
+    (void)workspace_root;
+    (void)base_revision;
+    (void)candidate_revision;
+    (void)result_root;
     return BQ_UNSUPPORTED;
 }
 

@@ -11,6 +11,7 @@
 #include "workspace.c"
 #include "worker_linux.c"
 #include "protocol.c"
+#include "transport.c"
 #include <inttypes.h>
 #include <limits.h>
 
@@ -47,13 +48,17 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u8 body[BQ_CONTROL_BODY] = {0};
     u32 body_size = 0;
     bool raw = false;
+    bool remote = false;
+    bool serve = false;
     bool valid = false;
     u64 id = 0;
     u64 argument = 0;
-    if (argc == 4 && !strcmp(argv[1], "worker-unit"))
+    if (argc == 10 && !strcmp(argv[1], "worker-unit"))
     {
         valid = bq_decimal(argv[3], true, &argument) && argument <= INT_MAX;
-        error = valid ? bq_worker_unit(string_from_pointer(argv[2]), (int)argument) : BQ_BAD_REQUEST;
+        error = valid ? bq_worker_unit(string_from_pointer(argv[2]), (int)argument, string_from_pointer(argv[4]),
+                                        string_from_pointer(argv[5]), string_from_pointer(argv[6]), string_from_pointer(argv[7]),
+                                        string_from_pointer(argv[8]), string_from_pointer(argv[9])) : BQ_BAD_REQUEST;
         if (error != BQ_OK)
         {
             fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
@@ -64,6 +69,21 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     {
         operation = BQ_OP_CAPABILITIES;
         valid = true;
+    }
+    else if (argc == 3 && !strcmp(argv[1], "rpc"))
+    {
+        remote = true;
+        valid = true;
+    }
+    else if (argc == 8 && !strcmp(argv[1], "serve"))
+    {
+        u64 cpu = 0;
+        String8 installed = string_from_pointer(argv[4]);
+        String8 workspace = string_from_pointer(argv[5]);
+        String8 lease = string_from_pointer(argv[6]);
+        serve = true;
+        valid = bq_decimal(argv[7], false, &cpu) && cpu <= UINT32_MAX &&
+                installed.length <= BQ_PATH_CAP && workspace.length <= BQ_PATH_CAP && lease.length <= BQ_PATH_CAP;
     }
     else if (argc >= 3)
     {
@@ -167,6 +187,41 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             valid = true;
         }
     }
+    if (remote && valid)
+    {
+        error = bq_transport_client(argv[2], input, output);
+        if (error != BQ_OK)
+        {
+            fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
+        }
+        if (fflush(output) != 0)
+        {
+            error = BQ_IO;
+        }
+        bq_close(&queue);
+        return error == BQ_OK ? 0 : 1;
+    }
+    if (serve && valid)
+    {
+        u64 cpu = 0;
+        bq_decimal(argv[7], false, &cpu);
+        BqWorkerConfig config = {
+            .installed_root = string_from_pointer(argv[4]),
+            .workspace_root = string_from_pointer(argv[5]),
+            .lease_file = string_from_pointer(argv[6]),
+            .boot_id_file = S8("/proc/sys/kernel/random/boot_id"),
+            .cgroup_root = S8("/sys/fs/cgroup"),
+            .limits = {(u32)cpu, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
+            .quarantine = &bq_worker_quarantine,
+        };
+        error = bq_transport_serve(argv[2], argv[3], &config);
+        if (error != BQ_OK)
+        {
+            fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
+        }
+        bq_close(&queue);
+        return error == BQ_OK ? 0 : 1;
+    }
     if (valid)
     {
         error = operation == BQ_OP_CAPABILITIES ? BQ_OK : bq_open(&queue, argv[2]);
@@ -241,7 +296,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "status/result/cancel DIR JOB | logs DIR JOB [AFTER_SEQUENCE] | fake-run DIR | "
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
-                    "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR\n");
+                    "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
+                    "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
         }
     }
     bq_close(&queue);
