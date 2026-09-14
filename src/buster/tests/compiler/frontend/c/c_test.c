@@ -4670,13 +4670,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
     };
     String8 constant_source = S8("_Static_assert(sizeof(__INT8_C(1)) == sizeof(int), \"promoted i8\");\n"
                                  "_Static_assert(sizeof(__UINT16_C(1)) == sizeof(int), \"promoted u16\");\n"
                                  "_Static_assert(__UINT32_C(1) - 2 > 0, \"unsigned u32\");\n"
                                  "_Static_assert(sizeof(__INT64_C(1)) == 8 && __INT64_C(1) - 2 < 0, \"signed i64\");\n"
                                  "_Static_assert(sizeof(__UINT64_C(1)) == 8 && (__UINT64_C(1) << 63) == 0x8000000000000000ULL, \"unsigned u64\");\n"
-                                 "_Static_assert(sizeof(__INTMAX_C(1)) == 8 && sizeof(__UINTMAX_C(1)) == 8, \"max widths\");\n");
+                                 "_Static_assert(sizeof(__INTMAX_C(1)) == 8 && sizeof(__UINTMAX_C(1)) == 8, \"max widths\");\n"
+                                 "__typeof__(__SCHAR_MAX__) *signed_char_maximum_type = (int *)0;\n"
+                                 "__typeof__(__SHRT_MAX__) *short_maximum_type = (int *)0;\n"
+                                 "__typeof__(__INT_MAX__) *int_maximum_type = (int *)0;\n"
+                                 "__typeof__(__LONG_MAX__) *long_maximum_type = (long *)0;\n"
+                                 "__typeof__(__LONG_LONG_MAX__) *long_long_maximum_type = (long long *)0;\n"
+                                 "#if __SCHAR_MAX__ != 127 || __SHRT_MAX__ != 32767 || __INT_MAX__ != 2147483647\n"
+                                 "#error invalid narrow integer maximum\n"
+                                 "#endif\n"
+                                 "#if __SIZEOF_LONG__ == 8\n"
+                                 "#if __LONG_MAX__ != 9223372036854775807L\n"
+                                 "#error invalid LP64 long maximum\n"
+                                 "#endif\n"
+                                 "#elif __SIZEOF_LONG__ == 4\n"
+                                 "#if __LONG_MAX__ != 2147483647L\n"
+                                 "#error invalid LLP64 long maximum\n"
+                                 "#endif\n"
+                                 "#else\n"
+                                 "#error unsupported long width\n"
+                                 "#endif\n"
+                                 "#if __LONG_LONG_MAX__ != 9223372036854775807LL\n"
+                                 "#error invalid long long maximum\n"
+                                 "#endif\n");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(constant_targets); index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -4687,6 +4711,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-constant-macros.c"), tokens, syntax, target);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0);
+
+        CPreprocessResult maximum_tokens = c_preprocess(
+            temporary.arena, S8("__SCHAR_MAX__ __SHRT_MAX__ __INT_MAX__ __LONG_MAX__ __LONG_LONG_MAX__\n"),
+            (CPreprocessOptions){.source_path = S8("integer-maximum-macros.c"), .target = target, .data_layout = target_data_layout(target)});
+        BUSTER_TEST(arguments, maximum_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, maximum_tokens.token_count == 6);
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("127"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 1, C_TOKEN_PREPROCESSING_NUMBER, S8("32767"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 2, C_TOKEN_PREPROCESSING_NUMBER, S8("2147483647"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 3, C_TOKEN_PREPROCESSING_NUMBER,
+                                  target_data_layout(target).long_integer.size == 8 ? S8("9223372036854775807L") : S8("2147483647L"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 4, C_TOKEN_PREPROCESSING_NUMBER, S8("9223372036854775807LL"));
         scratch_end(temporary);
     }
 
