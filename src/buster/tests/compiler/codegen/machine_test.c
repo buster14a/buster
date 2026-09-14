@@ -3014,6 +3014,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
     };
     // Clang's encoding of tests/differential/clear_cache_aarch64.s. The
     // alignment and both loop targets are part of this independent oracle.
@@ -3035,6 +3036,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
             if (program && program->module_count == 1)
             {
                 IrModule* module = program->modules;
+                u32 clear_instruction_count = 0;
+                u32 clear_runtime_call_count = 0;
+                u32 clear_runtime_symbol_count = 0;
+                for (u32 symbol_index = 0; symbol_index < program->symbols.count; symbol_index += 1)
+                {
+                    IrSymbol* symbol = program->symbols.symbols + symbol_index;
+                    if (symbol->kind == IR_SYMBOL_FUNCTION && string_equal(symbol->link_name, S8("__clear_cache")))
+                    {
+                        clear_runtime_symbol_count += 1;
+                        IrType* function_type = ir_type_from_id(&program->types, symbol->type);
+                        IrType* return_type = function_type ? ir_type_from_id(&program->types, function_type->return_type) : 0;
+                        BUSTER_TEST(arguments, symbol->linkage == IR_LINKAGE_IMPORT);
+                        BUSTER_TEST(arguments, function_type && function_type->kind == IR_TYPE_FUNCTION &&
+                                                   function_type->calling_convention == IR_CALLING_CONVENTION_C &&
+                                                   !function_type->is_variadic && function_type->parameter_count == 2);
+                        BUSTER_TEST(arguments, return_type && return_type->kind == IR_TYPE_VOID);
+                        if (function_type && function_type->parameter_count == 2)
+                        {
+                            IrType* first_parameter = ir_type_from_id(&program->types, function_type->parameter_types[0]);
+                            IrType* second_parameter = ir_type_from_id(&program->types, function_type->parameter_types[1]);
+                            BUSTER_TEST(arguments, first_parameter && first_parameter->kind == IR_TYPE_POINTER);
+                            BUSTER_TEST(arguments, second_parameter && second_parameter->kind == IR_TYPE_POINTER);
+                        }
+                    }
+                }
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + instruction_index;
+                        clear_instruction_count += instruction->opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE;
+                        IrSymbol* symbol = instruction->opcode == IR_OPCODE_CALL ? ir_symbol_from_id(&program->symbols, instruction->symbol) : 0;
+                        if (symbol && string_equal(symbol->link_name, S8("__clear_cache")))
+                        {
+                            IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            clear_runtime_call_count += 1;
+                            BUSTER_TEST(arguments, symbol->linkage == IR_LINKAGE_IMPORT);
+                            BUSTER_TEST(arguments, result_type && result_type->kind == IR_TYPE_VOID &&
+                                                       instruction->result.value == IR_ID_UNDERLYING_INVALID);
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, clear_instruction_count == (target_index == 2 ? 0u : 3u));
+                BUSTER_TEST(arguments, clear_runtime_call_count == (target_index == 2 ? 3u : 0u));
+                BUSTER_TEST(arguments, clear_runtime_symbol_count == (target_index == 2 ? 1u : 0u));
                 for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
                 {
                     CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, targets[target_index],
@@ -3049,6 +3096,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
                             sequences += memcmp(generated.code.pointer + offset, cache_words, sizeof(cache_words)) == 0;
                         }
                         BUSTER_TEST(arguments, sequences == 3);
+                    }
+                    if (target_index == 2 && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        u32 direct_maintenance_words = 0;
+                        for (u64 offset = 0; offset + sizeof(u32) <= generated.code.length; offset += sizeof(u32))
+                        {
+                            u32 word;
+                            memcpy(&word, generated.code.pointer + offset, sizeof(word));
+                            direct_maintenance_words += (word & UINT32_C(0xffffffe0)) == UINT32_C(0xd50b7b20) ||
+                                                        (word & UINT32_C(0xffffffe0)) == UINT32_C(0xd50b7520);
+                        }
+                        BUSTER_TEST(arguments, direct_maintenance_words == 0);
+                        BUSTER_TEST(arguments, generated.relocation_count == 3);
+                        for (u32 relocation_index = 0; relocation_index < generated.relocation_count; relocation_index += 1)
+                        {
+                            CodegenModuleRelocation* relocation = generated.relocations + relocation_index;
+                            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, relocation->symbol);
+                            BUSTER_TEST(arguments, relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26);
+                            BUSTER_TEST(arguments, symbol && string_equal(symbol->link_name, S8("__clear_cache")));
+                            BUSTER_TEST(arguments, symbol && symbol->linkage == IR_LINKAGE_IMPORT);
+                        }
                     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
                     bool native_arch = (BUSTER_CPU_ARCH_X86_64 && target_index == 0) || (BUSTER_CPU_ARCH_AARCH64 && target_index == 1);

@@ -14144,6 +14144,89 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_builtin_float_bits(CIntegerIrBuilder* buil
     return result;
 }
 
+// Windows Arm64 does not permit hosted code to execute the DC CVAU / IC IVAU
+// maintenance sequence directly. Clang's builtin therefore crosses the
+// compiler-rt __clear_cache boundary, whose Windows implementation calls
+// FlushInstructionCache. Preserve that ABI instead of selecting the inline
+// AArch64 machine opcode used by freestanding and Unix targets.
+BUSTER_C_INTERNAL bool c_ir_emit_clear_cache_runtime_call(CIntegerIrBuilder* builder, CToken token, IrValueId first, IrValueId second)
+{
+    String8 link_name = S8("__clear_cache");
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId void_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+    IrValueId arguments[2] = {first, second};
+    bool emitted = void_pointer_type.value != IR_ID_UNDERLYING_INVALID;
+    for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(arguments) && emitted; argument_index += 1)
+    {
+        arguments[argument_index] = c_ir_decay_array(builder, arguments[argument_index], void_pointer_type, source);
+        arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], void_pointer_type, source);
+        emitted = arguments[argument_index].value != IR_ID_UNDERLYING_INVALID;
+    }
+    IrTypeId function_type = IR_TYPE_ID_INVALID;
+    IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+    for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count && symbol.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)
+    {
+        IrSymbol* candidate = &builder->program->symbols.symbols[symbol_index];
+        if (candidate->kind == IR_SYMBOL_FUNCTION && string_equal(candidate->link_name, link_name))
+        {
+            symbol = candidate->id;
+            function_type = candidate->type;
+        }
+    }
+    if (emitted && symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, BUSTER_ARRAY_LENGTH(arguments));
+        parameter_types[0] = void_pointer_type;
+        parameter_types[1] = void_pointer_type;
+        function_type = ir_program_add_type(builder->program, (IrType){
+            .name = S8("C clear cache function"),
+            .parameter_types = parameter_types,
+            .element_type = IR_TYPE_ID_INVALID,
+            .return_type = builder->void_type,
+            .layout = {
+                .size = builder->program->data_layout.pointer.size,
+                .alignment = builder->program->data_layout.pointer.alignment,
+                .resolved = true,
+            },
+            .kind = IR_TYPE_FUNCTION,
+            .calling_convention = IR_CALLING_CONVENTION_C,
+            .parameter_count = BUSTER_ARRAY_LENGTH(arguments),
+        });
+        symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+            .name = link_name,
+            .link_name = link_name,
+            .source = source,
+            .type = function_type,
+            .kind = IR_SYMBOL_FUNCTION,
+            .linkage = IR_LINKAGE_IMPORT,
+        });
+    }
+    emitted &= symbol.value != IR_ID_UNDERLYING_INVALID && function_type.value != IR_ID_UNDERLYING_INVALID;
+    if (emitted)
+    {
+        IrValueId reference_result = c_ir_add_result(builder, function_type);
+        IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
+        reference.symbol = symbol;
+        reference.result = reference_result;
+        IrInstructionId reference_id = c_ir_append_instruction(builder, reference, source);
+        emitted = reference_result.value != IR_ID_UNDERLYING_INVALID && reference_id.value != IR_ID_UNDERLYING_INVALID;
+        if (emitted)
+        {
+            builder->function->values[reference_result.value].definition = reference_id;
+            IrValueId* operands = arena_allocate(builder->arena, IrValueId, BUSTER_ARRAY_LENGTH(arguments) + 1);
+            operands[0] = reference_result;
+            operands[1] = arguments[0];
+            operands[2] = arguments[1];
+            IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, builder->void_type);
+            call.operands = operands;
+            call.operand_count = BUSTER_ARRAY_LENGTH(arguments) + 1;
+            call.symbol = symbol;
+            emitted = c_ir_append_instruction(builder, call, source).value != IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    return emitted;
+}
+
 /* Lowers one `__builtin_mem*` call to the library function it names. Clang
    makes these available with no declaration in scope, which is exactly why
    freestanding sources reach for them, so the prototype cannot be assumed to
@@ -18559,13 +18642,24 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST, argument_start, separator, false);
             }
-            IrSourceRange clear_source = c_ir_token_source_range(builder, token);
-            IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type);
-            clear.operands = arena_allocate(builder->arena, IrValueId, 2);
-            clear.operands[0] = first;
-            clear.operands[1] = second;
-            clear.operand_count = 2;
-            c_ir_append_instruction(builder, clear, clear_source);
+            bool windows_runtime = builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->target.os == OPERATING_SYSTEM_WINDOWS;
+            if (windows_runtime)
+            {
+                if (!c_ir_emit_clear_cache_runtime_call(builder, token, first, second))
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+            }
+            else
+            {
+                IrSourceRange clear_source = c_ir_token_source_range(builder, token);
+                IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type);
+                clear.operands = arena_allocate(builder->arena, IrValueId, 2);
+                clear.operands[0] = first;
+                clear.operands[1] = second;
+                clear.operand_count = 2;
+                c_ir_append_instruction(builder, clear, clear_source);
+            }
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             selected->argument_count = 2;
             selected->emitted = true;
