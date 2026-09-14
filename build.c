@@ -22648,6 +22648,19 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_process_query(Arena* arena, SliceString
     }
     return result;
 }
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_first_line(String8 output)
+{
+    output = build_compiler_output_trim(output);
+    for (u64 i = 0; i < output.length; i += 1)
+    {
+        if (output.pointer[i] == '\r' || output.pointer[i] == '\n')
+        {
+            output.length = i;
+            break;
+        }
+    }
+    return build_compiler_output_trim(output);
+}
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_identity_matches(BuildCompiler compiler, String8 identity)
 {
     bool result = compiler == BUILD_COMPILER_CL ? string_equal(identity, S8("BUSTER_BUILD_COMPILER_MSVC")) :
@@ -22671,6 +22684,10 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_probe(Arena* arena, MatrixCoverageTarge
         String8 arguments[] = {resolved_path, S8("/Bv"), S8("/EP"), S8("/TC"), S8("tests/build_compiler_identity.h")};
         String8 output = {0};
         result = matrix_coverage_process_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), true, &output);
+        // /Bv appends compiler-pass paths whose spelling can differ only in
+        // case between the native driver and Python on Windows.  Its first
+        // line is the stable compiler version/target identity we require.
+        output = matrix_coverage_first_line(output);
         String8 target = os_get_environment_variable(S8("VSCMD_ARG_TGT_ARCH"));
         info = (BuildCompilerIdentity){.executable = resolved_path, .identity = S8("BUSTER_BUILD_COMPILER_MSVC"), .target = target, .version = output};
     }
@@ -22861,6 +22878,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_coverage_manifest_self_test(Arena* aren
     MatrixCoverageLane lane = matrix_coverage_lane_create(arena);
     MatrixCoveragePlan plan = {0};
     bool result = matrix_coverage_policy_self_test(arena);
+    String8 cl_version_fixture = S8("\r\nMicrosoft (R) C/C++ Optimizing Compiler Version 19.44.35214 for ARM64\r\nC:\\BuildTools\\VC\\Tools\\MSVC\\bin\\Hostx64\\arm64\\c1.dll\r\n");
+    result = string_equal(matrix_coverage_first_line(cl_version_fixture),
+                          S8("Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35214 for ARM64")) && result;
     BuildCompiler fixture_compiler = BUILD_COMPILER_COUNT;
     BuildCompiler fixture_candidates[] = {BUILD_COMPILER_GCC, BUILD_COMPILER_CLANG, BUILD_COMPILER_CL, BUILD_COMPILER_ZIG};
     for (u32 candidate_i = 0; candidate_i < BUSTER_ARRAY_LENGTH(fixture_candidates); candidate_i += 1)

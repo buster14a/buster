@@ -173,6 +173,7 @@ def _coverage_probe_compiler(path, compiler, environment):
         # object or executable, while retaining /Bv's exact version evidence.
         version = _coverage_probe_output(path, ("/Bv", "/EP", "/TC", "tests/build_compiler_identity.h"), environment,
                                          prefer_stderr=True)
+        version = version.splitlines()[0].strip() if version else None
         return {"identity": "BUSTER_BUILD_COMPILER_MSVC", "target": target, "version": version} if target and version else None
     if compiler == "zig":
         version = _coverage_probe_output(path, ("version",), environment)
