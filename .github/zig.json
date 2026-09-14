@@ -7,5 +7,13 @@
     "aarch64-macos": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
     "x86_64-windows": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e",
     "aarch64-windows": "aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef"
+  },
+  "size": {
+    "x86_64-linux": 55478392,
+    "aarch64-linux": 51211944,
+    "x86_64-macos": 57396836,
+    "aarch64-macos": 52238004,
+    "x86_64-windows": 97217739,
+    "aarch64-windows": 93109828
   }
 }
