@@ -1895,11 +1895,18 @@ char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 st
     return result;
 }
 
+// Reserving zero elements moves the arena cursor to the String8 boundary the
+// first append would have aligned it to anyway, so the saved start is a real
+// arena position rather than a rounded-up one the cursor has not reached. An
+// empty builder then flushes to a zero-length slice at every valid initial
+// alignment instead of subtracting a larger start from a smaller cursor and
+// underflowing the byte count (#638).
 OsArgumentBuilder os_argument_builder_start(Arena* arena)
 {
+    (void)arena_allocate(arena, String8, 0);
     OsArgumentBuilder result = {
         .arena = arena,
-        .position = align_forward(arena->position, BUSTER_ALIGN_OF(String8)),
+        .position = arena->position,
     };
     return result;
 }

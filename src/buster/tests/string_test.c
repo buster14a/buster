@@ -6205,6 +6205,74 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
     }
 
     {
+        // #638: an argument builder flushes a valid slice at every initial
+        // arena alignment, including the empty one. `start` used to round its
+        // saved position up while leaving the cursor where it was, so an empty
+        // flush subtracted the larger saved start from the smaller cursor and
+        // the unsigned byte count underflowed. Walk every residue of String8's
+        // alignment on an already dirty arena and check the empty,
+        // single-argument and multi-argument shapes against exact lengths,
+        // exact bytes, and the cursor the builder is supposed to leave behind.
+        String8 appended[] = {
+            S8("driver"), S8("--flag"), S8(""), S8("value with spaces"),
+        };
+        for (u64 residue = 0; residue < BUSTER_ALIGN_OF(String8); residue += 1)
+        {
+            for (u64 count = 0; count <= BUSTER_ARRAY_LENGTH(appended); count += 1)
+            {
+                u64 restore = arena->position;
+                u64 unaligned = align_forward(arena->position, BUSTER_ALIGN_OF(String8)) + residue;
+                (void)arena_allocate(arena, char8, unaligned - arena->position);
+                BUSTER_TEST(arguments, arena->position == unaligned);
+
+                OsArgumentBuilder builder = os_argument_builder_start(arena);
+                for (u64 i = 0; i < count; i += 1)
+                {
+                    os_argument_builder_append(&builder, appended[i]);
+                }
+                SliceString8 flushed = os_argument_builder_flush(&builder);
+                u64 expected_start = align_forward(unaligned, BUSTER_ALIGN_OF(String8));
+
+                BUSTER_TEST(arguments, flushed.length == count);
+                BUSTER_TEST(arguments, arena->position == expected_start + count * sizeof(String8));
+                BUSTER_TEST(arguments, (u8*)flushed.pointer == arena_get_byte_pointer_align(arena, expected_start, BUSTER_ALIGN_OF(String8)));
+                for (u64 i = 0; i < BUSTER_MIN(flushed.length, count); i += 1)
+                {
+                    BUSTER_STRING_TEST(arguments, flushed.pointer[i], appended[i]);
+                }
+                arena_set_position(arena, restore);
+            }
+        }
+        // Two builders in sequence on the same arena: the second starts from
+        // the cursor the first one left and neither observes the other's
+        // elements. The reused arena is dirty from every case above.
+        {
+            u64 restore = arena->position;
+            (void)arena_allocate(arena, char8, 1);
+            OsArgumentBuilder first = os_argument_builder_start(arena);
+            os_argument_builder_append(&first, S8("first"));
+            SliceString8 first_flushed = os_argument_builder_flush(&first);
+            OsArgumentBuilder second = os_argument_builder_start(arena);
+            SliceString8 second_flushed = os_argument_builder_flush(&second);
+            OsArgumentBuilder third = os_argument_builder_start(arena);
+            os_argument_builder_append(&third, S8("third"));
+            os_argument_builder_append(&third, S8("fourth"));
+            SliceString8 third_flushed = os_argument_builder_flush(&third);
+
+            BUSTER_TEST(arguments, first_flushed.length == 1);
+            BUSTER_TEST(arguments, second_flushed.length == 0);
+            BUSTER_TEST(arguments, third_flushed.length == 2);
+            if (first_flushed.length == 1 && third_flushed.length == 2)
+            {
+                BUSTER_STRING_TEST(arguments, first_flushed.pointer[0], S8("first"));
+                BUSTER_STRING_TEST(arguments, third_flushed.pointer[0], S8("third"));
+                BUSTER_STRING_TEST(arguments, third_flushed.pointer[1], S8("fourth"));
+            }
+            arena_set_position(arena, restore);
+        }
+    }
+
+    {
         const char16 environment_block[] = {
             'U', 'S', 'E',  'R', '=', 'd', 'a', 'v', 'i', 'd', 0,   'P', 'R', 'O', 'G', 'R', 'A', 'M', '_', 'F', 'I', 'L', 'E', 'S', '=',
             'C', ':', '\\', 'P', 'r', 'o', 'g', 'r', 'a', 'm', ' ', 'F', 'i', 'l', 'e', 's', 0,   'E', 'M', 'P', 'T', 'Y', '=', 0,   0,
