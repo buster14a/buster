@@ -17,3 +17,6 @@
 
 # Hash-pinned external GPU source fixtures.
 tests/gpu/* text eol=lf
+
+# Byte-pinned installed bench-service policy input.
+tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf

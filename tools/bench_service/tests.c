@@ -79,6 +79,30 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     BQ_CHECK(!bq_decimal("-1", true, &value));
     BQ_CHECK(!bq_decimal("0", true, &value));
     BQ_CHECK(bq_decimal("0", false, &value) && value == 0);
+    FILE* attributes_file = fopen(".gitattributes", "rb");
+    char attributes[4096];
+    u32 attributes_size = attributes_file ? (u32)fread(attributes, 1, sizeof(attributes), attributes_file) : 0;
+    int attributes_extra = attributes_file ? fgetc(attributes_file) : 0;
+    bool attributes_complete = attributes_file && attributes_size < sizeof(attributes) &&
+                               attributes_extra == EOF && !ferror(attributes_file);
+    if (attributes_file)
+    {
+        fclose(attributes_file);
+    }
+    char const rule[] = "tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf";
+    bool rule_found = false;
+    for (u32 start = 0; attributes_complete && !rule_found && start < attributes_size;)
+    {
+        u32 end = start;
+        while (end < attributes_size && attributes[end] != '\n')
+        {
+            end += 1;
+        }
+        u32 content_end = end > start && attributes[end - 1] == '\r' ? end - 1 : end;
+        rule_found = content_end - start == sizeof(rule) - 1 && !memcmp(attributes + start, rule, sizeof(rule) - 1);
+        start = end < attributes_size ? end + 1 : end;
+    }
+    BQ_CHECK(attributes_complete && rule_found);
     FILE* profile = fopen("tools/bench_service/profiles/validate-buster-v1.recipe", "rb");
     char recipe[sizeof(bq_real_recipe)] = {0};
     BQ_CHECK(profile && fread(recipe, 1, sizeof(recipe), profile) == sizeof(bq_real_recipe) - 1 &&
