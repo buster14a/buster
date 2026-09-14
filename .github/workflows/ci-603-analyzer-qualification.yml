@@ -10,7 +10,8 @@ permissions:
 
 concurrency:
   group: issue-603-analyzer-selection-qualification
-  cancel-in-progress: false
+  # A corrected qualification head supersedes and cancels an older harness run.
+  cancel-in-progress: true
 
 jobs:
   qualify:
@@ -245,22 +246,32 @@ jobs:
                   campaigns[fields[0]] = (fields[1], int(fields[4]) / 1_000_000_000)
           values = {"compare_external_s": [], "skip_external_s": [],
                     "compare_candidate_s": [], "skip_candidate_s": [],
-                    "compare_reference_s": []}
+                    "compare_baseline_nested_s": [],
+                    "compare_baseline_wrapper_s": [],
+                    "compare_baseline_overhead_s": []}
           for sample in sorted((root / "samples").iterdir()):
               treatment, external = campaigns[sample.name]
               log = (sample / "campaign.log").read_text()
-              candidate = re.search(r"^ANALYZE_RUN elapsed_us=(\d+).* status=pass$", log, re.M)
-              if candidate is None:
-                  raise SystemExit(f"missing candidate metric in {sample.name}")
+              analyzer_runs = [int(value) for value in re.findall(
+                  r"^ANALYZE_RUN elapsed_us=(\d+).* status=pass$", log, re.M)]
+              baseline_wrappers = [int(value) for value in re.findall(
+                  r"^ANALYZE_BASELINE .* elapsed_us=(\d+).* status=pass$", log, re.M)]
               values[f"{treatment}_external_s"].append(external)
-              values[f"{treatment}_candidate_s"].append(int(candidate.group(1)) / 1_000_000)
-              reference = re.search(r"^ANALYZE_BASELINE .* elapsed_us=(\d+).* status=pass$", log, re.M)
               if treatment == "compare":
-                  if reference is None:
-                      raise SystemExit(f"missing reference metric in {sample.name}")
-                  values["compare_reference_s"].append(int(reference.group(1)) / 1_000_000)
-              elif reference is not None:
-                  raise SystemExit(f"unexpected reference metric in {sample.name}")
+                  if len(analyzer_runs) != 2 or len(baseline_wrappers) != 1:
+                      raise SystemExit(f"comparison metric cardinality failed in {sample.name}")
+                  baseline_nested, candidate = analyzer_runs
+                  baseline_wrapper = baseline_wrappers[0]
+                  if baseline_wrapper < baseline_nested:
+                      raise SystemExit(f"baseline wrapper is shorter than its nested run in {sample.name}")
+                  values["compare_baseline_nested_s"].append(baseline_nested / 1_000_000)
+                  values["compare_baseline_wrapper_s"].append(baseline_wrapper / 1_000_000)
+                  values["compare_baseline_overhead_s"].append((baseline_wrapper - baseline_nested) / 1_000_000)
+              else:
+                  if len(analyzer_runs) != 1 or baseline_wrappers:
+                      raise SystemExit(f"skip metric cardinality failed in {sample.name}")
+                  candidate = analyzer_runs[0]
+              values[f"{treatment}_candidate_s"].append(candidate / 1_000_000)
           if any(len(values[key]) != 1 for key in values):
               raise SystemExit("workflow attempt does not contain one sample for every required metric")
           rows = []
