@@ -572,6 +572,23 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if BUSTER_LINUX || BUSTER_MACOS
+    // A private group with only its exited leader is a normal successful wait.
+    // Darwin reports EPERM when group signalling filters out that zombie; the
+    // waiter must verify disappearance after reaping without losing helpers.
+    {
+        String8 spawn_arguments[] = {S8("/bin/sh"), S8("-c"), S8("exit 0")};
+        ProcessSpawnOptions options = {.use_process_environment = 1, .new_process_group = 1};
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+            (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_sync(arguments->arena, spawn);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, wait_result.platform_status == 0);
+        }
+    }
+
     // realpath may write a resolved prefix even on failure. Discarding its
     // oversized output allocation must not make those bytes look fresh to
     // arena_allocate_zeroed. Use a fresh mapping so no prior dirty watermark

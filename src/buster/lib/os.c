@@ -1813,6 +1813,17 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
     {
+        if (options.new_process_group)
+        {
+            short flags = 0;
+            pipe_result = posix_spawnattr_getflags(&attributes, &flags) == 0 &&
+                          posix_spawnattr_setpgroup(&attributes, 0) == 0 &&
+                          posix_spawnattr_setflags(&attributes, (short)(flags | POSIX_SPAWN_SETPGROUP)) == 0;
+        }
+    }
+
+    if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
+    {
         PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
         PosixStringList envp = options.use_process_environment ? program_state->input.raw_environment
                                                                : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
@@ -1863,6 +1874,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     }
 
     result.handle = (OsProcessHandle*)(pid == -1 ? 0 : (u64)pid);
+    result.process_group = pid != -1 && options.new_process_group;
 #endif
 
     if (program_flag_get(PROGRAM_FLAG_VERBOSE))
@@ -2194,16 +2206,29 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         int status = 0;
         struct rusage usage = {0};
         pid_t wait_result = -1;
+        bool group_exit_observed = false;
+        bool wait_failed = false;
+#if BUSTER_MACOS
+        bool verify_group_absent_after_reap = false;
+#endif
         // A child with no captured stream never entered the drain loop, so this
         // is where its deadline is enforced. Poll for the exit rather than
         // blocking in wait4, then kill what is still running.
         while (!timed_out && deadline)
         {
-            wait_result = wait4(pid, &status, WNOHANG, &usage);
-            if (wait_result == pid || (wait_result < 0 && errno != EINTR))
+            if (spawn.process_group)
             {
-                break;
+                siginfo_t information = {0};
+                int observed = waitid(P_PID, (id_t)pid, &information, WEXITED | WNOHANG | WNOWAIT);
+                if (!observed && information.si_pid == pid) { group_exit_observed = true; }
+                else if (observed && errno != EINTR) { wait_failed = true; }
             }
+            else
+            {
+                wait_result = wait4(pid, &status, WNOHANG, &usage);
+                if (wait_result < 0 && errno != EINTR) { wait_failed = true; }
+            }
+            if (group_exit_observed || wait_result == pid || wait_failed) { break; }
             u64 remaining = os_process_deadline_milliseconds(deadline, 1);
             if (!remaining)
             {
@@ -2212,17 +2237,60 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             poll(0, 0, (int)(remaining < 10 ? remaining : 10));
         }
+        // Observe a process-group leader's exit without reaping it. Its zombie
+        // reserves both the PID and process-group ID while residual helpers are
+        // terminated, so cleanup cannot race an unrelated group reusing the ID.
+        if (spawn.process_group && !timed_out && !wait_failed && !group_exit_observed)
+        {
+            siginfo_t information;
+            int observed;
+            do
+            {
+                information = (siginfo_t){0};
+                observed = waitid(P_PID, (id_t)pid, &information, WEXITED | WNOWAIT);
+                group_exit_observed = !observed && information.si_pid == pid;
+            } while (observed && errno == EINTR);
+            wait_failed = !group_exit_observed;
+        }
         if (timed_out)
         {
             // The status below then describes this kill rather than the child's
             // own progress, which is why `timed_out` is reported separately.
-            kill(pid, SIGKILL);
+            kill(spawn.process_group ? -pid : pid, SIGKILL);
             wait_result = -1;
+        }
+        else if (group_exit_observed)
+        {
+            // The leader has exited but is deliberately not reaped yet. Kill
+            // helpers still in its reserved group before wait4 releases the ID.
+            if (kill(-pid, SIGKILL) != 0 && errno != ESRCH)
+            {
+#if BUSTER_MACOS
+                // Darwin's killpg path excludes zombies from its process-group
+                // iteration, so a group containing only our reserved leader
+                // reports EPERM. Defer that one verdict until reaping removes
+                // the leader; no signal is sent after the ID becomes reusable.
+                if (errno == EPERM) { verify_group_absent_after_reap = true; }
+                else { wait_failed = true; }
+#else
+                wait_failed = true;
+#endif
+            }
         }
         if (wait_result != pid)
         {
             wait_result = wait4(pid, &status, 0, &usage);
         }
+#if BUSTER_MACOS
+        if (verify_group_absent_after_reap)
+        {
+            // ESRCH proves the EPERM came from the zombie-only Darwin group.
+            // A residual or newly reused group can only fail this run: it is
+            // probed, never signalled, after wait4 releases the reserved ID.
+            bool group_absent = wait_result == pid && kill(-pid, 0) != 0 && errno == ESRCH;
+            if (!group_absent) { wait_failed = true; }
+        }
+#endif
 
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
@@ -2251,6 +2319,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         {
             result.result = PROCESS_RESULT_FAILED;
         }
+        if (wait_failed) { result.result = PROCESS_RESULT_FAILED; }
 #endif
         if (timed_out)
         {

@@ -63,6 +63,7 @@ struct DSettings
     OsMutexHandle* spawn_mutex;
     SliceString8 environment_keys;
     SliceString8 environment_values;
+    u32 process_slot;
     u32 rows;
     u32 timeout_seconds;
     u32 reduce_limit;
@@ -71,7 +72,148 @@ struct DSettings
     bool strict_mir;
     bool explicit_environment;
     bool io_failed;
+    bool self_test_cancel_after_unregister;
 };
+
+#define D_PROCESS_SLOT_COUNT 64
+#if BUSTER_SINGLE_THREADED
+typedef volatile sig_atomic_t DCancellationAtomic;
+#else
+typedef AtomicU64 DCancellationAtomic;
+#endif
+#if !BUSTER_SINGLE_THREADED && !BUSTER_COMPILER_MSVC
+BUSTER_CT_CHECK(__atomic_always_lock_free(sizeof(DCancellationAtomic), 0));
+#endif
+BUSTER_GLOBAL_LOCAL DCancellationAtomic d_cancellation_signal;
+BUSTER_GLOBAL_LOCAL DCancellationAtomic d_active_process_groups[D_PROCESS_SLOT_COUNT];
+
+BUSTER_GLOBAL_LOCAL u64 d_atomic_load(DCancellationAtomic* value)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED || BUSTER_COMPILER_MSVC
+    result = *value;
+#elif defined(__clang__)
+    result = __c11_atomic_load(value, __ATOMIC_SEQ_CST);
+#else
+    result = __atomic_load_n(value, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void d_atomic_store(DCancellationAtomic* value, u64 stored)
+{
+#if BUSTER_SINGLE_THREADED || BUSTER_COMPILER_MSVC
+    *value = stored;
+#elif defined(__clang__)
+    __c11_atomic_store(value, stored, __ATOMIC_SEQ_CST);
+#else
+    __atomic_store_n(value, stored, __ATOMIC_SEQ_CST);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool d_atomic_set_if_zero(DCancellationAtomic* value, u64 stored)
+{
+    bool result;
+#if BUSTER_SINGLE_THREADED || BUSTER_COMPILER_MSVC
+    result = *value == 0;
+    if (result) { *value = (sig_atomic_t)stored; }
+#elif defined(__clang__)
+    u64 expected = 0;
+    result = __c11_atomic_compare_exchange_strong(value, &expected, stored, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#else
+    u64 expected = 0;
+    result = __atomic_compare_exchange_n(value, &expected, stored, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_atomic_exchange(DCancellationAtomic* value, u64 stored)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED || BUSTER_COMPILER_MSVC
+    result = (u64)*value;
+    *value = (sig_atomic_t)stored;
+#elif defined(__clang__)
+    result = __c11_atomic_exchange(value, stored, __ATOMIC_SEQ_CST);
+#else
+    result = __atomic_exchange_n(value, stored, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
+typedef struct DCancellationHandlers DCancellationHandlers;
+struct DCancellationHandlers
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct sigaction previous_interrupt;
+    struct sigaction previous_terminate;
+    struct sigaction previous_alarm;
+#endif
+    bool installed;
+};
+
+#if BUSTER_LINUX || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL void d_cancellation_handler(int signal_number)
+{
+    int child_signal = signal_number == SIGALRM ? SIGKILL : SIGTERM;
+    if (signal_number != SIGALRM) { d_atomic_set_if_zero(&d_cancellation_signal, (u64)signal_number); }
+    for (u32 index = 0; index < D_PROCESS_SLOT_COUNT; index += 1)
+    {
+        u64 group = d_atomic_load(d_active_process_groups + index);
+        if (group > 0)
+        {
+            // kill is async-signal-safe. Every tracked child leads a private
+            // process group, so grandchildren cannot outlive runner cleanup.
+            kill(-(pid_t)group, child_signal);
+        }
+    }
+    // Cooperative children get a bounded cleanup interval. SIGALRM then
+    // terminates any group which ignored the original cancellation.
+    if (signal_number != SIGALRM) { alarm(2); }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool d_cancellation_begin(DCancellationHandlers* handlers)
+{
+    bool result = true;
+    d_atomic_store(&d_cancellation_signal, 0);
+    for (u32 index = 0; index < D_PROCESS_SLOT_COUNT; index += 1) { d_atomic_store(d_active_process_groups + index, 0); }
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct sigaction action = {0};
+    action.sa_handler = d_cancellation_handler;
+    sigemptyset(&action.sa_mask);
+    result = sigaction(SIGALRM, &action, &handlers->previous_alarm) == 0;
+    if (result)
+    {
+        result = sigaction(SIGTERM, &action, &handlers->previous_terminate) == 0;
+        if (result)
+        {
+            result = sigaction(SIGINT, &action, &handlers->previous_interrupt) == 0;
+            if (!result) { sigaction(SIGTERM, &handlers->previous_terminate, 0); }
+        }
+        if (!result) { sigaction(SIGALRM, &handlers->previous_alarm, 0); }
+    }
+#endif
+    handlers->installed = result;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_cancellation_end(DCancellationHandlers* handlers)
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    if (handlers->installed)
+    {
+        alarm(0);
+        sigaction(SIGINT, &handlers->previous_interrupt, 0);
+        sigaction(SIGTERM, &handlers->previous_terminate, 0);
+        sigaction(SIGALRM, &handlers->previous_alarm, 0);
+    }
+#else
+    BUSTER_UNUSED(handlers);
+#endif
+    u32 result = (u32)d_atomic_load(&d_cancellation_signal);
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL bool d_mir_config(DConfig config)
 {
@@ -204,15 +346,38 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
     // a concurrent child can inherit another child's writer and delay its EOF.
     // Child execution and deadline waits remain concurrent.
     if (settings->spawn_mutex) { os_mutex_lock(settings->spawn_mutex); }
-    ProcessSpawnResult spawn = os_process_spawn(command, settings->environment_keys, settings->environment_values,
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                              .use_process_environment = !settings->explicit_environment});
+    ProcessSpawnResult spawn = {0};
+    if (!d_atomic_load(&d_cancellation_signal))
+    {
+        spawn = os_process_spawn(command, settings->environment_keys, settings->environment_values,
+            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                  .use_process_environment = !settings->explicit_environment,
+                                  .new_process_group = !BUSTER_WINDOWS});
+#if BUSTER_LINUX || BUSTER_MACOS
+        if (spawn.handle)
+        {
+            BUSTER_CHECK(settings->process_slot < D_PROCESS_SLOT_COUNT);
+            pid_t group = (pid_t)(u64)spawn.handle;
+            d_atomic_store(d_active_process_groups + settings->process_slot, (u64)group);
+            // Close the publication race: cancellation may have arrived after
+            // spawn but before this lane recorded the new process group.
+            if (d_atomic_load(&d_cancellation_signal)) { kill(-group, SIGTERM); }
+        }
+#endif
+    }
     if (settings->spawn_mutex) { os_mutex_unlock(settings->spawn_mutex); }
     DObservation observation = {.kind = D_SPAWN};
     if (spawn.handle)
     {
         ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, (u64)settings->timeout_seconds * 1000000);
         observation = d_wait_observation(wait);
+#if BUSTER_LINUX || BUSTER_MACOS
+        u64 group = d_atomic_exchange(d_active_process_groups + settings->process_slot, 0);
+        // Test-only injection at the exact completed-child/unregistered-slot
+        // boundary. The OS wait has already removed residual group members.
+        if (settings->self_test_cancel_after_unregister && !d_atomic_load(&d_cancellation_signal)) { raise(SIGTERM); }
+        BUSTER_CHECK(group == (u64)spawn.handle);
+#endif
     }
     d_write(settings, string_format(arena, S8("{S8}.stdout"), prefix), observation.output);
     d_write(settings, string_format(arena, S8("{S8}.stderr"), prefix), observation.error);
@@ -509,7 +674,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
     u32 trials = 0;
     u64 granularity = 2;
     bool exhausted = false;
-    while (!exhausted && trials < settings->reduce_limit && best.length)
+    while (!exhausted && trials < settings->reduce_limit && best.length && !d_atomic_load(&d_cancellation_signal))
     {
         u64 lines = 0;
         boundaries[lines++] = 0;
@@ -521,7 +686,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
         if (granularity > lines) { granularity = lines; }
         u64 chunk = (lines + granularity - 1) / granularity;
         bool changed = false;
-        for (u64 line = 0; !changed && line < lines && trials < settings->reduce_limit; line += chunk)
+        for (u64 line = 0; !changed && line < lines && trials < settings->reduce_limit && !d_atomic_load(&d_cancellation_signal); line += chunk)
         {
             u64 from = boundaries[line];
             u64 to = boundaries[BUSTER_MIN(line + chunk, lines)];
@@ -601,7 +766,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
             d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name));
         }
     }
-    for (u32 index = 0; ready && index < config_count; index += 1)
+    for (u32 index = 0; ready && index < config_count && !d_atomic_load(&d_cancellation_signal); index += 1)
     {
         u64 scratch = arena->position;
         DConfig config = configs[index];
@@ -634,7 +799,16 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
 
 // Explicit test children exercise the real capture/status/deadline path. They
 // never compile arbitrary source and run only on the private self-test command.
-BUSTER_GLOBAL_LOCAL void d_self_test_child(String8 mode)
+#if BUSTER_LINUX || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t d_cancel_tree_stop;
+BUSTER_GLOBAL_LOCAL void d_cancel_tree_handler(int signal_number)
+{
+    BUSTER_UNUSED(signal_number);
+    d_cancel_tree_stop = 1;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void d_self_test_child(Arena* arena, String8 mode, String8 path, u32 child_index, u32 child_count)
 {
     if (string_equal(mode, S8("exit")))
     {
@@ -669,6 +843,161 @@ BUSTER_GLOBAL_LOCAL void d_self_test_child(String8 mode)
 #endif
         exit(2);
     }
+#if BUSTER_LINUX || BUSTER_MACOS
+    else if (string_equal(mode, S8("cancel-tree")))
+    {
+        bool detached_leaf = child_count && child_index + 1 == child_count;
+        pid_t leaf = fork();
+        if (leaf == 0)
+        {
+            if (detached_leaf)
+            {
+                signal(SIGTERM, SIG_IGN);
+                close(STDOUT_FILENO);
+                close(STDERR_FILENO);
+            }
+            for (;;) { pause(); }
+        }
+        if (leaf > 0 && path.length)
+        {
+            struct sigaction action = {0};
+            action.sa_handler = d_cancel_tree_handler;
+            sigemptyset(&action.sa_mask);
+            bool handler_ready = sigaction(SIGTERM, &action, 0) == 0;
+            String8 marker = string_format_z(arena, S8("{S8}.{u32}"), path, child_index);
+            FILE* file = d_file_open((char*)marker.pointer, true, false);
+            if (file)
+            {
+                bool written = fprintf(file, "%ld\n", (long)getpid()) > 0 && fclose(file) == 0;
+                bool ready = handler_ready && written && child_count > 0;
+                bool all_ready = false;
+                u64 deadline = os_now_microseconds() + 5000000;
+                while (ready && !all_ready && os_now_microseconds() < deadline)
+                {
+                    all_ready = true;
+                    for (u32 index = 0; all_ready && index < child_count; index += 1)
+                    {
+                        all_ready = path_exists(arena, string_format(arena, S8("{S8}.{u32}"), path, index));
+                    }
+                    if (!all_ready)
+                    {
+                        struct timespec delay = {.tv_nsec = 10000000};
+                        nanosleep(&delay, 0);
+                    }
+                }
+                ready &= all_ready;
+                if (ready)
+                {
+                    if (detached_leaf) { exit(0); }
+                    else
+                    {
+                        while (!d_cancel_tree_stop) { pause(); }
+                        kill(leaf, SIGTERM);
+                        while (waitpid(leaf, 0, 0) < 0 && errno == EINTR) {}
+                        signal(SIGTERM, SIG_DFL);
+                        raise(SIGTERM);
+                    }
+                }
+            }
+            kill(leaf, SIGKILL);
+            waitpid(leaf, 0, 0);
+        }
+        exit(1);
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(path);
+#endif
+}
+
+typedef struct DCancellationSelfTestWork DCancellationSelfTestWork;
+struct DCancellationSelfTestWork
+{
+    DSettings settings;
+    String8 marker;
+    DObservation observations[4];
+    u32 jobs;
+};
+
+BUSTER_GLOBAL_LOCAL void d_cancellation_self_test_lane(void* argument)
+{
+    DCancellationSelfTestWork* work = argument;
+    u32 index = lane_index();
+    DSettings settings = work->settings;
+    settings.arena = arena_create((ArenaCreation){0});
+    settings.process_slot = index;
+    settings.self_test_cancel_after_unregister = index + 1 == work->jobs;
+    String8 index_text = string_format(settings.arena, S8("{u32}"), index);
+    String8 count_text = string_format(settings.arena, S8("{u32}"), work->jobs);
+    String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"),
+                     S8("--self-test-child"), S8("cancel-tree"), S8("--self-test-path"), work->marker,
+                     S8("--self-test-index"), index_text, S8("--self-test-count"), count_text};
+    work->observations[index] = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
+        string_format(settings.arena, S8("{S8}.{u32}.observation"), work->marker, index));
+    BUSTER_CHECK(arena_destroy(settings.arena, 1));
+}
+
+BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32* jobs);
+
+// Run only as a nested self-test process: its child creates a grandchild and
+// then cancels this runner. The production handlers must terminate the whole
+// private process group, reap the direct child, and finally preserve SIGTERM
+// as this process's externally visible status.
+BUSTER_GLOBAL_LOCAL u32 d_cancellation_self_test(Arena* arena, String8 marker)
+{
+    u32 errors = 0;
+#if BUSTER_LINUX || BUSTER_MACOS
+    DCancellationHandlers handlers = {0};
+    errors += !d_cancellation_begin(&handlers);
+    if (!errors)
+    {
+        DCancellationSelfTestWork work = {.settings = {.arena = arena, .timeout_seconds = 10}, .marker = marker};
+        errors += !d_jobs(BUSTER_ARRAY_LENGTH(work.observations), os_get_logical_thread_count(),
+            os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &work.jobs);
+        work.settings.spawn_mutex = os_mutex_create();
+        errors += !work.settings.spawn_mutex;
+        if (work.settings.spawn_mutex && work.jobs) { lane_run(work.jobs, &d_cancellation_self_test_lane, &work); }
+        for (u32 index = 0; index < work.jobs; index += 1)
+        {
+            DObservation observation = work.observations[index];
+            if (index + 1 == work.jobs) { errors += observation.kind != D_EXIT || observation.status != 0; }
+            else { errors += observation.kind != D_SIGNAL || (observation.status != SIGTERM && observation.status != SIGKILL); }
+            ByteSlice bytes = file_read(arena, string_format(arena, S8("{S8}.{u32}"), marker, index), (FileReadOptions){0});
+            String8 group_text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+            while (group_text.length && (group_text.pointer[group_text.length - 1] == '\n' || group_text.pointer[group_text.length - 1] == '\r'))
+            {
+                group_text.length -= 1;
+            }
+            u32 group = 0;
+            errors += !d_number(group_text, &group) || !group;
+            bool absent = false;
+            u64 deadline = os_now_microseconds() + 5000000;
+            while (!absent && os_now_microseconds() < deadline)
+            {
+                absent = kill(-(pid_t)group, 0) != 0 && errno == ESRCH;
+                if (!absent)
+                {
+                    struct timespec delay = {.tv_nsec = 10000000};
+                    nanosleep(&delay, 0);
+                }
+            }
+            errors += !absent || d_atomic_load(d_active_process_groups + index) != 0;
+        }
+        if (work.settings.spawn_mutex) { os_mutex_destroy(work.settings.spawn_mutex); }
+    }
+    u32 signal_number = d_cancellation_end(&handlers);
+    errors += signal_number != SIGTERM;
+    if (!errors)
+    {
+        fflush(0);
+        raise((int)signal_number);
+        errors = 1;
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(marker);
+#endif
+    return errors;
 }
 
 BUSTER_GLOBAL_LOCAL bool d_create_output(Arena* arena, String8 path)
@@ -795,6 +1124,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
     }
     for (;;)
     {
+        if (d_atomic_load(&d_cancellation_signal)) { break; }
         u64 index = atomic_u64_increment(&work->next);
         if (index >= work->count) { break; }
         DCase test = work->tests[index];
@@ -802,6 +1132,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
         if (work->self_test) { record->failures += !d_worker_self_test_enter(work, index); }
         DSettings settings = work->settings;
         settings.arena = arena;
+        settings.process_slot = lane_index();
         settings.report = 0;
         settings.log = 0;
         settings.rows = 0;
@@ -1167,6 +1498,25 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
                 string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL child={S8} kind={u32} status={u32} raw={u32}\n"), modes[index], (u32)child.kind, child.status, child.raw_status);
             }
         }
+#if BUSTER_LINUX || BUSTER_MACOS
+        {
+            u32 before_child = errors;
+            String8 marker = path_join(arena, directory, S8("cancellation.pid"));
+            String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"),
+                             S8("--self-test-cancellation"), marker};
+            DSettings cancellation_settings = settings;
+            cancellation_settings.timeout_seconds = 10;
+            DObservation child = d_observe(&cancellation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
+                path_join(arena, directory, S8("cancellation")));
+            settings.io_failed |= cancellation_settings.io_failed;
+            errors += child.kind != D_SIGNAL || child.status != SIGTERM;
+            if (errors != before_child)
+            {
+                string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL cancellation kind={u32} status={u32} raw={u32}\n"),
+                    (u32)child.kind, child.status, child.raw_status);
+            }
+        }
+#endif
         DConfig config = {.allocator = 0};
         DObservation telemetry = {.output = S8("warning\nCODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n")};
         errors += !d_verification(&settings, &telemetry, config) || !string_equal(telemetry.output, S8("warning\n"));
@@ -1223,8 +1573,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         .out = S8("build/differential"), .timeout_seconds = 10, .reduce_limit = 64, .verify = true};
     DCase custom = {.name = S8("custom")};
     bool list = false, self_test = false, valid = true;
-    String8 child_mode = {0};
-    u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1;
+    String8 child_mode = {0}, self_test_path = {0}, cancellation_test = {0};
+    u32 cancellation_signal = 0;
+    u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1, self_test_index = 0, self_test_count = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 arg = arguments.pointer[index];
@@ -1239,6 +1590,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         {
             String8 value = arguments.pointer[++index];
             if (string_equal(arg, S8("--self-test-child"))) { child_mode = value; }
+            else if (string_equal(arg, S8("--self-test-path"))) { self_test_path = value; }
+            else if (string_equal(arg, S8("--self-test-cancellation"))) { cancellation_test = value; }
+            else if (string_equal(arg, S8("--self-test-index"))) { valid &= d_number(value, &self_test_index); }
+            else if (string_equal(arg, S8("--self-test-count"))) { valid &= d_number(value, &self_test_count); }
             else if (string_equal(arg, S8("--ide"))) { settings.ide = value; }
             else if (string_equal(arg, S8("--cc"))) { settings.cc = value; }
             else if (string_equal(arg, S8("--out"))) { settings.out = value; }
@@ -1253,7 +1608,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             else { valid = false; }
         }
     }
-    if (child_mode.length) { d_self_test_child(child_mode); valid = false; }
+    if (child_mode.length) { d_self_test_child(arena, child_mode, self_test_path, self_test_index, self_test_count); valid = false; }
     valid &= !(custom.host.length && custom.reject) && (!(custom.host.length || custom.reject) || custom.source.length);
     valid &= d_jobs(requested_jobs, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &jobs);
     u32 total_cases = custom.source.length ? 1 : (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
@@ -1262,7 +1617,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     DConfig* configs = arena_allocate(arena, DConfig, count);
     d_matrix(configs, count);
     u32 failures = 0;
-    if (!valid)
+    if (cancellation_test.length) { failures = d_cancellation_self_test(arena, cancellation_test); }
+    else if (!valid)
     {
         string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
@@ -1294,6 +1650,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                 if (!settings.report) { failures = 1; }
                 else
                 {
+                    DCancellationHandlers cancellation_handlers = {0};
+                    bool cancellation_ready = d_cancellation_begin(&cancellation_handlers);
+                    if (!cancellation_ready)
+                    {
+                        string_print(S8("error: failed to install differential cancellation handlers\n"));
+                        failures += 1;
+                    }
                     settings.io_failed |= fprintf(settings.report, "prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us\n") < 0;
                     String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\nstrict_mir={u32}\n"),
                         settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated,
@@ -1313,13 +1676,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                     }
                     d_write(&settings, path_join(arena, settings.out, S8("configurations.txt")),
                         string_join_arena(arena, (SliceString8){.pointer = config_names, .length = count * 2}, false));
-                    if (custom.source.length)
+                    if (cancellation_ready && custom.source.length)
                     {
                         custom.source = os_path_absolute(arena, custom.source, true);
                         if (custom.host.length) { custom.host = os_path_absolute(arena, custom.host, true); }
                         failures += d_cases_run(&settings, &custom, 1, configs, count, jobs);
                     }
-                    else
+                    else if (cancellation_ready)
                     {
                         u32 case_count = (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
                         DCase* cases = arena_allocate(arena, DCase, case_count);
@@ -1341,11 +1704,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                     settings.io_failed |= fclose(settings.report) != 0;
                     d_write(&settings, path_join(arena, settings.out, S8("summary.txt")),
                         string_format(arena, S8("version=1 failures={u32} io_failed={u32} configurations={u32}\n"), failures, (u32)settings.io_failed, count));
+                    cancellation_signal = d_cancellation_end(&cancellation_handlers);
                 }
             }
         }
     }
     failures += settings.io_failed;
     string_print(S8("DIFFERENTIAL_SUMMARY failures={u32} configurations={u32}\n"), failures, count);
+    if (cancellation_signal)
+    {
+        fflush(0);
+        raise((int)cancellation_signal);
+        failures = 1;
+    }
     return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }

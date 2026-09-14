@@ -321,6 +321,13 @@ truncated or unwritable evidence fails the aggregate. Failed child launch,
 crash, timeout and recovering sanitizer reports retain their existing failure
 semantics. No test is dropped when another case fails.
 
+On Linux and macOS every compiler, linker and executed program leads a private
+process group. `SIGINT` or `SIGTERM` stops further case/configuration admission,
+signals every active group, waits for the admitted lanes to finish child and
+arena cleanup, and then re-raises the original signal. A two-second alarm
+escalates groups which ignore termination. Deadline cleanup uses the same group
+boundary, so a compiler-owned helper cannot survive its timed-out parent.
+
 The existing self-test runs this same worker and collection path with real
 children at one and multiple lanes (respecting the quota), checks ordered binary
 observations, and injects crashes, deadlines, failed launches, duplicate case
@@ -356,6 +363,17 @@ and all cases and case-owned arenas must be inactive after the lane barrier.
 These are self-test-only counters, not process RSS or corpus instrumentation.
 Existing crash, timeout, failed-launch, sanitizer, missing/duplicate completion,
 damaged-stream and evidence-write controls remain registered.
+
+The Unix self-test also requests four children, applies the normal host/quota
+clamp, and gives each admitted child a live grandchild. The children rendezvous
+before cancelling the nested runner. The last grandchild ignores `SIGTERM` and
+closes its inherited capture descriptors while its direct parent exits, proving
+that post-wait cleanup cannot lose a detached helper. Its lane injects `SIGTERM`
+immediately after atomically unregistering the completed group; the other live
+lanes must still be cancelled. The control requires every process group to be
+absent, all active slots to be cleared and the runner to retain the original
+`SIGTERM` status. This exercises the production signal, wait and process-group
+path rather than only worker counters.
 
 These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
 policy remains one worker, and #408's matched full-CI latency, aggregate runner
