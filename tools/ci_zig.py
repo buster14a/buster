@@ -3,7 +3,11 @@
 
 The reviewed manifest owns the version and all six target digests. Both cache
 hits and downloads cross the same verification boundary before tar or Zig runs.
-This is dependency setup only; build.c continues to own the compiler matrix.
+Its per-target compressed sizes mirror the official Zig release index
+(https://ziglang.org/download/index.json) for the pinned version and are the
+receipt ceilings; a future pin update must update the corresponding size facts
+with its digest. This is dependency setup only; build.c continues to own the
+compiler matrix.
 """
 import argparse
 import hashlib
@@ -11,7 +15,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,19 +24,29 @@ import urllib.request
 
 TARGETS = frozenset(f"{arch}-{system}" for arch in ("x86_64", "aarch64")
                     for system in ("linux", "macos", "windows"))
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_TIMEOUT_SECONDS = 60
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def load_pin(manifest, target):
     data = json.loads(Path(manifest).read_text(encoding="utf-8"))
-    if target not in TARGETS or set(data["sha256"]) != TARGETS:
+    digests = data.get("sha256")
+    sizes = data.get("size")
+    if target not in TARGETS or not isinstance(digests, dict) or set(digests) != TARGETS:
         raise ValueError("Zig manifest must cover exactly the six supported targets")
+    if not isinstance(sizes, dict) or set(sizes) != TARGETS:
+        raise ValueError("Zig manifest must provide sizes for exactly the six supported targets")
     version = data["version"]
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("Zig version must be an exact release")
-    for digest in data["sha256"].values():
+    for digest in digests.values():
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("Zig digests must be lowercase SHA-256 values")
-    return version, data["sha256"][target]
+    for size in sizes.values():
+        if type(size) is not int or size < 0:
+            raise ValueError("Zig archive sizes must be non-negative integers")
+    return version, digests[target], sizes[target]
 
 
 def verify_archive(archive, expected):
@@ -47,29 +60,62 @@ def verify_archive(archive, expected):
                          "Do not execute or republish this cache entry.")
 
 
-def download_archive(url, destination):
-    """Bound network retries; partial downloads never become cache entries."""
+def _copy_archive(source, output, maximum):
+    received = 0
+    while True:
+        remaining = maximum - received
+        read_size = min(DOWNLOAD_CHUNK_SIZE, remaining + 1)
+        chunk = source.read(read_size)
+        if not chunk:
+            break
+        received += len(chunk)
+        if received > maximum:
+            raise ValueError(f"Zig archive exceeds maximum compressed size of {maximum} bytes "
+                             f"(received {received} bytes)")
+        written = output.write(chunk)
+        if written != len(chunk):
+            raise OSError(f"short Zig archive write: wrote {written} of {len(chunk)} bytes")
+        if received == maximum:
+            extra = source.read(1)
+            if extra:
+                received += len(extra)
+                raise ValueError(f"Zig archive exceeds maximum compressed size of {maximum} bytes "
+                                 f"(received at least {received} bytes)")
+            break
+    return received
+
+
+def _remove_partial(partial):
+    partial.unlink(missing_ok=True)
+
+
+def download_archive(url, destination, max_bytes):
+    """Bound received bytes and network retries; partial files never cache."""
     destination = Path(destination)
     partial = destination.with_name(destination.name + ".part")
-    complete = False
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("Zig archive maximum size must be a non-negative integer")
     try:
-        for attempt in range(3):
-            if not complete:
-                try:
-                    with urllib.request.urlopen(url, timeout=60) as source, partial.open("wb") as output:
-                        shutil.copyfileobj(source, output, length=1024 * 1024)
-                    partial.replace(destination)
-                    complete = True
-                except (OSError, urllib.error.URLError):
-                    if attempt == 2:
-                        raise
-                    time.sleep(attempt + 1)
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as source, partial.open("wb") as output:
+                    _copy_archive(source, output, max_bytes)
+                partial.replace(destination)
+                return
+            except ValueError:
+                _remove_partial(partial)
+                raise
+            except (OSError, urllib.error.URLError):
+                _remove_partial(partial)
+                if attempt == DOWNLOAD_ATTEMPTS - 1:
+                    raise
+                time.sleep(attempt + 1)
     finally:
-        partial.unlink(missing_ok=True)
+        _remove_partial(partial)
 
 
 def install(target, manifest, cache_directory, install_directory, github_path=None):
-    version, digest = load_pin(manifest, target)
+    version, digest, max_bytes = load_pin(manifest, target)
     archive = Path(cache_directory).resolve() / "archive"
     root = Path(install_directory).resolve()
     if root.exists():
@@ -80,7 +126,7 @@ def install(target, manifest, cache_directory, install_directory, github_path=No
     if not cached:
         extension = "zip" if target.endswith("-windows") else "tar.xz"
         url = f"https://ziglang.org/download/{version}/zig-{target}-{version}.{extension}"
-        download_archive(url, archive)
+        download_archive(url, archive, max_bytes)
     # Never trust cache-hit, archive names, or a prior extraction as integrity.
     verify_archive(archive, digest)
     root.parent.mkdir(parents=True, exist_ok=True)
