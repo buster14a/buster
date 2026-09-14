@@ -13,6 +13,7 @@
 #include <errno.h>
 
 #define BQ_SCHEMA 1u
+#define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 #define BQ_JOB_CAP 64u
 #define BQ_EVENT_CAP (BQ_JOB_CAP * 16u)
@@ -20,12 +21,15 @@
 #define BQ_HEADER_SIZE 160u
 #define BQ_RECORD_CAP (BQ_HEADER_SIZE + BQ_REQUEST_CAP)
 #define BQ_FIELD_COUNT 5u
+#define BQ_PATH_CAP 192u
 
 typedef enum BqError
 {
     BQ_OK, BQ_BAD_REQUEST, BQ_CONFLICT, BQ_FULL, BQ_BUSY, BQ_IO,
     BQ_CORRUPT, BQ_RECONCILIATION_REQUIRED, BQ_NOT_FOUND,
-    BQ_UNSUPPORTED, BQ_INVALID_TRANSITION
+    BQ_UNSUPPORTED, BQ_INVALID_TRANSITION, BQ_RECIPE_MISMATCH,
+    BQ_SOURCE_MISMATCH, BQ_WORKSPACE_MISMATCH, BQ_CLEANUP_FAILED,
+    BQ_CONFIGURATION_MISMATCH
 } BqError;
 
 typedef enum BqPhase
@@ -58,8 +62,8 @@ typedef struct BqRequest
 typedef struct BqJob
 {
     u64 id;
-    /* Reservation sequence is the immutable fake attempt/ownership token.
-     * It is NOT a PID, boot identity, real worker lease or exactly-once proof. */
+    /* Reservation sequence is the immutable attempt/ownership token. It is
+     * NOT a PID, boot identity, host lease or exactly-once proof. */
     u64 token;
     BqPhase phase;
     BqOutcome outcome;
@@ -130,5 +134,11 @@ BUSTER_F_DECL BqError bq_cancel(BqQueue* queue, u64 id);
 BUSTER_F_DECL BqError bq_fake_step(BqQueue* queue, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_fake_run(BqQueue* queue, u64* id);
 BUSTER_F_DECL BqError bq_fake_reconcile(BqQueue* queue, u64 id, u64 token);
+BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);
+BUSTER_F_DECL bool bq_recipe_real(BqRequest const* request);
+BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
+BUSTER_F_DECL BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token);
+BUSTER_F_DECL bool bq_workspace_name(char result[64], u64 id, u64 token);
+BUSTER_F_DECL BqError bq_failure_evidence(BqQueue* queue, BqJob const* job);
 BUSTER_F_DECL char const* bq_error_name(BqError error);
 #endif

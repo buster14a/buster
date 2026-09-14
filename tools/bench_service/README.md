@@ -1,10 +1,11 @@
-# Native durable queue: first software slice of #437
+# Native queue and installed-input materializer for #437
 
-This is a local, one-shot **fake-worker** control tool, not the dedicated-host
-service. It does not execute source, spawn workers, acquire the measurement
-host's inherited lease, change server configuration, listen on a socket,
-authenticate callers, measure performance or qualify a 9700X. Do not close #437
-or accept compiler performance changes because these tests pass.
+This is a local, one-shot control tool with a deterministic fake worker and a
+real installed-input materialization boundary. It is not yet the dedicated-host
+service. It does not execute source, spawn or contain workers, acquire the
+measurement host's inherited lease, change server configuration, listen on a
+socket, authenticate callers, measure performance or qualify a 9700X. Do not
+close #437 or accept compiler performance changes because these tests pass.
 
 ## Build and registered tests
 
@@ -24,12 +25,28 @@ foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
 The normal native executable is `build/bench-service-tools/service` (`.exe` on
-Windows). Tests use private, disposable directories with deterministic scenarios;
+Windows). Tests use private, disposable directories with deterministic source manifests;
 no sleeps, timing assertions, external workers or network access are involved.
 Windows validates the portable codec and rejects durable queue opening as
 unsupported. **Journal durability and fake execution are POSIX-only in this
 slice**; native Linux/macOS test evidence must not be described as Windows
 storage support.
+
+The optional materializer additionally takes two absolute, bounded paths from
+the trusted local worker/operator interface, never from a submitted job:
+
+* `INSTALLED_ROOT` is an operator-owned, read-only tree. The selected recipe,
+  source directories, manifests, and source files must have no write bits.
+  Every absolute-path component is opened relative to its verified parent with
+  symbolic-link following disabled.
+* `WORKSPACE_ROOT` is an already provisioned private local directory owned by
+  the service account. Every attempt uses an exclusive deterministic child and
+  refuses an existing child rather than deleting or reusing it.
+
+These paths configure installed policy and job storage. They do not add
+request-controlled commands, flags, source paths, or executable paths. The
+eventual worker unit must pin them; this unauthenticated local interface must
+not be exposed to untrusted callers.
 
 ## Ownership and storage contract
 
@@ -101,7 +118,7 @@ idempotency, not by claiming exactly-once execution.
 Event payloads are canonical request bytes for submit; `(job, token)` as two
 64-bit integers for reserve/reconcile; `(job, token, next_phase, outcome)` as
 8+8+4+4 bytes for advance; and an eight-byte job ID for cancel. Submit sequence
-is the job ID. Reservation sequence is the immutable fake-attempt token.
+is the job ID. Reservation sequence is the immutable attempt token.
 
 ## Admission, identities and fake execution
 
@@ -109,13 +126,15 @@ The submission is five consecutive `(u32 byte_count, bytes)` fields: principal,
 idempotency key, installed recipe, base source ID and candidate source ID.
 Principals (1..32 bytes) and keys (1..64 bytes) use ASCII letters, digits, `.`,
 `_`, `-`. Source IDs are full lowercase 40- or 64-hex digests of the same width,
-not branch names, abbreviated revisions or shell strings. This fake slice
-validates identity syntax only: it does not fetch or prove that commits exist.
+not branch names, abbreviated revisions or shell strings. Fake recipes validate
+identity syntax only; the real recipe below verifies an installed snapshot.
 
 Recipes `fake-success-v1` and `fake-failure-v1` have immutable schema-1 meanings:
 repository `buster`, workload `fake-steps-v1`, profile `unmeasured`, toolchain
 `none`, oracle `fake-v1`. The CLI cannot supply flags or arbitrary programs.
-Future real recipes require their own pinned manifest and execution validation.
+`validate-buster-v1` is the first real materialization recipe. Its exact installed
+bytes are checked against `profiles/validate-buster-v1.recipe`; it still does
+not execute a build.
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.
 
@@ -146,9 +165,60 @@ ordinary fake advancement stop. The explicit `fake-reconcile JOB TOKEN`
 operation validates the persisted token and finishes interrupted work without
 rerunning it. If execution outcome was already recorded during finalization,
 it is preserved while cleanup is reconciled. This operation is justified only
-because **schema 1 cannot spawn an external worker**. A real service must prove
+because **fake recipes cannot spawn an external worker**. A real service must prove
 boot/unit/process ownership, cleanup and inherited-lease state; this fake
 operation is not a real-host force-unlock interface.
+
+## Installed snapshots and immutable attempt workspaces
+
+The materializer reserves the next FIFO job before reading installed inputs, so
+validation and copying stay inside the queue's existing whole-job authority. A
+fake operation refuses a real job, and a materialization operation refuses a
+fake job without reserving it.
+
+Each requested identity selects `INSTALLED_ROOT/sources/<identity>`, containing
+a read-only `source.manifest`:
+
+```text
+BQ-SOURCE-V1
+repository=buster14a/buster
+revision=<exact 40- or 64-hex request identity>
+<lowercase file sha256> <strict relative path>
+...
+```
+
+The manifest is capped at 64 KiB and 4,096 sorted unique entries; individual
+files are capped at 64 MiB and each snapshot at 512 MiB. Empty components, `.`, `..`, absolute paths,
+backslashes, symbolic-link traversal, writable/nonregular source files, hash or
+revision mismatch, missing files, duplicates, and unsorted paths fail closed.
+Only listed, verified bytes are copied, so unlisted installed files cannot
+affect a job. These are implementation limits, not a claim that an operator has
+installed a complete Buster snapshot.
+
+An admitted attempt is `WORKSPACE_ROOT/job-<job>-attempt-<token>` with disjoint
+`base/source`, `base/build`, `candidate/source`, and `candidate/build`
+directories. Source copies and their directories become read-only after hash
+verification. Build directories remain writable and are never shared, so
+`generate` on one subject cannot delete a tree used by the other subject or by
+another attempt. A read-only `.identity` binds the directory to job, token,
+request digest, recipe, and both source identities before the preparing event
+is persisted.
+
+Recipe/source/materialization failures publish an immutable `failure-<job>`
+record in the queue directory before the existing journal advances to cleaning.
+The record binds job, attempt token, request digest, and a bounded reason.
+Status and result responses retain that reason after restart. Admission is
+released only after the seal-matched workspace has been completely removed and
+the finished event is durable. A stale directory, altered seal, ambiguous
+failure record, directory-count overflow, or failed removal keeps the job active
+and reconciliation required. Cleanup never follows symbolic links.
+
+`workspace-reconcile` may remove only the deterministic directory whose seal
+matches the active job/token. A missing directory is accepted only when the
+journal says preparation did not complete or cleaning already began; a missing
+prepared workspace is an error. This does not inspect cgroups or prove process-
+tree cleanup, so no real command can execute until the later Linux supervisor
+and containment slice supplies that boundary.
 
 ## CLI
 
@@ -166,6 +236,9 @@ Use a pre-provisioned durable private directory, represented here by `STATE`:
 ./build.sh bench_service cancel STATE 1
 # Only after recovery of a crashed fake attempt; use its actual persisted token:
 ./build.sh bench_service fake-reconcile STATE JOB TOKEN
+# Trusted worker/operator paths, not submitted request fields:
+./build.sh bench_service materialize STATE INSTALLED_ROOT WORKSPACE_ROOT
+./build.sh bench_service workspace-reconcile STATE WORKSPACE_ROOT JOB TOKEN
 ```
 
 `status` and `result` report phase/outcome/validity independently. `logs` pages
@@ -182,20 +255,26 @@ stdin, and writes one response frame. It is a local pipe codec, not a daemon,
 network transport, timeout policy or authentication service. Human CLI commands
 use this same dispatcher.
 
-The 24-byte header is `BQP1` (four bytes), schema (u32=1), operation (u32), payload
-length (u32 <=512), correlation (u64). Truncation, trailing bytes, unsupported
-versions/operations, malformed payloads and oversized lengths fail. Response
-operation is request operation OR `0x80000000`; correlation is echoed for a
+The 24-byte header is `BQP1` (four bytes), schema (u32), operation (u32), payload
+length (u32 <=512), correlation (u64). Schema 2 adds operations 9/10 and the
+failure field while retaining schema 1 request/response behavior and its
+120-byte status body. Truncation, trailing bytes, unsupported versions or
+operations, malformed payloads, and oversized lengths fail. Response operation
+is request operation OR `0x80000000`; schema and correlation are echoed for a
 valid envelope. Every response payload begins with a four-byte `BqError` code
 (see `queue.h`); nonzero codes must be handled before parsing a success payload.
 
-Operations 1..8 are capabilities (empty), submit (canonical request), status
+Operations 1..10 are capabilities (empty), submit (canonical request), status
 (job u64), result (job u64), cancel (job u64), logs (job u64, after-sequence u64),
-fake-run (empty), fake-reconcile (job u64, token u64).
+fake-run (empty), fake-reconcile (job u64, token u64), materialize (installed
+path length u32, workspace path length u32, then both paths), and
+workspace-reconcile (job u64, token u64, workspace path length u32, path).
+Both paths are absolute and at most 192 bytes.
 
-Status-like replies have 120-byte bodies: error at 0; job/token/journal-sequence
+Schema 2 status-like replies have 124-byte bodies: error at 0; job/token/journal-sequence
 u64 at 4/12/20; phase/outcome/validity/cancel-intent/reconciliation/pending/retained
-u32 at 28/32/36/40/44/48/52; request digest (64 hex bytes) at 56. Capabilities
+u32 at 28/32/36/40/44/48/52; request digest (64 hex bytes) at 56; durable
+materialization failure code at 120 (zero when absent). Capabilities
 returns fixed UTF-8 text after the error code. Logs returns count at 4 (u32),
 next cursor at 8 (u64), more at 16 (u32), then up to four 32-byte event entries:
 sequence u64, job u64, kind/phase/outcome/validity u32. A client follows `next`
@@ -203,7 +282,7 @@ only when `more` is nonzero. Output memory never scales with input lengths.
 
 ## Requirement mapping and remaining gates
 
-| #437 first-slice requirement | Implementation / deterministic native coverage |
+| #437 queue/materializer requirement | Implementation / deterministic native coverage |
 | --- | --- |
 | Durable bounded single-writer journal | `bq_open`, `bq_append`, `bq_replay`; competing handles, real short writes, sync/ack faults |
 | Bounded framing, sequence, checksums | Canonical encoding; every partial final-frame prefix; header/payload corruption; duplicate sequence; oversized lengths; checksum-valid illegal transitions |
@@ -212,13 +291,16 @@ only when `more` is nonzero. Output memory never scales with input lengths.
 | Recovery without exactly-once fiction | Poisoned I/O handles; partial/full reservation boundaries; reconciliation required before reuse; recorded outcome preserved |
 | Bounded CLI/control operations | Same dispatcher for CLI and binary frames; truncation/version/length/numeric validation; bounded journal-event pagination |
 | Separate execution outcome/validity | Successful, failed, cancelled and interrupted fake jobs remain not-evaluated |
+| Installed recipe/source validation | Exact recipe bytes; requested revision, safe sorted paths and source SHA-256; durable failure reasons |
+| Per-attempt workspace isolation | Exclusive job/token identity; separate base/candidate source and build trees; read-only verified sources |
+| Cleanup/recovery | Seal-required removal, restart reconciliation, collision/tamper/cleanup failures retain active admission |
 
 These are new-feature acceptance tests, not a claim of a pre-existing queue bug
-reproduced on main. Main has no `bench_service` implementation. Exact candidate
-SHAs, commands and observed CI results belong in the PR evidence; this document
-is not an assertion that unrun gates passed.
+reproduced on main. Exact candidate SHAs, commands and observed CI results
+belong in the PR evidence; this document is not an assertion that unrun gates
+passed.
 
-Still outside this slice: real recipes/source materialization; systemd and
+Still outside this slice: build/validate/compare execution; systemd and process
 containment; inherited measurement lease integration; boot/unit reconciliation;
 transport/authentication; multi-client service loop; deployment and retention
 migration; qualification, A/A, physical 9700X acceptance and real result bundles.

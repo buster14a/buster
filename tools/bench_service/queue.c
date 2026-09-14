@@ -94,6 +94,19 @@ BUSTER_GLOBAL_LOCAL bool bq_source_identity(String8 value)
     return ok;
 }
 
+bool bq_recipe_fake(BqRequest const* request)
+{
+    String8 recipe = bq_field(request, 2);
+    bool result = string_equal(recipe, S8("fake-success-v1")) || string_equal(recipe, S8("fake-failure-v1"));
+    return result;
+}
+
+bool bq_recipe_real(BqRequest const* request)
+{
+    bool result = string_equal(bq_field(request, 2), S8("validate-buster-v1"));
+    return result;
+}
+
 bool bq_request_valid(BqRequest const* request)
 {
     String8 principal = bq_field(request, 0);
@@ -102,7 +115,8 @@ bool bq_request_valid(BqRequest const* request)
     String8 base = bq_field(request, 3);
     String8 candidate = bq_field(request, 4);
     bool ok = bq_name(principal, 32) && bq_name(key, 64) &&
-              (string_equal(recipe, S8("fake-success-v1")) || string_equal(recipe, S8("fake-failure-v1"))) &&
+              (string_equal(recipe, S8("fake-success-v1")) || string_equal(recipe, S8("fake-failure-v1")) ||
+               string_equal(recipe, S8("validate-buster-v1"))) &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;
@@ -286,6 +300,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
                 BqOutcome expected = job->outcome;
                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
+                bool failure_cleanup = bq_recipe_real(&job->request) && job->phase < BQ_CLEANING && next == BQ_CLEANING && outcome == BQ_FAILED;
                 if (next == BQ_FINALIZING)
                 {
                     expected = string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
@@ -294,7 +309,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
                 {
                     expected = BQ_CANCELLED;
                 }
-                if ((!advance && !cancel_cleanup) || outcome != (u32)expected)
+                if ((!advance && !cancel_cleanup && !failure_cleanup) || (!failure_cleanup && outcome != (u32)expected))
                 {
                     error = BQ_INVALID_TRANSITION;
                 }
@@ -673,7 +688,8 @@ BqError bq_fake_step(BqQueue* queue, u64 id, u64 token)
 {
     BqJob* job = bq_job(&queue->state, id);
     BqError error = queue->poisoned ? BQ_IO : queue->needs_reconciliation ? BQ_RECONCILIATION_REQUIRED :
-                    !job ? BQ_NOT_FOUND : job->id != queue->state.active_id || job->token != token ? BQ_INVALID_TRANSITION : BQ_OK;
+                    !job ? BQ_NOT_FOUND : !bq_recipe_fake(&job->request) ? BQ_UNSUPPORTED :
+                    job->id != queue->state.active_id || job->token != token ? BQ_INVALID_TRANSITION : BQ_OK;
     if (error == BQ_OK)
     {
         BqPhase next = job->cancel_requested && job->phase < BQ_CLEANING ? BQ_CLEANING : (BqPhase)(job->phase + 1);
@@ -699,7 +715,14 @@ BqError bq_fake_step(BqQueue* queue, u64 id, u64 token)
 BqError bq_fake_run(BqQueue* queue, u64* id)
 {
     u64 token = 0;
-    BqError error = bq_reserve(queue, id, &token);
+    BqError error = BQ_NOT_FOUND;
+    for (u32 i = 0; i < queue->state.job_count && error == BQ_NOT_FOUND; i += 1)
+    {
+        if (queue->state.jobs[i].phase == BQ_QUEUED)
+        {
+            error = bq_recipe_fake(&queue->state.jobs[i].request) ? bq_reserve(queue, id, &token) : BQ_UNSUPPORTED;
+        }
+    }
     for (u32 step = 0; error == BQ_OK && queue->state.active_id && step < BQ_FINISHED; step += 1)
     {
         error = bq_fake_step(queue, *id, token);
@@ -709,11 +732,13 @@ BqError bq_fake_run(BqQueue* queue, u64* id)
 
 BqError bq_fake_reconcile(BqQueue* queue, u64 id, u64 token)
 {
-    BqError error = queue->poisoned ? BQ_IO : !queue->needs_reconciliation ? BQ_INVALID_TRANSITION : BQ_OK;
+    BqJob* job = bq_job(&queue->state, id);
+    BqError error = queue->poisoned ? BQ_IO : !queue->needs_reconciliation ? BQ_INVALID_TRANSITION :
+                    !job ? BQ_NOT_FOUND : !bq_recipe_fake(&job->request) ? BQ_UNSUPPORTED : BQ_OK;
     if (error == BQ_OK)
     {
-        /* Valid ONLY because this schema can never spawn an external worker.
-         * A real executor must use verified boot/unit/lease reconciliation. */
+        /* Valid ONLY for fake recipes, which can never spawn an external
+         * worker. A real executor needs boot/unit/lease reconciliation. */
         u8 body[16];
         bq_put64(body, id);
         bq_put64(body + 8, token);
@@ -729,7 +754,8 @@ BqError bq_fake_reconcile(BqQueue* queue, u64 id, u64 token)
 char const* bq_error_name(BqError error)
 {
     char const* names[] = {"ok", "bad-request", "conflicting-key", "queue-full", "busy", "io-uncertain",
-                           "corrupt-journal", "reconciliation-required", "not-found", "unsupported", "invalid-transition"};
+                           "corrupt-journal", "reconciliation-required", "not-found", "unsupported", "invalid-transition",
+                           "recipe-mismatch", "source-mismatch", "workspace-mismatch", "cleanup-failed", "configuration-mismatch"};
     char const* result = (u32)error < sizeof(names) / sizeof(names[0]) ? names[error] : "unknown-error";
     return result;
 }
