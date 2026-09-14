@@ -1,4 +1,4 @@
-/* First software slice of #437. No host execution, transport or benchmark
+/* Queue/materializer software for #437. No host execution, transport or benchmark
  * qualification lives here. queue.c owns persistence and all state changes;
  * protocol.c is the bounded control boundary. See README.md before extending.
  */
@@ -12,7 +12,8 @@
 #include <string.h>
 #include <errno.h>
 
-#define BQ_SCHEMA 1u
+#define BQ_SCHEMA_LEGACY 1u
+#define BQ_SCHEMA 2u
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 #define BQ_JOB_CAP 64u
@@ -86,6 +87,7 @@ typedef struct BqState
 {
     u64 sequence;
     u64 active_id;
+    u32 journal_schema;
     u32 job_count;
     u32 event_count;
     BqJob jobs[BQ_JOB_CAP];

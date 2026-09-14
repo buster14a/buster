@@ -33,7 +33,7 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal-schema=1 executor=fake-only repository=buster pending=8 lifetime-jobs=64\n"
+    "schema=2 journal-schema=2 legacy-journal-schema=1 executor=fake-only repository=buster pending=8 lifetime-jobs=64\n"
     "recipes=fake-success-v1,fake-failure-v1,validate-buster-v1 workload=fake-steps-v1\n"
     "profile=unmeasured toolchain=none oracle=fake-v1 validity=not-evaluated\n"
     "materialization=installed-read-only-manifest workspace=per-attempt-isolated\n"
@@ -106,7 +106,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         else if ((operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL) && length == 8)
         {
             id = bq_u64(body);
-            error = bq_job(&queue->state, id) ? BQ_OK : BQ_NOT_FOUND;
+            BqJob* job = bq_job(&queue->state, id);
+            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED : BQ_OK;
             if (error == BQ_OK && operation == BQ_OP_CANCEL)
             {
                 error = bq_cancel(queue, id);
@@ -149,7 +150,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             id = bq_u64(body);
             u64 after = bq_u64(body + 8);
-            error = !bq_job(&queue->state, id) ? BQ_NOT_FOUND : after > queue->state.sequence ? BQ_BAD_REQUEST : BQ_OK;
+            BqJob* job = bq_job(&queue->state, id);
+            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED :
+                    after > queue->state.sequence ? BQ_BAD_REQUEST : BQ_OK;
             if (error == BQ_OK)
             {
                 u32 count = 0;
@@ -206,6 +209,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             BqError failure = job ? bq_failure_evidence(queue, job) : BQ_NOT_FOUND;
             bq_put32(output + 120, failure != BQ_NOT_FOUND && failure != BQ_UNSUPPORTED ? (u32)failure : 0);
+            if (error == BQ_OK && (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT) &&
+                (failure == BQ_CORRUPT || failure == BQ_IO))
+            {
+                error = failure;
+            }
         }
     }
     bq_put32(output, (u32)error);

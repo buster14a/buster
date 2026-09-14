@@ -35,8 +35,8 @@ storage support.
 The optional materializer additionally takes two absolute, bounded paths from
 the trusted local worker/operator interface, never from a submitted job:
 
-* `INSTALLED_ROOT` is an operator-owned, read-only tree. The selected recipe,
-  source directories, manifests, and source files must have no write bits.
+* `INSTALLED_ROOT` is an operator-provisioned, mode-read-only tree. The selected
+  recipe, source directories, manifests, and source files must have no write bits.
   Every absolute-path component is opened relative to its verified parent with
   symbolic-link following disabled.
 * `WORKSPACE_ROOT` is an already provisioned private local directory owned by
@@ -47,6 +47,14 @@ These paths configure installed policy and job storage. They do not add
 request-controlled commands, flags, source paths, or executable paths. The
 eventual worker unit must pin them; this unauthenticated local interface must
 not be exposed to untrusted callers.
+
+POSIX write-bit removal prevents accidental writes but is not an immutable-file
+security boundary against the owning effective UID, which can restore write
+permission. Tests explicitly exercise that limitation. A production unit must
+install policy/source inputs under a distinct operator identity and must not run
+an executable worker with the materializer's storage authority. This slice has
+no executable worker; privilege separation or a platform sealing facility is a
+later containment gate.
 
 ## Ownership and storage contract
 
@@ -70,8 +78,8 @@ synced on opening, including an empty journal left by an interrupted creator.
 Any append/sync uncertainty poisons that handle: close/reopen and reconcile or
 retry, never roll it back in memory and continue appending.
 
-Limits are fixed in schema 1: eight unfinished jobs (including active and
-cleaning), 64 lifetime submissions, 1,024 journal events, 320-byte request
+Limits are fixed across journal schemas 1 and 2: eight unfinished jobs
+(including active and cleaning), 64 lifetime submissions, 1,024 journal events, 320-byte request
 payloads, 480-byte maximum journal frames and 536-byte control frames. Normal
 job transitions use fewer than 16 events each. There is no compaction, rotation,
 expiry or tombstone eviction. Once all 64 lifetime slots are used, new keys fail
@@ -86,7 +94,7 @@ All integers are unsigned little-endian. Every record has a 160-byte header:
 | Offset | Size | Meaning |
 | --- | --- | --- |
 | 0 | 8 | `BQJNL001` magic |
-| 8 | 4 | schema, exactly 1 |
+| 8 | 4 | schema, legacy 1 or current 2 |
 | 12 | 4 | event kind: submit/reserve/advance/cancel/reconcile = 1..5 |
 | 16 | 4 | bounded payload byte count |
 | 20 | 4 | reserved, must be zero |
@@ -109,6 +117,14 @@ illegal transition causes opening to fail without truncation. The parser never
 scans forward for a convenient later record. An entirely removed accepted
 suffix cannot be detected without an external witness; such loss violates the
 assumed durable local-storage contract and is not a supported repair path.
+
+Schema 1 is the exact fake-recipe format published by the queue-only slice.
+Schema 2 retains the same framing and event kinds but admits the pinned real
+recipe and its fail-to-cleaning transition. Replay accepts a schema-1 prefix
+followed by schema-2 records and rejects a 2-to-1 downgrade. Opening a legacy
+journal does not rewrite it; the first subsequent mutation appends a durably
+versioned schema-2 record. Old binaries cannot consume schema 2 and fail closed
+at its first header; they must not open a journal after it has been upgraded.
 
 A complete unacknowledged write may survive a crash and is replayed. An
 incomplete unacknowledged write is discarded as above. Acknowledged writes are
@@ -169,7 +185,7 @@ because **fake recipes cannot spawn an external worker**. A real service must pr
 boot/unit/process ownership, cleanup and inherited-lease state; this fake
 operation is not a real-host force-unlock interface.
 
-## Installed snapshots and immutable attempt workspaces
+## Installed snapshots and sealed attempt workspaces
 
 The materializer reserves the next FIFO job before reading installed inputs, so
 validation and copying stay inside the queue's existing whole-job authority. A
@@ -188,7 +204,8 @@ revision=<exact 40- or 64-hex request identity>
 ```
 
 The manifest is capped at 64 KiB and 4,096 sorted unique entries; individual
-files are capped at 64 MiB and each snapshot at 512 MiB. Empty components, `.`, `..`, absolute paths,
+files are capped at 64 MiB, each snapshot at 512 MiB, and each copied source
+tree at 480 directories. Empty components, `.`, `..`, absolute paths,
 backslashes, symbolic-link traversal, writable/nonregular source files, hash or
 revision mismatch, missing files, duplicates, and unsorted paths fail closed.
 Only listed, verified bytes are copied, so unlisted installed files cannot
@@ -197,27 +214,37 @@ installed a complete Buster snapshot.
 
 An admitted attempt is `WORKSPACE_ROOT/job-<job>-attempt-<token>` with disjoint
 `base/source`, `base/build`, `candidate/source`, and `candidate/build`
-directories. Source copies and their directories become read-only after hash
-verification. Build directories remain writable and are never shared, so
+directories. Source copies and their directories become mode-read-only after
+hash verification. Build directories remain writable and are never shared, so
 `generate` on one subject cannot delete a tree used by the other subject or by
 another attempt. A read-only `.identity` binds the directory to job, token,
 request digest, recipe, and both source identities before the preparing event
 is persisted.
 
-Recipe/source/materialization failures publish an immutable `failure-<job>`
-record in the queue directory before the existing journal advances to cleaning.
+Every attempt whose roots validate first publishes a mode-read-only
+`attempt-<job>` record binding both configured paths and root device/inode
+identities. Recipe/source/materialization failures publish a mode-read-only
+`failure-<job>` record in the queue directory before the existing journal advances to cleaning.
 The record binds job, attempt token, request digest, and a bounded reason.
 Status and result responses retain that reason after restart. Admission is
 released only after the seal-matched workspace has been completely removed and
 the finished event is durable. A stale directory, altered seal, ambiguous
 failure record, directory-count overflow, or failed removal keeps the job active
-and reconciliation required. Cleanup never follows symbolic links.
+and reconciliation required. Cleanup publishes an idempotent `cleanup-<job>`
+inode binding before it changes either journal phase or workspace contents;
+`cleanup-failure-<job>` durably overrides the reported reason when removal
+fails. Cleanup walks already-open directory descriptors, verifies child and
+root inode identities, preserves `.identity` until all other removals are
+synced, and is bounded at 1,024 directories and 16,384 entries. It never follows
+symbolic links.
 
-`workspace-reconcile` may remove only the deterministic directory whose seal
-matches the active job/token. A missing directory is accepted only when the
+`workspace-reconcile` is accepted only after reopen has marked the active job
+as needing reconciliation. It may remove only the deterministic directory
+whose seal matches the active job/token. A missing directory is accepted only when the
 journal says preparation did not complete or cleaning already began; a missing
 prepared workspace is an error. This does not inspect cgroups or prove process-
-tree cleanup, so no real command can execute until the later Linux supervisor
+tree cleanup, and mode-read-only files remain mutable by the same effective
+UID, so no real command can execute until the later Linux supervisor
 and containment slice supplies that boundary.
 
 ## CLI
@@ -256,7 +283,7 @@ network transport, timeout policy or authentication service. Human CLI commands
 use this same dispatcher.
 
 The 24-byte header is `BQP1` (four bytes), schema (u32), operation (u32), payload
-length (u32 <=512), correlation (u64). Schema 2 adds operations 9/10 and the
+length (u32 <=512), correlation (u64). Control schema 2 adds operations 9/10 and the
 failure field while retaining schema 1 request/response behavior and its
 120-byte status body. Truncation, trailing bytes, unsupported versions or
 operations, malformed payloads, and oversized lengths fail. Response operation
@@ -279,6 +306,10 @@ returns fixed UTF-8 text after the error code. Logs returns count at 4 (u32),
 next cursor at 8 (u64), more at 16 (u32), then up to four 32-byte event entries:
 sequence u64, job u64, kind/phase/outcome/validity u32. A client follows `next`
 only when `more` is nonzero. Output memory never scales with input lengths.
+Control-schema-1 clients may continue to inspect fake jobs, but status, result,
+cancel, and logs reject real-recipe jobs as unsupported rather than omitting
+schema-2 evidence. Corrupt or unreadable durable evidence also fails a schema-2
+status/result response at the top-level error field.
 
 ## Requirement mapping and remaining gates
 

@@ -185,11 +185,12 @@ BUSTER_GLOBAL_LOCAL bool bq_same_key(BqRequest const* a, BqRequest const* b)
 
 /* Event validation is shared by tentative append and replay. No in-memory
  * mutation becomes visible to a caller until the corresponding fsync succeeds. */
-BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
+BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
 {
     BqError error = BQ_OK;
     BqJob* job = NULL;
-    if (sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE)
+    if ((schema != BQ_SCHEMA_LEGACY && schema != BQ_SCHEMA) || (state->journal_schema && schema < state->journal_schema) ||
+        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE)
     {
         error = BQ_INVALID_TRANSITION;
     }
@@ -204,7 +205,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
         {
             request.size = size;
             memcpy(request.bytes, body, size);
-            if (!bq_request_valid(&request))
+            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)))
             {
                 error = BQ_BAD_REQUEST;
             }
@@ -300,7 +301,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
                 BqOutcome expected = job->outcome;
                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
-                bool failure_cleanup = bq_recipe_real(&job->request) && job->phase < BQ_CLEANING && next == BQ_CLEANING && outcome == BQ_FAILED;
+                bool failure_cleanup = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
+                                       job->phase < BQ_CLEANING && next == BQ_CLEANING && outcome == BQ_FAILED;
                 if (next == BQ_FINALIZING)
                 {
                     expected = string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
@@ -327,6 +329,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, BqRecordKind kind, u64 sequ
     }
     if (error == BQ_OK)
     {
+        state->journal_schema = schema;
         state->sequence = sequence;
         state->events[state->event_count] = (BqEvent){sequence, job->id, kind, job->phase, job->outcome};
         state->event_count += 1;
@@ -351,11 +354,11 @@ BUSTER_GLOBAL_LOCAL void bq_header_digest(u8 const header[BQ_HEADER_SIZE], char8
     sha256_finish_hex(&hash, digest);
 }
 
-BUSTER_GLOBAL_LOCAL void bq_frame(u8 frame[BQ_RECORD_CAP], BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
+BUSTER_GLOBAL_LOCAL void bq_frame_schema(u8 frame[BQ_RECORD_CAP], u32 schema, BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
 {
     memset(frame, 0, BQ_HEADER_SIZE);
     memcpy(frame, "BQJNL001", 8);
-    bq_put32(frame + 8, BQ_SCHEMA);
+    bq_put32(frame + 8, schema);
     bq_put32(frame + 12, (u32)kind);
     bq_put32(frame + 16, size);
     bq_put64(frame + 24, sequence);
@@ -365,6 +368,11 @@ BUSTER_GLOBAL_LOCAL void bq_frame(u8 frame[BQ_RECORD_CAP], BqRecordKind kind, u6
     bq_header_digest(frame, digest);
     memcpy(frame + 32, digest, 64);
     memcpy(frame + BQ_HEADER_SIZE, body, size);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_frame(u8 frame[BQ_RECORD_CAP], BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
+{
+    bq_frame_schema(frame, BQ_SCHEMA, kind, sequence, body, size);
 }
 
 #ifndef _WIN32
@@ -465,7 +473,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 length = bq_u32(frame + 16);
             u32 kind = bq_u32(frame + 12);
             u64 sequence = bq_u64(frame + 24);
-            if (memcmp(frame, "BQJNL001", 8) || bq_u32(frame + 8) != BQ_SCHEMA || bq_u32(frame + 20) ||
+            u32 schema = bq_u32(frame + 8);
+            if (memcmp(frame, "BQJNL001", 8) || (schema != BQ_SCHEMA_LEGACY && schema != BQ_SCHEMA) || bq_u32(frame + 20) ||
                 length > BQ_REQUEST_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE ||
                 sequence != queue->state.sequence + 1 || memcmp(frame + 32, digest, 64))
             {
@@ -483,7 +492,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             {
                 bq_digest(frame + BQ_HEADER_SIZE, length, digest);
                 if (memcmp(frame + 96, digest, 64) ||
-                    bq_apply(&queue->state, (BqRecordKind)kind, sequence, frame + BQ_HEADER_SIZE, length) != BQ_OK)
+                    bq_apply(&queue->state, schema, (BqRecordKind)kind, sequence, frame + BQ_HEADER_SIZE, length) != BQ_OK)
                 {
                     error = BQ_CORRUPT;
                 }
@@ -587,7 +596,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_append(BqQueue* queue, BqRecordKind kind, u8 cons
     BqState next = queue->state;
     if (error == BQ_OK)
     {
-        error = bq_apply(&next, kind, next.sequence + 1, body, size);
+        error = bq_apply(&next, BQ_SCHEMA, kind, next.sequence + 1, body, size);
     }
     if (error == BQ_OK)
     {
