@@ -1271,7 +1271,8 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     }
     if (error == BQ_OK && job->phase == BQ_RESERVED && failure != BQ_NOT_FOUND)
     {
-        error = bq_real_advance(queue, job, BQ_CLEANING, BQ_FAILED);
+        BqOutcome outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
+        error = bq_real_advance(queue, job, BQ_CLEANING, outcome);
         job = bq_job(&queue->state, id);
     }
     if (error == BQ_OK && exists && !bq_remove_workspace(workspaces, name, workspace,

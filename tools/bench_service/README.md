@@ -242,6 +242,9 @@ synced, and is bounded at 1,024 directories, 256 nested directory descriptors,
 and 16,384 entries. Native coverage exercises a 220-level writable build tree;
 deeper or larger unexpected output fails closed with the active job retained.
 It never follows symbolic links.
+If cancellation is durably requested while a failed attempt awaits recovery,
+cleanup and terminal outcome are cancelled while the original failure evidence
+remains available for diagnosis.
 
 `workspace-reconcile` is accepted only after reopen has marked the active job
 as needing reconciliation. It may remove only the deterministic directory

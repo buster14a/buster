@@ -731,6 +731,67 @@ BUSTER_GLOBAL_LOCAL void bq_test_configuration_transition_recovery(void)
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_cancelled_failure_recovery(void)
+{
+    for (u32 attempted = 0; attempted < 2; attempted += 1)
+    {
+        BqMaterialFixture fixture;
+        if (bq_material_test_begin(&fixture, 0))
+        {
+            BqRequest request = bq_test_real_request(58 + attempted);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+            BqJob* job = bq_job(&fixture.queue.queue.state, id);
+            int installed = -1, root = -1, workspace = -1;
+            char name[64] = {0}, path[512] = {0};
+            if (attempted)
+            {
+                installed = bq_open_absolute_directory(string_from_pointer(fixture.installed));
+                root = bq_open_absolute_directory(string_from_pointer(fixture.workspaces));
+                struct stat installed_info, root_info, workspace_info;
+                BQ_CHECK(installed >= 0 && root >= 0 && fstat(installed, &installed_info) == 0 &&
+                         fstat(root, &root_info) == 0 && bq_workspace_name(name, id, token));
+                BQ_CHECK(bq_attempt_write(&fixture.queue.queue, job, string_from_pointer(fixture.installed),
+                                          string_from_pointer(fixture.workspaces), &installed_info, &root_info) == BQ_OK);
+                BQ_CHECK(mkdirat(root, name, 0700) == 0);
+                workspace = openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                BQ_CHECK(workspace >= 0 && fstat(workspace, &workspace_info) == 0 &&
+                         bq_workspace_seal(workspace, job, true));
+                snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+            }
+            BqError reason = attempted ? BQ_SOURCE_MISMATCH : BQ_CONFIGURATION_MISMATCH;
+            BQ_CHECK(bq_failure_write(&fixture.queue.queue, job, reason) == BQ_OK);
+            if (workspace >= 0)
+            {
+                close(workspace);
+            }
+            if (root >= 0)
+            {
+                close(root);
+            }
+            if (installed >= 0)
+            {
+                close(installed);
+            }
+            bq_close(&fixture.queue.queue);
+            BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+            BQ_CHECK(bq_cancel(&fixture.queue.queue, id) == BQ_OK && bq_job(&fixture.queue.queue.state, id)->cancel_requested);
+            String8 workspace_root = attempted ? string_from_pointer(fixture.workspaces) :
+                                     S8("/definitely-missing-buster-workspace-root");
+            BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, workspace_root, id, token) == BQ_OK);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_CANCELLED &&
+                     bq_failure_evidence(&fixture.queue.queue, job) == reason && !fixture.queue.queue.state.active_id);
+            if (attempted)
+            {
+                BQ_CHECK(access(path, F_OK) != 0 && errno == ENOENT);
+            }
+            bq_material_test_end(&fixture);
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_cleanup_bounds_and_failure(void)
 {
     BqMaterialFixture fixture;
@@ -1383,6 +1444,7 @@ int main(int argc, char** argv)
     bq_test_uncertain_failure_cleanup();
     bq_test_no_attempt_recovery();
     bq_test_configuration_transition_recovery();
+    bq_test_cancelled_failure_recovery();
     bq_test_cleanup_bounds_and_failure();
     char const* storage = "posix-real-journal";
 #else
