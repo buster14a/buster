@@ -59,6 +59,7 @@ typedef struct TpConfig
     char const* candidate_id;
     char const* machine_id;
     char const* lock_file;
+    int lease_fd, lease_fd_explicit;
     TpHost const* host;
     char const* profile;
     char const* self_host_root;
@@ -200,6 +201,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->seed = 20260907;
     config->scale = 1;
     config->cpu = -1;
+    config->lease_fd = -1;
     config->guard = 1;
     int ok = 1, selected_workloads = 0;
     for (int i = 2; i < argc && ok; ++i)
@@ -241,6 +243,13 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--candidate-id")) config->candidate_id = value;
             else if (!strcmp(key, "--machine-id")) config->machine_id = value;
             else if (!strcmp(key, "--lock-file")) config->lock_file = value;
+            else if (!strcmp(key, "--lease-fd"))
+            {
+                unsigned descriptor = 0;
+                ok = !config->lease_fd_explicit && tp_number(value, &descriptor) && descriptor >= 3 && descriptor <= INT_MAX;
+                if (ok) config->lease_fd = (int)descriptor;
+                config->lease_fd_explicit = 1;
+            }
             else if (!strcmp(key, "--profile")) config->profile = value;
             else if (!strcmp(key, "--self-host-root")) config->self_host_root = value;
             else if (!strcmp(key, "--self-host-generated")) config->self_host_generated = value;
@@ -355,7 +364,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         tp_error("admit-workload requires DESCRIPTOR, source/compiler/oracle evidence, output, qualification id and all closure manifests");
         ok = 0;
     }
-    if (config->machine_id || config->lock_file || !strcmp(config->command, "qualify"))
+    if (config->machine_id || config->lock_file || config->lease_fd_explicit || !strcmp(config->command, "qualify"))
     {
         int dedicated = config->machine_id && config->machine_id[0] &&
                         strlen(config->machine_id) < TP_HOST_LABEL_CAP && config->lock_file &&
@@ -1714,7 +1723,7 @@ static void tp_help(void)
           "  throughput admit-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome pass\n"
           "    --output NEW_DIR --qualification-id ID --dependency-manifest FILE --resource-manifest FILE\n"
           "    --sysroot-manifest FILE --sdk-manifest FILE --environment-manifest FILE --runtime-manifest FILE\n"
-          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH\n\n"
+          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH [--lease-fd N]\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
           "--workload NAME (repeatable; first replaces defaults; names below, or default|all),\n"
@@ -1729,6 +1738,7 @@ static void tp_help(void)
           "Workloads: tiny_startup, large_function, many_functions, symbol_table, control_flow, backend_pressure,\n"
           "macros, aggregate-abi. Default: the first six, in fixed corpus order regardless of selection order.\n"
           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
+          "A service may additionally pass its held lease with --lease-fd N; it requires --lock-file and is not inherited by compiler children.\n"
           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
           "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
@@ -1746,7 +1756,8 @@ int main(int argc, char** argv)
     int admitted = tp_options(argc, argv, &config);
     if (admitted && config.machine_id)
     {
-        int error = tp_host_lock_acquire(config.lock_file, &lock);
+        int error = config.lease_fd_explicit ? tp_host_lock_adopt(config.lock_file, config.lease_fd, &lock) :
+                                              tp_host_lock_acquire(config.lock_file, &lock);
         if (!error) error = tp_host_capture(&host, config.cpu, config.machine_id, config.lock_file);
         admitted = error == 0;
         if (admitted) config.host = &host;
