@@ -59,6 +59,7 @@ struct DSettings
     String8 cc;
     String8 out;
     String8 include;
+    SliceString8 library_paths;
     FILE* report;
     FILE* log;
     FILE* evidence;
@@ -570,7 +571,8 @@ BUSTER_GLOBAL_LOCAL u32 d_matrix(DConfig* configs, u32 capacity)
 // The fixed observer is immutable within a case. Compile it once for Buster
 // rows, but never share it with the independent O0/O2 or reduction controls.
 // Source-only flags belong to compilation; sanitizer runtime flags also belong
-// to the final link. The returned argv fits the existing 40-entry command.
+// to the final link. Explicit library paths make the Visual Studio developer
+// shell's LIB contract visible to child compilers that do not consume LIB.
 BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool compile, String8* argv)
 {
     Arena* arena = settings->arena;
@@ -590,6 +592,10 @@ BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool
     }
     if (compile && test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
     if (compile && settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+    for (u64 index = 0; index < settings->library_paths.length; index += 1)
+    {
+        argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+    }
     return count;
 }
 
@@ -608,7 +614,7 @@ BUSTER_GLOBAL_LOCAL String8 d_prepare_caller(DSettings* settings, DCase test, St
     bool ready = false;
     if (!path_exists(arena, object) && !settings->io_failed)
     {
-        String8 argv[40];
+        String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
         u64 count = d_caller_arguments(settings, test, true, argv);
         argv[count++] = test.host;
         argv[count++] = S8("-c");
@@ -646,7 +652,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     // Output existence is never allowed to turn a failed compile into a pass.
     os_file_delete(object);
     os_file_delete(executable);
-    String8 argv[40];
+    String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
     u64 count = 0;
     argv[count++] = host ? settings->cc : settings->ide;
     if (host)
@@ -676,6 +682,10 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     argv[count++] = S8("-funsigned-char");
     if (test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
     if (settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+    for (u64 index = 0; index < settings->library_paths.length; index += 1)
+    {
+        argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+    }
     argv[count++] = test.source;
     if (test.host.length && host) { argv[count++] = test.host; }
     bool object_only = (!host && test.host.length) || test.reject;
@@ -683,8 +693,8 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
 #if BUSTER_LINUX
     if (host && !object_only) { argv[count++] = S8("-no-pie"); }
 #endif
-#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64
-    // The Arm64 UCRT does not export the legacy direct printf symbol used by
+#if BUSTER_WINDOWS
+    // The Windows UCRT does not export the legacy direct printf symbol used by
     // the headerless observables and generated-source corpus. Keep those exact
     // sources and link Microsoft's compatibility definitions into both sides
     // of the differential instead of pruning the cases on this host.
@@ -1709,7 +1719,9 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
     }
     DSettings settings = {.arena = arena, .timeout_seconds = 1};
-    DSettings caller_settings = {.arena = arena, .cc = S8("compiler with spaces"), .include = S8("global include")};
+    String8 caller_library_paths[] = {S8("first library"), S8("second-library")};
+    DSettings caller_settings = {.arena = arena, .cc = S8("compiler with spaces"), .include = S8("global include"),
+                                 .library_paths = (SliceString8)BUSTER_ARRAY_TO_SLICE(caller_library_paths)};
     DCase caller_case = {.host = S8("fixed caller.c"), .include = S8("source include")};
     for (u32 sanitize = 0; sanitize < 2; sanitize += 1)
     {
@@ -1717,22 +1729,26 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         String8 argv[40];
         u64 argc = d_caller_arguments(&caller_settings, caller_case, true, argv);
         String8 expected[] = {S8("compiler with spaces"), S8("-O0"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char")};
-        errors += argc != 7 + sanitize * 2;
+        errors += argc != 9 + sanitize * 2;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1) { errors += !string_equal(argv[index], expected[index]); }
         if (sanitize)
         {
             errors += !string_equal(argv[5], S8("-fsanitize=address,undefined"));
             errors += !string_equal(argv[6], S8("-fno-sanitize-recover=all"));
         }
-        errors += !string_equal(argv[argc - 2], S8("-Isource include"));
-        errors += !string_equal(argv[argc - 1], S8("-Iglobal include"));
+        errors += !string_equal(argv[argc - 4], S8("-Isource include"));
+        errors += !string_equal(argv[argc - 3], S8("-Iglobal include"));
+        errors += !string_equal(argv[argc - 2], S8("-Lfirst library"));
+        errors += !string_equal(argv[argc - 1], S8("-Lsecond-library"));
         argc = d_caller_arguments(&caller_settings, caller_case, false, argv);
-        errors += argc != 1 + sanitize * 2 || !string_equal(argv[0], caller_settings.cc);
+        errors += argc != 3 + sanitize * 2 || !string_equal(argv[0], caller_settings.cc);
         if (sanitize)
         {
             errors += !string_equal(argv[1], S8("-fsanitize=address,undefined"));
             errors += !string_equal(argv[2], S8("-fno-sanitize-recover=all"));
         }
+        errors += !string_equal(argv[argc - 2], S8("-Lfirst library"));
+        errors += !string_equal(argv[argc - 1], S8("-Lsecond-library"));
     }
     DObservation caller_compile = {.kind = D_EXIT};
     errors += !d_caller_ready(caller_compile, true, false);
@@ -1841,6 +1857,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
 {
     DSettings settings = {.arena = arena, .ide = S8("build/Release/ide"), .cc = S8("clang"),
         .out = S8("build/differential"), .timeout_seconds = 10, .reduce_limit = 64, .verify = true};
+    settings.library_paths.pointer = arena_allocate(arena, String8, arguments.length);
     DCase custom = {.name = S8("custom")};
     bool list = false, self_test = false, valid = true;
     String8 child_mode = {0}, self_test_path = {0}, cancellation_test = {0};
@@ -1870,6 +1887,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             else if (string_equal(arg, S8("--source"))) { custom.source = value; }
             else if (string_equal(arg, S8("--host"))) { custom.host = value; }
             else if (string_equal(arg, S8("--include"))) { settings.include = value; }
+            else if (string_equal(arg, S8("--library-path")))
+            {
+                valid &= value.length != 0;
+                if (value.length) { settings.library_paths.pointer[settings.library_paths.length++] = value; }
+            }
             else if (string_equal(arg, S8("--generated"))) { valid &= d_number(value, &generated) && generated <= 10000; }
             else if (string_equal(arg, S8("--jobs"))) { valid &= d_number(value, &requested_jobs); }
             else if (string_equal(arg, S8("--seed"))) { valid &= d_number(value, &seed); }
@@ -1890,7 +1912,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     if (cancellation_test.length) { failures = d_cancellation_self_test(arena, cancellation_test); }
     else if (!valid)
     {
-        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
+        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--library-path dir]... [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
     }
     else if (self_test) { failures = d_self_test(arena); }
@@ -1932,6 +1954,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                         settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated,
                         (u32)settings.verify, (u32)settings.sanitize_oracle, (u32)settings.strict_mir);
                     manifest = string_format(arena, S8("{S8}jobs_requested={u32} jobs_effective={u32} cases={u32}\n"), manifest, requested_jobs, jobs, total_cases);
+                    manifest = string_format(arena, S8("{S8}library_path_count={u64}\n"), manifest, settings.library_paths.length);
+                    for (u64 index = 0; index < settings.library_paths.length; index += 1)
+                    {
+                        manifest = string_format(arena, S8("{S8}library_path_{u64}={S8}\n"), manifest, index, settings.library_paths.pointer[index]);
+                    }
                     u64 ide_hash = 0, ide_size = 0, cc_hash = 0, cc_size = 0;
                     settings.io_failed |= !build_artifact_fanout_hash_file(arena, settings.ide, &ide_hash, &ide_size);
                     settings.io_failed |= !build_artifact_fanout_hash_file(arena, settings.cc, &cc_hash, &cc_size);

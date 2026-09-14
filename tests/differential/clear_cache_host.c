@@ -1,14 +1,18 @@
 #include <stdio.h>
 #if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 // LLVM's hosted Windows Arm64 package does not ship the compiler-rt builtins
 // library that normally owns this helper. The differential checks argument
-// evaluation and register liveness, not executable-code modification, so the
-// independent host/caller object supplies the no-op runtime boundary needed by
-// both linked programs.
+// evaluation and register liveness without modifying executable code, but its
+// nonempty ranges still have to exercise Windows' real cache-maintenance API.
 void __clear_cache(void *begin, void *end)
 {
-    (void)begin;
-    (void)end;
+    SIZE_T size = (SIZE_T)((char *)end - (char *)begin);
+    if (!FlushInstructionCache(GetCurrentProcess(), begin, size))
+    {
+        ExitProcess(1);
+    }
 }
 #endif
 void clear_range(char *, char *);
