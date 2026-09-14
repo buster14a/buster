@@ -119,6 +119,11 @@ The full product is:
 - frontend SSA enabled and disabled;
 - PIC enabled and disabled.
 
+The current 402-subject support contract therefore freezes exactly
+`402 x 12 x 2 x 2 x 4 = 77,184` row identities. Applicability evidence is an
+additional validator-owned projection; it never removes a row or changes the
+input-byte ledger.
+
 Every row supplies `-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char
 -fverify-codegen -nostdinc`, the frozen resource include, an explicit target,
 CPU model and allocator. The default CPU
@@ -220,6 +225,45 @@ disposition transitions. Comparison schema 2 preserves separate candidate,
 reference and combined-acceptance common-row failure counts and row lists. The
 candidate gate rejects only `candidate_common_failure_rows`; the acceptance gate
 rejects `acceptance_common_failure_rows`, including unresolved references.
+
+### Schema-2 applicability and admission evidence
+
+The Python contract validator derives a closed applicability class for every
+selected cell; the producer cannot provide or override this field. The derived
+classes are:
+
+| Class | Meaning | Owner |
+| --- | --- | --- |
+| `admitted-supported` | The supported-object obligation is admitted to the candidate compiler. | candidate |
+| `retained-control` | The allocator-`none` direct compilation is retained as the group control. | reference |
+| `retained-reference` | Candidate evidence is retained, but its direct reference is unresolved. | reference |
+| `platform-inapplicable` | Native execution belongs to a platform owner that is unavailable for this object cell. | platform |
+| `unavailable` | Compiler/process/evidence admission is unavailable or not admitted. | admission |
+
+`validate-shards` writes `applicability.tsv` next to its JSON output. It has
+one deterministic row for every selected cell, including the original fixture,
+target, CPU, frontend, allocator and PIC identity plus the producer disposition,
+validator reason, ownership and separate candidate/reference/acceptance failure
+bits. The original `rows.tsv` identity map and the frozen input-byte ledger are
+unchanged. A supported-native gap remains `admitted-supported`; its candidate
+failure cannot be hidden by relabeling it as a reference or unavailable row.
+The validator also records the exact supported-gap row list and rejects any
+attempt to move those rows to another class (the current evidence has 192).
+This candidate-owned rule takes precedence over the platform execution-control
+label for a declared gap; the object evidence still has to explain the gap.
+
+The candidate gate applies candidate cleanliness to admitted-supported cells;
+reference-only retained rows do not become candidate failures merely because
+their direct reference is unresolved. A retained row whose candidate side has
+an unexpected defect is still fatal. The acceptance gate additionally requires
+every retained reference/control to resolve. This class distinction does not
+waive unexpected compile, object, process, fallback or telemetry defects: those
+remain fatal for any applicable cell, including platform-inapplicable controls.
+A bounded, deterministic
+`residual.tsv` is emitted beside `applicability.tsv`; it retains at most 256
+diagnostic rows and joins fallback attribution to fixture, function, target,
+CPU, frontend, allocator and PIC. The JSON report records both evidence paths,
+class counts and whether residual attribution was truncated.
 
 ## Observations and failure accounting
 
