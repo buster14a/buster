@@ -643,6 +643,42 @@ static TpWorkloadAdmissionState* tp_workload_admission_state_allocate(void)
     return result;
 }
 
+static int tp_workload_path_separator(char value)
+{
+    return value == '/' || value == '\\';
+}
+
+static int tp_workload_absolute_path_syntax(char const* path, int windows)
+{
+    int ok = path && path[0];
+    if (ok && windows)
+    {
+        int drive = ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+                    path[1] == ':' && tp_workload_path_separator(path[2]);
+        int unc = tp_workload_path_separator(path[0]) && tp_workload_path_separator(path[1]);
+        char const* server = unc ? path + 2 : NULL;
+        char const* share = server;
+        while (share && *share && !tp_workload_path_separator(*share)) ++share;
+        int server_present = share && share > server;
+        if (share && *share) ++share; else share = NULL;
+        unc = unc && server_present && share && *share && !tp_workload_path_separator(*share);
+        ok = drive || unc;
+    }
+    else if (ok) ok = path[0] == '/';
+    return ok;
+}
+
+static int tp_workload_absolute_path(char const* path, char canonical[TP_PATH_CAP])
+{
+#ifdef _WIN32
+    int ok = tp_workload_absolute_path_syntax(path, 1);
+#else
+    int ok = tp_workload_absolute_path_syntax(path, 0);
+#endif
+    if (ok) ok = tp_absolute(path, canonical);
+    return ok;
+}
+
 static int tp_workload_file_contains_line(char const* path, char const* needle)
 {
     FILE* file = fopen(path, "rb");
@@ -669,14 +705,15 @@ static int tp_workload_identity_file(char* value)
     char* hash = strchr(value, '\t');
     char* bytes_text = hash ? strchr(hash + 1, '\t') : NULL;
     uint64_t expected_bytes = 0, actual_bytes = 0, lines = 0;
-    char actual_sha256[65];
+    char actual_sha256[65], canonical[TP_PATH_CAP];
     int ok = hash && bytes_text;
     if (ok)
     {
         *hash++ = 0;
         *bytes_text++ = 0;
-        ok = value[0] == '/' && tp_workload_sha256(hash) && tp_workload_u64(bytes_text, &expected_bytes) &&
-             tp_workload_regular_file(value) && tp_hash_file(value, actual_sha256, &actual_bytes, &lines) &&
+        ok = tp_workload_absolute_path(value, canonical) && tp_workload_sha256(hash) &&
+             tp_workload_u64(bytes_text, &expected_bytes) && tp_workload_regular_file(canonical) &&
+             tp_hash_file(canonical, actual_sha256, &actual_bytes, &lines) &&
              actual_bytes == expected_bytes && !strcmp(actual_sha256, hash);
     }
     return ok;
@@ -685,13 +722,13 @@ static int tp_workload_identity_file(char* value)
 static int tp_workload_identity_tree(char* value)
 {
     char* hash = strchr(value, '\t');
-    char actual_sha256[65];
+    char actual_sha256[65], canonical[TP_PATH_CAP];
     int ok = hash != NULL;
     if (ok)
     {
         *hash++ = 0;
-        ok = value[0] == '/' && tp_workload_sha256(hash) && tp_workload_directory(value) &&
-             tp_hash_tree(value, actual_sha256) && !strcmp(actual_sha256, hash);
+        ok = tp_workload_absolute_path(value, canonical) && tp_workload_sha256(hash) &&
+             tp_workload_directory(canonical) && tp_hash_tree(canonical, actual_sha256) && !strcmp(actual_sha256, hash);
     }
     return ok;
 }

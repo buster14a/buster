@@ -1001,7 +1001,10 @@ static void test_workload_admission(char const* executable, char const* root)
     }
     char output[TP_PATH_CAP];
     CHECK(tp_path(output, directory, "success"));
-#ifdef _WIN32
+#if defined(_WIN32)
+    TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
+#elif defined(BUSTER_SANITIZE)
+    puts("THROUGHPUT_ADMISSION_STACK status=unsupported reason=sanitizer-instrumented");
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
 #else
     TpProcess result = test_admit_workload_mode(executable, "throughput-low-stack", descriptor, source_root,
@@ -1112,6 +1115,15 @@ static void test_workload_admission(char const* executable, char const* root)
 
 static void test_checked_in_workload_descriptors(void)
 {
+    CHECK(tp_workload_absolute_path_syntax("/tmp/buster/closure", 0));
+    CHECK(!tp_workload_absolute_path_syntax("tmp/buster/closure", 0));
+    CHECK(tp_workload_absolute_path_syntax("D:/a/buster/closure", 1));
+    CHECK(tp_workload_absolute_path_syntax("d:\\a\\buster\\closure", 1));
+    CHECK(tp_workload_absolute_path_syntax("//server/share/closure", 1));
+    CHECK(tp_workload_absolute_path_syntax("\\\\server\\share\\closure", 1));
+    CHECK(!tp_workload_absolute_path_syntax("D:relative", 1));
+    CHECK(!tp_workload_absolute_path_syntax("/drive-relative", 1));
+    CHECK(!tp_workload_absolute_path_syntax("//server", 1));
     static char const* const paths[] = {
         "tools/throughput/workloads/cjson-1.7.19.workload",
         "tools/throughput/workloads/lua-5.4.8.workload",
