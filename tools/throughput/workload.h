@@ -616,6 +616,33 @@ typedef struct TpWorkloadExpandedArguments
     unsigned count;
 } TpWorkloadExpandedArguments;
 
+/* Descriptor parsing and expanded argv storage are deliberately heap-owned.
+ * Their fixed capacity is too large for the default Windows main-thread stack. */
+typedef struct TpWorkloadAdmissionState
+{
+    TpWorkloadDescriptor descriptor;
+    TpWorkloadDescriptor after_descriptor;
+    TpWorkloadIdentity identities[6];
+    TpWorkloadIdentity after_identity;
+    TpWorkloadExpandedArguments expanded;
+} TpWorkloadAdmissionState;
+
+#ifdef TP_WORKLOAD_TEST_ALLOCATIONS
+static int tp_workload_test_fail_state_allocation;
+#endif
+
+static TpWorkloadAdmissionState* tp_workload_admission_state_allocate(void)
+{
+    TpWorkloadAdmissionState* result = NULL;
+#ifdef TP_WORKLOAD_TEST_ALLOCATIONS
+    if (tp_workload_test_fail_state_allocation) tp_workload_test_fail_state_allocation = 0;
+    else result = calloc(1, sizeof(*result));
+#else
+    result = calloc(1, sizeof(*result));
+#endif
+    return result;
+}
+
 static int tp_workload_file_contains_line(char const* path, char const* needle)
 {
     FILE* file = fopen(path, "rb");
@@ -937,30 +964,33 @@ static void tp_workload_json_identity(FILE* file, char const* key, char const* d
 
 static int tp_workload_admit(TpWorkloadAdmitOptions options)
 {
-    TpWorkloadDescriptor descriptor = {0};
+    TpWorkloadAdmissionState* state = tp_workload_admission_state_allocate();
+    TpWorkloadDescriptor* descriptor = state ? &state->descriptor : NULL;
+    TpWorkloadIdentity* identities = state ? state->identities : NULL;
     char descriptor_path[TP_PATH_CAP], root[TP_PATH_CAP], compiler[TP_PATH_CAP], evidence[TP_PATH_CAP], output[TP_PATH_CAP], cwd[TP_PATH_CAP];
     char descriptor_sha256[65], tree_sha256[65], compiler_sha256[65], evidence_sha256[65], commands_sha256[65], runtime_sha256[65];
     uint64_t descriptor_bytes = 0, compiler_bytes = 0, evidence_bytes = 0, commands_bytes = 0, runtime_bytes = 0, lines = 0;
-    TpWorkloadIdentity identities[6];
     char const* identity_paths[6] = {options.dependency_manifest, options.resource_manifest, options.sysroot_manifest,
                                      options.sdk_manifest, options.environment_manifest, options.runtime_manifest};
     char const* identity_kinds[6] = {"dependency", "resource", "sysroot", "sdk", "environment", "runtime"};
-    char const* declared_identities[6] = {descriptor.dependency_identity, descriptor.resource_identity, descriptor.sysroot_identity,
-                                          descriptor.sdk_identity, descriptor.environment_identity, descriptor.runtime_identity};
-    int ok = options.check.descriptor && options.check.source_root && options.check.compiler && options.check.evidence &&
+    char const* declared_identities[6] = {
+        state ? descriptor->dependency_identity : NULL, state ? descriptor->resource_identity : NULL,
+        state ? descriptor->sysroot_identity : NULL, state ? descriptor->sdk_identity : NULL,
+        state ? descriptor->environment_identity : NULL, state ? descriptor->runtime_identity : NULL};
+    int ok = state && options.check.descriptor && options.check.source_root && options.check.compiler && options.check.evidence &&
              options.check.evidence_outcome && !strcmp(options.check.evidence_outcome, "pass") && options.output &&
              options.qualification_id && options.qualification_id[0] && strlen(options.qualification_id) < TP_WORKLOAD_TEXT_CAP &&
              tp_absolute(options.check.descriptor, descriptor_path) && tp_absolute(options.check.source_root, root) &&
              tp_absolute(options.check.compiler, compiler) && tp_absolute(options.check.evidence, evidence) &&
              tp_absolute(options.output, output) && tp_absolute(".", cwd) && tp_workload_regular_file(descriptor_path) &&
              tp_workload_directory(root) && tp_workload_regular_file(compiler) && tp_workload_regular_file(evidence) &&
-             tp_workload_descriptor_parse(descriptor_path, &descriptor) && !strcmp(descriptor.schema, TP_WORKLOAD_DESCRIPTOR_SCHEMA) &&
-             tp_workload_descriptor_inputs(root, &descriptor, tree_sha256) &&
+             tp_workload_descriptor_parse(descriptor_path, descriptor) && !strcmp(descriptor->schema, TP_WORKLOAD_DESCRIPTOR_SCHEMA) &&
+             tp_workload_descriptor_inputs(root, descriptor, tree_sha256) &&
              tp_hash_file(descriptor_path, descriptor_sha256, &descriptor_bytes, &lines) &&
              tp_hash_file(compiler, compiler_sha256, &compiler_bytes, &lines) &&
              tp_hash_file(evidence, evidence_sha256, &evidence_bytes, &lines) && evidence_bytes > 0 &&
-             tp_workload_file_contains_line(evidence, descriptor.oracle_success);
-    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(identities) && ok; ++i)
+             tp_workload_file_contains_line(evidence, descriptor->oracle_success);
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(state->identities) && ok; ++i)
         ok = tp_workload_identity(identity_paths[i], identity_kinds[i], identities + i);
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(declared_identities) && ok; ++i)
         ok = !strcmp(declared_identities[i], identities[i].identity);
@@ -971,7 +1001,8 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         if (!ok) tp_error("admission output already exists or cannot be created: %s", output);
     }
     unsigned source_count = 0;
-    for (unsigned i = 0; i < descriptor.input_count; ++i) source_count += tp_workload_source_input(descriptor.inputs + i);
+    for (unsigned i = 0; ok && i < descriptor->input_count; ++i)
+        source_count += tp_workload_source_input(descriptor->inputs + i);
     TpWorkloadArtifact* artifacts = ok ? calloc(source_count + 2, sizeof(*artifacts)) : NULL;
     ok = ok && artifacts != NULL;
     char commands_path[TP_PATH_CAP], runtime_path[TP_PATH_CAP];
@@ -980,9 +1011,9 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
     unsigned artifact_count = 0, source_index = 0;
     uint64_t object_source_bytes = 0, object_translated_bytes = 0, object_translated_lines = 0;
     TpProcess runtime_process = {0};
-    for (unsigned i = 0; i < descriptor.input_count && ok; ++i)
+    for (unsigned i = 0; ok && i < descriptor->input_count; ++i)
     {
-        TpWorkloadInput const* input = descriptor.inputs + i;
+        TpWorkloadInput const* input = descriptor->inputs + i;
         if (!tp_workload_source_input(input)) continue;
         TpWorkloadArtifact* artifact = artifacts + artifact_count;
         char source[TP_PATH_CAP], metrics[TP_PATH_CAP], log[TP_PATH_CAP], leaf[128];
@@ -992,16 +1023,16 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         ok = ok && tp_path(metrics, output, leaf) && tp_workload_text_copy(artifact->metrics_path, sizeof(artifact->metrics_path), metrics);
         snprintf(leaf, sizeof(leaf), "object-%03u.log", source_index);
         ok = ok && tp_path(log, output, leaf);
-        TpWorkloadExpandedArguments expanded;
+        TpWorkloadExpandedArguments* expanded = &state->expanded;
         TpProcess process;
-        ok = ok && tp_workload_expand_arguments(&descriptor, compiler, root, descriptor.object_arguments,
-                                                 descriptor.object_argument_count, source, artifact->path, metrics, NULL, &expanded) &&
+        ok = ok && tp_workload_expand_arguments(descriptor, compiler, root, descriptor->object_arguments,
+                                                 descriptor->object_argument_count, source, artifact->path, metrics, NULL, expanded) &&
              (remove(artifact->path) == 0 || errno == ENOENT) && (remove(metrics) == 0 || errno == ENOENT) &&
-             tp_workload_bind_identities(identities, "source-to-object", &expanded, NULL) &&
-             tp_workload_command_record(commands, "source-to-object", input->path, cwd, &expanded, identities);
+             tp_workload_bind_identities(identities, "source-to-object", expanded, NULL) &&
+             tp_workload_command_record(commands, "source-to-object", input->path, cwd, expanded, identities);
         if (ok)
         {
-            int passed = tp_workload_process_pass(&expanded, cwd, log, &process);
+            int passed = tp_workload_process_pass(expanded, cwd, log, &process);
             int recorded = tp_workload_result_record(commands, "source-to-object", input->path, &process, identities);
             ok = passed && recorded;
         }
@@ -1035,16 +1066,16 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         ok = tp_path(executable, output, "program");
 #endif
         ok = ok && tp_path(link_metrics, output, "compile-link.metrics") && tp_path(link_log, output, "compile-link.log");
-        TpWorkloadExpandedArguments expanded;
+        TpWorkloadExpandedArguments* expanded = &state->expanded;
         TpProcess process;
-        ok = ok && tp_workload_expand_arguments(&descriptor, compiler, root, descriptor.compile_link_arguments,
-                                                 descriptor.compile_link_argument_count, NULL, executable, link_metrics, NULL, &expanded) &&
+        ok = ok && tp_workload_expand_arguments(descriptor, compiler, root, descriptor->compile_link_arguments,
+                                                 descriptor->compile_link_argument_count, NULL, executable, link_metrics, NULL, expanded) &&
              (remove(executable) == 0 || errno == ENOENT) && (remove(link_metrics) == 0 || errno == ENOENT) &&
-             tp_workload_bind_identities(identities, "source-to-linked-executable", &expanded, NULL) &&
-             tp_workload_command_record(commands, "source-to-linked-executable", NULL, cwd, &expanded, identities);
+             tp_workload_bind_identities(identities, "source-to-linked-executable", expanded, NULL) &&
+             tp_workload_command_record(commands, "source-to-linked-executable", NULL, cwd, expanded, identities);
         if (ok)
         {
-            int passed = tp_workload_process_pass(&expanded, cwd, link_log, &process);
+            int passed = tp_workload_process_pass(expanded, cwd, link_log, &process);
             int recorded = tp_workload_result_record(commands, "source-to-linked-executable", NULL, &process, identities);
             ok = passed && recorded;
         }
@@ -1066,20 +1097,20 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
     }
     if (ok)
     {
-        TpWorkloadExpandedArguments expanded;
+        TpWorkloadExpandedArguments* expanded = &state->expanded;
         ok = tp_path(runtime_path, output, "runtime.log") &&
-             tp_workload_expand_arguments(&descriptor, compiler, root, descriptor.runtime_arguments,
-                                           descriptor.runtime_argument_count, NULL, NULL, NULL, executable, &expanded) &&
-             tp_workload_bind_identities(identities, "runtime", &expanded, executable) &&
-             tp_workload_command_record(commands, "runtime", NULL, cwd, &expanded, identities);
+             tp_workload_expand_arguments(descriptor, compiler, root, descriptor->runtime_arguments,
+                                           descriptor->runtime_argument_count, NULL, NULL, NULL, executable, expanded) &&
+             tp_workload_bind_identities(identities, "runtime", expanded, executable) &&
+             tp_workload_command_record(commands, "runtime", NULL, cwd, expanded, identities);
         if (ok)
         {
-            int passed = tp_workload_process_pass(&expanded, cwd, runtime_path, &runtime_process);
+            int passed = tp_workload_process_pass(expanded, cwd, runtime_path, &runtime_process);
             int recorded = tp_workload_result_record(commands, "runtime", NULL, &runtime_process, identities);
             ok = passed && recorded;
         }
         ok = ok && tp_workload_regular_file(runtime_path) && tp_hash_file(runtime_path, runtime_sha256, &runtime_bytes, &lines) &&
-             runtime_bytes > 0 && !strcmp(runtime_sha256, descriptor.runtime_transcript_sha256);
+             runtime_bytes > 0 && !strcmp(runtime_sha256, descriptor->runtime_transcript_sha256);
         if (ok)
         {
             TpWorkloadArtifact* artifact = artifacts + artifact_count;
@@ -1094,10 +1125,10 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
     if (commands && fclose(commands) != 0) ok = 0;
     if (ok) ok = tp_hash_file(commands_path, commands_sha256, &commands_bytes, &lines) && commands_bytes > 0;
     uint64_t link_source_bytes = 0;
-    for (unsigned i = 0; i < descriptor.link_input_count; ++i)
-        for (unsigned j = 0; j < descriptor.input_count; ++j)
-            if (!strcmp(descriptor.link_inputs[i], descriptor.inputs[j].path)) link_source_bytes += descriptor.inputs[j].bytes;
-    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(identities) && ok; ++i)
+    for (unsigned i = 0; ok && i < descriptor->link_input_count; ++i)
+        for (unsigned j = 0; ok && j < descriptor->input_count; ++j)
+            if (!strcmp(descriptor->link_inputs[i], descriptor->inputs[j].path)) link_source_bytes += descriptor->inputs[j].bytes;
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(state->identities) && ok; ++i)
         ok = identities[i].bound_operations == tp_workload_operation_mask(identities[i].operation) &&
              identities[i].bound_arguments == (UINT32_C(1) << identities[i].argument_count) - 1;
     for (unsigned i = 0; i < artifact_count && ok; ++i)
@@ -1114,23 +1145,23 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
     }
     if (ok)
     {
-        TpWorkloadDescriptor after_descriptor = {0};
+        TpWorkloadDescriptor* after_descriptor = &state->after_descriptor;
         char after_descriptor_sha256[65], after_tree_sha256[65], after_compiler_sha256[65], after_evidence_sha256[65];
         uint64_t after_bytes = 0;
         ok = tp_workload_regular_file(descriptor_path) && tp_workload_regular_file(compiler) && tp_workload_regular_file(evidence) &&
-             tp_workload_descriptor_parse(descriptor_path, &after_descriptor) &&
-             tp_workload_descriptor_inputs(root, &after_descriptor, after_tree_sha256) &&
+             tp_workload_descriptor_parse(descriptor_path, after_descriptor) &&
+             tp_workload_descriptor_inputs(root, after_descriptor, after_tree_sha256) &&
              tp_hash_file(descriptor_path, after_descriptor_sha256, &after_bytes, &lines) && after_bytes == descriptor_bytes &&
              !strcmp(after_descriptor_sha256, descriptor_sha256) && !strcmp(after_tree_sha256, tree_sha256) &&
              tp_hash_file(compiler, after_compiler_sha256, &after_bytes, &lines) && after_bytes == compiler_bytes &&
              !strcmp(after_compiler_sha256, compiler_sha256) &&
              tp_hash_file(evidence, after_evidence_sha256, &after_bytes, &lines) && after_bytes == evidence_bytes &&
              !strcmp(after_evidence_sha256, evidence_sha256);
-        for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(identities) && ok; ++i)
+        for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(state->identities) && ok; ++i)
         {
-            TpWorkloadIdentity after_identity;
-            ok = tp_workload_regular_file(identities[i].path) && tp_workload_identity(identity_paths[i], identity_kinds[i], &after_identity) &&
-                 after_identity.bytes == identities[i].bytes && !strcmp(after_identity.sha256, identities[i].sha256);
+            TpWorkloadIdentity* after_identity = &state->after_identity;
+            ok = tp_workload_regular_file(identities[i].path) && tp_workload_identity(identity_paths[i], identity_kinds[i], after_identity) &&
+                 after_identity->bytes == identities[i].bytes && !strcmp(after_identity->sha256, identities[i].sha256);
         }
         if (!ok) tp_error("admission inputs or closure identities drifted during execution");
     }
@@ -1139,19 +1170,19 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         fputs("{\"schema\":\"buster-throughput-workload-admission-v1\",\"scope\":\"hosted-functional-admission\",", stdout);
         fputs("\"admitted\":true,\"fresh_admission_required\":false,\"qualification_id\":", stdout);
         tp_json_string(stdout, options.qualification_id);
-        fputs(",\"name\":", stdout); tp_json_string(stdout, descriptor.name);
-        fputs(",\"family\":", stdout); tp_json_string(stdout, descriptor.family);
-        fputs(",\"historical_outcome\":", stdout); tp_json_string(stdout, descriptor.historical_outcome);
-        fputs(",\"historical_evidence\":", stdout); tp_json_string(stdout, descriptor.historical_evidence);
-        fputs(",\"source_identity\":{\"declared\":", stdout); tp_json_string(stdout, descriptor.source_identity);
+        fputs(",\"name\":", stdout); tp_json_string(stdout, descriptor->name);
+        fputs(",\"family\":", stdout); tp_json_string(stdout, descriptor->family);
+        fputs(",\"historical_outcome\":", stdout); tp_json_string(stdout, descriptor->historical_outcome);
+        fputs(",\"historical_evidence\":", stdout); tp_json_string(stdout, descriptor->historical_evidence);
+        fputs(",\"source_identity\":{\"declared\":", stdout); tp_json_string(stdout, descriptor->source_identity);
         fputs(",\"tree_sha256\":", stdout); tp_json_string(stdout, tree_sha256); fputc('}', stdout);
-        fputs(",\"generated_identity\":", stdout); tp_json_string(stdout, descriptor.generated_identity);
-        tp_workload_json_identity(stdout, "dependency_identity", descriptor.dependency_identity, identities + 0);
-        tp_workload_json_identity(stdout, "resource_identity", descriptor.resource_identity, identities + 1);
-        tp_workload_json_identity(stdout, "sysroot_identity", descriptor.sysroot_identity, identities + 2);
-        tp_workload_json_identity(stdout, "sdk_identity", descriptor.sdk_identity, identities + 3);
-        tp_workload_json_identity(stdout, "environment_identity", descriptor.environment_identity, identities + 4);
-        tp_workload_json_identity(stdout, "runtime_identity", descriptor.runtime_identity, identities + 5);
+        fputs(",\"generated_identity\":", stdout); tp_json_string(stdout, descriptor->generated_identity);
+        tp_workload_json_identity(stdout, "dependency_identity", descriptor->dependency_identity, identities + 0);
+        tp_workload_json_identity(stdout, "resource_identity", descriptor->resource_identity, identities + 1);
+        tp_workload_json_identity(stdout, "sysroot_identity", descriptor->sysroot_identity, identities + 2);
+        tp_workload_json_identity(stdout, "sdk_identity", descriptor->sdk_identity, identities + 3);
+        tp_workload_json_identity(stdout, "environment_identity", descriptor->environment_identity, identities + 4);
+        tp_workload_json_identity(stdout, "runtime_identity", descriptor->runtime_identity, identities + 5);
         fputs(",\"compiler\":{\"path\":", stdout); tp_json_string(stdout, compiler);
         fputs(",\"sha256\":", stdout); tp_json_string(stdout, compiler_sha256);
         fprintf(stdout, ",\"bytes\":%" PRIu64 "}", compiler_bytes);
@@ -1161,36 +1192,36 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
         fputs(",\"oracle_evidence\":{\"path\":", stdout); tp_json_string(stdout, evidence);
         fputs(",\"sha256\":", stdout); tp_json_string(stdout, evidence_sha256);
         fprintf(stdout, ",\"bytes\":%" PRIu64 ",\"outcome\":\"pass\"}", evidence_bytes);
-        fputs(",\"combination\":{\"target\":", stdout); tp_json_string(stdout, descriptor.target);
-        fputs(",\"abi\":", stdout); tp_json_string(stdout, descriptor.abi);
-        fputs(",\"cpu\":", stdout); tp_json_string(stdout, descriptor.cpu);
-        fputs(",\"cpu_features\":", stdout); tp_json_string(stdout, descriptor.cpu_features);
-        fputs(",\"frontend\":", stdout); tp_json_string(stdout, descriptor.admission_frontend);
-        fputs(",\"pic\":", stdout); tp_json_string(stdout, descriptor.admission_pic);
-        fputs(",\"allocator\":", stdout); tp_json_string(stdout, descriptor.admission_allocator); fputc('}', stdout);
+        fputs(",\"combination\":{\"target\":", stdout); tp_json_string(stdout, descriptor->target);
+        fputs(",\"abi\":", stdout); tp_json_string(stdout, descriptor->abi);
+        fputs(",\"cpu\":", stdout); tp_json_string(stdout, descriptor->cpu);
+        fputs(",\"cpu_features\":", stdout); tp_json_string(stdout, descriptor->cpu_features);
+        fputs(",\"frontend\":", stdout); tp_json_string(stdout, descriptor->admission_frontend);
+        fputs(",\"pic\":", stdout); tp_json_string(stdout, descriptor->admission_pic);
+        fputs(",\"allocator\":", stdout); tp_json_string(stdout, descriptor->admission_allocator); fputc('}', stdout);
         fputs(",\"performed_cells\":[", stdout);
         char const* cell_operations[] = {"source-to-object", "source-to-linked-executable", "runtime"};
         for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(cell_operations); ++i)
         {
             if (i) fputc(',', stdout);
             fputs("{\"operation\":", stdout); tp_json_string(stdout, cell_operations[i]);
-            fputs(",\"target\":", stdout); tp_json_string(stdout, descriptor.target);
-            fputs(",\"cpu\":", stdout); tp_json_string(stdout, descriptor.cpu);
-            fputs(",\"frontend\":", stdout); tp_json_string(stdout, descriptor.admission_frontend);
-            fputs(",\"pic\":", stdout); tp_json_string(stdout, descriptor.admission_pic);
-            fputs(",\"allocator\":", stdout); tp_json_string(stdout, descriptor.admission_allocator); fputc('}', stdout);
+            fputs(",\"target\":", stdout); tp_json_string(stdout, descriptor->target);
+            fputs(",\"cpu\":", stdout); tp_json_string(stdout, descriptor->cpu);
+            fputs(",\"frontend\":", stdout); tp_json_string(stdout, descriptor->admission_frontend);
+            fputs(",\"pic\":", stdout); tp_json_string(stdout, descriptor->admission_pic);
+            fputs(",\"allocator\":", stdout); tp_json_string(stdout, descriptor->admission_allocator); fputc('}', stdout);
         }
         fputc(']', stdout);
-        fputs(",\"requested_configuration\":{\"c_lowerings\":", stdout); tp_json_string(stdout, descriptor.c_lowerings);
-        fputs(",\"pic_modes\":", stdout); tp_json_string(stdout, descriptor.pic_modes);
-        fputs(",\"allocator_modes\":", stdout); tp_json_string(stdout, descriptor.allocator_modes);
-        fputs(",\"operations\":", stdout); tp_json_string(stdout, descriptor.operations);
-        fputs(",\"artifacts\":", stdout); tp_json_string(stdout, descriptor.artifacts); fputc('}', stdout);
+        fputs(",\"requested_configuration\":{\"c_lowerings\":", stdout); tp_json_string(stdout, descriptor->c_lowerings);
+        fputs(",\"pic_modes\":", stdout); tp_json_string(stdout, descriptor->pic_modes);
+        fputs(",\"allocator_modes\":", stdout); tp_json_string(stdout, descriptor->allocator_modes);
+        fputs(",\"operations\":", stdout); tp_json_string(stdout, descriptor->operations);
+        fputs(",\"artifacts\":", stdout); tp_json_string(stdout, descriptor->artifacts); fputc('}', stdout);
         fprintf(stdout, ",\"requested_work\":{\"object\":{\"source_count\":%u,\"raw_source_bytes\":%" PRIu64
                         "},\"compile_link\":{\"source_count\":%u,\"raw_source_bytes\":%" PRIu64
                         "},\"runtime\":{\"argv_count\":%u,\"transcript_sha256\":", source_count, object_source_bytes,
-                descriptor.link_input_count, link_source_bytes, descriptor.runtime_argument_count);
-        tp_json_string(stdout, descriptor.runtime_transcript_sha256);
+                descriptor->link_input_count, link_source_bytes, descriptor->runtime_argument_count);
+        tp_json_string(stdout, descriptor->runtime_transcript_sha256);
         fputs("}}", stdout);
         TpWorkloadArtifact const* executable_artifact = artifacts + source_count;
         fprintf(stdout, ",\"performed_work\":{\"object\":{\"command_count\":%u,\"artifact_count\":%u,\"translated_bytes\":%" PRIu64
@@ -1228,6 +1259,7 @@ static int tp_workload_admit(TpWorkloadAdmitOptions options)
     }
     if (!ok) tp_error("workload functional admission failed; no admission receipt emitted");
     free(artifacts);
+    free(state);
     return ok;
 }
 

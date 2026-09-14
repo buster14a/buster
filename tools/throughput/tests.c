@@ -2,9 +2,11 @@
  * fixtures, never compiler measurements. Child modes exercise the OS boundary.
  * Build through ./build.sh bench_throughput self-test; shared.c owns linkage.
  */
+#define TP_WORKLOAD_TEST_ALLOCATIONS 1
 #define main throughput_cli_main
 #include "throughput.c"
 #undef main
+#undef TP_WORKLOAD_TEST_ALLOCATIONS
 
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
@@ -83,12 +85,38 @@ static void test_delay(unsigned milliseconds)
 #endif
 }
 
+static int test_admission_transcript(void)
+{
+    static char const text[] = "admitted\n";
+    int result = 3;
+#ifdef _WIN32
+    DWORD written = 0;
+    if (WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), text, (DWORD)(sizeof(text) - 1), &written, NULL) &&
+        written == (DWORD)(sizeof(text) - 1)) result = 0;
+#else
+    if (fwrite(text, 1, sizeof(text) - 1, stdout) == sizeof(text) - 1 && fflush(stdout) == 0) result = 0;
+#endif
+    return result;
+}
+
 static int test_child(int argc, char** argv)
 {
     int result = 0;
     if (argc < 3) result = 2;
     else if (!strcmp(argv[2], "fail")) result = 7;
     else if (!strcmp(argv[2], "throughput")) result = throughput_cli_main(argc - 2, argv + 2);
+    else if (!strcmp(argv[2], "throughput-admission-oom"))
+    {
+        tp_workload_test_fail_state_allocation = 1;
+        result = throughput_cli_main(argc - 2, argv + 2);
+    }
+#ifndef _WIN32
+    else if (!strcmp(argv[2], "throughput-low-stack"))
+    {
+        struct rlimit limit = {(rlim_t)1024 * 1024, (rlim_t)1024 * 1024};
+        result = setrlimit(RLIMIT_STACK, &limit) == 0 ? throughput_cli_main(argc - 2, argv + 2) : 2;
+    }
+#endif
 #ifdef __linux__
     else if (argc == 4 && !strcmp(argv[2], "host-lock-probe"))
     {
@@ -99,6 +127,7 @@ static int test_child(int argc, char** argv)
     }
 #endif
     else if (!strcmp(argv[2], "sleep")) test_delay(5000);
+    else if (!strcmp(argv[2], "admission-transcript")) result = test_admission_transcript();
     else if (argc == 4 && !strcmp(argv[2], "descendant-marker"))
     {
         test_delay(2000);
@@ -237,16 +266,22 @@ static int test_identity_manifest(char const* root, char const* name, char const
     return length > 0 && (size_t)length < sizeof(text) && test_text(root, name, text);
 }
 
-static TpProcess test_admit_workload(char const* executable, char const* descriptor, char const* source_root,
-                                     char const* evidence, char const* output, char* manifests[6], char const* log)
+static TpProcess test_admit_workload_mode(char const* executable, char const* mode, char const* descriptor, char const* source_root,
+                                          char const* evidence, char const* output, char* manifests[6], char const* log)
 {
-    char* command[] = {(char*)executable, "child", "throughput", "admit-workload", (char*)descriptor,
+    char* command[] = {(char*)executable, "child", (char*)mode, "admit-workload", (char*)descriptor,
         "--source-root", (char*)source_root, "--compiler", (char*)executable, "--evidence", (char*)evidence,
         "--evidence-outcome", "pass", "--output", (char*)output, "--qualification-id", "test:qualification",
         "--dependency-manifest", manifests[0], "--resource-manifest", manifests[1],
         "--sysroot-manifest", manifests[2], "--sdk-manifest", manifests[3],
         "--environment-manifest", manifests[4], "--runtime-manifest", manifests[5], NULL};
     return tp_process(command, NULL, log, 10, -1, 0);
+}
+
+static TpProcess test_admit_workload(char const* executable, char const* descriptor, char const* source_root,
+                                     char const* evidence, char const* output, char* manifests[6], char const* log)
+{
+    return test_admit_workload_mode(executable, "throughput", descriptor, source_root, evidence, output, manifests, log);
 }
 
 static int test_admission_descriptor(char const* directory, char const* tree_hash,
@@ -280,7 +315,7 @@ static int test_admission_descriptor(char const* directory, char const* tree_has
         "compile_link_argv=$CPU\ncompile_link_argv=$FRONTEND\ncompile_link_argv=$PIC\n"
         "compile_link_argv=-fregister-allocator=$MODE\ncompile_link_argv=-fsource-metrics=$METRICS\n%s"
         "compile_link_argv=$LINK_SOURCES\ncompile_link_argv=-lm\ncompile_link_argv=-o\ncompile_link_argv=$OUTPUT\n"
-        "runtime_argv=$EXECUTABLE\nruntime_argv=child\nruntime_argv=echo\nruntime_argv=admitted\n",
+        "runtime_argv=$EXECUTABLE\nruntime_argv=child\nruntime_argv=admission-transcript\n",
         TP_WORKLOAD_DESCRIPTOR_SCHEMA, transcript_sha256, source_bytes + generated_bytes, tree_hash,
         source_hash, source_bytes, generated_hash, generated_bytes, object_control, link_control);
     return controls_ok && length > 0 && (size_t)length < sizeof(text) && test_text(directory, "admission.workload", text);
@@ -966,7 +1001,12 @@ static void test_workload_admission(char const* executable, char const* root)
     }
     char output[TP_PATH_CAP];
     CHECK(tp_path(output, directory, "success"));
+#ifdef _WIN32
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
+#else
+    TpProcess result = test_admit_workload_mode(executable, "throughput-low-stack", descriptor, source_root,
+                                                evidence, output, manifests, log);
+#endif
     CHECK(result.exit_code == 0 && !result.launch_error && !result.timed_out);
     FILE* file = fopen(log, "rb");
     char report[65536] = {0};
@@ -984,6 +1024,11 @@ static void test_workload_admission(char const* executable, char const* root)
 
     char failed_output[TP_PATH_CAP], failure_log[TP_PATH_CAP];
     CHECK(tp_path(failure_log, directory, "admission-failure.log"));
+    CHECK(tp_path(failed_output, directory, "admission-state-oom"));
+    result = test_admit_workload_mode(executable, "throughput-admission-oom", descriptor, source_root,
+                                      evidence, failed_output, manifests, failure_log);
+    struct stat failed_status;
+    CHECK(result.exit_code == 2 && stat(failed_output, &failed_status) != 0 && errno == ENOENT);
     CHECK(tp_path(failed_output, directory, "preexisting") && tp_mkdirs(failed_output));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK(result.exit_code == 2);
