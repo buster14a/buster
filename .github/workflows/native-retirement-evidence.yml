@@ -133,15 +133,18 @@ jobs:
           --shard-index 3 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
           --out evidence/census-integrated-3
-      - name: Join and independently validate every census row
+      - name: Independently validate every census shard and row
         if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
         working-directory: candidate
         run: |
-          cp ../validation/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py evidence/
-          cp ../validation/docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py evidence/
-          clang -O2 -fPIC -shared -Isrc src/buster/lib/hash.c -o evidence/libcensus_hash.so
-          python3 "$PWD/evidence/join-census.py" census-integrated 4
-          python3 "$PWD/evidence/validate-census-v2.py" census-integrated 4
+          python3 ../validation/tools/native_retirement_contract.py validate-shards \
+            evidence/census-integrated-0 \
+            evidence/census-integrated-1 \
+            evidence/census-integrated-2 \
+            evidence/census-integrated-3 \
+            --out evidence/census-validation-v2.json \
+            --require-clean-candidate \
+            --require-clean-acceptance
       - name: Retain raw evidence and build recipes
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -157,6 +160,8 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 6
+          # Preserve ledger-declared tracked dotfiles under evidence without
+          # uploading checkout/.git metadata or unrelated hidden files.
           include-hidden-files: true
 
   strict_differential:
@@ -301,6 +306,8 @@ jobs:
           Copy-Item 'build\CMakeCache.txt', 'build\compile_commands.json' 'evidence\strict-binary\'
           & $Driver test_differential --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
           $DifferentialArgs = @(
             'test_differential'
             '--ide', "$PWD\evidence\strict-binary\ide.exe"
@@ -308,6 +315,9 @@ jobs:
             '--strict-mir'
             '--out', 'evidence\strict-differential'
           )
+          foreach ($LibraryPath in $LibraryPaths) {
+            $DifferentialArgs += @('--library-path', $LibraryPath)
+          }
           if ('${{ matrix.sanitizer }}' -eq 'required') {
             $ResourceDir = (& clang.exe -print-resource-dir).Trim()
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
