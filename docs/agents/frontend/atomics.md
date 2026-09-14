@@ -151,11 +151,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   promoted width**, which is what the promotion above exists for: a three-byte
   record is read and written through four bytes, and the padding the promotion
   added is written as zero, because Clang copies the value through a zeroed
-  temporary and that is the oracle. The widths the canonical emitters lower
-  that access at are one, two, four and eight bytes on both targets, plus
-  sixteen on x86-64 where `cx16` gives them `CMPXCHG16B`, and on AArch64
-  through exclusive-pair loops -- the sequences `_Atomic __int128` already
-  uses, which also take aggregates promoted into that width. The
+  temporary and that is the oracle. The frontend represents widths one, two,
+  four and eight bytes on both targets, plus sixteen on x86-64 and on AArch64.
+  A sixteen-byte x86-64 aggregate remains representable in canonical IR
+  independently of `cx16`; downstream machine/codegen admission still requires
+  `cx16` for `CMPXCHG16B` and reports an unsupported instruction when it is
+  absent. AArch64 lowers sixteen-byte accesses through exclusive-pair loops --
+  the sequences `_Atomic __int128` already uses, which also take aggregates
+  promoted into that width. The
   AArch64 selector now handles the promoted aggregate loads/stores through
   sixteen bytes as well as full-width integer exchange/RMW/CAS. Its pair
   update rows consume the integer images described below; they do not widen
@@ -170,8 +173,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   the place and drops the load again: refusing at the emit site rejects
   `&object.atomic_member`, which performs no atomic access at all and is what
   `tests/basic_c_packed_layout.c` writes over its seventeen-byte atomic
-  member. The sixteen-byte x86-64 access requires `cx16`, so the refusal is
-  target-dependent where the layout rule above is not.
+  member. Only the downstream x86-64 admission of a sixteen-byte access is
+  target-dependent on `cx16`; the frontend representation is not.
   `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
   Clang's answers baked in, including the padding.
 - **GNU scalar atomic builtins need an atomic pointer view in canonical IR.**

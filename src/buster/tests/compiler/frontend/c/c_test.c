@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+#include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -12769,6 +12770,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, aggregate_store_count == 1);
         BUSTER_TEST(arguments, aggregate_widths_agree);
         scratch_end(temporary);
+    }
+    {
+        // Sixteen-byte aggregate atomics remain representable in canonical IR
+        // on baseline x86-64 even though the downstream CMPXCHG16B admission
+        // still requires cx16.  The same representation is emitted on
+        // haswell/cx16 and AArch64, where the backend has a native admission.
+        Target targets[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        };
+        String8 source = S8("typedef struct { unsigned long long low, high; } wide;"
+                            " static _Atomic wide object;"
+                            " wide atomic_wide_store_exchange(wide desired) {"
+                            " object = desired;"
+                            " return __c11_atomic_exchange(&object, desired, __ATOMIC_SEQ_CST);"
+                            " }\n");
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            Target target = targets[target_index];
+            TemporalArena temporary = scratch_begin(0, 0);
+            TargetDataLayout data_layout = target_data_layout(target);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                                     (CPreprocessOptions){.target = target, .data_layout = data_layout});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("atomic-aggregate-wide-ir.c"), tokens, parse, target);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                u32 atomic_store_count = 0;
+                u32 aggregate_exchange_count = 0;
+                bool atomic_store_shape = false;
+                bool aggregate_exchange_shape = false;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + instruction_index;
+                        if (instruction->opcode == IR_OPCODE_ATOMIC_STORE)
+                        {
+                            atomic_store_count += 1;
+                            if (instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count &&
+                                instruction->operands[1].value < function->value_count)
+                            {
+                                IrType* place_type = ir_type_from_id(&lowered.program->types,
+                                                                      function->values[instruction->operands[0].value].canonical_type);
+                                IrType* value_type = ir_type_from_id(&lowered.program->types,
+                                                                      function->values[instruction->operands[1].value].canonical_type);
+                                atomic_store_shape |= place_type && place_type->is_atomic && place_type->layout.resolved && place_type->layout.size == 16 &&
+                                                      value_type && value_type->kind == IR_TYPE_STRUCT && value_type->layout.resolved && value_type->layout.size == 16;
+                            }
+                        }
+                        if (instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE && instruction->atomic_operation == IR_ATOMIC_EXCHANGE)
+                        {
+                            aggregate_exchange_count += 1;
+                            if (instruction->operand_count && instruction->operands[0].value < function->value_count)
+                            {
+                                IrType* place_type = ir_type_from_id(&lowered.program->types,
+                                                                      function->values[instruction->operands[0].value].canonical_type);
+                                IrType* operation_type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                                aggregate_exchange_shape |= place_type && place_type->is_atomic && place_type->layout.resolved && place_type->layout.size == 16 &&
+                                                            operation_type && operation_type->kind == IR_TYPE_INTEGER && !operation_type->is_atomic &&
+                                                            operation_type->layout.resolved && operation_type->layout.size == 16 && operation_type->bit_width == 128;
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, atomic_store_count == 1);
+                BUSTER_TEST(arguments, aggregate_exchange_count == 1);
+                BUSTER_TEST(arguments, atomic_store_shape);
+                BUSTER_TEST(arguments, aggregate_exchange_shape);
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
+                                                                             (CodegenModuleOptions){0});
+                if (target_index == 0)
+                {
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
     }
     {
         // Wider than any lock-free access the target has, which would need a
