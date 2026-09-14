@@ -29,7 +29,6 @@ TARGETS = {
 IDENTITY_FIELDS = ("fixture", "target", "target_abi", "cpu", "cpu_features", "allocator",
                    "frontend_lowering", "PIC", "fixture_recipe", "compile_obligation",
                    "link_obligation", "execution_obligation", "diagnostic_obligation")
-SUCCESS = {"baseline-supported", "strict-success", "strict-empty-unit"}
 INPUT_FIELDS = ("path", "role", "compile_obligation", "bytes", "buster_hash_64", "sha256",
                 "fixture_recipe", "fixture_flags")
 SUPPORT_FIELDS = ("path", "role", "compile_obligation", "bytes", "sha256")
@@ -280,13 +279,13 @@ def classify_result(row, result, expected_baseline_functions):
 
     if disposition == "strict-success-baseline-unresolved":
         side = "reference"
-        reference_failure = not inapplicable
+        reference_failure = True
     elif disposition.startswith("baseline-and-"):
         # Preserve the reference failure while still rejecting the unresolved
         # candidate side when the MIR leg did not produce a supported result.
         side = "reference"
         candidate_failure = True
-        reference_failure = not inapplicable
+        reference_failure = True
     elif disposition in {"strict-success", "strict-empty-unit"} and not candidate_failure:
         side = "candidate"
     elif disposition.startswith("infrastructure-") or disposition.startswith("setup-"):
@@ -443,7 +442,7 @@ def validate(directory):
     }
 
 
-def partition_shards(reports, require_clean_candidate=False):
+def partition_shards(reports, require_clean_candidate=False, require_clean_acceptance=False):
     """Prove that validated shard reports form one complete row partition."""
     assert reports, "at least one census shard is required"
     manifests = [report["manifest"] for report in reports]
@@ -480,11 +479,13 @@ def partition_shards(reports, require_clean_candidate=False):
     candidate_failures = sorted(item["row"] for item in outcomes.values() if item["candidate_failure"])
     acceptance_failures = sorted(item["row"] for item in outcomes.values() if item["acceptance_failure"])
     if require_clean_candidate:
-        assert not acceptance_failures, f"candidate acceptance has unresolved rows: {acceptance_failures[:8]}"
+        assert not candidate_failures, f"candidate has unresolved rows: {candidate_failures[:8]}"
+    if require_clean_acceptance:
+        assert not acceptance_failures, f"acceptance has unresolved rows: {acceptance_failures[:8]}"
     return first, selected_rows, {key: outcomes[key] for key in sorted(outcomes, key=int)}
 
 
-def validate_shards(directories, output, require_clean_candidate=False):
+def validate_shards(directories, output, require_clean_candidate=False, require_clean_acceptance=False):
     """Validate every v2 shard and prove that their selected rows partition it.
 
     A per-shard result can be internally consistent while the overall census
@@ -538,13 +539,16 @@ def validate_shards(directories, output, require_clean_candidate=False):
         "telemetry_defect_rows": telemetry_defects,
         "execution_defect_rows": execution_defects,
         "require_clean_candidate": require_clean_candidate,
+        "require_clean_acceptance": require_clean_acceptance,
         "clean_candidate": not candidate_failures,
         "clean_acceptance": not acceptance_failures,
         "complete_row_partition": True,
     }
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if require_clean_candidate:
-        assert not acceptance_failures, f"candidate acceptance has unresolved rows: {acceptance_failures[:8]}"
+        assert not candidate_failures, f"candidate has unresolved rows: {candidate_failures[:8]}"
+    if require_clean_acceptance:
+        assert not acceptance_failures, f"acceptance has unresolved rows: {acceptance_failures[:8]}"
     return result
 
 
@@ -583,13 +587,16 @@ def self_test():
             raise AssertionError("incomplete or duplicate shard partition was accepted")
 
 
-def reconcile(reference, candidate, output, require_clean):
+def reconcile(reference, candidate, output, require_clean_candidate, require_clean_acceptance=False):
     old, new = reference["identities"], candidate["identities"]
     common = sorted(set(old) & set(new))
     transitions = Counter((old[key]["disposition"], new[key]["disposition"]) for key in common)
     reference_manifest = reference["manifest"]
     candidate_manifest = candidate["manifest"]
-    report = {"schema": 1, "reference": reference["directory"], "candidate": candidate["directory"],
+    candidate_common_failure_rows = sorted(new[key]["row"] for key in common if new[key]["candidate_failure"])
+    reference_common_failure_rows = sorted(new[key]["row"] for key in common if new[key]["reference_failure"])
+    acceptance_common_failure_rows = sorted(new[key]["row"] for key in common if new[key]["acceptance_failure"])
+    report = {"schema": 2, "reference": reference["directory"], "candidate": candidate["directory"],
               "reference_compiler_revision_claim": reference_manifest["compiler_revision_claim"],
               "candidate_compiler_revision_claim": candidate_manifest["compiler_revision_claim"],
               "reference_baseline_revision_claim": reference_manifest["baseline_revision_claim"],
@@ -612,15 +619,21 @@ def reconcile(reference, candidate, output, require_clean):
               "added_rows": len(set(new) - set(old)),
               "transitions": [{"from": before, "to": after, "rows": count}
                               for (before, after), count in sorted(transitions.items())],
-              "candidate_common_failures": sum(new[key].get("acceptance_failure",
-                                                               new[key]["disposition"] not in SUCCESS or
-                                                               new[key]["fallbacks"] or
-                                                               new[key].get("telemetry_defect", False) or
-                                                               new[key].get("candidate_failure", False))
-                                               for key in common)}
+              "candidate_common_failures": len(candidate_common_failure_rows),
+              "candidate_common_failure_rows": candidate_common_failure_rows,
+              "reference_common_failures": len(reference_common_failure_rows),
+              "reference_common_failure_rows": reference_common_failure_rows,
+              "acceptance_common_failures": len(acceptance_common_failure_rows),
+              "acceptance_common_failure_rows": acceptance_common_failure_rows,
+              "require_clean_candidate": require_clean_candidate,
+              "require_clean_acceptance": require_clean_acceptance,
+              "clean_candidate": not candidate_common_failure_rows,
+              "clean_acceptance": not acceptance_common_failure_rows}
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if require_clean:
+    if require_clean_candidate:
         assert report["candidate_common_failures"] == 0, "candidate has unresolved common rows"
+    if require_clean_acceptance:
+        assert report["acceptance_common_failures"] == 0, "acceptance has unresolved common rows"
     return report
 
 
@@ -634,11 +647,13 @@ def main():
     shards_parser.add_argument("directories", nargs="+", type=Path)
     shards_parser.add_argument("--out", required=True, type=Path)
     shards_parser.add_argument("--require-clean-candidate", action="store_true")
+    shards_parser.add_argument("--require-clean-acceptance", action="store_true")
     compare_parser = subparsers.add_parser("compare")
     compare_parser.add_argument("reference", type=Path)
     compare_parser.add_argument("candidate", type=Path)
     compare_parser.add_argument("--out", required=True, type=Path)
     compare_parser.add_argument("--require-clean-candidate", action="store_true")
+    compare_parser.add_argument("--require-clean-acceptance", action="store_true")
     arguments = parser.parse_args()
     if arguments.command == "self-test":
         self_test()
@@ -652,10 +667,12 @@ def main():
                                         for report in reports]}))
     elif arguments.command == "validate-shards":
         print(json.dumps(validate_shards(arguments.directories, arguments.out,
-                                         arguments.require_clean_candidate), sort_keys=True))
+                                         arguments.require_clean_candidate,
+                                         arguments.require_clean_acceptance), sort_keys=True))
     else:
         print(json.dumps(reconcile(validate(arguments.reference), validate(arguments.candidate),
-                                   arguments.out, arguments.require_clean_candidate), sort_keys=True))
+                                   arguments.out, arguments.require_clean_candidate,
+                                   arguments.require_clean_acceptance), sort_keys=True))
 
 
 if __name__ == "__main__":
