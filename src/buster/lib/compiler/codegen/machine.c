@@ -2622,6 +2622,26 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena,
     return mutable_count;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_debug_constant_value(IrFunction const* function, IrValueId value, u64* constant_out)
+{
+    bool result = false;
+    if (function && constant_out && value.value < function->value_count)
+    {
+        IrInstructionId definition = function->values[value.value].definition;
+        if (definition.value < function->instruction_count)
+        {
+            IrInstruction const* instruction = function->instructions + definition.value;
+            if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_count == 1 && instruction->immediates &&
+                !instruction->immediate_is_negative)
+            {
+                *constant_out = instruction->immediates[0];
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make(IrProgram* program, IrFunction* ir_function,
                                                                 MachineFunction* machine_function, u32 const* value_stack_slots,
                                                                 u32 const* value_indirect_slots, IrLocalId local, IrValueId value,
@@ -2642,7 +2662,7 @@ BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make(IrProgram* progra
     {
         result.value_size = (u8)type->layout.size;
     }
-    if (!indirect && type && type->layout.resolved && type->layout.size <= 8 && ir_constant_index_value(ir_function, value, &constant))
+    if (!indirect && type && type->layout.resolved && type->layout.size <= 8 && machine_debug_constant_value(ir_function, value, &constant))
     {
         result.kind = MACHINE_DEBUG_VALUE_CONSTANT;
         result.constant = constant;

@@ -1,7 +1,18 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/codegen/machine.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
+
+enum
+{
+    CODEGEN_TEST_CODEVIEW_SYMBOLS = 0xf1,
+    CODEGEN_TEST_CODEVIEW_S_LOCAL = 0x113e,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD = 0x1140,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER = 0x1141,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+};
 
 typedef u64 CodegenTestFunction2(u64 left, u64 right);
 typedef u64 CodegenTestFunction1(u64 value);
@@ -866,7 +877,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
         memcpy(&length, bytes.pointer + subsection + 4, 4);
         u64 payload = subsection + 8;
         if (length > bytes.length - payload) break;
-        if (kind == CODEVIEW_TEST_SYMBOLS)
+        if (kind == CODEGEN_TEST_CODEVIEW_SYMBOLS)
         {
             u64 record = payload;
             u64 end = payload + length;
@@ -877,33 +888,33 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                 memcpy(&record_length, bytes.pointer + record, 2);
                 memcpy(&record_kind, bytes.pointer + record + 2, 2);
                 if (record_length < 2 || record + 2 + record_length > end) break;
-                mask |= record_kind == CODEVIEW_TEST_S_LOCAL ? CODEGEN_TEST_CONSUMER_LOCAL : 0;
-                local_count += record_kind == CODEVIEW_TEST_S_LOCAL;
-                mask |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                mask |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                if (record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL && record_length >= 6)
+                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL ? CODEGEN_TEST_CONSUMER_LOCAL : 0;
+                local_count += record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL;
+                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
+                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && record_length >= 6)
                 {
                     s32 frame = 0;
                     memcpy(&frame, bytes.pointer + record + 4, 4);
                     *found_frame_value |= frame == expected_frame;
                 }
-                mask |= (record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD ||
-                         record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
+                mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
+                         record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
                 mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
                 u32 range_start = UINT32_MAX;
                 u16 range_length = 0;
-                if ((record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER ||
-                     record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL) && record_length >= 14)
+                if ((record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ||
+                     record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL) && record_length >= 14)
                 {
                     memcpy(&range_start, bytes.pointer + record + 8, 4);
                     memcpy(&range_length, bytes.pointer + record + 14, 2);
                 }
-                else if (record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER && record_length >= 18)
+                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER && record_length >= 18)
                 {
                     memcpy(&range_start, bytes.pointer + record + 12, 4);
                     memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
-                else if (record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD && record_length >= 16)
+                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
                 {
                     memcpy(&range_start, bytes.pointer + record + 10, 4);
                     memcpy(&range_length, bytes.pointer + record + 16, 2);
@@ -911,12 +922,12 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                 if (range_start != UINT32_MAX)
                 {
                     defrange_count += 1;
-                    exact_mask |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER && range_start == 0 && range_length == 10
+                    exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && range_start == 0 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                    exact_mask |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL && range_start == 10 && range_length == 10
+                    exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && range_start == 10 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                    exact_piece_count += (record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD ||
-                                          record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER) &&
+                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
+                                          record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
                                          range_start == 20 && range_length == 10;
                     found_unavailable_range |= range_start == 30 && range_length == 10;
                 }
@@ -1008,7 +1019,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_codeview_named_constant(ByteSlice bytes, S
         {
             break;
         }
-        if (kind == CODEVIEW_TEST_SYMBOLS)
+        if (kind == CODEGEN_TEST_CODEVIEW_SYMBOLS)
         {
             u64 record = payload;
             u64 end = payload + length;
