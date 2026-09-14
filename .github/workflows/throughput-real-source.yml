@@ -2,8 +2,8 @@ name: Real-source throughput qualification
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['bench/423-real-source-20260912']
+  pull_request:
+    branches: [main]
     paths:
       - .github/workflows/throughput-real-source.yml
       - tools/throughput/**
@@ -14,14 +14,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: real-source-throughput-${{ github.ref }}
-  cancel-in-progress: false
+  group: real-source-throughput-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   compatibility:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.head_ref == 'bench/423-real-source-admission-20260914') }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '1'
       BUSTER_TEST_JOBS: '1'
@@ -29,11 +29,14 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Retain exact source for review and reproduction
         shell: bash
+        env:
+          SUBMITTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$SUBMITTED_SHA"
           mkdir -p evidence
           git rev-parse HEAD > evidence/revision.txt
           git rev-parse 'HEAD^{tree}' > evidence/tree.txt
@@ -41,7 +44,7 @@ jobs:
           sha256sum evidence/source.tar > evidence/source.tar.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: real-source-qualification-source-${{ github.sha }}
+          name: real-source-qualification-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: evidence
           retention-days: 14
           if-no-files-found: error
@@ -171,16 +174,213 @@ jobs:
             --source-root external/sqlite-amalgamation-3530400 --compiler build/Release/ide --evidence evidence/sqlite.log \
             --evidence-outcome "$(outcome "$SQLITE")" > evidence/sqlite-preflight.json
           grep -F '"admitted":false' evidence/cjson-preflight.json evidence/lua-preflight.json evidence/sqlite-preflight.json
+      - name: Generate parsed closure manifests
+        id: closures
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          closure="$PWD/evidence/closures"
+          mkdir -p "$closure"
+          manifest_begin() {
+            local path=$1 kind=$2 identity=$3 operations=$4
+            printf 'schema=buster-throughput-identity-v1\nkind=%s\nidentity=%s\noperation=%s\n' \
+              "$kind" "$identity" "$operations" > "$path"
+          }
+          manifest_argument() {
+            printf 'argument=%s|%s\n' "$2" "$3" >> "$1"
+          }
+          manifest_fact() {
+            printf 'fact=%s\n' "$2" >> "$1"
+          }
+          manifest_file() {
+            local resolved hash bytes
+            resolved=$(readlink -f "$2")
+            test -f "$resolved" && test ! -L "$resolved"
+            hash=$(sha256sum "$resolved" | cut -d' ' -f1)
+            bytes=$(stat -c '%s' "$resolved")
+            printf 'file=%s\t%s\t%s\n' "$resolved" "$hash" "$bytes" >> "$1"
+          }
+          manifest_files_under() {
+            local path=$1 root=$2 list
+            test -d "$root"
+            list=$(mktemp)
+            if ! find -L "$root" -type f -print0 | sort -z > "$list"; then
+              rm -f "$list"
+              return 1
+            fi
+            while IFS= read -r -d '' file; do
+              manifest_file "$path" "$file"
+            done < "$list"
+            rm -f "$list"
+          }
+          compiler="$PWD/build/Release/ide"
+          resource="$closure/resource.identity"
+          manifest_begin "$resource" resource 'compiler-binary-bound;complete-header-closure-required-at-admission' \
+            source-to-object,source-to-linked-executable
+          manifest_argument "$resource" source-to-object -ffrontend-ssa
+          manifest_argument "$resource" source-to-linked-executable -ffrontend-ssa
+          manifest_file "$resource" "$compiler"
+          resource_include="$(clang -print-resource-dir)/include"
+          manifest_files_under "$resource" "$resource_include"
+
+          sysroot="$closure/sysroot.identity"
+          manifest_begin "$sysroot" sysroot runtime-required \
+            source-to-object,source-to-linked-executable
+          manifest_argument "$sysroot" source-to-object --target=x86_64-unknown-linux-gnu
+          manifest_argument "$sysroot" source-to-linked-executable --target=x86_64-unknown-linux-gnu
+          manifest_files_under "$sysroot" /usr/include
+          if test -d /usr/local/include; then manifest_files_under "$sysroot" /usr/local/include; fi
+
+          sdk="$closure/sdk.identity"
+          manifest_begin "$sdk" sdk not-applicable-linux source-to-object,source-to-linked-executable
+          manifest_fact "$sdk" not-applicable-linux
+
+          environment="$closure/environment.identity"
+          manifest_begin "$environment" environment 'runtime-required;sanitized-env-and-locale-required-at-admission' \
+            source-to-object,source-to-linked-executable,runtime
+          manifest_fact "$environment" 'env:LC_ALL=C'
+          manifest_fact "$environment" 'env:TZ=UTC'
+          manifest_fact "$environment" "env:PATH=$PATH"
+
+          runtime_file() {
+            local path
+            path=$(ldconfig -p | awk -v name="$1" '$1 == name && !found { path = $NF; found = 1 } END { if (found) print path }')
+            test -n "$path"
+            manifest_file "$2" "$path"
+          }
+          cjson_dependency="$closure/cjson-dependency.identity"
+          manifest_begin "$cjson_dependency" dependency libm:native-toolchain source-to-linked-executable
+          manifest_argument "$cjson_dependency" source-to-linked-executable -lm
+          runtime_file libc.so.6 "$cjson_dependency"
+          runtime_file libm.so.6 "$cjson_dependency"
+
+          lua_dependency="$closure/lua-dependency.identity"
+          manifest_begin "$lua_dependency" dependency libm+libdl+readline:native-toolchain source-to-linked-executable
+          for argument in -lm -ldl -lreadline; do
+            manifest_argument "$lua_dependency" source-to-linked-executable "$argument"
+          done
+          for library in libc.so.6 libm.so.6 libdl.so.2 libreadline.so.8; do
+            runtime_file "$library" "$lua_dependency"
+          done
+
+          sqlite_dependency="$closure/sqlite-dependency.identity"
+          manifest_begin "$sqlite_dependency" dependency libm+libdl+pthread:native-toolchain source-to-linked-executable
+          for argument in -lm -ldl -lpthread; do
+            manifest_argument "$sqlite_dependency" source-to-linked-executable "$argument"
+          done
+          for library in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0; do
+            runtime_file "$library" "$sqlite_dependency"
+          done
+
+          runtime_manifest() {
+            local path=$1 identity=$2
+            shift 2
+            manifest_begin "$path" runtime "$identity" runtime
+            # The manifest must retain this placeholder for admission-time binding.
+            # shellcheck disable=SC2016
+            manifest_argument "$path" runtime '$EXECUTABLE'
+            manifest_file "$path" /lib64/ld-linux-x86-64.so.2
+            for library in "$@"; do runtime_file "$library" "$path"; done
+          }
+          runtime_manifest "$closure/cjson-runtime.identity" cjson-glibc-runtime-closure libc.so.6 libm.so.6
+          runtime_manifest "$closure/lua-runtime.identity" lua-glibc-readline-runtime-closure \
+            libc.so.6 libm.so.6 libdl.so.2 libreadline.so.8 libtinfo.so.6
+          runtime_manifest "$closure/sqlite-runtime.identity" sqlite-glibc-runtime-closure \
+            libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0
+      - name: Admit exact passing functional combinations
+        id: admission
+        if: ${{ !cancelled() && steps.closures.outcome == 'success' }}
+        shell: bash
+        env:
+          CJSON: ${{ steps.oracle_cjson.outcome }}
+          LUA: ${{ steps.oracle_lua.outcome }}
+          SQLITE: ${{ steps.oracle_sqlite.outcome }}
+        run: |
+          set -euo pipefail
+          closure="$PWD/evidence/closures"
+          source_revision=$(cat evidence/revision.txt)
+          qualification="${source_revision}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          : > evidence/admission-outcomes.txt
+          admission_failed=0
+          admit() {
+            local family=$1 descriptor=$2 source=$3 oracle=$4 dependency=$5 runtime=$6
+            if test "${!family}" != success; then
+              printf '%s oracle did not pass; no admission attempted\n' "$family" >> "evidence/${family,,}-admission-skipped.txt"
+              if test "${!family}" = failure; then
+                printf '%s=failed-oracle\n' "${family,,}" >> evidence/admission-outcomes.txt
+              else
+                printf '%s=unavailable\n' "${family,,}" >> evidence/admission-outcomes.txt
+              fi
+              return
+            fi
+            if env -i PATH="$PATH" LC_ALL=C TZ=UTC \
+              .ci-tools/build bench_throughput admit-workload "$descriptor" \
+                --source-root "$source" --compiler build/Release/ide --evidence "$oracle" --evidence-outcome pass \
+                --output "evidence/${family,,}-admission-work" --qualification-id "$qualification" \
+                --dependency-manifest "$dependency" --resource-manifest "$closure/resource.identity" \
+                --sysroot-manifest "$closure/sysroot.identity" --sdk-manifest "$closure/sdk.identity" \
+                --environment-manifest "$closure/environment.identity" --runtime-manifest "$runtime" \
+                > "evidence/${family,,}-admission.json.tmp" \
+                2> "evidence/${family,,}-admission.stderr.log"; then
+              mv "evidence/${family,,}-admission.json.tmp" "evidence/${family,,}-admission.json"
+              printf '%s=admitted\n' "${family,,}" >> evidence/admission-outcomes.txt
+            else
+              rm -f "evidence/${family,,}-admission.json.tmp"
+              printf '%s=invalid-or-incomplete\n' "${family,,}" >> evidence/admission-outcomes.txt
+              admission_failed=1
+            fi
+          }
+          admit CJSON tools/throughput/workloads/cjson-1.7.19.workload external/cjson-throughput \
+            evidence/cjson.log "$closure/cjson-dependency.identity" "$closure/cjson-runtime.identity"
+          admit LUA tools/throughput/workloads/lua-5.4.8.workload external/lua-5.4.8/src \
+            evidence/lua.log "$closure/lua-dependency.identity" "$closure/lua-runtime.identity"
+          admit SQLITE tools/throughput/workloads/sqlite-3.53.4.workload external/sqlite-amalgamation-3530400 \
+            evidence/sqlite.log "$closure/sqlite-dependency.identity" "$closure/sqlite-runtime.identity"
+          cat evidence/admission-outcomes.txt
+          exit "$admission_failed"
+      - name: Validate hosted functional admission receipts
+        if: ${{ !cancelled() && steps.admission.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          expected = {"cjson": (3, 3), "lua": (34, 33), "sqlite": (2, 2)}
+          source_revision = Path("evidence/revision.txt").read_text().strip()
+          expected_qualification = f"{source_revision}:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
+          receipts = []
+          for family, counts in expected.items():
+              receipt = json.loads(Path(f"evidence/{family}-admission.json").read_text())
+              assert receipt["schema"] == "buster-throughput-workload-admission-v1"
+              assert receipt["scope"] == "hosted-functional-admission" and receipt["admitted"] is True
+              assert receipt["fresh_admission_required"] is False and receipt["family"] == family
+              assert receipt["qualification_id"] == expected_qualification
+              assert receipt["combination"]["frontend"] == "direct-ssa"
+              assert receipt["combination"]["pic"] == "off" and receipt["combination"]["allocator"] == "fast"
+              assert [cell["operation"] for cell in receipt["performed_cells"]] == [
+                  "source-to-object", "source-to-linked-executable", "runtime"]
+              assert receipt["requested_work"]["object"]["source_count"] == counts[0]
+              assert receipt["requested_work"]["compile_link"]["source_count"] == counts[1]
+              assert any(item["role"] == "runtime-transcript" for item in receipt["artifacts"])
+              receipts.append(receipt)
+          assert len({receipt["family"] for receipt in receipts}) == 3
+          assert any(item["source"] == "sqlite3.c" and item["role"] == "object"
+                     for item in receipts[2]["artifacts"])
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: real-source-qualification-${{ github.sha }}-${{ github.run_attempt }}
+          name: real-source-qualification-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
           path: |
             evidence
             build/cjson-v1.7.19-*
             build/lua-v5.4.8-*
             build/sqlite-3.53.4-*
             build/throughput-tool-tests
+            build/Release/ide
             build/CMakeCache.txt
             build/compile_commands.json
           retention-days: 14

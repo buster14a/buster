@@ -2,9 +2,11 @@
  * fixtures, never compiler measurements. Child modes exercise the OS boundary.
  * Build through ./build.sh bench_throughput self-test; shared.c owns linkage.
  */
+#define TP_WORKLOAD_TEST_ALLOCATIONS 1
 #define main throughput_cli_main
 #include "throughput.c"
 #undef main
+#undef TP_WORKLOAD_TEST_ALLOCATIONS
 
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
@@ -83,12 +85,38 @@ static void test_delay(unsigned milliseconds)
 #endif
 }
 
+static int test_admission_transcript(void)
+{
+    static char const text[] = "admitted\n";
+    int result = 3;
+#ifdef _WIN32
+    DWORD written = 0;
+    if (WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), text, (DWORD)(sizeof(text) - 1), &written, NULL) &&
+        written == (DWORD)(sizeof(text) - 1)) result = 0;
+#else
+    if (fwrite(text, 1, sizeof(text) - 1, stdout) == sizeof(text) - 1 && fflush(stdout) == 0) result = 0;
+#endif
+    return result;
+}
+
 static int test_child(int argc, char** argv)
 {
     int result = 0;
     if (argc < 3) result = 2;
     else if (!strcmp(argv[2], "fail")) result = 7;
     else if (!strcmp(argv[2], "throughput")) result = throughput_cli_main(argc - 2, argv + 2);
+    else if (!strcmp(argv[2], "throughput-admission-oom"))
+    {
+        tp_workload_test_fail_state_allocation = 1;
+        result = throughput_cli_main(argc - 2, argv + 2);
+    }
+#ifndef _WIN32
+    else if (!strcmp(argv[2], "throughput-low-stack"))
+    {
+        struct rlimit limit = {(rlim_t)1024 * 1024, (rlim_t)1024 * 1024};
+        result = setrlimit(RLIMIT_STACK, &limit) == 0 ? throughput_cli_main(argc - 2, argv + 2) : 2;
+    }
+#endif
 #ifdef __linux__
     else if (argc == 4 && !strcmp(argv[2], "host-lock-probe"))
     {
@@ -99,6 +127,7 @@ static int test_child(int argc, char** argv)
     }
 #endif
     else if (!strcmp(argv[2], "sleep")) test_delay(5000);
+    else if (!strcmp(argv[2], "admission-transcript")) result = test_admission_transcript();
     else if (argc == 4 && !strcmp(argv[2], "descendant-marker"))
     {
         test_delay(2000);
@@ -157,26 +186,139 @@ static int test_compiler_child(int argc, char** argv)
     char const* source = NULL;
     char const* output = NULL;
     char const* metrics = NULL;
-    int result = 0;
+    int compile_only = 0, compiler_fail = 0, compiler_missing = 0, mutate_prior = 0, result = 0;
     for (int i = 2; i < argc; ++i)
     {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) output = argv[++i];
         else if (!strncmp(argv[i], "-fsource-metrics=", 17)) metrics = argv[i] + 17;
-        else if (strstr(argv[i], ".c")) source = argv[i];
+        else if (!strcmp(argv[i], "-c")) compile_only = 1;
+        else if (!strcmp(argv[i], "-DTP_TEST_COMPILER_FAIL")) compiler_fail = 1;
+        else if (!strcmp(argv[i], "-DTP_TEST_COMPILER_MISSING")) compiler_missing = 1;
+        else if (!strcmp(argv[i], "-DTP_TEST_MUTATE_PRIOR")) mutate_prior = 1;
+        else if (strstr(argv[i], ".c"))
+        {
+            source = argv[i];
+            compiler_fail |= strstr(argv[i], "compiler-fail") != NULL;
+            compiler_missing |= strstr(argv[i], "compiler-missing") != NULL;
+        }
     }
     if (!source || !output || !metrics) result = 9;
-    else if (strstr(source, "compiler-fail")) result = 7;
-    else if (!strstr(source, "compiler-missing"))
+    else if (compiler_fail) result = 7;
+    else if (!compiler_missing)
     {
-        FILE* artifact = fopen(output, "wb");
         FILE* report = fopen(metrics, "wb");
-        int ok = artifact && report && fputs("object", artifact) >= 0 &&
-                 fputs("lexed.translated_bytes=16\nlexed.translated_lines=2\n", report) >= 0;
-        if (artifact && fclose(artifact) != 0) ok = 0;
+        int ok = report && fputs("lexed.translated_bytes=16\nlexed.translated_lines=2\n", report) >= 0;
         if (report && fclose(report) != 0) ok = 0;
+        if (compile_only)
+        {
+            FILE* artifact = ok ? fopen(output, "wb") : NULL;
+            ok = artifact && fputs("object", artifact) >= 0;
+            if (artifact && fclose(artifact) != 0) ok = 0;
+        }
+        else
+        {
+            FILE* input = ok ? fopen(argv[0], "rb") : NULL;
+            FILE* artifact = input ? fopen(output, "wb") : NULL;
+            unsigned char buffer[16384];
+            ok = input && artifact;
+            while (ok)
+            {
+                size_t count = fread(buffer, 1, sizeof(buffer), input);
+                if (count && fwrite(buffer, 1, count, artifact) != count) ok = 0;
+                if (count < sizeof(buffer))
+                {
+                    if (ferror(input)) ok = 0;
+                    break;
+                }
+            }
+            if (input && fclose(input) != 0) ok = 0;
+            if (artifact && fclose(artifact) != 0) ok = 0;
+#ifndef _WIN32
+            if (ok && chmod(output, 0700) != 0) ok = 0;
+#endif
+            if (ok && mutate_prior)
+            {
+                char prior[TP_PATH_CAP];
+                size_t directory_length = (size_t)(strrchr(output, '/') - output);
+                ok = directory_length + strlen("/object-000.o") < sizeof(prior);
+                if (ok)
+                {
+                    memcpy(prior, output, directory_length);
+                    strcpy(prior + directory_length, "/object-000.o");
+                    FILE* changed = fopen(prior, "wb");
+                    ok = changed && fputs("mutated", changed) >= 0;
+                    if (changed && fclose(changed) != 0) ok = 0;
+                }
+            }
+        }
         if (!ok) result = 8;
     }
     return result;
+}
+
+static int test_identity_manifest(char const* root, char const* name, char const* kind, char const* operation,
+                                  char const* bindings, char const* closure_path, char const* closure_hash, uint64_t closure_bytes)
+{
+    char text[TP_PATH_CAP + 1024];
+    int length = snprintf(text, sizeof(text),
+        "schema=buster-throughput-identity-v1\nkind=%s\nidentity=test:%s\noperation=%s\n%sfile=%s\t%s\t%" PRIu64 "\n",
+        kind, kind, operation, bindings, closure_path, closure_hash, closure_bytes);
+    return length > 0 && (size_t)length < sizeof(text) && test_text(root, name, text);
+}
+
+static TpProcess test_admit_workload_mode(char const* executable, char const* mode, char const* descriptor, char const* source_root,
+                                          char const* evidence, char const* output, char* manifests[6], char const* log)
+{
+    char* command[] = {(char*)executable, "child", (char*)mode, "admit-workload", (char*)descriptor,
+        "--source-root", (char*)source_root, "--compiler", (char*)executable, "--evidence", (char*)evidence,
+        "--evidence-outcome", "pass", "--output", (char*)output, "--qualification-id", "test:qualification",
+        "--dependency-manifest", manifests[0], "--resource-manifest", manifests[1],
+        "--sysroot-manifest", manifests[2], "--sdk-manifest", manifests[3],
+        "--environment-manifest", manifests[4], "--runtime-manifest", manifests[5], NULL};
+    return tp_process(command, NULL, log, 10, -1, 0);
+}
+
+static TpProcess test_admit_workload(char const* executable, char const* descriptor, char const* source_root,
+                                     char const* evidence, char const* output, char* manifests[6], char const* log)
+{
+    return test_admit_workload_mode(executable, "throughput", descriptor, source_root, evidence, output, manifests, log);
+}
+
+static int test_admission_descriptor(char const* directory, char const* tree_hash,
+                                     char const* source_hash, uint64_t source_bytes,
+                                     char const* generated_hash, uint64_t generated_bytes,
+                                     char const* compiler_control, char const* transcript_sha256)
+{
+    char text[16384];
+    char object_control[128] = {0}, link_control[128] = {0};
+    int controls_ok = !compiler_control[0] ||
+        (snprintf(object_control, sizeof(object_control), "object_argv=%s\n", compiler_control) > 0 &&
+         snprintf(link_control, sizeof(link_control), "compile_link_argv=%s\n", compiler_control) > 0);
+    int length = snprintf(text, sizeof(text),
+        "schema=%s\nname=admission-fixture\nfamily=fixture\nsource_identity=test:source\n"
+        "dependency_identity=test:dependency\ngenerated_identity=test:generated\nresource_identity=test:resource\n"
+        "sysroot_identity=test:sysroot\nsdk_identity=test:sdk\nenvironment_identity=test:environment\n"
+        "runtime_identity=test:runtime\n"
+        "target=x86_64-unknown-linux-gnu\nabi=sysv-amd64\ncpu=baseline\ncpu_features=baseline\n"
+        "c_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\nallocator_modes=none,mir-stack,fast,quality\n"
+        "operations=source-to-object,source-to-linked-executable,runtime\nartifacts=object,executable,runtime-transcript\n"
+        "oracle=test:oracle\noracle_success=status=pass\nhistorical_outcome=failed\n"
+        "historical_evidence=test:historical\nadmission=fresh-required\nadmission_frontend=direct-ssa\n"
+        "admission_pic=off\nadmission_allocator=fast\nruntime_transcript_sha256=%s\ncwd=.\n"
+        "requested_translation_unit_bytes=%" PRIu64 "\ninput_tree_sha256=%s\n"
+        "input=source\tsource.c\t%s\t%" PRIu64 "\ninput=generated\tgenerated.c\t%s\t%" PRIu64 "\n"
+        "link_input=source.c\nlink_input=generated.c\n"
+        "object_argv=$COMPILER\nobject_argv=cc\nobject_argv=-I$ROOT\nobject_argv=$TARGET\nobject_argv=$CPU\n"
+        "object_argv=$FRONTEND\nobject_argv=$PIC\nobject_argv=-fregister-allocator=$MODE\n"
+        "object_argv=-fsource-metrics=$METRICS\n%sobject_argv=-c\nobject_argv=-o\nobject_argv=$OUTPUT\nobject_argv=$SOURCE\n"
+        "compile_link_argv=$COMPILER\ncompile_link_argv=cc\ncompile_link_argv=-I$ROOT\ncompile_link_argv=$TARGET\n"
+        "compile_link_argv=$CPU\ncompile_link_argv=$FRONTEND\ncompile_link_argv=$PIC\n"
+        "compile_link_argv=-fregister-allocator=$MODE\ncompile_link_argv=-fsource-metrics=$METRICS\n%s"
+        "compile_link_argv=$LINK_SOURCES\ncompile_link_argv=-lm\ncompile_link_argv=-o\ncompile_link_argv=$OUTPUT\n"
+        "runtime_argv=$EXECUTABLE\nruntime_argv=child\nruntime_argv=admission-transcript\n",
+        TP_WORKLOAD_DESCRIPTOR_SCHEMA, transcript_sha256, source_bytes + generated_bytes, tree_hash,
+        source_hash, source_bytes, generated_hash, generated_bytes, object_control, link_control);
+    return controls_ok && length > 0 && (size_t)length < sizeof(text) && test_text(directory, "admission.workload", text);
 }
 
 static void test_processes(char const* executable, char const* root)
@@ -705,45 +847,45 @@ static void test_workload_descriptors(char const* executable, char const* root)
         "compile_argv=-fregister-allocator=$MODE\ncompile_argv=-fsource-metrics=$METRICS\n"
         "compile_argv=-c\ncompile_argv=-o\ncompile_argv=$OUTPUT\ncompile_argv=$SOURCE\n"
         "link_argv=$COMPILER\nlink_argv=cc\nlink_argv=$OBJECTS\nlink_argv=-o\nlink_argv=$OUTPUT\n",
-        TP_WORKLOAD_DESCRIPTOR_SCHEMA, source_bytes, tree_hash, source_hash, source_bytes, header_hash, header_bytes);
+        TP_WORKLOAD_DESCRIPTOR_SCHEMA_V1, source_bytes, tree_hash, source_hash, source_bytes, header_hash, header_bytes);
     CHECK(length > 0 && (size_t)length < sizeof(descriptor));
     CHECK(test_text(directory, "fixture.workload", descriptor));
     TpWorkloadDescriptor parsed;
     CHECK(tp_workload_descriptor_parse(descriptor_path, &parsed));
     CHECK(parsed.input_count == 2 && parsed.requested_translation_unit_bytes == source_bytes &&
           !strcmp(parsed.historical_outcome, "failed"));
-    CHECK(parsed.compile_argument_count < TP_WORKLOAD_MAX_ARGUMENTS);
-    strcpy(parsed.compile_arguments[parsed.compile_argument_count++], "$UNRECOGNIZED");
-    CHECK(!tp_workload_arguments_valid(parsed.compile_arguments, parsed.compile_argument_count, 0));
-    --parsed.compile_argument_count;
-    unsigned mode_argument = parsed.compile_argument_count, root_argument = parsed.compile_argument_count;
-    unsigned output_argument = parsed.compile_argument_count, output_option = parsed.compile_argument_count;
-    for (unsigned i = 0; i < parsed.compile_argument_count; ++i)
+    CHECK(parsed.legacy_compile_argument_count < TP_WORKLOAD_MAX_ARGUMENTS);
+    strcpy(parsed.legacy_compile_arguments[parsed.legacy_compile_argument_count++], "$UNRECOGNIZED");
+    CHECK(!tp_workload_arguments_valid(parsed.legacy_compile_arguments, parsed.legacy_compile_argument_count, 0, 1));
+    --parsed.legacy_compile_argument_count;
+    unsigned mode_argument = parsed.legacy_compile_argument_count, root_argument = parsed.legacy_compile_argument_count;
+    unsigned output_argument = parsed.legacy_compile_argument_count, output_option = parsed.legacy_compile_argument_count;
+    for (unsigned i = 0; i < parsed.legacy_compile_argument_count; ++i)
     {
-        if (!strcmp(parsed.compile_arguments[i], "-fregister-allocator=$MODE")) mode_argument = i;
-        if (!strcmp(parsed.compile_arguments[i], "-I$ROOT")) root_argument = i;
-        if (!strcmp(parsed.compile_arguments[i], "$OUTPUT")) output_argument = i;
-        if (!strcmp(parsed.compile_arguments[i], "-o")) output_option = i;
+        if (!strcmp(parsed.legacy_compile_arguments[i], "-fregister-allocator=$MODE")) mode_argument = i;
+        if (!strcmp(parsed.legacy_compile_arguments[i], "-I$ROOT")) root_argument = i;
+        if (!strcmp(parsed.legacy_compile_arguments[i], "$OUTPUT")) output_argument = i;
+        if (!strcmp(parsed.legacy_compile_arguments[i], "-o")) output_option = i;
     }
-    CHECK(mode_argument < parsed.compile_argument_count && root_argument < parsed.compile_argument_count);
-    if (mode_argument < parsed.compile_argument_count && root_argument < parsed.compile_argument_count)
+    CHECK(mode_argument < parsed.legacy_compile_argument_count && root_argument < parsed.legacy_compile_argument_count);
+    if (mode_argument < parsed.legacy_compile_argument_count && root_argument < parsed.legacy_compile_argument_count)
     {
-        strcpy(parsed.compile_arguments[mode_argument], "-fregister-allocator=$MODEjunk");
-        CHECK(!tp_workload_arguments_valid(parsed.compile_arguments, parsed.compile_argument_count, 0));
-        strcpy(parsed.compile_arguments[mode_argument], "-fregister-allocator=$MODE");
-        strcpy(parsed.compile_arguments[root_argument], "-I.");
-        CHECK(!tp_workload_arguments_valid(parsed.compile_arguments, parsed.compile_argument_count, 0));
-        strcpy(parsed.compile_arguments[root_argument], "-I$ROOT");
-        strcpy(parsed.compile_arguments[0], "-g0");
-        CHECK(!tp_workload_arguments_valid(parsed.compile_arguments, parsed.compile_argument_count, 0));
-        strcpy(parsed.compile_arguments[0], "$COMPILER");
+        strcpy(parsed.legacy_compile_arguments[mode_argument], "-fregister-allocator=$MODEjunk");
+        CHECK(!tp_workload_arguments_valid(parsed.legacy_compile_arguments, parsed.legacy_compile_argument_count, 0, 1));
+        strcpy(parsed.legacy_compile_arguments[mode_argument], "-fregister-allocator=$MODE");
+        strcpy(parsed.legacy_compile_arguments[root_argument], "-I.");
+        CHECK(!tp_workload_arguments_valid(parsed.legacy_compile_arguments, parsed.legacy_compile_argument_count, 0, 1));
+        strcpy(parsed.legacy_compile_arguments[root_argument], "-I$ROOT");
+        strcpy(parsed.legacy_compile_arguments[0], "-g0");
+        CHECK(!tp_workload_arguments_valid(parsed.legacy_compile_arguments, parsed.legacy_compile_argument_count, 0, 1));
+        strcpy(parsed.legacy_compile_arguments[0], "$COMPILER");
     }
-    CHECK(output_argument < parsed.compile_argument_count && output_option < parsed.compile_argument_count);
-    if (output_argument < parsed.compile_argument_count && output_option < parsed.compile_argument_count)
+    CHECK(output_argument < parsed.legacy_compile_argument_count && output_option < parsed.legacy_compile_argument_count);
+    if (output_argument < parsed.legacy_compile_argument_count && output_option < parsed.legacy_compile_argument_count)
     {
-        strcpy(parsed.compile_arguments[output_option], "$OUTPUT");
-        strcpy(parsed.compile_arguments[output_argument], "-o");
-        CHECK(!tp_workload_arguments_valid(parsed.compile_arguments, parsed.compile_argument_count, 0));
+        strcpy(parsed.legacy_compile_arguments[output_option], "$OUTPUT");
+        strcpy(parsed.legacy_compile_arguments[output_argument], "-o");
+        CHECK(!tp_workload_arguments_valid(parsed.legacy_compile_arguments, parsed.legacy_compile_argument_count, 0, 1));
     }
     if (paths_ok)
     {
@@ -803,6 +945,207 @@ static void test_workload_descriptors(char const* executable, char const* root)
         CHECK(test_text(directory, "fixture.workload", malformed));
         result = tp_process(command, NULL, log, 3, -1, 0);
         CHECK(result.exit_code == 2);
+    }
+}
+
+static void test_workload_admission(char const* executable, char const* root)
+{
+    char* missing_output[] = {"throughput", "admit-workload", "descriptor", "--source-root", "root", "--compiler", "compiler",
+        "--evidence", "evidence", "--evidence-outcome", "pass", "--qualification-id", "id",
+        "--dependency-manifest", "dependency", "--resource-manifest", "resource", "--sysroot-manifest", "sysroot",
+        "--sdk-manifest", "sdk", "--environment-manifest", "environment", "--runtime-manifest", "runtime", NULL};
+    TpConfig missing_output_config;
+    CHECK(!tp_options((int)BUSTER_ARRAY_LENGTH(missing_output) - 1, missing_output, &missing_output_config));
+    char directory[TP_PATH_CAP], source_root[TP_PATH_CAP], descriptor[TP_PATH_CAP], evidence[TP_PATH_CAP], log[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "workload-admission") && tp_mkdirs(directory) &&
+                   tp_path(source_root, directory, "inputs") && tp_mkdirs(source_root) &&
+                   tp_path(descriptor, directory, "admission.workload") &&
+                   tp_path(evidence, directory, "oracle.log") && tp_path(log, directory, "admission.log");
+    CHECK(paths_ok);
+    char source[TP_PATH_CAP], generated[TP_PATH_CAP], closure[TP_PATH_CAP];
+    char source_hash[65], generated_hash[65], closure_hash[65], tree_hash[65];
+    uint64_t source_bytes = 0, generated_bytes = 0, closure_bytes = 0, lines = 0;
+    CHECK(paths_ok && test_text(source_root, "source.c", "int source(void) { return 1; }\n") &&
+          test_text(source_root, "generated.c", "int generated(void) { return 2; }\n") &&
+          test_text(directory, "closure.txt", "immutable closure\n") && test_text(directory, "oracle.log", "status=pass\n") &&
+          tp_path(source, source_root, "source.c") && tp_path(generated, source_root, "generated.c") &&
+          tp_path(closure, directory, "closure.txt") && tp_hash_file(source, source_hash, &source_bytes, &lines) &&
+          tp_hash_file(generated, generated_hash, &generated_bytes, &lines) &&
+          tp_hash_file(closure, closure_hash, &closure_bytes, &lines) && tp_hash_tree(source_root, tree_hash));
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265"));
+    static char const* const names[6] = {"dependency.identity", "resource.identity", "sysroot.identity",
+                                         "sdk.identity", "environment.identity", "runtime.identity"};
+    static char const* const kinds[6] = {"dependency", "resource", "sysroot", "sdk", "environment", "runtime"};
+    static char const* const operations[6] = {
+        "source-to-linked-executable",
+        "source-to-object,source-to-linked-executable",
+        "source-to-object,source-to-linked-executable",
+        "source-to-object,source-to-linked-executable",
+        "source-to-object,source-to-linked-executable,runtime",
+        "runtime"};
+    static char const* const bindings[6] = {
+        "argument=source-to-linked-executable|-lm\n",
+        "argument=source-to-object|-ffrontend-ssa\nargument=source-to-linked-executable|-ffrontend-ssa\n",
+        "argument=source-to-object|--target=x86_64-unknown-linux-gnu\nargument=source-to-linked-executable|--target=x86_64-unknown-linux-gnu\n",
+        "argument=source-to-object|-mcpu=baseline\nargument=source-to-linked-executable|-mcpu=baseline\n",
+        "argument=source-to-object|-fno-pic\nargument=source-to-linked-executable|-fno-pic\nargument=runtime|$EXECUTABLE\n",
+        "argument=runtime|$EXECUTABLE\n"};
+    char manifest_paths[6][TP_PATH_CAP];
+    char* manifests[6];
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        CHECK(test_identity_manifest(directory, names[i], kinds[i], operations[i], bindings[i], closure, closure_hash, closure_bytes));
+        CHECK(tp_path(manifest_paths[i], directory, names[i]));
+        manifests[i] = manifest_paths[i];
+    }
+    char output[TP_PATH_CAP];
+    CHECK(tp_path(output, directory, "success"));
+#if defined(_WIN32)
+    TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
+#elif defined(BUSTER_SANITIZE)
+    puts("THROUGHPUT_ADMISSION_STACK status=unsupported reason=sanitizer-instrumented");
+    TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
+#else
+    TpProcess result = test_admit_workload_mode(executable, "throughput-low-stack", descriptor, source_root,
+                                                evidence, output, manifests, log);
+#endif
+    CHECK(result.exit_code == 0 && !result.launch_error && !result.timed_out);
+    FILE* file = fopen(log, "rb");
+    char report[65536] = {0};
+    CHECK(file != NULL);
+    if (file)
+    {
+        size_t size = fread(report, 1, sizeof(report) - 1, file);
+        CHECK(size < sizeof(report) - 1 && !ferror(file) && fclose(file) == 0);
+        CHECK(strstr(report, "\"admitted\":true") && strstr(report, "\"performed_cells\":[") &&
+              strstr(report, "\"object\":{\"command_count\":2") &&
+              strstr(report, "\"translated_bytes\":32") && strstr(report, "\"runtime-transcript\"") &&
+              strstr(report, "\"argv_bound\":true") && strstr(report, "}},\"argv_identity\"") &&
+              !strstr(report, "}}},\"argv_identity\""));
+    }
+
+    char failed_output[TP_PATH_CAP], failure_log[TP_PATH_CAP];
+    CHECK(tp_path(failure_log, directory, "admission-failure.log"));
+    CHECK(tp_path(failed_output, directory, "admission-state-oom"));
+    result = test_admit_workload_mode(executable, "throughput-admission-oom", descriptor, source_root,
+                                      evidence, failed_output, manifests, failure_log);
+    struct stat failed_status;
+    CHECK(result.exit_code == 2 && stat(failed_output, &failed_status) != 0 && errno == ENOENT);
+    CHECK(tp_path(failed_output, directory, "preexisting") && tp_mkdirs(failed_output));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+
+    char* saved_dependency = manifests[0];
+    char missing_manifest[TP_PATH_CAP];
+    CHECK(tp_path(missing_manifest, directory, "missing.identity") && tp_path(failed_output, directory, "missing-dependency"));
+    manifests[0] = missing_manifest;
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+    manifests[0] = saved_dependency;
+
+    char mismatch[TP_PATH_CAP + 1024];
+    int mismatch_length = snprintf(mismatch, sizeof(mismatch),
+        "schema=buster-throughput-identity-v1\nkind=dependency\nidentity=test:wrong-dependency\n"
+        "operation=source-to-linked-executable\nargument=source-to-linked-executable|-lm\nfile=%s\t%s\t%" PRIu64 "\n",
+        closure, closure_hash, closure_bytes);
+    CHECK(mismatch_length > 0 && (size_t)mismatch_length < sizeof(mismatch) &&
+          test_text(directory, names[0], mismatch) && tp_path(failed_output, directory, "identity-mismatch"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+    CHECK(test_identity_manifest(directory, names[0], kinds[0], operations[0], bindings[0], closure, closure_hash, closure_bytes));
+
+    CHECK(test_text(directory, "closure.txt", "drifted closure\n") && tp_path(failed_output, directory, "closure-drift"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+    CHECK(test_text(directory, "closure.txt", "immutable closure\n"));
+
+    char* saved_runtime = manifests[5];
+    manifests[5] = missing_manifest;
+    CHECK(tp_path(failed_output, directory, "missing-runtime"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+    manifests[5] = saved_runtime;
+
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
+                                    "-DTP_TEST_COMPILER_FAIL",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
+          tp_path(failed_output, directory, "compiler-failure"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+    char commands[TP_PATH_CAP];
+    CHECK(tp_path(commands, failed_output, "commands.jsonl"));
+    file = fopen(commands, "rb");
+    memset(report, 0, sizeof(report));
+    CHECK(file != NULL);
+    if (file)
+    {
+        size_t size = fread(report, 1, sizeof(report) - 1, file);
+        CHECK(size < sizeof(report) - 1 && !ferror(file) && fclose(file) == 0);
+        CHECK(strstr(report, "\"operation_result\":\"source-to-object\"") && strstr(report, "\"exit_code\":7"));
+    }
+
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
+                                    "-DTP_TEST_COMPILER_MISSING",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
+          tp_path(failed_output, directory, "missing-artifact"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
+                                    "-DTP_TEST_MUTATE_PRIOR",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
+          tp_path(failed_output, directory, "artifact-drift"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
+                                    "0000000000000000000000000000000000000000000000000000000000000000") &&
+          tp_path(failed_output, directory, "runtime-mismatch"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+
+    CHECK(test_text(directory, "oracle.log", "prefix status=pass suffix\n") &&
+          test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
+          tp_path(failed_output, directory, "oracle-substring"));
+    result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
+    CHECK(result.exit_code == 2);
+}
+
+static void test_checked_in_workload_descriptors(void)
+{
+    CHECK(tp_workload_absolute_path_syntax("/tmp/buster/closure", 0));
+    CHECK(!tp_workload_absolute_path_syntax("tmp/buster/closure", 0));
+    CHECK(tp_workload_absolute_path_syntax("D:/a/buster/closure", 1));
+    CHECK(tp_workload_absolute_path_syntax("d:\\a\\buster\\closure", 1));
+    CHECK(tp_workload_absolute_path_syntax("//server/share/closure", 1));
+    CHECK(tp_workload_absolute_path_syntax("\\\\server\\share\\closure", 1));
+    CHECK(!tp_workload_absolute_path_syntax("D:relative", 1));
+    CHECK(!tp_workload_absolute_path_syntax("/drive-relative", 1));
+    CHECK(!tp_workload_absolute_path_syntax("//server", 1));
+    static char const* const paths[] = {
+        "tools/throughput/workloads/cjson-1.7.19.workload",
+        "tools/throughput/workloads/lua-5.4.8.workload",
+        "tools/throughput/workloads/sqlite-3.53.4.workload"};
+    static char const* const families[] = {"cjson", "lua", "sqlite"};
+    static unsigned const object_counts[] = {3, 34, 2};
+    static unsigned const link_counts[] = {3, 33, 2};
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(paths); ++i)
+    {
+        TpWorkloadDescriptor descriptor;
+        CHECK(tp_workload_descriptor_parse(paths[i], &descriptor));
+        CHECK(!strcmp(descriptor.family, families[i]) && descriptor.link_input_count == link_counts[i]);
+        unsigned object_count = 0;
+        uint64_t largest_source = 0;
+        for (unsigned j = 0; j < descriptor.input_count; ++j)
+        {
+            int source = tp_workload_source_input(descriptor.inputs + j);
+            object_count += source;
+            if (source && descriptor.inputs[j].bytes > largest_source) largest_source = descriptor.inputs[j].bytes;
+        }
+        CHECK(object_count == object_counts[i]);
+        if (!strcmp(descriptor.family, "sqlite")) CHECK(largest_source > UINT64_C(9500000));
     }
 }
 
@@ -1007,6 +1350,8 @@ int main(int argc, char** argv)
         test_sample_paths(executable, root);
         test_compiler_failures(executable, root);
         test_workload_descriptors(executable, root);
+        test_workload_admission(executable, root);
+        test_checked_in_workload_descriptors();
         test_inputs(root);
         test_maximum_jobs(root);
         test_processes(executable, root);
