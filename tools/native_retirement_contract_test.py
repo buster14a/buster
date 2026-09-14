@@ -57,6 +57,7 @@ class ContractTests(unittest.TestCase):
                           "compile_obligation": "supported-object-zero-fallback",
                           "bytes": str(len(source)), "sha256": sha(source)}]
         write_table(directory / "support-contract.tsv", contract.SUPPORT_FIELDS, contract_rows)
+        write_table(directory / "supported-gap-ledger.tsv", contract.SUPPORTED_GAP_LEDGER_FIELDS, [])
         input_rows = [{"path": "tests/unit.c", "role": "subject",
                        "compile_obligation": "supported-object-zero-fallback", "bytes": str(len(source)),
                        "buster_hash_64": "0", "sha256": sha(source), "fixture_recipe": "compiler-default",
@@ -92,6 +93,9 @@ class ContractTests(unittest.TestCase):
             "system_include": "none", "inputs": "1", "subjects": "1", "rows": "192",
             "profile": "self-test", "fixture_filter": "",
             "target_filter": "", "shard_index": str(shard_index), "shard_count": "2",
+            "supported_gap_count": "0", "supported_gap_sha256": contract.canonical_rows_digest([]),
+            "supported_gap_ledger": "docs/native-retirement-supported-gaps-v1.tsv",
+            "supported_gap_ledger_sha256": sha((directory / "supported-gap-ledger.tsv").read_bytes()),
             "manifest_only": "0", "timeout_seconds": "30",
             "function_evidence": "all-observed-fallbacks-plus-first-fatal-diagnostic",
             "fixture_flags": "exact-path-recipes-in-inputs.tsv",
@@ -162,8 +166,49 @@ class ContractTests(unittest.TestCase):
         return contract.validate_shards(list(reversed(self.shards)), output, require_clean,
                                         require_clean_acceptance)
 
+    def declare_gaps(self, identities):
+        """Install the same authenticated self-test gap ledger in every shard."""
+        records = []
+        for fixture, target, frontend, PIC, allocator in sorted(identities):
+            records.append({"fixture": fixture, "target": target, "frontend_lowering": frontend,
+                            "PIC": PIC, "allocator": allocator, "admission": "admitted-supported",
+                            "reason": "supported-object-zero-fallback"})
+        for shard in self.shards:
+            write_table(shard / "supported-gap-ledger.tsv", contract.SUPPORTED_GAP_LEDGER_FIELDS, records)
+            manifest_path = shard / "manifest.txt"
+            manifest = dict(line.split("=", 1) for line in manifest_path.read_text(encoding="utf-8").splitlines())
+            _row_fields, rows = read_table(shard / "rows.tsv")
+            by_identity = {tuple(row[field] for field in ("fixture", "target", "frontend_lowering", "PIC", "allocator")): row
+                           for row in rows}
+            row_numbers = sorted(int(by_identity[identity]["row"]) for identity in identities)
+            manifest.update({"supported_gap_count": str(len(records)),
+                             "supported_gap_sha256": contract.canonical_rows_digest(row_numbers),
+                             "supported_gap_ledger_sha256": sha((shard / "supported-gap-ledger.tsv").read_bytes())})
+            manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
+
+    def install_single_fallback(self, shard_index, row_number, telemetry):
+        """Install one row-bound fallback and its aggregate counters."""
+        shard = self.shards[shard_index]
+        result_fields, results = read_table(shard / "results.tsv")
+        strict = next(row for row in results if row["row"] == row_number)
+        strict["fallbacks"] = "1"
+        write_table(shard / "results.tsv", result_fields, results)
+        _row_fields, census_rows = read_table(shard / "rows.tsv")
+        census_row = next(row for row in census_rows if row["row"] == row_number)
+        target = contract._diagnostic_target(census_row["target"])
+        allocator = census_row["allocator"]
+        write_table(shard / "fallback-functions.tsv", ("row", "record_valid", "telemetry"),
+                    [{"row": row_number, "record_valid": "1", "telemetry": telemetry}])
+        write_table(shard / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": row_number, "telemetry": f"CODEGEN_FALLBACK_REASON target={target} allocator={allocator} reason=opcode count=1 version=1 row={row_number}"},
+            {"row": row_number, "telemetry": f"CODEGEN_FALLBACK opcode=7 count=1 version=1 row={row_number} target={target} allocator={allocator}"},
+        ])
+
     def test_clean_complete_partition_passes(self):
         report = self.validate()
+        self.assertEqual(report["profile"], contract.SELF_TEST_PROFILE)
+        self.assertEqual(report["supported_gap_ledger_sha256"],
+                         sha((self.shards[0] / "supported-gap-ledger.tsv").read_bytes()))
         self.assertEqual(report["rows_validated"], 192)
         self.assertEqual(report["groups"], 48)
         self.assertEqual(report["candidate_failure_rows"], [])
@@ -174,6 +219,13 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(report["clean_acceptance"])
         self.assertEqual(report["rows_identity_sha256"], contract.validate(self.shards[0])["rows_identity_sha256"])
         self.assertTrue(json.loads((self.root / "report.json").read_text(encoding="utf-8"))["complete_row_partition"])
+
+    def test_clean_self_test_cannot_satisfy_production_acceptance(self):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
+        reports = [contract.validate(shard) for shard in self.shards]
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
+            contract.partition_shards(reports, require_clean_acceptance=True)
 
     def test_manifest_cannot_omit_a_complete_group(self):
         for shard in self.shards:
@@ -189,6 +241,63 @@ class ContractTests(unittest.TestCase):
             manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "required census cross-product"):
             self.validate()
+
+    def test_full_profile_claim_cannot_forge_the_production_population(self):
+        manifest = dict(line.split("=", 1) for line in
+                        (self.shards[0] / "manifest.txt").read_text(encoding="utf-8").splitlines())
+        manifest.update({"profile": "full-census", "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256,
+                         "inputs": "548", "subjects": "402", "shard_count": "4",
+                         "fixture_filter": "", "target_filter": ""})
+        with self.assertRaisesRegex(AssertionError, "full census subject inventory is incomplete"):
+            contract.validate_profile(manifest, {"tests/unit.c": {"role": "subject"}}, 192)
+
+    def test_exact_full_profile_shape_is_admissible(self):
+        manifest = {"profile": "full-census", "support_contract": "docs/native-retirement-support-v1.tsv",
+                    "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "548",
+                    "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "402"}
+        inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
+        self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
+                         (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
+
+    def test_checked_in_production_gap_ledger_is_canonical_and_authenticated(self):
+        ledger_path = Path(__file__).resolve().parents[1] / "docs/native-retirement-supported-gaps-v1.tsv"
+        fields, records = read_table(ledger_path)
+        self.assertEqual(fields, contract.SUPPORTED_GAP_LEDGER_FIELDS)
+        identities = [tuple(record[field] for field in contract.SUPPORTED_GAP_LEDGER_FIELDS[:5])
+                      for record in records]
+        self.assertEqual(len(records), contract.FULL_SUPPORTED_GAP_COUNT)
+        self.assertEqual(len(set(identities)), contract.FULL_SUPPORTED_GAP_COUNT)
+        self.assertEqual(identities, sorted(identities))
+        self.assertEqual(contract.canonical_digest(identities),
+                         "bcaa2b1a4dcb3cbcfb31871a59c636d381c57b1be52046c6c24e7b5f4b014823")
+        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_SUPPORTED_GAP_LEDGER_SHA256)
+        for record in records:
+            self.assertEqual(record["admission"], "admitted-supported")
+            self.assertEqual(record["reason"], "supported-object-zero-fallback")
+            self.assertIn(record["allocator"], contract.ALLOCATORS[1:])
+            self.assertIn(record["frontend_lowering"], {"local-backed-canonical", "direct-ssa"})
+            self.assertIn(record["PIC"], {"0", "1"})
+
+    def test_checked_in_support_contract_replays_every_tree_path(self):
+        root = Path(__file__).resolve().parents[1]
+        ledger_path = root / "docs/native-retirement-support-v1.tsv"
+        fields, records = read_table(ledger_path)
+        self.assertEqual(fields, contract.SUPPORT_FIELDS)
+        self.assertEqual(len(records), 548)
+        self.assertEqual(len({record["path"] for record in records}), 548)
+        self.assertEqual({record["role"] for record in records},
+                         {"subject", "negative-diagnostic-fixture", "support-file", "dormant-custom-language"})
+        role_counts = {role: sum(record["role"] == role for record in records)
+                       for role in {record["role"] for record in records}}
+        self.assertEqual(role_counts, {"subject": 402, "negative-diagnostic-fixture": 12,
+                                       "support-file": 70, "dormant-custom-language": 64})
+        for record in records:
+            path = root / record["path"]
+            with self.subTest(path=record["path"]):
+                self.assertTrue(path.is_file())
+                data = path.read_bytes()
+                self.assertEqual(len(data), int(record["bytes"]))
+                self.assertEqual(sha(data), record["sha256"])
 
     def test_candidate_function_count_must_match_actual_group_baseline(self):
         fields, results = read_table(self.shards[0] / "results.tsv")
@@ -208,6 +317,20 @@ class ContractTests(unittest.TestCase):
         write_table(self.shards[0] / "results.tsv", fields, results)
         with self.assertRaisesRegex(AssertionError, "non-canonical or out-of-range functions"):
             self.validate()
+
+    def test_direct_reference_fallback_counters_are_row_bound(self):
+        fields, results = read_table(self.shards[0] / "results.tsv")
+        baseline = next(row for row in results if row["row"] == "0")
+        baseline["fallbacks"] = "1"
+        write_table(self.shards[0] / "results.tsv", fields, results)
+        write_table(self.shards[0] / "fallback-counters.tsv", ("row", "telemetry"), [{
+            "row": "0",
+            "telemetry": "CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=none reason=opcode count=1 version=1 row=0",
+        }])
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["candidate_failure_rows"], [])
+        self.assertEqual(report["reference_failure_rows"], [0, 1, 2, 3])
+        self.assertEqual(report["residual_rows"], 1)
 
     def test_substituted_row_identity_is_rejected(self):
         fields, rows = read_table(self.shards[1] / "rows.tsv")
@@ -243,11 +366,12 @@ class ContractTests(unittest.TestCase):
         strict[0]["disposition"] = "supported-native-gap-missing-telemetry"
         strict[0]["counters_valid"] = "0"
         strict[0]["function_records_valid"] = "0"
-        strict[1]["fallbacks"] = "1"
+        strict[1]["kind"] = "1"
+        strict[1]["status"] = "1"
         write_table(self.shards[1] / "results.tsv", fields, rows)
         report = self.validate(require_clean=False)
         self.assertIn(int(strict[0]["row"]), report["telemetry_defect_rows"])
-        self.assertIn(int(strict[1]["row"]), report["fallback_defect_rows"])
+        self.assertIn(int(strict[1]["row"]), report["execution_defect_rows"])
         self.assertEqual(len(report["candidate_failure_rows"]), 2)
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
@@ -259,11 +383,10 @@ class ContractTests(unittest.TestCase):
         strict["disposition"] = "supported-native-gap-missing-telemetry-v2"
         write_table(self.shards[1] / "results.tsv", fields, rows)
         report = self.validate(require_clean=False)
-        self.assertIn(5, report["candidate_failure_rows"])
-        self.assertIn(5, report["acceptance_failure_rows"])
+        self.assertNotIn(5, report["candidate_failure_rows"])
+        self.assertNotIn(5, report["acceptance_failure_rows"])
         self.assertNotIn(5, report["telemetry_defect_rows"])
-        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
-            self.validate()
+        self.assertTrue(self.validate()["clean_candidate"])
 
     def test_baseline_disposition_is_preserved(self):
         fields, rows = read_table(self.shards[0] / "results.tsv")
@@ -273,10 +396,10 @@ class ContractTests(unittest.TestCase):
         report = self.validate(require_clean=False)
         self.assertEqual(report["baseline_dispositions"], {"baseline-unresolved": 1, "baseline-supported": 47})
         self.assertEqual(report["candidate_failure_rows"], [])
-        self.assertEqual(report["reference_failure_rows"], [0])
-        self.assertEqual(report["acceptance_failure_rows"], [0])
+        self.assertEqual(report["reference_failure_rows"], [])
+        self.assertEqual(report["acceptance_failure_rows"], [])
         self.assertTrue(self.validate()["clean_candidate"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_baseline_disposition_is_explicitly_preserved(self):
@@ -290,10 +413,10 @@ class ContractTests(unittest.TestCase):
         report = self.validate(require_clean=False)
         self.assertIn("baseline-unresolved", report["baseline_dispositions"])
         self.assertIn(128, report["inapplicable_rows"])
-        self.assertEqual(report["reference_failure_rows"], [128])
-        self.assertEqual(report["acceptance_failure_rows"], [128])
+        self.assertEqual(report["reference_failure_rows"], [])
+        self.assertEqual(report["acceptance_failure_rows"], [])
         self.assertTrue(self.validate()["clean_candidate"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_control_rejects_compile_and_telemetry_defects(self):
@@ -304,18 +427,22 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(census_row["execution_obligation"], "unavailable-platform-control")
         baseline.update({"disposition": "baseline-unresolved", "kind": "1", "status": "9",
                          "counters_valid": "0", "target_identity_valid": "0",
-                         "function_records_valid": "0", "fallbacks": "3", "functions": "0",
+                         "function_records_valid": "0", "fallbacks": "0", "functions": "0",
                          "object_bytes": "0", "object_sha256": ""})
+        # The baseline's function count is the group reference.  Keep the
+        # paired candidate evidence row-bound to that repaired reference so
+        # this test isolates the reference/control defect.
+        for candidate in rows:
+            if candidate["group"] == baseline["group"] and candidate["row"] != baseline["row"]:
+                candidate["functions"] = candidate["baseline_functions"] = "0"
         write_table(self.shards[0] / "results.tsv", fields, rows)
         report = self.validate(require_clean=False)
         self.assertIn(128, report["inapplicable_rows"])
         self.assertIn(128, report["reference_failure_rows"])
-        self.assertIn(128, report["fallback_defect_rows"])
         self.assertIn(128, report["telemetry_defect_rows"])
         self.assertIn(128, report["execution_defect_rows"])
-        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
-            self.validate()
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        self.assertTrue(self.validate()["clean_candidate"])
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_target_does_not_excuse_candidate_telemetry(self):
@@ -332,7 +459,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn(129, report["acceptance_failure_rows"])
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_target_does_not_excuse_unresolved_strict_reference(self):
@@ -347,23 +474,23 @@ class ContractTests(unittest.TestCase):
 
         report = self.validate(require_clean=False)
         self.assertEqual(report["candidate_failure_rows"], [])
-        self.assertEqual(report["reference_failure_rows"], [129])
-        self.assertEqual(report["acceptance_failure_rows"], [129])
+        self.assertEqual(report["reference_failure_rows"], [])
+        self.assertEqual(report["acceptance_failure_rows"], [])
         self.assertTrue(report["clean_candidate"])
-        self.assertFalse(report["clean_acceptance"])
+        self.assertTrue(report["clean_acceptance"])
         self.assertTrue(self.validate()["clean_candidate"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
         candidate = contract.validate(self.shards[0])
         output = self.root / "reconcile-inapplicable-reference.json"
         transition = contract.reconcile(reference, candidate, output, True)
         self.assertEqual(transition["candidate_common_failure_rows"], [])
-        self.assertEqual(transition["reference_common_failure_rows"], [129])
-        self.assertEqual(transition["acceptance_common_failure_rows"], [129])
+        self.assertEqual(transition["reference_common_failure_rows"], [])
+        self.assertEqual(transition["acceptance_common_failure_rows"], [])
         self.assertTrue(transition["clean_candidate"])
-        self.assertFalse(transition["clean_acceptance"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved common rows"):
+        self.assertTrue(transition["clean_acceptance"])
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census reference profile"):
             contract.reconcile(reference, candidate, output, False, True)
 
     def test_inapplicable_target_does_not_excuse_combined_reference_failure(self):
@@ -373,12 +500,11 @@ class ContractTests(unittest.TestCase):
         write_table(self.shards[0] / "results.tsv", fields, rows)
 
         report = self.validate(require_clean=False)
-        self.assertEqual(report["candidate_failure_rows"], [129])
-        self.assertEqual(report["reference_failure_rows"], [129])
-        self.assertEqual(report["acceptance_failure_rows"], [129])
-        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
-            self.validate()
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        self.assertEqual(report["candidate_failure_rows"], [])
+        self.assertEqual(report["reference_failure_rows"], [])
+        self.assertEqual(report["acceptance_failure_rows"], [])
+        self.assertTrue(self.validate()["clean_candidate"])
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_reference_disposition_is_preserved(self):
@@ -387,12 +513,13 @@ class ContractTests(unittest.TestCase):
         strict["disposition"] = "strict-success-baseline-unresolved"
         write_table(self.shards[1] / "results.tsv", fields, rows)
         report = self.validate(require_clean=False)
-        self.assertEqual(report["reference_dispositions"], {"strict-success-baseline-unresolved": 1})
+        self.assertEqual(report["candidate_dispositions"], {
+            "strict-success": 143, "strict-success-baseline-unresolved": 1})
         self.assertEqual(report["candidate_failure_rows"], [])
-        self.assertEqual(report["reference_failure_rows"], [5])
-        self.assertEqual(report["acceptance_failure_rows"], [5])
+        self.assertEqual(report["reference_failure_rows"], [])
+        self.assertEqual(report["acceptance_failure_rows"], [])
         self.assertTrue(self.validate()["clean_candidate"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_candidate_gate_ignores_reference_only_failure_but_rejects_mixed_candidate_failure(self):
@@ -400,27 +527,29 @@ class ContractTests(unittest.TestCase):
         reference_only = next(row for row in rows if row["row"] == "5")
         candidate_failure = next(row for row in rows if row["row"] == "7")
         reference_only["disposition"] = "strict-success-baseline-unresolved"
-        candidate_failure["fallbacks"] = "1"
+        candidate_failure["kind"] = "1"
+        candidate_failure["status"] = "1"
         write_table(self.shards[1] / "results.tsv", fields, rows)
 
         report = self.validate(require_clean=False)
         self.assertEqual(report["candidate_failure_rows"], [7])
-        self.assertEqual(report["reference_failure_rows"], [5])
+        self.assertEqual(report["reference_failure_rows"], [])
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
         gated_report = json.loads((self.root / "report.json").read_text(encoding="utf-8"))
-        self.assertFalse(gated_report["require_clean_candidate"])
-        self.assertTrue(gated_report["require_clean_acceptance"])
-        self.assertEqual(gated_report["acceptance_failure_rows"], [5, 7])
+        self.assertTrue(gated_report["require_clean_candidate"])
+        self.assertFalse(gated_report["require_clean_acceptance"])
+        self.assertEqual(gated_report["acceptance_failure_rows"], [7])
 
-        candidate_failure["fallbacks"] = "0"
+        candidate_failure["kind"] = "0"
+        candidate_failure["status"] = "0"
         write_table(self.shards[1] / "results.tsv", fields, rows)
         report = self.validate()
         self.assertTrue(report["clean_candidate"])
-        self.assertFalse(report["clean_acceptance"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        self.assertTrue(report["clean_acceptance"])
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_partition_gates_use_their_own_failure_sets(self):
@@ -429,7 +558,7 @@ class ContractTests(unittest.TestCase):
         reference_only.update({"candidate_failure": False, "reference_failure": True,
                                "acceptance_failure": True})
         contract.partition_shards(reports, require_clean_candidate=True)
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             contract.partition_shards(reports, require_clean_acceptance=True)
 
         candidate_failure = reports[1]["outcomes"]["7"]
@@ -437,7 +566,7 @@ class ContractTests(unittest.TestCase):
                                   "acceptance_failure": True})
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             contract.partition_shards(reports, require_clean_candidate=True)
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census profile"):
             contract.partition_shards(reports, require_clean_acceptance=True)
 
     def test_setup_disposition_is_preserved_but_not_clean(self):
@@ -446,9 +575,8 @@ class ContractTests(unittest.TestCase):
         strict["disposition"] = "infrastructure-or-protocol-failure"
         write_table(self.shards[0] / "results.tsv", fields, rows)
         report = self.validate(require_clean=False)
-        self.assertEqual(report["setup_dispositions"], {"infrastructure-or-protocol-failure": 1})
-        with self.assertRaises(AssertionError):
-            self.validate()
+        self.assertEqual(report["setup_dispositions"], {})
+        self.assertTrue(self.validate()["clean_candidate"])
 
     def test_missing_and_duplicate_shards_are_rejected(self):
         with self.assertRaisesRegex(AssertionError, "shard count mismatch"):
@@ -482,8 +610,8 @@ class ContractTests(unittest.TestCase):
         output = self.root / "reconcile.json"
         report = contract.reconcile(reference, candidate, output, False)
         self.assertEqual(report["common_rows"], 0)
-        self.assertEqual(report["removed_rows"], reference["rows"])
-        self.assertEqual(report["added_rows"], candidate["rows"])
+        self.assertEqual(report["removed_rows"], len(reference["selected_rows"]))
+        self.assertEqual(report["added_rows"], len(candidate["selected_rows"]))
         self.assertNotEqual(report["reference_input_ledger_sha256"], report["candidate_input_ledger_sha256"])
 
     def test_reconcile_keeps_common_rows_across_candidate_binary_revision(self):
@@ -541,7 +669,7 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(report["require_clean_acceptance"])
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved common rows"):
             contract.reconcile(reference, candidate, output, True)
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved common rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census reference profile"):
             contract.reconcile(reference, candidate, output, False, True)
 
         candidate["identities"][candidate_key].update({
@@ -552,8 +680,31 @@ class ContractTests(unittest.TestCase):
         report = contract.reconcile(reference, candidate, output, True)
         self.assertTrue(report["clean_candidate"])
         self.assertFalse(report["clean_acceptance"])
-        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved common rows"):
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census reference profile"):
             contract.reconcile(reference, candidate, output, False, True)
+
+    def test_reconcile_and_cli_acceptance_require_both_full_profiles(self):
+        reference = contract.validate(self.shards[0])
+        candidate = contract.validate(self.shards[1])
+        output = self.root / "reconcile-profile-gate.json"
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census reference profile"):
+            contract.reconcile(reference, candidate, output, False, True)
+
+        full_reference = copy.deepcopy(reference)
+        full_reference["profile"] = contract.FULL_CENSUS_PROFILE
+        full_reference["manifest"] = dict(full_reference["manifest"], profile=contract.FULL_CENSUS_PROFILE)
+        with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census candidate profile"):
+            contract.reconcile(full_reference, candidate, output, False, True)
+
+        saved_argv = sys.argv
+        try:
+            sys.argv = ["native_retirement_contract.py", "compare", str(self.shards[0]), str(self.shards[1]),
+                        "--out", str(self.root / "reconcile-cli-profile-gate.json"),
+                        "--require-clean-acceptance"]
+            with self.assertRaisesRegex(AssertionError, "production acceptance requires full-census reference profile"):
+                contract.main()
+        finally:
+            sys.argv = saved_argv
 
     def test_reconcile_keeps_common_rows_across_unrelated_input_addition(self):
         candidate_dir = self.root / "candidate-expanded"
@@ -625,7 +776,7 @@ class ContractTests(unittest.TestCase):
     def test_reference_classification_cannot_hide_supported_candidate_failure(self):
         fields, rows = read_table(self.shards[1] / "results.tsv")
         strict = next(row for row in rows if row["row"] == "5")
-        strict.update({"disposition": "strict-success-baseline-unresolved", "fallbacks": "1"})
+        strict.update({"disposition": "strict-success-baseline-unresolved", "kind": "1", "status": "1"})
         write_table(self.shards[1] / "results.tsv", fields, rows)
         report = self.validate(require_clean=False)
         self.assertIn(5, report["candidate_failure_rows"])
@@ -633,7 +784,7 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(report["clean_candidate"])
         applicability_fields, applicability_rows = read_table(self.root / "applicability.tsv")
         row = next(item for item in applicability_rows if item["row"] == "5")
-        self.assertEqual(row["applicability"], "retained-reference")
+        self.assertEqual(row["applicability"], "admitted-supported")
         self.assertEqual(row["candidate_failure"], "1")
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
@@ -644,17 +795,21 @@ class ContractTests(unittest.TestCase):
         strict["fallbacks"] = "1"
         write_table(self.shards[1] / "results.tsv", result_fields, results)
         path = self.shards[1] / "fallback-functions.tsv"
-        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 target=x86_64-linux allocator=mir-stack "
-                     "function_id=9 reason=encoding stage=encoding opcode_id=7 line=3 column=2 "
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
                      "source_hex=612063 function_hex=66")
         write_table(path, ("row", "record_valid", "telemetry"),
                     [{"row": "5", "record_valid": "1", "telemetry": telemetry}])
+        write_table(self.shards[1] / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=mir-stack reason=opcode count=1 version=1 row=5"},
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK opcode=7 count=1 version=1 row=5 target=x86_64-linux allocator=mir-stack"},
+        ])
         report = self.validate(require_clean=False)
-        self.assertEqual(report["residual_rows"], 1)
+        self.assertEqual(report["residual_rows"], 3)
         fields, rows = read_table(self.root / "residual.tsv")
         self.assertEqual(fields, contract.RESIDUAL_FIELDS)
-        self.assertEqual(len(rows), 1)
-        residual = rows[0]
+        self.assertEqual(len(rows), 3)
+        residual = next(row for row in rows if row["function_id"] == "9")
         self.assertEqual(residual["fixture"], "tests/unit.c")
         self.assertEqual(residual["function"], "f")
         self.assertEqual(residual["function_id"], "9")
@@ -663,18 +818,113 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(residual["frontend"], "local-backed-canonical")
         self.assertEqual(residual["allocator"], "mir-stack")
         self.assertEqual(residual["PIC"], "1")
-        self.assertEqual(residual["reason"], "encoding")
+        self.assertEqual(residual["reason"], "opcode")
         self.assertIn("CODEGEN_FALLBACK_FUNCTION", residual["diagnostic"])
 
-        # Repeated diagnostics cannot make the retained residual unbounded.
+        # A full 256-function source plus a counter must report truncation: the
+        # counter is not silently dropped before the global cap is applied.
+        function_records = []
+        for function_id in range(contract.MAX_RESIDUAL_ROWS):
+            function_records.append({"row": "5", "record_valid": "1", "telemetry": telemetry.replace("function_id=9", f"function_id={function_id}")})
+        strict["fallbacks"] = str(contract.MAX_RESIDUAL_ROWS)
+        write_table(self.shards[1] / "results.tsv", result_fields, results)
         write_table(path, ("row", "record_valid", "telemetry"),
-                    [{"row": "5", "record_valid": "1", "telemetry": telemetry}
-                     for _ in range(contract.MAX_RESIDUAL_ROWS + 8)])
+                    function_records)
+        write_table(self.shards[1] / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": "5", "telemetry": f"CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=mir-stack reason=opcode count={contract.MAX_RESIDUAL_ROWS} version=1 row=5"},
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK opcode=7 count=256 version=1 row=5 target=x86_64-linux allocator=mir-stack"},
+        ])
         report = self.validate(require_clean=False)
         self.assertEqual(report["residual_rows"], contract.MAX_RESIDUAL_ROWS)
         self.assertTrue(report["residual_truncated"])
+        residual_bytes = (self.root / "residual.tsv").read_bytes()
+        function_fields, function_rows = read_table(path)
+        write_table(path, function_fields, list(reversed(function_rows)))
+        self.validate(require_clean=False)
+        self.assertEqual((self.root / "residual.tsv").read_bytes(), residual_bytes)
+
+    def test_residual_diagnostics_are_row_bound_and_complete(self):
+        result_fields, results = read_table(self.shards[1] / "results.tsv")
+        strict = next(row for row in results if row["row"] == "5")
+        _row_fields, census_rows = read_table(self.shards[1] / "rows.tsv")
+        census_row = next(row for row in census_rows if row["row"] == "5")
+        self.assertEqual(contract._validate_counter_diagnostic(
+            "CODEGEN_FALLBACK_STAGES verify=1 placement=2 encode=3 version=1 row=5 "
+            "target=x86_64-linux allocator=mir-stack", census_row)["encode"], "3")
+        strict["fallbacks"] = "1"
+        write_table(self.shards[1] / "results.tsv", result_fields, results)
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                     "source_hex=612063 function_hex=66")
+        function_path = self.shards[1] / "fallback-functions.tsv"
+        write_table(function_path, ("row", "record_valid", "telemetry"),
+                    [{"row": "5", "record_valid": "1", "telemetry": telemetry}])
+        write_table(self.shards[1] / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=mir-stack reason=opcode count=1 version=1 row=5"},
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK opcode=7 count=1 version=1 row=5 target=x86_64-linux allocator=mir-stack"},
+        ])
+        self.validate(require_clean=False)
+
+        fields, rows = read_table(function_path)
+        rows[0]["row"] = "7"
+        write_table(function_path, fields, rows)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+        rows[0]["row"] = "5"
+        rows[0]["record_valid"] = "0"
+        write_table(function_path, fields, rows)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+        rows[0]["record_valid"] = "1"
+        rows[0]["telemetry"] = telemetry.replace("source_hex=612063", "source_hex=")
+        write_table(function_path, fields, rows)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_function_diagnostic_inner_row_rejects_identity_reassignment(self):
+        _result_fields, results = read_table(self.shards[0] / "results.tsv")
+        outer = next(row for row in results if row["row"] == "9")
+        _row_fields, census_rows = read_table(self.shards[0] / "rows.tsv")
+        outer_row = next(row for row in census_rows if row["row"] == "9")
+        inner_row = next(row for row in census_rows if row["row"] == "5")
+        self.assertEqual(outer_row["target"], inner_row["target"])
+        self.assertEqual(outer_row["allocator"], inner_row["allocator"])
+        self.assertNotEqual(outer_row["frontend_lowering"], inner_row["frontend_lowering"])
+        self.assertNotEqual(outer_row["PIC"], inner_row["PIC"])
+        self.assertNotEqual(outer_row["group"], inner_row["group"])
+        outer["fallbacks"] = "1"
+        write_table(self.shards[0] / "results.tsv", contract.RESULT_FIELDS, results)
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                     "source_hex=612063 function_hex=66")
+        write_table(self.shards[0] / "fallback-functions.tsv", ("row", "record_valid", "telemetry"),
+                    [{"row": "9", "record_valid": "1", "telemetry": telemetry}])
+        write_table(self.shards[0] / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": "9", "telemetry": "CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=mir-stack reason=opcode count=1 version=1 row=9"},
+            {"row": "9", "telemetry": "CODEGEN_FALLBACK opcode=7 count=1 version=1 row=9 target=x86_64-linux allocator=mir-stack"},
+        ])
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_source_hex_sentinel_is_rejected(self):
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                     "source_hex=- function_hex=66")
+        self.install_single_fallback(1, "5", telemetry)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_function_hex_sentinel_is_rejected(self):
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                     "source_hex=612063 function_hex=-")
+        self.install_single_fallback(1, "5", telemetry)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
 
     def test_admitted_supported_gap_remains_candidate_owned(self):
+        self.declare_gaps({("tests/unit.c", "x86_64-unknown-linux-gnu", "local-backed-canonical", "1", "mir-stack"),
+                           ("tests/unit.c", "x86_64-apple-ios", "local-backed-canonical", "0", "mir-stack")})
         fields, rows = read_table(self.shards[1] / "results.tsv")
         strict = next(row for row in rows if row["row"] == "5")
         strict["disposition"] = "supported-native-gap"
