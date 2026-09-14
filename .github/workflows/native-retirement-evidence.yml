@@ -143,7 +143,8 @@ jobs:
             evidence/census-integrated-2 \
             evidence/census-integrated-3 \
             --out evidence/census-validation-v2.json \
-            --require-clean-candidate
+            --require-clean-candidate \
+            --require-clean-acceptance
       - name: Retain raw evidence and build recipes
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -159,6 +160,9 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 6
+          # Preserve ledger-declared tracked dotfiles under evidence without
+          # uploading checkout/.git metadata or unrelated hidden files.
+          include-hidden-files: true
 
   strict_differential:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}

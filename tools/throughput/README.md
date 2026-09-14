@@ -51,6 +51,59 @@ measurement host. Use a new output directory for every run; existing results
 are not silently overwritten. Comparison never downloads historical numbers
 from a different runner and never automatically updates a golden baseline.
 
+### Real-source preflight and hosted functional admission
+
+The opt-in `check-workload` command validates a real-source descriptor and an
+already staged input tree without compiling, linking, executing or measuring
+anything:
+
+```sh
+./build.sh bench_throughput check-workload tools/throughput/workloads/cjson-1.7.19.workload \
+  --source-root /absolute/cjson-staging \
+  --compiler /absolute/ide \
+  --evidence /absolute/oracle.log \
+  --evidence-outcome pass
+```
+
+Version-1 descriptors remain accepted for durable preflight receipts. The
+version-2 descriptors for cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 bind their exact
+upstream identities, complete staged-file inventory, aggregate tree hash,
+requested translation-unit bytes, dependency/resource/sysroot/SDK/environment
+identities, target/ABI/features, C lowerings, PIC and allocator modes,
+operations, artifacts, oracle and separate ordered object, compile-link and
+runtime argv templates. The
+preflight independently hashes the descriptor, every declared input, the
+complete tree, compiler binary and caller-supplied oracle evidence, and repeats
+the identities and exact templates in its receipt.
+Missing, changed, duplicated or undeclared inputs; unsafe paths; malformed
+templates; missing evidence; and unknown evidence outcomes are hard failures.
+
+This command deliberately emits `scope=descriptor-and-input-preflight`,
+`admitted=false`, `performed_work=null` and `fresh_admission_required=true`.
+The evidence outcome is limited to `pass`, `failed`, `inconclusive` or
+`unavailable`; recording a failed oracle never turns it into a pass. In
+particular, the Lua descriptor preserves run 34727853592's missing-readline
+failure. A new qualification must run the existing build.c oracle after
+installing the declared native dependencies before Lua can be admitted.
+
+The branch-only `throughput-real-source.yml` workflow stages these exact roots,
+runs the existing cJSON/Lua/SQLite oracles, and always writes the preflight and
+outcome evidence. For each freshly passing oracle, `admit-workload` then verifies
+parsed dependency, compiler-resource, system-header, SDK, sanitized-environment
+and runtime-library manifests; compiles every declared source/generated file to
+an object; independently compile-links the declared source list; executes that
+artifact; and revalidates all identities before emitting a receipt. Expanded
+absolute argv, working directories, process results, metrics and artifact hashes
+are retained. Failed attempts retain their partial evidence but emit no success
+receipt.
+
+Each receipt admits only the explicitly performed Linux x86-64 baseline CPU,
+direct-SSA, non-PIC, fast-allocator cells for object, compile-link and runtime
+operations. The broader frontend/PIC/allocator lists remain requested descriptor
+metadata, not performed work. This is hosted functional admission only: it does
+not enlarge the default CI corpus, run timing samples, qualify a dedicated host,
+or establish A/A or A/B performance acceptance. Those remain separate work.
+
 ## Shared library boundary
 
 `build.c::bench_throughput_add` constructs both executables with `shared.c`,
@@ -471,6 +524,113 @@ code under `pull_request_target`. Permissions are read-only and checkout
 credentials are not persisted. Full self-host/PMU/allocation investigations are
 explicit local or dedicated-runner experiments, not hidden costs in every PR.
 The weekly run is an A/A health check; manual dispatch accepts a baseline ref.
+
+### Native-retirement statistics (version 1)
+
+`retirement_stats.h` is a separate opt-in method for the approved
+`native-retirement-performance-v1` contract. It does not change the ordinary CI
+guard above. A caller must freeze the two family-partition sizes, exactly two
+equal rounds, an even sample count of 60--256 pairs per round, at least 100,000
+resamples, and one 64-bit seed before collecting data. The three fixed analysis
+scopes are `round-1`, `round-2`, and `pooled`, matching
+`native_retirement_performance_binding.py:STATISTICAL_SCOPES`. Replay rejects an
+unfrozen plan, missing or extra ratios, a round with a different count, a
+shortened resample workspace, zero, missing or non-finite input, and values
+beyond its declared caps. The surrounding evidence validator remains
+responsible for proving that the declaration preceded collection, deriving the
+counts from the immutable manifest, assigning every member exactly one stable
+index, and invoking every declared member exactly once.
+
+Input for one family member is cell-major `[cell][round][pair]` paired
+candidate/baseline ratios. Every two adjacent pairs are an indivisible AB/BA
+block. For that block, the statistic is the equal-weight geometric mean of both
+pair ratios and every included cell; this gives each required cell and both
+orientations the same fixed weight. A round estimate is the median of its block
+statistics. The pooled estimate is the median of both equal-sized round strata.
+A slice or overall aggregate precomputes these block statistics in
+`O(cells * pairs)` time, then each bootstrap replicate selects whole blocks in
+`O(pairs)` time, uses one selected block across all cells, and retains both
+ratios. Round analyses draw only from their round. Pooled analysis draws within
+each round independently and combines the two strata without changing their
+equal weight. Thus replay is
+`O(cells * pairs + resamples * pairs + resamples * log(resamples))` rather than
+`O(cells * resamples * pairs)`, with one resample workspace independent of the
+cell count. No observation is trimmed, replaced or selected by its result.
+The published point estimate in each scope is therefore a median of declared
+block geometric means. This is the version-1 estimand, not an algebraic claim
+that a median commutes with a geometric mean: on crossed or skewed cells it can
+differ from the geometric mean of per-cell medians. Equal fixed cell weight is
+provided inside every block statistic, before the predeclared median operation;
+the evidence must publish that block-statistic median for each round and pooled
+scope rather than silently substituting the other nonlinear ordering.
+
+The complete declared family contains all wall-time, RSS and generated-runtime
+overall aggregates, required slices and cells. It is split before measurement
+into an aggregate/slice bootstrap partition and an exact-cell partition. Each
+partition receives half of family alpha 0.05. Within a partition of `N` members,
+each upper or lower bound in each of the three scopes uses one-sided tail alpha
+`0.05 / (12 * N)`: two partitions times two directions times three scopes times
+`N` members. The union bound is therefore at most 0.025 per partition and 0.05
+over both partitions. This stronger weighted Bonferroni construction never
+silently omits cells while retaining enough Monte Carlo tail resolution for the
+bounded bootstrap partition. Resampled statistics use at least 100,000 draws,
+are sorted, and use inverse empirical CDF/type 1: quantile `p` is
+`sorted[ceil(p * resamples) - 1]`, clamped to the available ranks. The bootstrap
+partition is capped at 80 members per scope, which leaves at least 5.208 expected
+draws in each corrected tail at 100,000 resamples. The frozen binding axes have
+at most 25 explicit members per metric (one aggregate, 12 targets, one
+`baseline` CPU, four allocators, two frontends, two PIC modes, and three
+artifact stages), hence at most 75 across the three variable metrics.
+
+Both `N` values are per-scope cardinalities derived without producer totals.
+For each named scope, bootstrap `N` is the count of that scope's aggregate and
+slice entries in `statistical_family.members`; exact-cell `N` is the sum of that
+scope's three variable-metric `cell_counts`. The immutable binding repeats the
+same member identities across all three scopes. If independently derived scope
+counts differ, or either plan count differs from them, version-1 replay is
+invalid. This makes the extra factor of two in `12 * N` unambiguously the two
+predeclared partitions, rather than an accidentally duplicated scope or tail.
+
+Cells use a separate exact distribution-free order-statistic interval, matching
+`stats.h`'s binomial construction but applying it to the independent two-pair
+block statistic. It consumes no resample workspace and has no Monte Carlo
+resolution limit. Round intervals use the round blocks directly. The pooled
+point estimate is the median of both equal-size strata, but its interval does
+not assume identical round distributions: each component round uses half the
+pooled tail allocation and the pooled interval envelopes the two component
+intervals. An equal-mixture median lies between its component medians, so this
+inner union bound is distribution-free and costs no more than the declared
+pooled tail allocation. An unattainable finite endpoint is honestly reported as
+zero or infinity. The exact partition supports 300,000 metric cells per scope.
+The binding currently fixes 19,296 support groups, 77,184 required object
+rows, and at least 77,186 rows after the required link and self-host stages. The
+100,000-cell cap therefore leaves explicit room for admitted real-workload rows,
+and the 300,000-member cap is exactly three variable metrics for that maximum
+population in each scope. These caps do not reduce resamples or authorize excluding a
+required cell. The caller derives the bootstrap count from one scope's explicit
+aggregate/slice members and the cell count by summing that scope's
+variable-metric `cell_counts`; a mismatch or a larger final manifest is invalid
+evidence and requires a reviewed version change, not truncation.
+
+A pass requires both rounds and pooled upper bounds at or below the applicable
+limit; a regression requires both rounds and pooled lower bounds above it. All
+other valid results, including round disagreement, a broad interval, or an
+infinite endpoint, are inconclusive. Any validation failure is invalid. Exact
+code-section byte ratios remain outside this sampled method.
+
+Replay and ordering use SplitMix64 with the constants and coordinate mapping in
+`tp_retirement_seed`. Bounded choices use rejection sampling rather than modulo
+bias. `tp_retirement_block_schedule` defines each cell's first-pair AB/BA
+orientation and separate Fisher-Yates cell orders for the two pairs from one
+`(seed, round, block, cell_count)` tuple; each cell takes the opposite
+orientation in the second pair. The schedule and bootstrap domains are stable
+named protocol constants. Bootstrap streams are separately derived from `(seed,
+bootstrap-domain, metric, family member, round-or-pooled)`. The native harness
+test fixes independently generated nonconstant-data draw, pooled-statistic, and
+quantile answers and exercises unchanged data, true regressions, broad
+intervals, disagreeing rounds, both family corrections, aggregates, malformed
+declarations, fixed sample counts, and supported caps. This software test is not
+dedicated-host A/A admission and issues no #36 performance verdict.
 
 ## Result bundle
 

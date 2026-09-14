@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Network-free tests of cache integrity and failure-summary contracts."""
 import copy
+import csv
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import ci_summary
 import ci_zig
 import github_ci_time
 import native_retirement_archive
+import native_retirement_contract
 
 
 class ZigTests(unittest.TestCase):
@@ -483,6 +485,59 @@ class NativeRetirementArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "size mismatch"):
             native_retirement_archive.verify_strict(self.assets, self.root / "damaged", False)
 
+    def test_census_upload_download_replay_preserves_hidden_ledger_input(self):
+        evidence = self.root / "candidate" / "evidence"
+        checkout_git = self.root / "candidate" / ".git" / "objects"
+        checkout_git.mkdir(parents=True)
+        (checkout_git / "private-object").write_bytes(b"must not be uploaded")
+        shard = evidence / "census-integrated-0"
+        input_root = shard / "inputs" / "tests"
+        input_root.mkdir(parents=True)
+        hidden = b"*.generated\n"
+        (input_root / ".gitignore").write_bytes(hidden)
+        support_row = {
+            "path": "tests/.gitignore", "role": "support-file", "compile_obligation": "dependency-only",
+            "bytes": str(len(hidden)), "sha256": hashlib.sha256(hidden).hexdigest(),
+        }
+        input_row = {
+            **support_row, "buster_hash_64": "0", "fixture_recipe": "compiler-default", "fixture_flags": "",
+        }
+        for path, fields, row in (
+            (shard / "support-contract.tsv", native_retirement_contract.SUPPORT_FIELDS, support_row),
+            (shard / "inputs.tsv", native_retirement_contract.INPUT_FIELDS, input_row),
+        ):
+            with path.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t", lineterminator="\n")
+                writer.writeheader()
+                writer.writerow(row)
+        manifest = {
+            "support_contract_sha256": native_retirement_contract.sha256(shard / "support-contract.tsv"),
+            "inputs": "1",
+        }
+
+        uploaded = self.root / "census-upload.zip"
+        with zipfile.ZipFile(uploaded, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in evidence.rglob("*"):
+                if path.is_file():
+                    bundle.write(path, Path("evidence") / path.relative_to(evidence))
+        downloaded = self.root / "downloaded"
+        native_retirement_archive.extract_zip(uploaded, downloaded)
+        replayed = downloaded / "evidence" / "census-integrated-0"
+        self.assertEqual((replayed / "inputs/tests/.gitignore").read_bytes(), hidden)
+        self.assertFalse(any(".git" in path.parts for path in downloaded.rglob("*")))
+        native_retirement_contract.validate_inputs(replayed, manifest)
+
+        stripped = self.root / "census-upload-without-hidden.zip"
+        with zipfile.ZipFile(stripped, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in evidence.rglob("*"):
+                if path.is_file() and path.name != ".gitignore":
+                    bundle.write(path, Path("evidence") / path.relative_to(evidence))
+        stripped_download = self.root / "stripped-download"
+        native_retirement_archive.extract_zip(stripped, stripped_download)
+        with self.assertRaises(AssertionError):
+            native_retirement_contract.validate_inputs(
+                stripped_download / "evidence" / "census-integrated-0", manifest)
+
     def test_census_receipt_records_a_nonidentical_clean_rebuild(self):
         contract = self.make_inputs()
         value = json.loads(contract.read_text())
@@ -709,8 +764,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r"evidence/census-integrated-[0-3]", census_validation)), 4)
         self.assertIn("--out evidence/census-validation-v2.json", census_validation)
         self.assertIn("--require-clean-candidate", census_validation)
+        self.assertIn("--require-clean-acceptance", census_validation)
         self.assertNotIn("join-census.py", census_validation)
         self.assertNotIn("validate-census-v2.py", census_validation)
+        upload = text.split("      - name: Retain raw evidence and build recipes", 1)[1].split(
+            "\n  strict_differential:", 1)[0]
+        self.assertIn("include-hidden-files: true", upload)
+        self.assertIn("candidate/evidence/", upload)
+        self.assertNotIn("candidate/.git", upload)
         strict = text.split("\n  strict_differential:", 1)[1]
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)\n            slug: (.+)\n            platform: (.+)$", strict)
         self.assertEqual(entries, [

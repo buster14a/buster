@@ -175,17 +175,32 @@ exact rerun candidate:
 
 ```sh
 python3 tools/native_retirement_contract.py compare build/census-reference build/census-candidate \
-  --out build/common-row-transitions.json --require-clean-candidate
+  --out build/common-row-transitions.json --require-clean-candidate --require-clean-acceptance
 ```
 
 For a sharded census, `validate-shards` independently validates each directory,
 requires byte-exact equality of the full `rows.tsv` identity map and the full
 `inputs.tsv` recipe ledger, then proves a disjoint complete selected-row
 partition. Its aggregate report is written even when a disposition is dirty so
-reference, setup and candidate failures remain inspectable. Passing
-`--require-clean-candidate` additionally rejects every supported candidate
-failure, nonzero fallback or invalid function/target/counter telemetry, and
-every unresolved semantic baseline/reference row. Rows whose exact
+reference, setup and candidate failures remain inspectable:
+
+```sh
+python3 tools/native_retirement_contract.py validate-shards build/census-shard-* \
+  --out build/census-aggregate.json --require-clean-candidate --require-clean-acceptance
+```
+
+`--require-clean-candidate` rejects candidate-side setup or execution failures,
+supported candidate gaps, nonzero fallbacks, and invalid function, target,
+counter or artifact telemetry. It deliberately does not reinterpret a
+candidate success as a failure solely because its paired direct reference is
+unresolved. `--require-clean-acceptance` is the separate final-acceptance gate:
+it rejects both candidate-side failures and every unresolved semantic
+baseline/reference row. The report records the requested gates independently as
+`require_clean_candidate` and `require_clean_acceptance`, and records their
+results as `clean_candidate` and `clean_acceptance`. Passing only the candidate
+gate is not full retirement acceptance.
+
+Rows whose exact
 `execution_obligation` is `unavailable-platform-control` remain explicit
 inapplicable controls; they are retained in the report and waive only the
 separate native-execution obligation. They do not excuse a reference compile,
@@ -195,12 +210,16 @@ The acceptance workflow invokes this current validator directly from its second
 exact-candidate checkout. It does not reuse the historical archive's older join
 or schema reader. The retained `census-validation-v2.json` therefore records the
 complete current-schema partition even when `--require-clean-candidate` rejects
-real compiler or reference gaps.
+real compiler or reference gaps. The final invocation supplies both
+`--require-clean-candidate` and `--require-clean-acceptance`: the former keeps
+candidate cleanliness separate from unresolved direct-reference rows, while the
+latter is the independent final acceptance gate.
 
 The report records added and removed identities separately from the common-row
-disposition transitions. The strict option rejects any common candidate row that
-is not a baseline-supported, strict-success or strict-empty-unit result, or that
-reports a fallback.
+disposition transitions. Comparison schema 2 preserves separate candidate,
+reference and combined-acceptance common-row failure counts and row lists. The
+candidate gate rejects only `candidate_common_failure_rows`; the acceptance gate
+rejects `acceptance_common_failure_rows`, including unresolved references.
 
 ## Observations and failure accounting
 
@@ -297,6 +316,16 @@ No case or matrix row is pruned for either host-toolchain limitation. The stable
 `Native retirement acceptance complete` check rejects a missing, skipped,
 cancelled or failed census or native matrix. The archived direct reference
 remains separately pinned.
+
+The census upload is scoped to the generated `candidate/evidence/` tree and
+explicit build recipes, with hidden-file inclusion enabled for that evidence
+path. This preserves ledger-declared tracked inputs such as
+`inputs/tests/.gitignore` through the package/download boundary without
+uploading the checkout's `.git` directory or unrelated hidden files. The
+registered CI-tools regression packages a representative shard, downloads and
+extracts it with the archive reader, then replays the input ledger; it also
+proves that removing the hidden input fails validation rather than being
+silently repaired.
 
 The workflow does not synthesize #508's support decision or make the census a
 retirement verdict. After that manifest is approved, the final candidate run

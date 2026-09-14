@@ -1,7 +1,8 @@
 /* Reproducible compiler-throughput harness, not a generated-program benchmark.
  * Ownership: this executable owns deterministic inputs and per-process timing;
  * build.c owns compiler construction. No third-party library is required.
- * Map: tp_generate (workloads), tp_measure (commands), tp_run (paired trials),
+ * Map: tp_generate (synthetic workloads), tp_workload_check/tp_workload_admit
+ * (real-source qualification), tp_measure (commands), tp_run (paired trials),
  * tp_compare (strict raw-sample replay and CI decision), tp_self_test (tests).
  * qualification.h owns optional dedicated-host admission and cooperative locks.
  */
@@ -58,17 +59,30 @@ typedef struct TpConfig
     char const* candidate_id;
     char const* machine_id;
     char const* lock_file;
+    int lease_fd, lease_fd_explicit;
     TpHost const* host;
     char const* profile;
     char const* self_host_root;
     char const* self_host_generated;
     char const* allocation_baseline;
     char const* allocation_candidate;
+    char const* descriptor;
+    char const* source_root;
+    char const* compiler;
+    char const* evidence;
+    char const* evidence_outcome;
+    char const* qualification_id;
+    char const* dependency_manifest;
+    char const* resource_manifest;
+    char const* sysroot_manifest;
+    char const* sdk_manifest;
+    char const* environment_manifest;
+    char const* runtime_manifest;
     char const* flags[TP_MAX_FLAGS];
     unsigned flag_count;
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
-    int assembly;
+    int assembly, output_explicit;
 } TpConfig;
 
 typedef struct TpWorkload
@@ -187,12 +201,17 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->seed = 20260907;
     config->scale = 1;
     config->cpu = -1;
+    config->lease_fd = -1;
     config->guard = 1;
     int ok = 1, selected_workloads = 0;
     for (int i = 2; i < argc && ok; ++i)
     {
         char const* key = argv[i];
-        if (!strcmp(key, "--pmu"))
+        if ((!strcmp(config->command, "check-workload") || !strcmp(config->command, "admit-workload")) && i == 2 && key[0] != '-')
+        {
+            config->descriptor = key;
+        }
+        else if (!strcmp(key, "--pmu"))
         {
             config->pmu = 1;
         }
@@ -217,18 +236,36 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         else
         {
             char const* value = argv[++i];
-            if (!strcmp(key, "--output")) config->output = value;
+            if (!strcmp(key, "--output")) { config->output = value; config->output_explicit = 1; }
             else if (!strcmp(key, "--baseline")) config->baseline = value;
             else if (!strcmp(key, "--candidate")) config->candidate = value;
             else if (!strcmp(key, "--baseline-id")) config->baseline_id = value;
             else if (!strcmp(key, "--candidate-id")) config->candidate_id = value;
             else if (!strcmp(key, "--machine-id")) config->machine_id = value;
             else if (!strcmp(key, "--lock-file")) config->lock_file = value;
+            else if (!strcmp(key, "--lease-fd"))
+            {
+                unsigned descriptor = 0;
+                ok = !config->lease_fd_explicit && tp_number(value, &descriptor) && descriptor >= 3 && descriptor <= INT_MAX;
+                if (ok) config->lease_fd = (int)descriptor;
+                config->lease_fd_explicit = 1;
+            }
             else if (!strcmp(key, "--profile")) config->profile = value;
             else if (!strcmp(key, "--self-host-root")) config->self_host_root = value;
             else if (!strcmp(key, "--self-host-generated")) config->self_host_generated = value;
             else if (!strcmp(key, "--allocation-baseline")) config->allocation_baseline = value;
             else if (!strcmp(key, "--allocation-candidate")) config->allocation_candidate = value;
+            else if (!strcmp(key, "--source-root")) config->source_root = value;
+            else if (!strcmp(key, "--compiler")) config->compiler = value;
+            else if (!strcmp(key, "--evidence")) config->evidence = value;
+            else if (!strcmp(key, "--evidence-outcome")) config->evidence_outcome = value;
+            else if (!strcmp(key, "--qualification-id")) config->qualification_id = value;
+            else if (!strcmp(key, "--dependency-manifest")) config->dependency_manifest = value;
+            else if (!strcmp(key, "--resource-manifest")) config->resource_manifest = value;
+            else if (!strcmp(key, "--sysroot-manifest")) config->sysroot_manifest = value;
+            else if (!strcmp(key, "--sdk-manifest")) config->sdk_manifest = value;
+            else if (!strcmp(key, "--environment-manifest")) config->environment_manifest = value;
+            else if (!strcmp(key, "--runtime-manifest")) config->runtime_manifest = value;
             else if (!strcmp(key, "--pairs")) ok = tp_number(value, &config->pairs);
             else if (!strcmp(key, "--warmups")) ok = tp_number(value, &config->warmups);
             else if (!strcmp(key, "--timeout")) ok = tp_number(value, &config->timeout);
@@ -312,7 +349,22 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         tp_error("both allocation compilers, or both self-host root/generated paths, must be supplied together");
         ok = 0;
     }
-    if (config->machine_id || config->lock_file || !strcmp(config->command, "qualify"))
+    if (!strcmp(config->command, "check-workload") &&
+        (!config->descriptor || !config->source_root || !config->compiler || !config->evidence || !config->evidence_outcome))
+    {
+        tp_error("check-workload requires DESCRIPTOR, --source-root, --compiler, --evidence and --evidence-outcome");
+        ok = 0;
+    }
+    if (!strcmp(config->command, "admit-workload") &&
+        (!config->descriptor || !config->source_root || !config->compiler || !config->evidence ||
+         !config->evidence_outcome || !config->output_explicit || !config->qualification_id || !config->dependency_manifest ||
+         !config->resource_manifest || !config->sysroot_manifest || !config->sdk_manifest ||
+         !config->environment_manifest || !config->runtime_manifest))
+    {
+        tp_error("admit-workload requires DESCRIPTOR, source/compiler/oracle evidence, output, qualification id and all closure manifests");
+        ok = 0;
+    }
+    if (config->machine_id || config->lock_file || config->lease_fd_explicit || !strcmp(config->command, "qualify"))
     {
         int dedicated = config->machine_id && config->machine_id[0] &&
                         strlen(config->machine_id) < TP_HOST_LABEL_CAP && config->lock_file &&
@@ -1278,6 +1330,8 @@ static int tp_compare(char const* root)
 }
 
 #include "tree.h"
+static int tp_mkdirs(char const* path);
+#include "workload.h"
 
 static int tp_mkdirs(char const* path)
 {
@@ -1665,7 +1719,11 @@ static void tp_help(void)
           "  throughput run --baseline IDE --candidate IDE --output NEW_DIR [options]\n"
           "  throughput compare --output RESULT_DIR\n"
           "  throughput self-test\n"
-          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH\n\n"
+          "  throughput check-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome OUTCOME\n"
+          "  throughput admit-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome pass\n"
+          "    --output NEW_DIR --qualification-id ID --dependency-manifest FILE --resource-manifest FILE\n"
+          "    --sysroot-manifest FILE --sdk-manifest FILE --environment-manifest FILE --runtime-manifest FILE\n"
+          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH [--lease-fd N]\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
           "--workload NAME (repeatable; first replaces defaults; names below, or default|all),\n"
@@ -1673,9 +1731,14 @@ static void tp_help(void)
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
           "--no-guard (required for custom workload runs; no performance pass claimed).\n"
+          "Descriptor outcomes: pass|failed|inconclusive|unavailable. check-workload verifies exact staged inputs,\n"
+          "compiler and evidence identities, but never executes the oracle or admits a workload.\n"
+          "admit-workload requires a passing oracle marker, hashes every closure manifest, performs the pinned\n"
+          "object and compile-link operations, executes the artifact and emits an admission receipt only on success.\n"
           "Workloads: tiny_startup, large_function, many_functions, symbol_table, control_flow, backend_pressure,\n"
           "macros, aggregate-abi. Default: the first six, in fixed corpus order regardless of selection order.\n"
           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
+          "A service may additionally pass its held lease with --lease-fd N; it requires --lock-file and is not inherited by compiler children.\n"
           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
           "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
@@ -1693,7 +1756,8 @@ int main(int argc, char** argv)
     int admitted = tp_options(argc, argv, &config);
     if (admitted && config.machine_id)
     {
-        int error = tp_host_lock_acquire(config.lock_file, &lock);
+        int error = config.lease_fd_explicit ? tp_host_lock_adopt(config.lock_file, config.lease_fd, &lock) :
+                                              tp_host_lock_acquire(config.lock_file, &lock);
         if (!error) error = tp_host_capture(&host, config.cpu, config.machine_id, config.lock_file);
         admitted = error == 0;
         if (admitted) config.host = &host;
@@ -1729,6 +1793,27 @@ int main(int argc, char** argv)
             ok = fputc('\n', stdout) != EOF && ok;
             ok = fflush(stdout) == 0 && ok;
             result = ok ? 0 : 2;
+        }
+        else if (!strcmp(config.command, "check-workload"))
+        {
+            TpWorkloadCheckOptions options = {
+                config.descriptor, config.source_root, config.compiler, config.evidence, config.evidence_outcome};
+            result = tp_workload_check(options) ? 0 : 2;
+        }
+        else if (!strcmp(config.command, "admit-workload"))
+        {
+            TpWorkloadAdmitOptions options = {
+                .check = {config.descriptor, config.source_root, config.compiler, config.evidence, config.evidence_outcome},
+                .output = config.output,
+                .qualification_id = config.qualification_id,
+                .dependency_manifest = config.dependency_manifest,
+                .resource_manifest = config.resource_manifest,
+                .sysroot_manifest = config.sysroot_manifest,
+                .sdk_manifest = config.sdk_manifest,
+                .environment_manifest = config.environment_manifest,
+                .runtime_manifest = config.runtime_manifest,
+            };
+            result = tp_workload_admit(options) ? 0 : 2;
         }
         else if (!strcmp(config.command, "run"))
         {

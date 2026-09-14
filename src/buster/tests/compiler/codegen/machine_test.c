@@ -4786,7 +4786,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
                     if (function->state == IR_FUNCTION_DECLARATION) continue;
                     MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
                     BUSTER_TEST(arguments, selected.supported);
-                    MachineSelectResult stack_selected = machine_select_validated_canonical_function(temporary.arena, program, function, target, false, false, 0);
+                    MachineSelectResult stack_selected = machine_select_validated_canonical_function(temporary.arena, program, function, target, false, false, false, 0);
                     BUSTER_TEST(arguments, stack_selected.supported && stack_selected.function.predicate_absence_certified);
                     if (stack_selected.supported)
                     {
@@ -5323,9 +5323,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_sparse_pins(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { LOCAL_COUNT = 64 };
+    IrInstruction instructions[LOCAL_COUNT] = {0};
+    IrValue values[LOCAL_COUNT] = {0};
+    IrDebugLocal locals[LOCAL_COUNT] = {0};
+    for (u32 index = 0; index < LOCAL_COUNT; index += 1)
+    {
+        instructions[index].opcode = IR_OPCODE_CONSTANT_INTEGER;
+        instructions[index].result.value = index;
+        instructions[index].canonical_local.value = index;
+        values[index].definition.value = index;
+        values[index].canonical_type = IR_TYPE_ID_INVALID;
+        locals[index].id.value = index;
+    }
+    IrFunction function = {
+        .instructions = instructions,
+        .values = values,
+        .debug_locals = locals,
+        .instruction_count = LOCAL_COUNT,
+        .value_count = LOCAL_COUNT,
+        .local_count = LOCAL_COUNT,
+        .debug_local_count = LOCAL_COUNT,
+        // A loose local x block reservation used to allocate 166,400 bytes
+        // even though every local below has one direct defining value.
+        .block_count = LOCAL_COUNT,
+    };
+    IrProgram program = {0};
+    MachineFunction machine_function = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 position = temporary.arena->position;
+    bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function);
+    u64 retained = temporary.arena->position - position;
+    BUSTER_TEST(arguments, built && machine_function.debug_value_count == LOCAL_COUNT && retained < BUSTER_KB(8));
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);

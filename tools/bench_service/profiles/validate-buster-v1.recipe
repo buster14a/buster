@@ -1,0 +1,5 @@
+schema=1
+recipe=validate-buster-v1
+repository=buster14a/buster
+source-manifest=BQ-SOURCE-V1
+layout=separate-source-build-v1

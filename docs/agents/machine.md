@@ -53,6 +53,16 @@
   switch-case target, even an unused row, because FAST consumes the whole table.
   Keep these checks at the existing verification boundary; selector-certified
   fresh functions continue directly to placement without another verifier pass.
+- Debug-enabled production selection publishes canonical-local identity in the
+  cold `MachineDebugValue` side table after virtual-register compaction. Its
+  source spans remain canonical instruction IDs and its references name final
+  virtual registers or stack slots, so scheduling shares the table unchanged;
+  scheduled line marks recover native ranges after encoding. Placement is the
+  authority for registers, spills and frame offsets. A range begins only at a
+  row boundary where the represented value is already available. Mutable
+  values are followed per row across definitions and allocator edits;
+  indirect/over-aligned and unrepresentable values publish UNAVAILABLE rather
+  than guessing. Selection without debug info allocates no table.
 - An ordinary machine virtual register has exactly one definition and every
   use, including an edge-copy source, is dominated by it. The temporary
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
