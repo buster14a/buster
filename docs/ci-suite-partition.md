@@ -86,12 +86,30 @@ export CFLAGS=-Wno-invalid-feature-combination
 driver="${RUNNER_TEMP:-/tmp}/buster-build"
 out="$(mktemp -d)/differential"
 clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-"$driver" generate --cc clang --config Release --linker DEFAULT
+"$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
 "$driver" test_mode_matrix --config Release
 "$driver" test_differential --self-test
 "$driver" build --config Release -t ide
 "$driver" test_differential --ide build/Release/ide --out "$out" --sanitize-oracle
 ```
+
+The hosted native producer deliberately keeps the non-`--ci` Release policy:
+`-O3`, tests enabled, one unity translation unit and object, and frame pointers
+enabled. It opts out only of producer debug information. The normal mode setup
+and missing-cache recovery pass the same explicit
+`-DBUSTER_DEBUG_INFO=OFF` override. Local Release generation remains unchanged
+and therefore keeps debug information and frame pointers for profiling.
+
+The profile qualification probe requires invalid input to fail nonzero with a
+nonempty diagnostic; the production differential runner separately captures and
+compares compiler diagnostics. The native lane keeps raw logs, but it neither
+retains the producer executable or a core file nor symbolizes producer program
+counters after a crash. On Linux the installed non-sanitized crash handler
+reports the fatal signal, fault address and raw program counter before
+re-raising; macOS has no corresponding custom handler. The hosted profile
+therefore retains frame-pointer unwindability and symbols, while source-line
+DWARF remains a local profiling facility rather than retained native-CI failure
+evidence.
 
 Do not generate concurrently with another build in the same tree. This local
 sequence is a reproduction of successful execution; the workflow additionally
