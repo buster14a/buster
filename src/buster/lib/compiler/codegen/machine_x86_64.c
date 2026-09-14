@@ -520,38 +520,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
     IrAbiConvention convention = machine_x64_abi_convention(target);
-    bool result = false;
     if (machine_x64_type_is_windows_va_list(type, target))
     {
         *shape = (MachineX64ValueShape){.part_count = 1, .byte_size = 8, .exact_byte_size = 8};
-        result = true;
+        return true;
     }
-    else if (machine_x64_type_is_vector_register(type) && ir_simd_operation_supported(target, IR_SIMD_SPLAT_BYTE))
+    if (machine_x64_type_is_vector_register(type) && ir_simd_operation_supported(target, IR_SIMD_SPLAT_BYTE))
     {
         // Native 512-bit values retain their existing ZMM dataflow. Other
         // CPU models use the frame-backed transport below.
         IrAbiValue vector_abi = ir_type_abi_value(program, type_id, convention, use);
         bool indirect = convention == IR_ABI_CONVENTION_WIN64_X86_64 && use != IR_ABI_USE_RESULT;
-        bool supported = vector_abi.indirect == indirect && !vector_abi.memory && vector_abi.part_count == 1 &&
-                         (indirect || (vector_abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && vector_abi.parts[0].size == 64));
-        if (supported)
+        if (vector_abi.indirect != indirect || vector_abi.memory || vector_abi.part_count != 1 ||
+            (!indirect && (vector_abi.parts[0].abi_class != IR_ABI_CLASS_VECTOR || vector_abi.parts[0].size != 64)))
         {
-            *shape = (MachineX64ValueShape){
-                .part_is_float = {indirect ? 0 : 1},
-                .part_count = 1,
-                .byte_size = 64,
-                .exact_byte_size = 64,
-                .vector = true,
-                .indirect = indirect,
-                .stack_alignment = 64,
-            };
-            result = true;
+            return false;
         }
+        *shape = (MachineX64ValueShape){
+            .part_is_float = {indirect ? 0 : 1},
+            .part_count = 1,
+            .byte_size = 64,
+            .exact_byte_size = 64,
+            .vector = true,
+            .indirect = indirect,
+            .stack_alignment = 64,
+        };
+        return true;
     }
-    else if (type && type->layout.resolved && type->kind == IR_TYPE_VECTOR &&
-             ((type->layout.size == 32 || type->layout.size == 64) ||
-              (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type->layout.size >= 32 && type->layout.size <= UINT32_MAX &&
-               !(type->layout.size & (type->layout.size - 1)))))
+    if (type && type->layout.resolved && type->kind == IR_TYPE_VECTOR &&
+        ((type->layout.size == 32 || type->layout.size == 64) ||
+         (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type->layout.size >= 32 && type->layout.size <= UINT32_MAX &&
+          !(type->layout.size & (type->layout.size - 1)))))
     {
         IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
         u32 part_bytes = BUSTER_MIN((u32)type->layout.size, target_vector_register_size(target));
@@ -605,9 +604,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                 }
             }
         }
-        result = supported;
+        return supported;
     }
-    else if (machine_x64_type_is_scalar_register(type))
+    if (machine_x64_type_is_scalar_register(type))
     {
         u16 extend_opcode = 0;
         if (type->kind == IR_TYPE_BOOLEAN || (type->kind == IR_TYPE_INTEGER && type->bit_width == 8))
@@ -623,28 +622,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .byte_size = 8,
             .scalar_extend_opcode = extend_opcode,
         };
-        result = true;
+        return true;
     }
-    else if (type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    if (type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
     {
         *shape = (MachineX64ValueShape){
             .part_is_float = {1},
             .part_count = 1,
             .byte_size = 8,
         };
-        result = true;
+        return true;
     }
-    else if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && codegen_canonical_x64_type_is_f80(type))
+    if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && codegen_canonical_x64_type_is_f80(type))
     {
         *shape = (MachineX64ValueShape){.byte_size = 16, .aggregate = true,
             .force_stack = use != IR_ABI_USE_RESULT, .f80_result = use == IR_ABI_USE_RESULT, .stack_alignment = 16};
-        result = true;
+        return true;
     }
     // A 128-bit integer is the System V two-eightbyte INTEGER pair — RAX:RDX
     // as a result, two consecutive GPRs or whole-value stack eightbytes as an
     // argument — the same parts the canonical integer-aggregate rule builds,
     // carried by the aggregate machinery over the value's 16-byte slot.
-    else if (type && type->layout.resolved && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+    if (type && type->layout.resolved && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
     {
         bool windows = convention == IR_ABI_CONVENTION_WIN64_X86_64;
         // Clang's Win64 ABI passes i128 through one pointer slot and returns
@@ -660,86 +659,81 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .xmm128 = windows && use == IR_ABI_USE_RESULT,
             .stack_alignment = 16,
         };
-        result = true;
+        return true;
     }
-    else if (type && type->layout.resolved &&
-             (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_SLICE ||
-              (type->kind == IR_TYPE_VECTOR && type->layout.size <= 16)))
+    if (!type || !type->layout.resolved || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_SLICE &&
+                                           !(type->kind == IR_TYPE_VECTOR && type->layout.size <= 16)))
     {
-        IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
-        if (use == IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !abi.memory && !abi.indirect &&
-            ((abi.part_count == 2 && type->layout.size == 16 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
-              abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP) || ir_abi_value_is_complex_x87_result(program, type_id, convention)))
+        return false;
+    }
+    IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+    if (use == IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !abi.memory && !abi.indirect &&
+        ((abi.part_count == 2 && type->layout.size == 16 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
+          abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP) || ir_abi_value_is_complex_x87_result(program, type_id, convention)))
+    {
+        *shape = (MachineX64ValueShape){.byte_size = (u32)type->layout.size, .aggregate = true, .stack_alignment = 16,
+            .f80_result = (u8)(abi.part_count / 2)};
+        return true;
+    }
+    if (abi.indirect || abi.memory || !abi.part_count || abi.part_count > 2)
+    {
+        if (type->layout.size > UINT32_MAX - 7)
         {
-            *shape = (MachineX64ValueShape){.byte_size = (u32)type->layout.size, .aggregate = true, .stack_alignment = 16,
-                .f80_result = (u8)(abi.part_count / 2)};
-            result = true;
+            return false;
         }
-        else if (abi.indirect || abi.memory || !abi.part_count || abi.part_count > 2)
+        if ((use == IR_ABI_USE_RESULT && (abi.indirect || abi.memory)) ||
+            (use != IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_WIN64_X86_64 && abi.indirect))
         {
-            if (type->layout.size <= UINT32_MAX - 7)
-            {
-                if ((use == IR_ABI_USE_RESULT && (abi.indirect || abi.memory)) ||
-                    (use != IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_WIN64_X86_64 && abi.indirect))
-                {
-                    // Large results use a hidden pointer. Win64 aggregate arguments
-                    // use one pointer slot, backed by a private copy meeting the type's
-                    // alignment and the outgoing area's sixteen-byte floor.
-                    *shape = (MachineX64ValueShape){
-                        .part_count = use == IR_ABI_USE_RESULT ? 0 : 1,
-                        .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
-                        .exact_byte_size = (u32)type->layout.size,
-                        .aggregate = true,
-                        .indirect = true,
-                        .stack_alignment = use == IR_ABI_USE_RESULT ? 0 : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
-                    };
-                    result = true;
-                }
-                else if (use != IR_ABI_USE_RESULT && abi.memory && !abi.indirect)
-                {
-                    // Memory-class arguments pass by value on the stack.
-                    *shape = (MachineX64ValueShape){
-                        .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
-                        .aggregate = true,
-                        .force_stack = true,
-                        .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
-                    };
-                    result = true;
-                }
-            }
+            // Large results use a hidden pointer. Win64 aggregate arguments
+            // use one pointer slot, backed by a private copy meeting the type's
+            // alignment and the outgoing area's sixteen-byte floor.
+            *shape = (MachineX64ValueShape){
+                .part_count = use == IR_ABI_USE_RESULT ? 0 : 1,
+                .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+                .exact_byte_size = (u32)type->layout.size,
+                .aggregate = true,
+                .indirect = true,
+                .stack_alignment = use == IR_ABI_USE_RESULT ? 0 : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
+            };
+            return true;
         }
-        else if (type->layout.size <= UINT32_MAX - 7)
+        if (use != IR_ABI_USE_RESULT && abi.memory && !abi.indirect)
         {
-            MachineX64ValueShape built = {
-                .part_count = abi.part_count,
+            // Memory-class arguments pass by value on the stack.
+            *shape = (MachineX64ValueShape){
                 .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
                 .aggregate = true,
+                .force_stack = true,
                 .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
-                .xmm128 = abi.part_count == 1 && abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && abi.parts[0].size == 16,
             };
-            bool valid = true;
-            for (u32 part_index = 0; part_index < abi.part_count && valid; part_index += 1)
-            {
-                bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT || abi.parts[part_index].abi_class == IR_ABI_CLASS_VECTOR;
-                if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
-                    (abi.parts[part_index].size > 8 && !built.xmm128))
-                {
-                    valid = false;
-                }
-                else
-                {
-                    built.part_offsets[part_index] = abi.parts[part_index].value_offset;
-                    built.part_is_float[part_index] = part_float ? 1 : 0;
-                }
-            }
-            if (valid)
-            {
-                *shape = built;
-                result = true;
-            }
+            return true;
         }
+        return false;
     }
-    return result;
+    if (type->layout.size > UINT32_MAX - 7)
+    {
+        return false;
+    }
+    MachineX64ValueShape built = {
+        .part_count = abi.part_count,
+        .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+        .aggregate = true,
+        .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
+        .xmm128 = abi.part_count == 1 && abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && abi.parts[0].size == 16,
+    };
+    for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
+    {
+        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT || abi.parts[part_index].abi_class == IR_ABI_CLASS_VECTOR;
+        if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
+            (abi.parts[part_index].size > 8 && !built.xmm128))
+        {
+            return false;
+        }
+        built.part_offsets[part_index] = abi.parts[part_index].value_offset;
+        built.part_is_float[part_index] = part_float ? 1 : 0;
+    }
+    *shape = built;
+    return true;
 }
 
 // Consecutive-register assignment per class: integer parts take the next

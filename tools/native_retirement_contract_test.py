@@ -89,7 +89,8 @@ class ContractTests(unittest.TestCase):
             "compiler_hash": "0", "compiler_bytes": str(len(candidate)), "compiler_sha256": sha(candidate),
             "baseline_hash": "0", "baseline_bytes": str(len(baseline)), "baseline_sha256": sha(baseline),
             "cpu": "baseline", "resource_include_sha256": closure.hexdigest(), "sysroot": "none",
-            "system_include": "none", "inputs": "1", "rows": "192", "fixture_filter": "",
+            "system_include": "none", "inputs": "1", "subjects": "1", "rows": "192",
+            "profile": "self-test", "fixture_filter": "",
             "target_filter": "", "shard_index": str(shard_index), "shard_count": "2",
             "manifest_only": "0", "timeout_seconds": "30",
             "function_evidence": "all-observed-fallbacks-plus-first-fatal-diagnostic",
@@ -592,6 +593,113 @@ class ContractTests(unittest.TestCase):
         self.assertNotEqual(report["reference_input_ledger_sha256"], report["candidate_input_ledger_sha256"])
         self.assertNotEqual(report["reference_manifest_identity_sha256"],
                              report["candidate_manifest_identity_sha256"])
+
+    def test_applicability_is_explicit_and_validator_owned(self):
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["applicability_classes"], list(contract.APPLICABILITY_CLASSES))
+        self.assertEqual(report["applicability_rows"], 192)
+        self.assertEqual(report["applicability_counts"], {
+            "admitted-supported": 132,
+            "platform-inapplicable": 16,
+            "retained-control": 44,
+            "retained-reference": 0,
+            "unavailable": 0,
+        })
+        fields, rows = read_table(self.root / "applicability.tsv")
+        self.assertEqual(fields, contract.APPLICABILITY_FIELDS)
+        self.assertEqual(len(rows), 192)
+        self.assertEqual([int(row["row"]) for row in rows], list(range(192)))
+        self.assertEqual({row["applicability"] for row in rows},
+                         {"admitted-supported", "platform-inapplicable", "retained-control"})
+        self.assertTrue(all(row["applicability"] == row["admission"] for row in rows))
+        self.assertTrue(all(row["reason"] and row["ownership"] and row["disposition"] for row in rows))
+
+        # A producer cannot opt a supported row out by appending an
+        # applicability field: rows.tsv has a closed, identity-bearing schema.
+        row_fields, census_rows = read_table(self.shards[0] / "rows.tsv")
+        census_rows[0]["applicability"] = "unavailable"
+        write_table(self.shards[0] / "rows.tsv", row_fields + ("applicability",), census_rows)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_reference_classification_cannot_hide_supported_candidate_failure(self):
+        fields, rows = read_table(self.shards[1] / "results.tsv")
+        strict = next(row for row in rows if row["row"] == "5")
+        strict.update({"disposition": "strict-success-baseline-unresolved", "fallbacks": "1"})
+        write_table(self.shards[1] / "results.tsv", fields, rows)
+        report = self.validate(require_clean=False)
+        self.assertIn(5, report["candidate_failure_rows"])
+        self.assertIn(5, report["acceptance_failure_rows"])
+        self.assertFalse(report["clean_candidate"])
+        applicability_fields, applicability_rows = read_table(self.root / "applicability.tsv")
+        row = next(item for item in applicability_rows if item["row"] == "5")
+        self.assertEqual(row["applicability"], "retained-reference")
+        self.assertEqual(row["candidate_failure"], "1")
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
+            self.validate()
+
+    def test_residual_tsv_is_bounded_and_attributed(self):
+        result_fields, results = read_table(self.shards[1] / "results.tsv")
+        strict = next(row for row in results if row["row"] == "5")
+        strict["fallbacks"] = "1"
+        write_table(self.shards[1] / "results.tsv", result_fields, results)
+        path = self.shards[1] / "fallback-functions.tsv"
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=encoding stage=encoding opcode_id=7 line=3 column=2 "
+                     "source_hex=612063 function_hex=66")
+        write_table(path, ("row", "record_valid", "telemetry"),
+                    [{"row": "5", "record_valid": "1", "telemetry": telemetry}])
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["residual_rows"], 1)
+        fields, rows = read_table(self.root / "residual.tsv")
+        self.assertEqual(fields, contract.RESIDUAL_FIELDS)
+        self.assertEqual(len(rows), 1)
+        residual = rows[0]
+        self.assertEqual(residual["fixture"], "tests/unit.c")
+        self.assertEqual(residual["function"], "f")
+        self.assertEqual(residual["function_id"], "9")
+        self.assertEqual(residual["target"], "x86_64-unknown-linux-gnu")
+        self.assertEqual(residual["cpu"], "baseline")
+        self.assertEqual(residual["frontend"], "local-backed-canonical")
+        self.assertEqual(residual["allocator"], "mir-stack")
+        self.assertEqual(residual["PIC"], "1")
+        self.assertEqual(residual["reason"], "encoding")
+        self.assertIn("CODEGEN_FALLBACK_FUNCTION", residual["diagnostic"])
+
+        # Repeated diagnostics cannot make the retained residual unbounded.
+        write_table(path, ("row", "record_valid", "telemetry"),
+                    [{"row": "5", "record_valid": "1", "telemetry": telemetry}
+                     for _ in range(contract.MAX_RESIDUAL_ROWS + 8)])
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["residual_rows"], contract.MAX_RESIDUAL_ROWS)
+        self.assertTrue(report["residual_truncated"])
+
+    def test_admitted_supported_gap_remains_candidate_owned(self):
+        fields, rows = read_table(self.shards[1] / "results.tsv")
+        strict = next(row for row in rows if row["row"] == "5")
+        strict["disposition"] = "supported-native-gap"
+        strict["kind"] = "1"
+        strict["status"] = "1"
+        write_table(self.shards[1] / "results.tsv", fields, rows)
+        report = self.validate(require_clean=False)
+        self.assertIn(5, report["candidate_failure_rows"])
+        applicability_fields, applicability_rows = read_table(self.root / "applicability.tsv")
+        row = next(item for item in applicability_rows if item["row"] == "5")
+        self.assertEqual(row["applicability"], "admitted-supported")
+        self.assertEqual(row["ownership"], "candidate-compiler")
+
+        # The platform-control target does not turn a declared supported gap
+        # into an inapplicable row.
+        fields, rows = read_table(self.shards[0] / "results.tsv")
+        strict = next(row for row in rows if row["row"] == "129")
+        strict["disposition"] = "supported-native-gap-missing-telemetry"
+        strict["counters_valid"] = "0"
+        write_table(self.shards[0] / "results.tsv", fields, rows)
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["supported_gap_count"], 2)
+        _fields, applicability_rows = read_table(self.root / "applicability.tsv")
+        row = next(item for item in applicability_rows if item["row"] == "129")
+        self.assertEqual(row["applicability"], "admitted-supported")
 
 if __name__ == "__main__":
     unittest.main()
