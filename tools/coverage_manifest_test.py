@@ -86,7 +86,8 @@ class CoverageManifestTests(unittest.TestCase):
                           '  if (argc != 5) return 86;\n'
                           '  for (int i = 0; i != 4; ++i) if (strcmp(argv[i + 1], expected[i])) return 86;\n'
                           '  fputs("preprocessed identity must not win\\n", stdout);\n'
-                          '  fputs("Microsoft (R) C/C++ Optimizing Compiler Version 19.42\\n", stderr);\n'
+                          '  fputs("Microsoft (R) C/C++ Optimizing Compiler Version 19.42\\r\\n", stderr);\n'
+                          '  fputs("C:\\\\Path-With-Case\\\\cl.exe: Version 19.42.0\\r\\n", stderr);\n'
                           '  return 0;\n}\n', encoding="utf-8")
         subprocess.run([self.compiler, str(source), "-o", str(fake_cl)], check=True, timeout=60)
         probe = ci_summary._coverage_probe_compiler(fake_cl, "cl", {"VSCMD_ARG_TGT_ARCH": "x64"})
