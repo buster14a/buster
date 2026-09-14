@@ -206,6 +206,12 @@ inapplicable controls; they are retained in the report and waive only the
 separate native-execution obligation. They do not excuse a reference compile,
 process status, object, fallback or telemetry defect.
 
+The acceptance workflow invokes this current validator directly from its second
+exact-candidate checkout. It does not reuse the historical archive's older join
+or schema reader. The retained `census-validation-v2.json` therefore records the
+complete current-schema partition even when `--require-clean-candidate` rejects
+real compiler or reference gaps.
+
 The report records added and removed identities separately from the common-row
 disposition transitions. Comparison schema 2 preserves separate candidate,
 reference and combined-acceptance common-row failure counts and row lists. The
@@ -277,6 +283,41 @@ this command measures object coverage. Fatal-stop/unvisited functions, self-host
 fixed points, independent mixed-compiler/runtime correctness, native unwinding,
 representative external workloads and accepted throughput/memory/size/runtime
 budgets remain separate requirements of #36.
+
+The `Native retirement evidence` workflow is the exact-candidate execution
+entry point for this census and the strict semantic differential. A pull request
+uses GitHub's exact integration commit; a manual dispatch uses its selected
+revision. The workflow rejects a checkout that does not match that identity and
+carries the commit, tree and compiler binary digest in the retained evidence.
+Its strict differential is a native six-host matrix: Linux, macOS and Windows
+on both x86-64 and AArch64. A successful object census on the Linux x86-64
+coordinator is therefore not mislabeled as runtime evidence for the other five
+hosts. Each host builds its own immutable candidate and independent O0/O2
+oracle. Sanitizer coverage is required on Linux, macOS and Windows x86-64; the
+workflow prepends Clang's matching resource-runtime directory on Windows so a
+different installed ASan DLL cannot satisfy the run. The Windows Arm64 runner's
+LLVM package does not ship an AArch64 ASan runtime, so that lane records
+`oracle_sanitizer=not-run` and the exact reason instead of reporting an
+unsanitized run as a sanitizer pass. Both Windows lanes preserve every Visual
+Studio `LIB` directory as an explicit, ordered `--library-path` input in the
+harness manifest and child argv. This lets the Buster driver find the UCRT
+legacy stdio definitions used by the intentionally headerless programs without
+silently inheriting the parent environment. The Arm64 clear-cache caller also
+supplies the compiler-rt `__clear_cache` boundary omitted by the runner package,
+backed by Windows' `FlushInstructionCache`. Windows Arm64 lowering calls that
+boundary because hosted processes cannot execute DC CVAU / IC IVAU directly;
+the original empty and nonempty ranges, argument side effects and live-register
+checks all remain. Other native hosts retain inline maintenance, and the
+independent Linux AArch64 byte oracle continues to check its complete sequence.
+No case or matrix row is pruned for either host-toolchain limitation. The stable
+`Native retirement acceptance complete` check rejects a missing, skipped,
+cancelled or failed census or native matrix. The archived direct reference
+remains separately pinned.
+
+The workflow does not synthesize #508's support decision or make the census a
+retirement verdict. After that manifest is approved, the final candidate run
+must be joined to its exact manifest identity and archived through the durable
+evidence pipeline before #509 or #36 can be closed.
 
 `--self-test` checks exact exclusions and language recipes, strict decimal/counter/attribution protocols,
 revision/path fields and complete, disjoint shard selection without needing a
