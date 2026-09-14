@@ -8,12 +8,41 @@ on:
       - .github/workflows/native-retirement-contract.yml
       - build.c
       - docs/agents/build.md
+      - docs/agents/benchmarking.md
       - docs/native-retirement-census.md
+      - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
+      - tools/native_retirement_result_input.py
+      - tools/native_retirement_result_input_test.py
+      - tools/native_retirement_archive.py
+      - tools/native_retirement_performance_binding.py
+      - tools/native_retirement_performance_binding_test.py
+      - tools/throughput/retirement_stats.h
+      - tools/throughput/**
+      - tools/throughput/stats.h
+      - tools/throughput/throughput.c
+      - tools/throughput/tests.c
+      - src/buster/lib/arena.c
+      - src/buster/lib/arena.h
+      - src/buster/lib/base.h
+      - src/buster/lib/file.c
+      - src/buster/lib/file.h
+      - src/buster/lib/hash.c
+      - src/buster/lib/hash.h
+      - src/buster/lib/integer.c
+      - src/buster/lib/integer.h
+      - src/buster/lib/os.c
+      - src/buster/lib/os.h
+      - src/buster/lib/os_internal.h
+      - src/buster/lib/string.c
+      - src/buster/lib/string.h
+      - src/buster/lib/system_headers.h
+      - src/buster/lib/time.c
+      - src/buster/lib/time.h
       - tests/**
   workflow_dispatch:
 
@@ -43,6 +72,17 @@ jobs:
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
+      - name: Validate streamed result input under strict resource warnings
+        run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
+      - name: Build and self-test the #619 retirement adapter
+        run: |
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv \
+            -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 \
+            tools/throughput/throughput.c tools/throughput/shared.c -lm \
+            -o "$RUNNER_TEMP/bench-throughput-retirement"
+          "$RUNNER_TEMP/bench-throughput-retirement" self-test
+      - name: Validate immutable performance binding schema
+        run: python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
       - name: Prove unreviewed input drift fails closed
         run: |
           printf '\n' >> tests/basic_c_operations.c
@@ -73,7 +113,7 @@ jobs:
           grep -Fx 'unfrozen_dependencies=none-for-object-census' evidence/resource-smoke/manifest.txt
           grep -q -F $'resource-header\t' evidence/resource-smoke/dependencies.tsv
           python3 tools/native_retirement_contract.py validate evidence/resource-smoke
-      - name: Retain contract diagnostics
+      - name: Retain seven-day contract diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -81,3 +121,8 @@ jobs:
           path: evidence/
           retention-days: 7
           if-no-files-found: error
+      - name: State durable evidence boundary
+        if: ${{ !cancelled() }}
+        run: |
+          echo 'The seven-day workflow artifact is diagnostic only.'
+          echo 'Final acceptance evidence must be published, downloaded, and independently replayed through #510.'
