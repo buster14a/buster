@@ -2,8 +2,8 @@ name: Real-source throughput qualification
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['bench/423-real-source-admission-20260914']
+  pull_request:
+    branches: [main]
     paths:
       - .github/workflows/throughput-real-source.yml
       - tools/throughput/**
@@ -14,12 +14,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: real-source-throughput-${{ github.ref }}
-  cancel-in-progress: false
+  group: real-source-throughput-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   compatibility:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.head_ref == 'bench/423-real-source-admission-20260914') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     env:
@@ -29,11 +29,14 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Retain exact source for review and reproduction
         shell: bash
+        env:
+          SUBMITTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$SUBMITTED_SHA"
           mkdir -p evidence
           git rev-parse HEAD > evidence/revision.txt
           git rev-parse 'HEAD^{tree}' > evidence/tree.txt
@@ -41,7 +44,7 @@ jobs:
           sha256sum evidence/source.tar > evidence/source.tar.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: real-source-qualification-source-${{ github.sha }}
+          name: real-source-qualification-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: evidence
           retention-days: 14
           if-no-files-found: error
@@ -294,7 +297,8 @@ jobs:
         run: |
           set -euo pipefail
           closure="$PWD/evidence/closures"
-          qualification="${GITHUB_SHA}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          source_revision=$(cat evidence/revision.txt)
+          qualification="${source_revision}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           : > evidence/admission-outcomes.txt
           admission_failed=0
           admit() {
@@ -340,14 +344,18 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
           expected = {"cjson": (3, 3), "lua": (34, 33), "sqlite": (2, 2)}
+          source_revision = Path("evidence/revision.txt").read_text().strip()
+          expected_qualification = f"{source_revision}:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
           receipts = []
           for family, counts in expected.items():
               receipt = json.loads(Path(f"evidence/{family}-admission.json").read_text())
               assert receipt["schema"] == "buster-throughput-workload-admission-v1"
               assert receipt["scope"] == "hosted-functional-admission" and receipt["admitted"] is True
               assert receipt["fresh_admission_required"] is False and receipt["family"] == family
+              assert receipt["qualification_id"] == expected_qualification
               assert receipt["combination"]["frontend"] == "direct-ssa"
               assert receipt["combination"]["pic"] == "off" and receipt["combination"]["allocator"] == "fast"
               assert [cell["operation"] for cell in receipt["performed_cells"]] == [
@@ -363,7 +371,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: real-source-qualification-${{ github.sha }}-${{ github.run_attempt }}
+          name: real-source-qualification-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
           path: |
             evidence
             build/cjson-v1.7.19-*
