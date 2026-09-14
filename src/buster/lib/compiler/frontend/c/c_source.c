@@ -7976,6 +7976,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__INT_WIDTH__", string_format(arena, S8("{u32}"), layout.integer.bit_width));
     C_DEFINE_TYPE_MACRO("__LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_integer.bit_width));
     C_DEFINE_TYPE_MACRO("__LONG_LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_long_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__SCHAR_MAX__", S8("127"));
+    C_DEFINE_TYPE_MACRO("__SHRT_MAX__", S8("32767"));
+    C_DEFINE_TYPE_MACRO("__INT_MAX__", S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__LONG_MAX__", layout.long_integer.bit_width == 64 ? S8("9223372036854775807L") : S8("2147483647L"));
+    C_DEFINE_TYPE_MACRO("__LONG_LONG_MAX__", S8("9223372036854775807LL"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_SHORT__", string_format(arena, S8("{u32}"), layout.short_integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_INT__", string_format(arena, S8("{u32}"), layout.integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG__", string_format(arena, S8("{u32}"), layout.long_integer.size));
