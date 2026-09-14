@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/object/object_internal.h>
+#include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/time.h>
 #include <buster/lib/file.h>
 #if BUSTER_INCLUDE_TESTS
@@ -320,6 +321,33 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSl
     return (ByteSlice){.pointer = bytes, .length = total_size};
 }
 
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_ecsymbols(Arena* arena, ByteSlice member, String8 metadata_name)
+{
+    u8 metadata[] = {0xe0, 0x01, 0, 0};
+    u64 metadata_size = sizeof(metadata);
+    u64 total_size = 8 + 60 + metadata_size + (metadata_size & 1) + 60 + member.length + (member.length & 1);
+    u8* bytes = arena_allocate(arena, u8, total_size);
+    memset(bytes, ' ', total_size);
+    memcpy(bytes, "!<arch>\n", 8);
+    u8* metadata_header = bytes + 8;
+    memcpy(metadata_header, metadata_name.pointer, metadata_name.length);
+    object_test_archive_write_size(metadata_header, metadata_size);
+    metadata_header[58] = '`';
+    metadata_header[59] = '\n';
+    memcpy(metadata_header + 60, metadata, metadata_size);
+    u8* object_header = metadata_header + 60 + metadata_size + (metadata_size & 1);
+    memcpy(object_header, "member.o/", 9);
+    object_test_archive_write_size(object_header, member.length);
+    object_header[58] = '`';
+    object_header[59] = '\n';
+    memcpy(object_header + 60, member.pointer, member.length);
+    if (member.length & 1)
+    {
+        object_header[60 + member.length] = '\n';
+    }
+    return (ByteSlice){.pointer = bytes, .length = total_size};
+}
+
 
 // A COFF object built by hand, because COMDAT is the one input shape
 // object_write cannot produce: the writer merges sections by kind, so it has
@@ -410,6 +438,96 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_coff_comdat_object(Arena* arena)
     object_test_coff_symbol(bytes, symbol_table, 7, S8("pending"), 4, 2, 0);
     object_test_coff_write_u32(bytes, string_table, 4);
 
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+// A format-equivalent subset of the VC 14.44 stdio object: each COMDAT owns
+// its own `.debug$S` C13 contribution, while the object owns one logical
+// CodeView stream. The reader has to retain one C13 signature, concatenate
+// the contribution payloads, and rebase the later contribution's relocation.
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_coff_repeated_codeview_object(Arena* arena)
+{
+    enum
+    {
+        SECTION_COUNT = 5,
+        SECTION_HEADERS_SIZE = 20 + SECTION_COUNT * 40,
+        TEXT_SIZE = 4,
+        PRIMARY_SYMBOLS_SIZE = 24,
+        SECONDARY_SYMBOLS_SIZE = 16,
+        TYPES_SIZE = 8,
+        RELOCATION_SIZE = 10,
+        SYMBOL_SIZE = 18,
+    };
+    u64 raw_offset = SECTION_HEADERS_SIZE;
+    u64 relocation_offset = raw_offset + TEXT_SIZE + PRIMARY_SYMBOLS_SIZE + SECONDARY_SYMBOLS_SIZE + 2 * TYPES_SIZE;
+    u64 symbol_offset = relocation_offset + RELOCATION_SIZE;
+    u64 string_offset = symbol_offset + SYMBOL_SIZE;
+    u64 length = string_offset + 4;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    object_test_coff_write_u16(bytes, 0, 0x8664);
+    object_test_coff_write_u16(bytes, 2, SECTION_COUNT);
+    object_test_coff_write_u32(bytes, 8, (u32)symbol_offset);
+    object_test_coff_write_u32(bytes, 12, 1);
+
+    u32 text_characteristics = 0x60300020;
+    u32 debug_characteristics = 0x42100040;
+    u64 text_section = 20;
+    u64 primary_symbols_section = text_section + 40;
+    u64 secondary_symbols_section = primary_symbols_section + 40;
+    u64 first_types_section = secondary_symbols_section + 40;
+    u64 second_types_section = first_types_section + 40;
+    object_test_coff_write_name(bytes, text_section, S8(".text"));
+    object_test_coff_write_u32(bytes, text_section + 16, TEXT_SIZE);
+    object_test_coff_write_u32(bytes, text_section + 20, (u32)raw_offset);
+    object_test_coff_write_u32(bytes, text_section + 36, text_characteristics);
+    object_test_coff_write_name(bytes, primary_symbols_section, S8(".debug$S"));
+    object_test_coff_write_u32(bytes, primary_symbols_section + 16, PRIMARY_SYMBOLS_SIZE);
+    object_test_coff_write_u32(bytes, primary_symbols_section + 20, (u32)(raw_offset + TEXT_SIZE));
+    object_test_coff_write_u32(bytes, primary_symbols_section + 36, debug_characteristics);
+    object_test_coff_write_name(bytes, secondary_symbols_section, S8(".debug$S"));
+    object_test_coff_write_u32(bytes, secondary_symbols_section + 16, SECONDARY_SYMBOLS_SIZE);
+    object_test_coff_write_u32(bytes, secondary_symbols_section + 20, (u32)(raw_offset + TEXT_SIZE + PRIMARY_SYMBOLS_SIZE));
+    object_test_coff_write_u32(bytes, secondary_symbols_section + 24, (u32)relocation_offset);
+    object_test_coff_write_u16(bytes, secondary_symbols_section + 32, 1);
+    object_test_coff_write_u32(bytes, secondary_symbols_section + 36, debug_characteristics);
+    object_test_coff_write_name(bytes, first_types_section, S8(".debug$T"));
+    object_test_coff_write_u32(bytes, first_types_section + 16, TYPES_SIZE);
+    object_test_coff_write_u32(bytes, first_types_section + 20, (u32)(raw_offset + TEXT_SIZE + PRIMARY_SYMBOLS_SIZE + SECONDARY_SYMBOLS_SIZE));
+    object_test_coff_write_u32(bytes, first_types_section + 36, debug_characteristics);
+    object_test_coff_write_name(bytes, second_types_section, S8(".debug$T"));
+    object_test_coff_write_u32(bytes, second_types_section + 16, TYPES_SIZE);
+    object_test_coff_write_u32(bytes, second_types_section + 20,
+                               (u32)(raw_offset + TEXT_SIZE + PRIMARY_SYMBOLS_SIZE + SECONDARY_SYMBOLS_SIZE + TYPES_SIZE));
+    object_test_coff_write_u32(bytes, second_types_section + 36, debug_characteristics);
+
+    u64 primary = raw_offset + TEXT_SIZE;
+    object_test_coff_write_u32(bytes, primary, 4);
+    object_test_coff_write_u32(bytes, primary + 4, 0xf3);
+    object_test_coff_write_u32(bytes, primary + 8, 1);
+    object_test_coff_write_u32(bytes, primary + 16, 0xf4);
+    object_test_coff_write_u32(bytes, primary + 20, 0);
+    u64 secondary = primary + PRIMARY_SYMBOLS_SIZE;
+    object_test_coff_write_u32(bytes, secondary, 4);
+    object_test_coff_write_u32(bytes, secondary + 4, 0xf1);
+    object_test_coff_write_u32(bytes, secondary + 8, 4);
+    object_test_coff_write_u16(bytes, secondary + 12, 2);
+    object_test_coff_write_u16(bytes, secondary + 14, 0x9999);
+    u64 first_types = secondary + SECONDARY_SYMBOLS_SIZE;
+    object_test_coff_write_u32(bytes, first_types, 4);
+    object_test_coff_write_u16(bytes, first_types + 4, 2);
+    object_test_coff_write_u16(bytes, first_types + 6, 0x9998);
+    u64 second_types = first_types + TYPES_SIZE;
+    object_test_coff_write_u32(bytes, second_types, 4);
+    object_test_coff_write_u16(bytes, second_types + 4, 2);
+    object_test_coff_write_u16(bytes, second_types + 6, 0x9997);
+
+    object_test_coff_write_u32(bytes, relocation_offset, 12);
+    object_test_coff_write_u32(bytes, relocation_offset + 4, 0);
+    object_test_coff_write_u16(bytes, relocation_offset + 8, 0x000a);
+    object_test_coff_symbol(bytes, symbol_offset, 0, S8("callee"), 1, 2, 0);
+    object_test_coff_write_u16(bytes, symbol_offset + 14, 0x20);
+    object_test_coff_write_u32(bytes, string_offset, 4);
     return (ByteSlice){.pointer = bytes, .length = length};
 }
 
@@ -1286,6 +1404,100 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, comdat.symbols[5].global && !comdat.symbols[5].weak);
         }
         arena_set_position(arguments->arena, comdat_scope.position);
+    }
+    {
+        TemporalArena codeview_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice codeview_bytes = object_test_coff_repeated_codeview_object(arguments->arena);
+        Target codeview_target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+        ObjectFile codeview = object_read(arguments->arena, codeview_bytes, codeview_target);
+        BUSTER_TEST(arguments, codeview.error == OBJECT_ERROR_NONE && codeview.section_count == OBJECT_SECTION_COUNT &&
+                                   codeview.debug_module_count == 1 && codeview.relocation_count == 1);
+        if (codeview.error == OBJECT_ERROR_NONE && codeview.section_count == OBJECT_SECTION_COUNT && codeview.debug_module_count == 1 &&
+            codeview.relocation_count == 1)
+        {
+            ByteSlice codeview_symbols = codeview.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data;
+            ByteSlice types = codeview.sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data;
+            u32 symbols_signature = 0;
+            u32 second_symbols_kind = 0;
+            u32 types_signature = 0;
+            u16 first_type_leaf = 0;
+            u16 second_type_leaf = 0;
+            if (codeview_symbols.length >= 28)
+            {
+                memcpy(&symbols_signature, codeview_symbols.pointer, sizeof(symbols_signature));
+                memcpy(&second_symbols_kind, codeview_symbols.pointer + 24, sizeof(second_symbols_kind));
+            }
+            if (types.length >= 12)
+            {
+                memcpy(&types_signature, types.pointer, sizeof(types_signature));
+                memcpy(&first_type_leaf, types.pointer + 6, sizeof(first_type_leaf));
+                memcpy(&second_type_leaf, types.pointer + 10, sizeof(second_type_leaf));
+            }
+            BUSTER_TEST(arguments, codeview_symbols.length == 36 && symbols_signature == 4 && second_symbols_kind == 0xf1);
+            BUSTER_TEST(arguments, types.length == 12 && types_signature == 4 && first_type_leaf == 0x9998 && second_type_leaf == 0x9997);
+            BUSTER_TEST(arguments, codeview.relocations[0].section == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS &&
+                                       codeview.relocations[0].kind == OBJECT_RELOCATION_COFF_SECTION16 && codeview.relocations[0].offset == 32);
+            PdbSection section = {.name = S8(".text"), .virtual_size = 4, .raw_size = 4, .characteristics = 0x60000020};
+            PdbModule module = {
+                .name = S8("repeated.obj"),
+                .codeview_symbols = codeview_symbols,
+                .codeview_types = types,
+                .code_size = 4,
+                .code_section = 1,
+            };
+            PdbInput input = {.sections = &section, .section_count = 1, .machine = 0x8664, .modules = &module, .module_count = 1};
+            BUSTER_TEST(arguments, pdb_build(arguments->arena, input).valid);
+            u8 nested_types[20] = {0};
+            object_test_coff_write_u32(nested_types, 0, 4);
+            object_test_coff_write_u16(nested_types, 4, 12);
+            object_test_coff_write_u16(nested_types, 6, 0x1203);
+            object_test_coff_write_u16(nested_types, 8, 0x1510);
+            object_test_coff_write_u32(nested_types, 12, 0x22);
+            nested_types[16] = 'n';
+            nested_types[18] = 0xf2;
+            nested_types[19] = 0xf1;
+            module.codeview_types = (ByteSlice){.pointer = nested_types, .length = sizeof(nested_types)};
+            BUSTER_TEST(arguments, pdb_build(arguments->arena, input).valid);
+            object_test_coff_write_u16(nested_types, 8, 0x1511);
+            object_test_coff_write_u16(nested_types, 10, 0xb);
+            BUSTER_TEST(arguments, pdb_build(arguments->arena, input).valid);
+            object_test_coff_write_u16(nested_types, 10, 0x13);
+            BUSTER_TEST(arguments, !pdb_build(arguments->arena, input).valid);
+            object_test_coff_write_u16(nested_types, 10, 0xb);
+            u8 packed_symbols[24] = {0};
+            object_test_coff_write_u32(packed_symbols, 0, 4);
+            object_test_coff_write_u32(packed_symbols, 4, 0xf1);
+            object_test_coff_write_u32(packed_symbols, 8, 9);
+            object_test_coff_write_u16(packed_symbols, 12, 3);
+            object_test_coff_write_u16(packed_symbols, 14, 0x9996);
+            packed_symbols[16] = 1;
+            object_test_coff_write_u16(packed_symbols, 17, 2);
+            object_test_coff_write_u16(packed_symbols, 19, 0x9995);
+            module.codeview_symbols = (ByteSlice){.pointer = packed_symbols, .length = sizeof(packed_symbols)};
+            BUSTER_TEST(arguments, pdb_build(arguments->arena, input).valid);
+        }
+        ByteSlice bad_signature = {
+            .pointer = arena_allocate(arguments->arena, u8, codeview_bytes.length),
+            .length = codeview_bytes.length,
+        };
+        memcpy(bad_signature.pointer, codeview_bytes.pointer, codeview_bytes.length);
+        object_test_coff_write_u32(bad_signature.pointer, 248, 3);
+        BUSTER_TEST(arguments, object_read(arguments->arena, bad_signature, codeview_target).error != OBJECT_ERROR_NONE);
+        ByteSlice short_signature = {
+            .pointer = arena_allocate(arguments->arena, u8, codeview_bytes.length),
+            .length = codeview_bytes.length,
+        };
+        memcpy(short_signature.pointer, codeview_bytes.pointer, codeview_bytes.length);
+        object_test_coff_write_u32(short_signature.pointer, 116, 3);
+        BUSTER_TEST(arguments, object_read(arguments->arena, short_signature, codeview_target).error != OBJECT_ERROR_NONE);
+        ByteSlice prefix_relocation = {
+            .pointer = arena_allocate(arguments->arena, u8, codeview_bytes.length),
+            .length = codeview_bytes.length,
+        };
+        memcpy(prefix_relocation.pointer, codeview_bytes.pointer, codeview_bytes.length);
+        object_test_coff_write_u32(prefix_relocation.pointer, 280, 2);
+        BUSTER_TEST(arguments, object_read(arguments->arena, prefix_relocation, codeview_target).error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, codeview_scope.position);
     }
     {
         // ELF64 and Mach-O carry the replaceable bit on the wire; COFF cannot,
@@ -4047,6 +4259,11 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {
             BUSTER_STRING_TEST(arguments, long_name.member_names[0], S8("long-member-name.o"));
         }
+        ByteSlice ecsymbols_archive = object_test_archive_ecsymbols(arguments->arena, elf.bytes, S8("/<ECSYMBOLS>/"));
+        ObjectArchive ecsymbols = object_archive_read(arguments->arena, ecsymbols_archive, x86_linux_target);
+        BUSTER_TEST(arguments, ecsymbols.error == OBJECT_ERROR_NONE && ecsymbols.object_count == 1);
+        ByteSlice near_ecsymbols_archive = object_test_archive_ecsymbols(arguments->arena, elf.bytes, S8("/<ECSYMBOLS>X/"));
+        BUSTER_TEST(arguments, object_archive_read(arguments->arena, near_ecsymbols_archive, x86_linux_target).error != OBJECT_ERROR_NONE);
         {
             u64 long_table_size = S8("long-member-name.o/\n").length;
             u64 object_header = 8 + 60 + long_table_size + (long_table_size & 1);

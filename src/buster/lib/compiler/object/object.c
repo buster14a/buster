@@ -31,7 +31,9 @@
 //                                                  and relocation rendering)
 //   object_read_u16 .. object_read_string_checked  checked reading primitives
 //   object_coff_comdat_is_replaceable              COFF COMDAT selection
-//   object_read_elf64, object_read_coff,           the three format readers
+//   object_read_elf64, object_read_coff,           the three format readers;
+//                                                  COFF joins repeated C13
+//                                                  debug contributions
 //   object_read_mach_o64, object_read              and their dispatcher
 //   object_bytes_are_object, object_archive_read   archives and detection
 //   object_symbol_name_slot                        symbol-name interning
@@ -5363,6 +5365,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             read_ok = false;
         }
     }
+    u8* section_prefix_sizes = 0;
+    if (read_ok)
+    {
+        section_prefix_sizes = arena_allocate(arena, u8, section_count);
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u8), BUSTER_ALIGN_OF(u8)))
+        {
+            read_ok = false;
+        }
+    }
     u8* section_comdat_selections = 0;
     if (read_ok)
     {
@@ -5490,6 +5501,28 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                                          : characteristics & 0x80000000     ? OBJECT_SECTION_DATA
                                                                             : OBJECT_SECTION_READ_ONLY_DATA;
             }
+            bool codeview_contribution = false;
+            u8 prefix_size = 0;
+            if (read_ok)
+            {
+                codeview_contribution = kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+                if (codeview_contribution && raw_size)
+                {
+                    u32 signature = 0;
+                    if (!raw_offset || raw_size < sizeof(signature) || !object_read_u32(bytes, raw_offset, &signature) || signature != 4)
+                    {
+                        read_ok = false;
+                    }
+                    else if (section_sizes[kind])
+                    {
+                        // Every IMAGE_COMDAT_SELECT_ASSOCIATIVE CodeView
+                        // contribution starts with CV_SIGNATURE_C13. The
+                        // in-memory object has one logical stream, so only
+                        // its first contribution retains that signature.
+                        prefix_size = sizeof(signature);
+                    }
+                }
+            }
             u32 alignment_code = 0;
             if (read_ok)
             {
@@ -5504,7 +5537,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (read_ok)
             {
                 u64 aligned_base = 0;
-                if (!align_forward_checked(section_sizes[kind], alignment, &aligned_base) || raw_size > UINT64_MAX - aligned_base)
+                bool base_valid = codeview_contribution || align_forward_checked(section_sizes[kind], alignment, &aligned_base);
+                if (codeview_contribution)
+                {
+                    aligned_base = section_sizes[kind];
+                }
+                u64 contribution_size = raw_size - prefix_size;
+                if (!base_valid || contribution_size > UINT64_MAX - aligned_base)
                 {
                     read_ok = false;
                 }
@@ -5517,7 +5556,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             {
                 section_kinds[section_index] = (u32)kind;
                 section_bases[section_index] = base;
-                section_sizes[kind] = base + raw_size;
+                section_prefix_sizes[section_index] = prefix_size;
+                section_sizes[kind] = base + raw_size - prefix_size;
                 section_alignments[kind] = BUSTER_MAX(section_alignments[kind], alignment);
                 relocation_capacity += relocation_count;
                 if (initializer_kind != OBJECT_SECTION_COUNT)
@@ -5595,7 +5635,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
             if (raw_offset && raw_size)
             {
-                memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + raw_offset, raw_size);
+                u8 prefix_size = section_prefix_sizes[section_index];
+                memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + raw_offset + prefix_size,
+                       raw_size - prefix_size);
             }
         }
         if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
@@ -5687,8 +5729,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     u16 section_index = section_number ? (u16)section_number - 1 : 0;
                     ObjectSectionKind symbol_kind = section_number ? (ObjectSectionKind)section_kinds[section_index] : OBJECT_SECTION_COUNT;
                     u64 symbol_base = section_number ? section_bases[section_index] : 0;
-                    if (section_number && (symbol_base > section_sizes[symbol_kind] || (u64)value > section_sizes[symbol_kind] - symbol_base ||
-                                          (u64)value > UINT64_MAX - symbol_base))
+                    u64 symbol_value = value;
+                    if (section_number && section_prefix_sizes[section_index])
+                    {
+                        if (value && value < section_prefix_sizes[section_index])
+                        {
+                            read_ok = false;
+                        }
+                        else
+                        {
+                            symbol_value = value ? value - section_prefix_sizes[section_index] : 0;
+                        }
+                    }
+                    if (section_number && (symbol_base > section_sizes[symbol_kind] || symbol_value > section_sizes[symbol_kind] - symbol_base ||
+                                          symbol_value > UINT64_MAX - symbol_base))
                     {
                         read_ok = false;
                     }
@@ -5742,7 +5796,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         destination_index = result.symbol_count++;
                         result.symbols[destination_index] = (ObjectSymbol){
                             .name = string_duplicate_arena(arena, name, false),
-                            .value = section_number ? symbol_base + value : 0,
+                            .value = section_number ? symbol_base + symbol_value : 0,
                             .section = section_number ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
                             .kind = symbol_type & 0x20 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                             .global = storage == OBJECT_COFF_STORAGE_EXTERNAL || storage == OBJECT_COFF_STORAGE_WEAK_EXTERNAL,
@@ -5855,6 +5909,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         kind = relocation_type == secrel_type    ? OBJECT_RELOCATION_COFF_SECREL32
                                : relocation_type == section_type ? OBJECT_RELOCATION_COFF_SECTION16
                                                                  : OBJECT_RELOCATION_COUNT;
+                        if (source_offset < section_prefix_sizes[section_index])
+                        {
+                            read_ok = false;
+                        }
                         if (kind == OBJECT_RELOCATION_COUNT)
                         {
                             result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -5863,7 +5921,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         if (read_ok)
                         {
                             result.relocations[result.relocation_count++] = (ObjectRelocation){
-                                .offset = section_bases[section_index] + source_offset,
+                                .offset = section_bases[section_index] + source_offset - section_prefix_sizes[section_index],
                                 .section = section_kinds[section_index],
                                 .symbol = symbol_map[source_symbol],
                                 .kind = kind,
@@ -7737,7 +7795,8 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
                         u64 object_offset = member_offset;
                         u64 object_size = member_size;
                         bool metadata = false;
-                        if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
+                        if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("/<ECSYMBOLS>/")) ||
+                            string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
                         {
                             metadata = true;
                         }
