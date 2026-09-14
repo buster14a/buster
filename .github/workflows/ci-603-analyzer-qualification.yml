@@ -1,0 +1,308 @@
+name: Issue 603 analyzer selection qualification
+
+on:
+  push:
+    branches:
+      - sol/603-analyzer-selection-20260914
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-603-analyzer-selection-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: One paired analyzer campaign
+    if: ${{ github.repository == 'buster14a/buster' && github.server_url == 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/sol/603-analyzer-selection-20260914' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Record identity and bootstrap identical drivers
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_root="$RUNNER_TEMP/buster-analyzer-603"
+          mkdir -p build "$qualification_root/samples"
+          test -z "$(git status --porcelain=v1)"
+          source_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          source_tree="$(git rev-parse --verify 'HEAD^{tree}')"
+          test "$source_revision" = "$GITHUB_SHA"
+          start_ns="$(date +%s%N)"
+          printf 'QUALIFICATION_ROOT=%s\nQUALIFICATION_START_NS=%s\n' "$qualification_root" "$start_ns" >> "$GITHUB_ENV"
+          {
+            printf 'BUSTER_ANALYZER_QUALIFICATION_IDENTITY_V1\n'
+            printf 'repository=%s\nserver_url=%s\nevent=%s\nref=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_EVENT_NAME" "$GITHUB_REF"
+            printf 'github_sha=%s\nsource_revision=%s\nsource_tree=%s\nrun_id=%s\nrun_attempt=%s\nrunner_image=%s\n' \
+              "$GITHUB_SHA" "$source_revision" "$source_tree" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "${ImageOS-unknown}-${ImageVersion-unknown}"
+            printf 'cohort_attempts_required=3\nthis_attempt_pairs=1\n'
+            printf 'workflow_sha256='
+            sha256sum .github/workflows/ci-603-analyzer-qualification.yml | cut -d' ' -f1
+          } > "$qualification_root/identity.txt"
+          clang --version | tee "$qualification_root/clang.txt"
+          uname -a > "$qualification_root/uname.txt"
+          lscpu > "$qualification_root/lscpu.txt"
+          cp /proc/meminfo "$qualification_root/meminfo.txt"
+          printf '%s\n' 'clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o OUTPUT' > "$qualification_root/bootstrap-command.txt"
+          phase_start="$(date +%s%N)"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-baseline
+          phase_end="$(date +%s%N)"
+          printf 'bootstrap\t%s\t%s\t%s\tpass\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" > "$qualification_root/phases.tsv"
+      - name: Exercise analyzer failure and coverage controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          phase_start="$(date +%s%N)"
+          build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$QUALIFICATION_ROOT/self-test.log"
+          phase_end="$(date +%s%N)"
+          printf 'self-test\t%s\t%s\t%s\tpass\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" >> "$QUALIFICATION_ROOT/phases.tsv"
+      - name: Configure one authoritative split-source database
+        shell: bash
+        run: |
+          set -euo pipefail
+          phase_start="$(date +%s%N)"
+          build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$QUALIFICATION_ROOT/configure.log"
+          phase_end="$(date +%s%N)"
+          printf 'configure\t%s\t%s\t%s\tpass\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" >> "$QUALIFICATION_ROOT/phases.tsv"
+          cp build/analyzer-tree/CMakeCache.txt "$QUALIFICATION_ROOT/CMakeCache.txt"
+          cp build/analyzer-tree/compile_commands.json "$QUALIFICATION_ROOT/compile_commands.json"
+          sha256sum build/analyzer-tree/CMakeCache.txt build/analyzer-tree/compile_commands.json > "$QUALIFICATION_ROOT/configuration-sha256.txt"
+          printf '%s\n' 'build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF' > "$QUALIFICATION_ROOT/configure-command.txt"
+      - name: Run one interleaved comparison and skip pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$QUALIFICATION_ROOT/current"
+          reference_manifest="$QUALIFICATION_ROOT/reference-manifest.txt"
+          reference_canonical="$QUALIFICATION_ROOT/reference-candidate-results.txt"
+          printf '%s\n' \
+            'Only shard elapsed_us, shard peak_child_rss_bytes and per-unit elapsed_us fields are omitted.' \
+            'The manifest, shard/count/TU identities, statuses and exact diagnostic-log SHA-256 values remain compared.' \
+            > "$QUALIFICATION_ROOT/result-normalization.txt"
+          if (( GITHUB_RUN_ATTEMPT % 2 == 1 )); then
+            treatments=(compare skip)
+          else
+            treatments=(skip compare)
+          fi
+          : > "$QUALIFICATION_ROOT/order.tsv"
+          : > "$QUALIFICATION_ROOT/campaigns.tsv"
+
+          pipeline_failed() {
+            [[ "$1" != 0 || "$2" != 0 ]]
+          }
+
+          run_sample() {
+            local pair="$1"
+            local position="$2"
+            local treatment="$3"
+            local sample="pair-${pair}-position-${position}-${treatment}"
+            local sample_root="$QUALIFICATION_ROOT/samples/$sample"
+            local start_ns end_ns campaign_status aggregate_status
+            local campaign_pipeline aggregate_pipeline analyzer_status tee_status
+            local baseline_arguments=()
+            mkdir -p "$sample_root"
+            test ! -e "$current"
+            if [[ "$treatment" == compare ]]; then
+              baseline_arguments=(--baseline-driver build/analyzer-baseline)
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$pair" "$position" "$treatment" "$sample" >> "$QUALIFICATION_ROOT/order.tsv"
+            printf '%s\n' "build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results CURRENT ${baseline_arguments[*]}" > "$sample_root/command.txt"
+            start_ns="$(date +%s%N)"
+            set +e
+            build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$current" "${baseline_arguments[@]}" 2>&1 | tee "$sample_root/campaign.log"
+            campaign_pipeline=("${PIPESTATUS[@]}")
+            set -e
+            test "${#campaign_pipeline[@]}" -eq 2
+            analyzer_status="${campaign_pipeline[0]}"
+            tee_status="${campaign_pipeline[1]}"
+            campaign_status=0
+            if pipeline_failed "$analyzer_status" "$tee_status"; then campaign_status=1; fi
+            end_ns="$(date +%s%N)"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sample" "$treatment" "$start_ns" "$end_ns" "$((end_ns - start_ns))" "$analyzer_status" "$tee_status" "$campaign_status" >> "$QUALIFICATION_ROOT/campaigns.tsv"
+            if [[ "$campaign_status" -ne 0 ]]; then
+              if [[ -d "$current" ]]; then mv "$current" "$sample_root/results"; fi
+              return "$campaign_status"
+            fi
+            grep -Eq '^ANALYZE_RUN .* status=pass$' "$sample_root/campaign.log"
+            if [[ "$treatment" == compare ]]; then
+              grep -Eq '^ANALYZE_BASELINE .* status=pass$' "$sample_root/campaign.log"
+              test -f "$current/baseline.log"
+            else
+              if grep -Eq '^ANALYZE_BASELINE ' "$sample_root/campaign.log" || [[ -e "$current/baseline.log" ]]; then
+                echo '::error::Skip sample unexpectedly executed a reference campaign.'
+                return 1
+              fi
+            fi
+            start_ns="$(date +%s%N)"
+            set +e
+            build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$current" 2>&1 | tee "$sample_root/aggregate.log"
+            aggregate_pipeline=("${PIPESTATUS[@]}")
+            set -e
+            test "${#aggregate_pipeline[@]}" -eq 2
+            analyzer_status="${aggregate_pipeline[0]}"
+            tee_status="${aggregate_pipeline[1]}"
+            aggregate_status=0
+            if pipeline_failed "$analyzer_status" "$tee_status"; then aggregate_status=1; fi
+            end_ns="$(date +%s%N)"
+            printf '%s-aggregate\taggregate\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sample" "$start_ns" "$end_ns" "$((end_ns - start_ns))" "$analyzer_status" "$tee_status" "$aggregate_status" >> "$QUALIFICATION_ROOT/campaigns.tsv"
+            if [[ "$aggregate_status" -ne 0 ]]; then
+              mv "$current" "$sample_root/results"
+              return "$aggregate_status"
+            fi
+            grep -Eq '^ANALYZE_AGGREGATE .* failures=0 .* status=pass$' "$sample_root/aggregate.log"
+
+            python3 - "$current" "$sample_root/candidate-results.txt" <<'PY'
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          manifest = (root / "manifest.txt").read_bytes()
+          if not manifest.endswith(b"\n"):
+              raise SystemExit("manifest lacks final newline")
+          canonical = ["BUSTER_ANALYZER_CANDIDATE_RESULTS_V1",
+                       "manifest_sha256=" + hashlib.sha256(manifest).hexdigest()]
+          expected_roots = {"manifest.txt", "baseline.log"}
+          seen_units = set()
+          for shard in range(8):
+              directory = root / f"shard-{shard}"
+              report = (directory / "result.txt").read_bytes()
+              if not report.endswith(b"\n") or b"\0" in report:
+                  raise SystemExit(f"invalid report framing for shard {shard}")
+              lines = report.decode("utf-8").splitlines()
+              if len(lines) < 6 or lines[0] != "BUSTER_CLANG_ANALYZE_RESULT_V1":
+                  raise SystemExit(f"invalid report header for shard {shard}")
+              recorded_shard = int(lines[2])
+              count = int(lines[3])
+              int(lines[4])  # volatile shard elapsed_us
+              int(lines[5])  # volatile shard peak_child_rss_bytes
+              if recorded_shard != shard or count < 0 or len(lines) != 6 + 4 * count:
+                  raise SystemExit(f"invalid report shape for shard {shard}")
+              canonical.extend((f"shard={shard}", f"fingerprint={lines[1]}", f"count={count}"))
+              expected_files = {"result.txt"}
+              for row in range(count):
+                  offset = 6 + 4 * row
+                  unit = int(lines[offset])
+                  status = int(lines[offset + 1])
+                  int(lines[offset + 2])  # volatile per-unit elapsed_us
+                  log_sha = lines[offset + 3]
+                  if unit in seen_units:
+                      raise SystemExit(f"duplicate unit {unit}")
+                  seen_units.add(unit)
+                  log_name = f"unit-{unit}.log"
+                  log = (directory / log_name).read_bytes()
+                  if hashlib.sha256(log).hexdigest() != log_sha:
+                      raise SystemExit(f"changed diagnostic log for unit {unit}")
+                  expected_files.add(log_name)
+                  canonical.append(f"unit={unit} status={status} diagnostic_sha256={log_sha}")
+              if {path.name for path in directory.iterdir()} != expected_files:
+                  raise SystemExit(f"unexpected shard files for shard {shard}")
+              expected_roots.add(directory.name)
+          if {path.name for path in root.iterdir()} - expected_roots:
+              raise SystemExit("unexpected candidate result files")
+          output.write_text("\n".join(canonical) + "\n")
+          PY
+            if [[ ! -e "$reference_canonical" ]]; then
+              cp "$current/manifest.txt" "$reference_manifest"
+              cp "$sample_root/candidate-results.txt" "$reference_canonical"
+            else
+              cmp -s "$reference_manifest" "$current/manifest.txt"
+              cmp -s "$reference_canonical" "$sample_root/candidate-results.txt"
+            fi
+            mv "$current" "$sample_root/results"
+          }
+
+          run_sample 1 1 "${treatments[0]}"
+          run_sample 1 2 "${treatments[1]}"
+          test "$(find "$QUALIFICATION_ROOT/samples" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2
+          end_ns="$(date +%s%N)"
+          {
+            printf 'BUSTER_ANALYZER_QUALIFICATION_RESULT_V1\n'
+            printf 'source_revision=%s\nsource_tree=%s\n' "$(git rev-parse --verify 'HEAD^{commit}')" "$(git rev-parse --verify 'HEAD^{tree}')"
+            printf 'samples=2\npairs=1\ncomparison=pass\n'
+            printf 'elapsed_ns=%s\n' "$((end_ns - QUALIFICATION_START_NS))"
+            printf 'canonical_sha256='
+            sha256sum "$reference_canonical" | cut -d' ' -f1
+          } > "$QUALIFICATION_ROOT/result.txt"
+          python3 - "$QUALIFICATION_ROOT" <<'PY'
+          import re
+          import statistics
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          campaigns = {}
+          for line in (root / "campaigns.tsv").read_text().splitlines():
+              fields = line.split("\t")
+              if len(fields) == 8 and fields[1] in {"compare", "skip"} and fields[5:] == ["0", "0", "0"]:
+                  campaigns[fields[0]] = (fields[1], int(fields[4]) / 1_000_000_000)
+          values = {"compare_external_s": [], "skip_external_s": [],
+                    "compare_candidate_s": [], "skip_candidate_s": [],
+                    "compare_reference_s": []}
+          for sample in sorted((root / "samples").iterdir()):
+              treatment, external = campaigns[sample.name]
+              log = (sample / "campaign.log").read_text()
+              candidate = re.search(r"^ANALYZE_RUN elapsed_us=(\d+).* status=pass$", log, re.M)
+              if candidate is None:
+                  raise SystemExit(f"missing candidate metric in {sample.name}")
+              values[f"{treatment}_external_s"].append(external)
+              values[f"{treatment}_candidate_s"].append(int(candidate.group(1)) / 1_000_000)
+              reference = re.search(r"^ANALYZE_BASELINE .* elapsed_us=(\d+).* status=pass$", log, re.M)
+              if treatment == "compare":
+                  if reference is None:
+                      raise SystemExit(f"missing reference metric in {sample.name}")
+                  values["compare_reference_s"].append(int(reference.group(1)) / 1_000_000)
+              elif reference is not None:
+                  raise SystemExit(f"unexpected reference metric in {sample.name}")
+          if any(len(values[key]) != 1 for key in values):
+              raise SystemExit("workflow attempt does not contain one sample for every required metric")
+          rows = []
+          for name, samples in values.items():
+              rows.append((name, len(samples), statistics.median(samples), min(samples), max(samples), max(samples) - min(samples)))
+          with (root / "measurements.tsv").open("w") as output:
+              output.write("metric\tsamples\tmedian_s\tmin_s\tmax_s\tspread_s\n")
+              for row in rows:
+                  output.write("%s\t%d\t%.6f\t%.6f\t%.6f\t%.6f\n" % row)
+          with (root / "measurements.md").open("w") as output:
+              output.write("| Metric | Samples | Median (s) | Min (s) | Max (s) | Spread (s) |\n")
+              output.write("| --- | ---: | ---: | ---: | ---: | ---: |\n")
+              for row in rows:
+                  output.write("| %s | %d | %.3f | %.3f | %.3f | %.3f |\n" % row)
+          PY
+      - name: Summarize qualification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result=fail
+          if [[ -f "$QUALIFICATION_ROOT/result.txt" ]]; then result=pass; fi
+          {
+            printf '## Issue 603 analyzer selection qualification\n\n'
+            printf '| Source | Run | Attempt | Result |\n| --- | --- | --- | --- |\n'
+            printf '| %s | %s | %s | %s |\n\n' "$(git rev-parse --short=12 HEAD)" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result"
+            if [[ -f "$QUALIFICATION_ROOT/order.tsv" ]]; then
+              printf 'One paired full campaign ran in this recorded order:\n\n'
+              sed 's/^/    /' "$QUALIFICATION_ROOT/order.tsv"
+              printf '\n'
+            fi
+            if [[ -f "$QUALIFICATION_ROOT/measurements.md" ]]; then
+              cat "$QUALIFICATION_ROOT/measurements.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain all analyzer qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-603-analyzer-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/buster-analyzer-603
+            build/analyze-*
+          if-no-files-found: error
+          retention-days: 14
