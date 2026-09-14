@@ -28,6 +28,15 @@ BUSTER_GLOBAL_LOCAL NrcTarget const nrc_targets[] = {
     {S8_INITIALIZER("aarch64-unknown-uefi"), S8_INITIALIZER("aapcs64"), S8_INITIALIZER("semantic-gate-509"), S8_INITIALIZER("semantic-gate-509")},
 };
 
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_manifest_name = S8_INITIALIZER("docs/native-retirement-dependencies-v1.json");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("0df1ff3ccc3d776a17143aa8b1336efcb6fc3dcd77f6defc7eb987711634771a");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("9cfbe0faa6d63990a011137bf5af61b4f3878eb5f460c56d7c8c91c044c47556");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("00f987ac3dcaf2768f761bd118a7f607b24e83169246c24f03b12ee355e63c56");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("7035bf416d79982bd83d58771dc96d06a29cc7058e41fc9d6016dd8311522340");
+BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
+BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
+BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
+
 typedef struct NrcInput NrcInput;
 struct NrcInput { String8 path; String8 role; String8 compile_obligation; String8 sha256; u64 hash; u64 bytes; };
 typedef struct NrcFixtureRecipe NrcFixtureRecipe;
@@ -49,11 +58,20 @@ struct NrcSettings
     String8 snapshot;
     String8 resource_include;
     String8 resource_snapshot;
+    String8 project_include;
+    String8 project_snapshot;
+    String8 dependency_manifest;
+    String8 dependency_receipt;
+    String8 dependency_manifest_sha256;
+    String8 dependency_receipt_sha256;
+    String8 dependency_project_sha256;
+    String8 dependency_ledger_sha256;
     String8 contract_path;
     String8 supported_gap_ledger_path;
     String8 contract_sha256;
     String8 supported_gap_ledger_sha256;
     String8 resource_sha256;
+    String8 project_sha256;
     FILE* rows;
     FILE* counters;
     FILE* functions;
@@ -112,6 +130,30 @@ BUSTER_GLOBAL_LOCAL bool nrc_file_identity(Arena* arena, String8 path, u64* byte
     }
     file_map_unmap(map);
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_receipt_field(Arena* arena, ByteSlice bytes, String8 key, String8* value)
+{
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 prefix = string_format(arena, S8("  \"{S8}\": \""), key);
+    String8 line = {0};
+    bool found = false;
+    while (text_next_line(&text, &line))
+    {
+        if (!found && line.length >= prefix.length && memory_compare(line.pointer, prefix.pointer, prefix.length))
+        {
+            u64 end = line.length;
+            bool comma = end && line.pointer[end - 1] == ',';
+            u64 quote = comma ? end - 2 : end - 1;
+            bool quoted = end >= prefix.length + 2 && line.pointer[quote] == '"';
+            if (quoted)
+            {
+                *value = string_slice(line, prefix.length, quote);
+                found = true;
+            }
+        }
+    }
+    return found;
 }
 
 BUSTER_GLOBAL_LOCAL bool nrc_sha256_valid(String8 value)
@@ -247,6 +289,92 @@ BUSTER_GLOBAL_LOCAL void nrc_dependency_append(Arena* arena, NrcDependency** dep
     (*dependencies)[(*count)++] = value;
 }
 
+BUSTER_GLOBAL_LOCAL bool nrc_snapshot_project(NrcSettings* settings, FILE* ledger, Sha256* closure)
+{
+    Arena* arena = settings->child.arena;
+    String8* directories = arena_allocate(arena, String8, 64);
+    u64 directory_count = 1, directory_capacity = 64;
+    directories[0] = S8("");
+    NrcDependency* dependencies = 0;
+    u64 dependency_count = 0, dependency_capacity = 0;
+    bool valid = settings->project_include.length != 0;
+    for (u64 directory_index = 0; valid && directory_index < directory_count; directory_index += 1)
+    {
+        String8 relative = directories[directory_index];
+        String8 source = relative.length ? path_join(arena, settings->project_include, relative) : settings->project_include;
+        MuslDirectoryEntry* entries = 0;
+        u64 entry_count = 0;
+        valid = musl_list_directory(arena, source, &entries, &entry_count);
+        for (u64 index = 0; valid && index < entry_count; index += 1)
+        {
+            String8 child = relative.length ? path_join(arena, relative, entries[index].name) : entries[index].name;
+            valid = nrc_field_safe(child);
+            if (entries[index].is_directory)
+            {
+                if (directory_count == directory_capacity)
+                {
+                    u64 grown_capacity = directory_capacity * 2;
+                    String8* grown = arena_allocate(arena, String8, grown_capacity);
+                    memcpy(grown, directories, directory_count * sizeof(*grown));
+                    directories = grown;
+                    directory_capacity = grown_capacity;
+                }
+                directories[directory_count++] = child;
+            }
+            else
+            {
+                nrc_dependency_append(arena, &dependencies, &dependency_count, &dependency_capacity,
+                                      (NrcDependency){.relative = child});
+            }
+        }
+    }
+    for (u64 index = 1; valid && index < dependency_count; index += 1)
+    {
+        NrcDependency value = dependencies[index];
+        u64 slot = index;
+        while (slot && assembly_import_string_compare(&dependencies[slot - 1].relative, &value.relative) > 0)
+        {
+            dependencies[slot] = dependencies[slot - 1];
+            slot -= 1;
+        }
+        dependencies[slot] = value;
+    }
+    for (u64 index = 0; valid && index < dependency_count; index += 1)
+    {
+        NrcDependency* dependency = dependencies + index;
+        String8 source = path_join(arena, settings->project_include, dependency->relative);
+        ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
+        OsFileDescriptor* descriptor = os_file_open(source, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        valid = descriptor && bytes.pointer;
+        if (descriptor)
+        {
+            valid &= os_file_get_size(descriptor) == bytes.length && os_file_close(descriptor);
+        }
+        if (valid)
+        {
+            dependency->bytes = bytes.length;
+            dependency->sha256 = nrc_sha256(arena, bytes.pointer, bytes.length);
+            String8 destination = path_join(arena, settings->project_snapshot, dependency->relative);
+            make_directory_recursive(arena, path_parent(arena, destination));
+            d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes));
+            sha256_add(closure, dependency->relative.pointer, dependency->relative.length);
+            sha256_add(closure, "\0", 1);
+            u8 encoded_bytes[8];
+            for (u32 byte = 0; byte < BUSTER_ARRAY_LENGTH(encoded_bytes); byte += 1)
+            {
+                encoded_bytes[byte] = (u8)(dependency->bytes >> (byte * 8));
+            }
+            sha256_add(closure, encoded_bytes, sizeof(encoded_bytes));
+            sha256_add(closure, bytes.pointer, bytes.length);
+            fprintf(ledger, "project-header\t%.*s\t%llu\t%.*s\n", (int)dependency->relative.length,
+                    dependency->relative.pointer, (unsigned long long)dependency->bytes,
+                    (int)dependency->sha256.length, dependency->sha256.pointer);
+        }
+    }
+    valid &= dependency_count != 0 && !settings->child.io_failed;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool nrc_snapshot_resource(NrcSettings* settings)
 {
     Arena* arena = settings->child.arena;
@@ -333,11 +461,87 @@ BUSTER_GLOBAL_LOCAL bool nrc_snapshot_resource(NrcSettings* settings)
                     (int)dependency->sha256.length, dependency->sha256.pointer);
         }
     }
+    Sha256 project_closure;
+    sha256_init(&project_closure);
+    bool project_valid = !settings->project_include.length;
+    if (valid && ledger && settings->project_include.length)
+    {
+        project_valid = nrc_snapshot_project(settings, ledger, &project_closure);
+    }
     nrc_close(settings, ledger);
     char8* closure_hex = arena_allocate(arena, char8, SHA256_HEX_CAPACITY);
     sha256_finish_hex(&closure, closure_hex);
     settings->resource_sha256 = (String8){.pointer = closure_hex, .length = SHA256_HEX_CAPACITY - 1};
-    valid &= dependency_count != 0 && !settings->child.io_failed;
+    if (settings->project_include.length)
+    {
+        char8* project_hex = arena_allocate(arena, char8, SHA256_HEX_CAPACITY);
+        sha256_finish_hex(&project_closure, project_hex);
+        settings->project_sha256 = (String8){.pointer = project_hex, .length = SHA256_HEX_CAPACITY - 1};
+    }
+    valid &= dependency_count != 0 && project_valid && !settings->child.io_failed;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_dependency_binding(NrcSettings* settings, bool required)
+{
+    Arena* arena = settings->child.arena;
+    bool valid = !required;
+    if (required && (!settings->dependency_manifest.length || !settings->dependency_receipt.length))
+    {
+        valid = false;
+    }
+    else if (required)
+    {
+        String8 expected_project_root = path_join(arena, path_parent(arena, settings->dependency_receipt),
+                                                  S8("dependencies/project-include"));
+        bool project_path_valid = string_equal(settings->project_include, expected_project_root);
+        String8 expected_manifest_path = os_path_absolute(arena, nrc_dependency_manifest_name, true);
+        bool manifest_path_valid = string_equal(settings->dependency_manifest, expected_manifest_path);
+        ByteSlice descriptor = file_read(arena, settings->dependency_manifest, (FileReadOptions){0});
+        ByteSlice receipt = file_read(arena, settings->dependency_receipt, (FileReadOptions){0});
+        u64 descriptor_bytes = 0, descriptor_hash = 0, receipt_bytes = 0, receipt_hash = 0;
+        String8 descriptor_sha256 = {0}, receipt_sha256 = {0};
+        valid = project_path_valid && manifest_path_valid && descriptor.pointer && receipt.pointer &&
+                nrc_file_identity(arena, settings->dependency_manifest, &descriptor_bytes, &descriptor_hash, &descriptor_sha256) &&
+                nrc_file_identity(arena, settings->dependency_receipt, &receipt_bytes, &receipt_hash, &receipt_sha256);
+        valid &= string_equal(descriptor_sha256, nrc_dependency_descriptor_sha256) &&
+                 string_equal(receipt_sha256, nrc_dependency_receipt_sha256);
+        String8 receipt_descriptor_sha256 = {0}, receipt_project_sha256 = {0}, receipt_ledger_sha256 = {0}, receipt_path = {0};
+        valid &= nrc_receipt_field(arena, receipt, S8("descriptor_sha256"), &receipt_descriptor_sha256) &&
+                 nrc_receipt_field(arena, receipt, S8("project_include_sha256"), &receipt_project_sha256) &&
+                 nrc_receipt_field(arena, receipt, S8("ledger_sha256"), &receipt_ledger_sha256) &&
+                 nrc_receipt_field(arena, receipt, S8("descriptor_path"), &receipt_path);
+        valid &= string_equal(receipt_descriptor_sha256, descriptor_sha256) &&
+                 string_equal(receipt_path, nrc_dependency_manifest_name) &&
+                 string_equal(receipt_project_sha256, settings->project_sha256) &&
+                 string_equal(settings->project_sha256, nrc_dependency_project_sha256);
+        String8 dependency_ledger_path = path_join(arena, path_parent(arena, settings->dependency_receipt), S8("dependencies.tsv"));
+        u64 ledger_bytes = 0, ledger_hash = 0;
+        String8 ledger_sha256 = {0};
+        valid &= nrc_file_identity(arena, dependency_ledger_path, &ledger_bytes, &ledger_hash, &ledger_sha256);
+        valid &= string_equal(receipt_ledger_sha256, ledger_sha256) &&
+                 string_equal(ledger_sha256, nrc_dependency_ledger_sha256);
+        settings->dependency_manifest_sha256 = descriptor_sha256;
+        settings->dependency_receipt_sha256 = receipt_sha256;
+        settings->dependency_project_sha256 = receipt_project_sha256;
+        settings->dependency_ledger_sha256 = ledger_sha256;
+        if (descriptor.pointer)
+        {
+            d_write(&settings->child, path_join(arena, settings->child.out, S8("dependency-descriptor.json")),
+                    BYTE_SLICE_TO_STRING(8, descriptor));
+        }
+        if (receipt.pointer)
+        {
+            d_write(&settings->child, path_join(arena, settings->child.out, S8("dependency-receipt.json")),
+                    BYTE_SLICE_TO_STRING(8, receipt));
+        }
+        ByteSlice ledger = file_read(arena, dependency_ledger_path, (FileReadOptions){0});
+        if (ledger.pointer)
+        {
+            d_write(&settings->child, path_join(arena, settings->child.out, S8("dependency-materializer.tsv")),
+                    BYTE_SLICE_TO_STRING(8, ledger));
+        }
+    }
     return valid;
 }
 
@@ -719,6 +923,11 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         command[command_count++] = S8("-isystem");
         command[command_count++] = settings->resource_snapshot;
         command[command_count++] = include;
+        if (settings->project_snapshot.length)
+        {
+            String8 project_include = string_format(temporary.arena, S8("-I{S8}"), settings->project_snapshot);
+            command[command_count++] = project_include;
+        }
         command[command_count++] = source;
         command[command_count++] = S8("-o");
         command[command_count++] = object;
@@ -951,7 +1160,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
     NrcSettings settings = {.child = {.arena = arena, .ide = S8("build/Release/ide"),
         .out = S8("build/native-retirement-census"), .timeout_seconds = 30, .verify = true},
         .shard_count = 1, .cpu = S8("baseline"), .contract_path = S8("docs/native-retirement-support-v1.tsv"),
-        .supported_gap_ledger_path = S8("docs/native-retirement-supported-gaps-v1.tsv")};
+        .supported_gap_ledger_path = S8("docs/native-retirement-supported-gaps-v1.tsv"),
+        .dependency_manifest = S8_INITIALIZER("docs/native-retirement-dependencies-v1.json")};
     bool valid = true, self_test = false;
     for (u64 index = 0; valid && index < arguments.length; index += 1)
     {
@@ -972,6 +1182,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             else if (string_equal(option, S8("--target"))) { settings.target_filter = value; }
             else if (string_equal(option, S8("--cpu"))) { settings.cpu = value; }
             else if (string_equal(option, S8("--resource-include"))) { settings.resource_include = value; }
+            else if (string_equal(option, S8("--project-include"))) { settings.project_include = value; }
+            else if (string_equal(option, S8("--dependency-manifest"))) { settings.dependency_manifest = value; }
+            else if (string_equal(option, S8("--dependency-receipt"))) { settings.dependency_receipt = value; }
             else if (string_equal(option, S8("--shard-index"))) { valid &= d_number(value, &settings.shard_index); }
             else if (string_equal(option, S8("--shard-count"))) { valid &= d_number(value, &settings.shard_count) && settings.shard_count > 0; }
             else if (string_equal(option, S8("--timeout")))
@@ -1003,6 +1216,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
     {
         string_print(S8("usage: native_retirement_census --compiler-revision <40-hex> [--ide path] [--baseline-ide path --baseline-revision <40-hex>] "
                         "[--out new-directory] [--fixture substring] [--target triple] [--cpu model] [--resource-include directory] "
+                        "[--project-include directory] [--dependency-manifest path --dependency-receipt path] "
                         "[--shard-index N --shard-count N] "
                         "[--timeout seconds] [--manifest-only] [--self-test]\n"));
         result = PROCESS_RESULT_FAILED;
@@ -1018,6 +1232,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         settings.child.out = os_path_absolute(arena, settings.child.out, true);
         settings.snapshot = path_join(arena, settings.child.out, S8("inputs"));
         settings.resource_snapshot = path_join(arena, settings.child.out, S8("dependencies/resource-include"));
+        settings.dependency_manifest = os_path_absolute(arena, settings.dependency_manifest, true);
+        if (settings.project_include.length)
+        {
+            settings.project_snapshot = path_join(arena, settings.child.out, S8("dependencies/project-include"));
+        }
+        if (settings.dependency_receipt.length)
+        {
+            settings.dependency_receipt = os_path_absolute(arena, settings.dependency_receipt, true);
+        }
         settings.child.report = nrc_open(&settings, S8("processes.tsv"));
         if (settings.child.report)
         {
@@ -1040,6 +1263,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         bool full_profile = !settings.fixture_filter.length && !settings.target_filter.length && settings.shard_count == 4 &&
                             input_count == 548 && subject_count == 402 && groups == 19296 &&
                             groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77184;
+        bool dependency_required = !settings.manifest_only && (full_profile || settings.project_include.length != 0);
+        if (dependency_required && (!settings.project_include.length || !settings.dependency_receipt.length))
+        {
+            settings.child.io_failed = true;
+        }
         String8 profile = full_profile ? S8("full-census") : S8("self-test");
         u64 compiler_hash = 0, compiler_bytes = 0, baseline_hash = 0, baseline_bytes = 0;
         String8 compiler_sha256 = {0}, baseline_sha256 = {0};
@@ -1048,9 +1276,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             settings.child.ide = os_path_absolute(arena, settings.child.ide, true);
             settings.baseline = os_path_absolute(arena, settings.baseline, true);
             settings.resource_include = os_path_absolute(arena, settings.resource_include, true);
-            settings.child.io_failed |= !nrc_file_identity(arena, settings.child.ide, &compiler_bytes, &compiler_hash, &compiler_sha256) ||
-                                       !nrc_file_identity(arena, settings.baseline, &baseline_bytes, &baseline_hash, &baseline_sha256) ||
-                                       !nrc_snapshot_resource(&settings);
+            if (settings.project_include.length) { settings.project_include = os_path_absolute(arena, settings.project_include, true); }
+            bool dependency_valid = nrc_file_identity(arena, settings.child.ide, &compiler_bytes, &compiler_hash, &compiler_sha256) &&
+                                    nrc_file_identity(arena, settings.baseline, &baseline_bytes, &baseline_hash, &baseline_sha256) &&
+                                    nrc_snapshot_resource(&settings);
+            dependency_valid &= nrc_dependency_binding(&settings, dependency_required);
+            settings.child.io_failed |= !dependency_valid;
             // The existing fanout helper preserves executable permissions and
             // verifies both bytes and fingerprint before admitting the copy.
             String8 candidate_copy = path_join(arena, settings.child.out, S8("candidate-ide.exe"));
@@ -1080,25 +1311,38 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         else { settings.child.io_failed = true; }
         String8 dependency_state = settings.manifest_only ? S8("not-executed-manifest-only") : S8("none-for-object-census");
         String8 environment_state = settings.manifest_only ? S8("not-executed-manifest-only") : S8("explicit-replacement-in-environment.tsv");
+        String8 project_include_sha256 = settings.project_include.length ? settings.project_sha256 : S8("");
+        String8 dependency_receipt_name = dependency_required ? S8("dependency-receipt.json") : S8("");
+        String8 source_dependencies = settings.project_include.length
+                                          ? S8("tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include")
+                                          : S8("tracked-tests-plus-snapshotted-resource-include");
         String8 metadata = string_format(arena, S8("version=2\nkind=object-coverage\nidentity_hash=sha256\nrow_artifact_hash=buster_hash_64-noncryptographic\n"
             "support_contract=docs/native-retirement-support-v1.tsv\nsupport_contract_sha256={S8}\n"
             "supported_gap_ledger=docs/native-retirement-supported-gaps-v1.tsv\nsupported_gap_ledger_sha256={S8}\n"
             "compiler_revision_claim={S8}\nbaseline_revision_claim={S8}\ncompiler_hash={u64}\ncompiler_bytes={u64}\n"
             "compiler_sha256={S8}\nbaseline_hash={u64}\nbaseline_bytes={u64}\nbaseline_sha256={S8}\n"
-            "cpu={S8}\nresource_include_sha256={S8}\nsysroot=none\nsystem_include=none\ninputs={u64}\nsubjects={u64}\nrows={u64}\n"
+            "cpu={S8}\nresource_include_sha256={S8}\nproject_include_sha256={S8}\n"
+            "dependency_manifest=docs/native-retirement-dependencies-v1.json\ndependency_manifest_sha256={S8}\n"
+            "dependency_receipt={S8}\ndependency_receipt_sha256={S8}\n"
+            "dependency_project_include_sha256={S8}\ndependency_ledger_sha256={S8}\n"
+            "archived_input_identity_sha256={S8}\narchived_fixture_map_sha256={S8}\narchived_row_identity_sha256={S8}\n"
+            "sysroot=none\nsystem_include=none\ninputs={u64}\nsubjects={u64}\nrows={u64}\n"
             "profile={S8}\nsupported_gap_count={u64}\nsupported_gap_sha256={S8}\n"
             "fixture_filter={S8}\ntarget_filter={S8}\nshard_index={u32}\nshard_count={u32}\nmanifest_only={u32}\ntimeout_seconds={u32}\n"
             "function_evidence=all-observed-fallbacks-plus-first-fatal-diagnostic\n"
-            "fixture_flags=exact-path-recipes-in-inputs.tsv\nsource_dependencies=tracked-tests-plus-snapshotted-resource-include\n"
+            "fixture_flags=exact-path-recipes-in-inputs.tsv\nsource_dependencies={S8}\n"
             "environment={S8}\nunfrozen_dependencies={S8}\n"
             "flags=-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem SNAPSHOT\n"),
             settings.contract_sha256, settings.supported_gap_ledger_sha256, settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
-            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, input_count, subject_count,
-            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, full_profile ? 192 : 0,
-            full_profile ? S8("a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec") : S8(""),
+            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, project_include_sha256,
+            settings.dependency_manifest_sha256, dependency_receipt_name, settings.dependency_receipt_sha256,
+            settings.dependency_project_sha256, settings.dependency_ledger_sha256, nrc_archived_input_sha256,
+            nrc_archived_fixture_map_sha256, nrc_archived_row_sha256, input_count, subject_count,
+            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, 192,
+            S8("a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"),
             settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds,
-            environment_state, dependency_state);
+            source_dependencies, environment_state, dependency_state);
         d_write(&settings.child, path_join(arena, settings.child.out, S8("manifest.txt")), metadata);
         settings.rows = nrc_open(&settings, S8("results.tsv"));
         settings.counters = nrc_open(&settings, S8("fallback-counters.tsv"));
