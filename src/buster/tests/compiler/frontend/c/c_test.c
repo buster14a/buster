@@ -5409,6 +5409,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     CParseResult aarch64_macos_builtins_parse = c_parse(arguments->arena, aarch64_macos_builtins);
     BUSTER_TEST(arguments, aarch64_macos_builtins_parse.diagnostic_count == 0);
 
+    // #639: __has_attribute answers for the GNU attributes this frontend
+    // implements, in every spelling the parser accepts, and denies one it only
+    // steps over. `returns_twice` is the control for that: clang implements it
+    // and answers 1, this frontend skips it and must answer 0. The C attribute
+    // operator keeps its own namespace and answers 0 throughout, including for
+    // the bare GNU names the GNU operator answers 1 for and for a namespaced
+    // spelling, which clang 18 also answers 0 and 1 for respectively.
+    CPreprocessResult attribute_queries =
+        c_preprocess(arguments->arena,
+                     S8("#if !__has_attribute(packed) || !__has_attribute(__packed__) || !__has_attribute(__packed)\n"
+                        "#error packed attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(aligned) || !__has_attribute(__aligned__) || !__has_attribute(__aligned)\n"
+                        "#error aligned attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(vector_size) || !__has_attribute(__vector_size__) || !__has_attribute(__vector_size)\n"
+                        "#error vector_size attribute query\n"
+                        "#endif\n"
+                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(returns_twice) || __has_attribute(_Alignas)\n"
+                        "#error unimplemented attribute query\n"
+                        "#endif\n"
+                        "#if __has_c_attribute(packed) || __has_c_attribute(aligned) || __has_c_attribute(vector_size)\n"
+                        "#error C attribute query answered a GNU name\n"
+                        "#endif\n"
+                        "#if __has_c_attribute(nodiscard) || __has_c_attribute(deprecated) || __has_c_attribute(gnu::packed)\n"
+                        "#error C attribute query answered an unimplemented attribute\n"
+                        "#endif\n"
+                        "int attribute_query_probe;\n"),
+                     (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, attribute_queries.diagnostic_count == 0);
+    BUSTER_TEST(arguments, attribute_queries.token_count == 4);
+    if (attribute_queries.token_count == 4)
+    {
+        c_test_preprocessed_token(arguments, &result, attribute_queries, 1, C_TOKEN_IDENTIFIER, S8("attribute_query_probe"));
+    }
+    CParseResult attribute_queries_parse = c_parse(arguments->arena, attribute_queries);
+    BUSTER_TEST(arguments, attribute_queries_parse.diagnostic_count == 0);
+
     CPreprocessResult include = c_preprocess(arguments->arena,
                                              S8("#include \"basic_c_include.h\"\n"
                                                 "INCLUDED_VALUE\n"),
@@ -15082,6 +15120,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         BUSTER_TEST(arguments, function_pointer_type != 0 && function_pointer_type->kind == IR_TYPE_POINTER);
     }
     scratch_end(pointee_temporary);
+
+    // #639: the query is only correct if source that *selects* an attribute
+    // through it keeps the layout. Calling the predicate proves nothing a
+    // header cares about, so this witness conditionally defines the attribute
+    // and then asserts the resulting record, on an explicit target whose int
+    // is four bytes. Before the repair __has_attribute(packed) was 0, both
+    // macros expanded to nothing, and the structures silently took the
+    // default layout while still compiling.
+    {
+        String8 witness_source = S8("#if __has_attribute(packed)\n"
+                                    "#define WIRE_PACKED __attribute__((packed))\n"
+                                    "#else\n"
+                                    "#define WIRE_PACKED\n"
+                                    "#endif\n"
+                                    "#if __has_attribute(__aligned__)\n"
+                                    "#define BLOCK_ALIGNED __attribute__((__aligned__(32)))\n"
+                                    "#else\n"
+                                    "#define BLOCK_ALIGNED\n"
+                                    "#endif\n"
+                                    "#if __has_attribute(__vector_size__)\n"
+                                    "#define LANES_VECTOR __attribute__((__vector_size__(16)))\n"
+                                    "#else\n"
+                                    "#define LANES_VECTOR\n"
+                                    "#endif\n"
+                                    "struct WIRE_PACKED Wire { char tag; int value; };\n"
+                                    "struct BLOCK_ALIGNED Block { char value; };\n"
+                                    "typedef int LANES_VECTOR Lanes;\n"
+                                    "_Static_assert(sizeof(struct Wire) == 5, \"packed query lost layout\");\n"
+                                    "_Static_assert(_Alignof(struct Wire) == 1, \"packed query lost alignment\");\n"
+                                    "_Static_assert(_Alignof(struct Block) == 32, \"aligned query lost layout\");\n"
+                                    "_Static_assert(sizeof(Lanes) == 16, \"vector_size query lost width\");\n"
+                                    "struct Wire wire_object;\n"
+                                    "struct Block block_object;\n");
+        TargetParseResult witness_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        BUSTER_TEST(arguments, witness_target.error == TARGET_PARSE_ERROR_NONE);
+        TemporalArena witness_temporary = scratch_begin(0, 0);
+        CPreprocessResult witness_preprocess = {0};
+        CParseResult witness_parse = {0};
+        CIRLowerResult witness_lowered = c_test_lower_source(witness_temporary.arena, witness_source, S8("attribute-query-layout.c"),
+                                                             witness_target.target, &witness_preprocess, &witness_parse);
+        BUSTER_TEST(arguments, witness_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_lowered.program != 0);
+        if (witness_lowered.program)
+        {
+            IrModule* witness_module = witness_lowered.program->modules;
+            IrGlobal* wire = c_test_find_ir_global(witness_module, witness_lowered.program, S8("wire_object"));
+            IrType* wire_type = wire ? ir_type_from_id(&witness_lowered.program->types, wire->type) : 0;
+            BUSTER_TEST(arguments, wire_type != 0);
+            if (wire_type)
+            {
+                BUSTER_TEST(arguments, wire_type->layout.size == 5);
+                BUSTER_TEST(arguments, wire_type->layout.alignment == 1);
+            }
+            IrGlobal* block = c_test_find_ir_global(witness_module, witness_lowered.program, S8("block_object"));
+            IrType* block_type = block ? ir_type_from_id(&witness_lowered.program->types, block->type) : 0;
+            BUSTER_TEST(arguments, block_type != 0);
+            if (block_type)
+            {
+                BUSTER_TEST(arguments, block_type->layout.alignment == 32);
+            }
+        }
+        scratch_end(witness_temporary);
+    }
 
     return result;
 }

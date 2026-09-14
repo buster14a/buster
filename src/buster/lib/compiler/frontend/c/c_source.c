@@ -5273,9 +5273,36 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
     return result;
 }
 
+// `__has_attribute` answers for the GNU attributes whose semantics this
+// frontend actually implements, by asking the parser's own spelling
+// predicates rather than keeping a second list beside them: `packed` and
+// `aligned` are collected by c_parse_layout_attributes and change the record
+// layout, `vector_size` builds the vector types. An attribute whose spelling
+// is merely accepted and stepped over is not supported and answers 0, so
+// source that selects a layout on this query cannot silently lose it (#639).
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)
 {
-    return string_equal(name, S8("vector_size")) || string_equal(name, S8("__vector_size")) || string_equal(name, S8("__vector_size__"));
+    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name);
+}
+
+// `__has_c_attribute` is a different operator over a different namespace, and
+// is deliberately not the query above. It asks about C's bracketed attributes,
+// answering the standard attribute's version number -- clang 18 answers
+// 202003L for `nodiscard` and 201910L for `fallthrough` -- 1 for a supported
+// vendor attribute written with its namespace (`gnu::packed`), and 0
+// otherwise, including for every GNU attribute named without one: clang
+// answers 0 for a bare `packed`, `aligned` and `vector_size`.
+//
+// This frontend recognizes `[[ ... ]]` in c_parse_c23_attribute_at and steps
+// over it; no bracketed attribute changes layout, diagnostics or code
+// generation here, and c_parse_layout_attributes only ever reads
+// `__attribute__` groups. Nothing is implemented, so the truthful answer is 0
+// for every spelling, and a bare GNU name answers 0 here even though the GNU
+// query above answers 1 for it. Implementing one of these attributes means
+// returning its version number from here, not 1.
+BUSTER_C_INTERNAL bool c_conditional_c_attribute_supported(void)
+{
+    return false;
 }
 
 BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
@@ -5316,8 +5343,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool has_include = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include"));
         bool has_include_next = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include_next"));
         bool has_builtin = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_builtin"));
-        bool has_attribute =
-            token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_attribute")) || c_token_spelling_equal(base, token, S8("__has_c_attribute")));
+        bool has_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_attribute"));
+        bool has_c_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_c_attribute"));
         bool has_feature =
             token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_feature")) || c_token_spelling_equal(base, token, S8("__has_extension")) ||
                                                  c_token_spelling_equal(base, token, S8("__building_module")));
@@ -5325,8 +5352,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool is_target_environment = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_environment"));
         bool is_target_os = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_os"));
         bool is_target_vendor = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_vendor"));
-        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_feature && !is_target_arch && !is_target_environment && !is_target_os &&
-            !is_target_vendor)
+        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_c_attribute && !has_feature && !is_target_arch &&
+            !is_target_environment && !is_target_os && !is_target_vendor)
         {
             continue;
         }
@@ -5382,6 +5409,14 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         {
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]))
                                     : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
+        }
+        else if (has_c_attribute)
+        {
+            // Any argument shape the balanced scan above accepted, so that the
+            // namespaced spelling this operator's own contract admits --
+            // `__has_c_attribute(gnu::packed)`, three tokens -- answers 0
+            // instead of failing the directive.
+            supported = c_conditional_c_attribute_supported();
         }
         else if ((is_target_arch || is_target_environment || is_target_os || is_target_vendor) && argument_count == 1 &&
                  arguments[0].kind == C_TOKEN_IDENTIFIER && options)
