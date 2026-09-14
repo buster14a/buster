@@ -18,6 +18,7 @@ on:
       - docs/native-retirement-census.md
       - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-supported-gaps-v1.tsv
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
