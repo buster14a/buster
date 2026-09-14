@@ -1415,17 +1415,17 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         if (codeview.error == OBJECT_ERROR_NONE && codeview.section_count == OBJECT_SECTION_COUNT && codeview.debug_module_count == 1 &&
             codeview.relocation_count == 1)
         {
-            ByteSlice symbols = codeview.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data;
+            ByteSlice codeview_symbols = codeview.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data;
             ByteSlice types = codeview.sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data;
             u32 symbols_signature = 0;
             u32 second_symbols_kind = 0;
             u32 types_signature = 0;
             u16 first_type_leaf = 0;
             u16 second_type_leaf = 0;
-            if (symbols.length >= 28)
+            if (codeview_symbols.length >= 28)
             {
-                memcpy(&symbols_signature, symbols.pointer, sizeof(symbols_signature));
-                memcpy(&second_symbols_kind, symbols.pointer + 24, sizeof(second_symbols_kind));
+                memcpy(&symbols_signature, codeview_symbols.pointer, sizeof(symbols_signature));
+                memcpy(&second_symbols_kind, codeview_symbols.pointer + 24, sizeof(second_symbols_kind));
             }
             if (types.length >= 12)
             {
@@ -1433,14 +1433,14 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 memcpy(&first_type_leaf, types.pointer + 6, sizeof(first_type_leaf));
                 memcpy(&second_type_leaf, types.pointer + 10, sizeof(second_type_leaf));
             }
-            BUSTER_TEST(arguments, symbols.length == 36 && symbols_signature == 4 && second_symbols_kind == 0xf1);
+            BUSTER_TEST(arguments, codeview_symbols.length == 36 && symbols_signature == 4 && second_symbols_kind == 0xf1);
             BUSTER_TEST(arguments, types.length == 12 && types_signature == 4 && first_type_leaf == 0x9998 && second_type_leaf == 0x9997);
             BUSTER_TEST(arguments, codeview.relocations[0].section == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS &&
                                        codeview.relocations[0].kind == OBJECT_RELOCATION_COFF_SECTION16 && codeview.relocations[0].offset == 32);
             PdbSection section = {.name = S8(".text"), .virtual_size = 4, .raw_size = 4, .characteristics = 0x60000020};
             PdbModule module = {
                 .name = S8("repeated.obj"),
-                .codeview_symbols = symbols,
+                .codeview_symbols = codeview_symbols,
                 .codeview_types = types,
                 .code_size = 4,
                 .code_section = 1,
