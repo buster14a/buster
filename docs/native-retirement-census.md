@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 547
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 548
 explicit SHA-256 rows bind every tracked test byte at the approval point: 402
-supported object subjects, 12 registered rejection controls, 69 support files
+supported object subjects, 12 registered rejection controls, 70 support files
 and 64 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
 is therefore a reviewed support decision, not an automatic side effect of adding
@@ -206,6 +206,15 @@ inapplicable controls; they are retained in the report and waive only the
 separate native-execution obligation. They do not excuse a reference compile,
 process status, object, fallback or telemetry defect.
 
+The acceptance workflow invokes this current validator directly from its second
+exact-candidate checkout. It does not reuse the historical archive's older join
+or schema reader. The retained `census-validation-v2.json` therefore records the
+complete current-schema partition even when `--require-clean-candidate` rejects
+real compiler or reference gaps. The final invocation supplies both
+`--require-clean-candidate` and `--require-clean-acceptance`: the former keeps
+candidate cleanliness separate from unresolved direct-reference rows, while the
+latter is the independent final acceptance gate.
+
 The report records added and removed identities separately from the common-row
 disposition transitions. Comparison schema 2 preserves separate candidate,
 reference and combined-acceptance common-row failure counts and row lists. The
@@ -292,14 +301,31 @@ workflow prepends Clang's matching resource-runtime directory on Windows so a
 different installed ASan DLL cannot satisfy the run. The Windows Arm64 runner's
 LLVM package does not ship an AArch64 ASan runtime, so that lane records
 `oracle_sanitizer=not-run` and the exact reason instead of reporting an
-unsanitized run as a sanitizer pass. That lane still executes the complete
-corpus: its independent oracle links the Arm64 UCRT legacy stdio definitions
-for the intentionally headerless programs, and the clear-cache caller supplies
-the compiler-rt boundary omitted by the runner package. No case or matrix row
-is pruned for either host-toolchain limitation. The stable
+unsanitized run as a sanitizer pass. Both Windows lanes preserve every Visual
+Studio `LIB` directory as an explicit, ordered `--library-path` input in the
+harness manifest and child argv. This lets the Buster driver find the UCRT
+legacy stdio definitions used by the intentionally headerless programs without
+silently inheriting the parent environment. The Arm64 clear-cache caller also
+supplies the compiler-rt `__clear_cache` boundary omitted by the runner package,
+backed by Windows' `FlushInstructionCache`. Windows Arm64 lowering calls that
+boundary because hosted processes cannot execute DC CVAU / IC IVAU directly;
+the original empty and nonempty ranges, argument side effects and live-register
+checks all remain. Other native hosts retain inline maintenance, and the
+independent Linux AArch64 byte oracle continues to check its complete sequence.
+No case or matrix row is pruned for either host-toolchain limitation. The stable
 `Native retirement acceptance complete` check rejects a missing, skipped,
 cancelled or failed census or native matrix. The archived direct reference
 remains separately pinned.
+
+The census upload is scoped to the generated `candidate/evidence/` tree and
+explicit build recipes, with hidden-file inclusion enabled for that evidence
+path. This preserves ledger-declared tracked inputs such as
+`inputs/tests/.gitignore` through the package/download boundary without
+uploading the checkout's `.git` directory or unrelated hidden files. The
+registered CI-tools regression packages a representative shard, downloads and
+extracts it with the archive reader, then replays the input ledger; it also
+proves that removing the hidden input fails validation rather than being
+silently repaired.
 
 The workflow does not synthesize #508's support decision or make the census a
 retirement verdict. After that manifest is approved, the final candidate run
