@@ -342,9 +342,9 @@ typedef enum CodegenFallbackReason
     CODEGEN_FALLBACK_REASON_COUNT,
 } CodegenFallbackReason;
 
-// Optional source-order attribution, independent of the aggregate counters.
-// The array exists only when record_fallbacks is requested. Function IDs refer
-// to the retained canonical module; a retry discards the entire attempt array.
+// Retained ABI for the retired fallback census. Native production generation
+// no longer populates this array: every supported native function is a machine
+// transaction and a refused function fails the module structurally.
 typedef struct CodegenFallbackRecord CodegenFallbackRecord;
 struct CodegenFallbackRecord
 {
@@ -374,15 +374,13 @@ struct CodegenStatistics
     u64 simd_operation_count;
     u32 function_count;
     u32 maximum_stack_frame_bytes;
-    // Functions a non-NONE register-allocator mode handed to the canonical
-    // stack path because the machine pipeline could not retain them. Zero
-    // under NONE; exactly the sum of fallback_reason_counts otherwise.
+    // Retained ABI fields for pre-cutover fallback telemetry. They remain zero
+    // in native production generation; none of the allocator spellings can
+    // re-enable direct emission.
     u32 fallback_function_count;
     u32 reserved;
-    // Census of why machine selection rejected each fallback function,
-    // keyed by the first unsupported IR opcode; the final bucket counts
-    // selection rejections with no specific opcode. Post-selection failures
-    // and deliberate target exclusions have their own reason census below.
+    // Retained fallback-reason census slots. Native failures are returned as a
+    // structured CodegenError instead of entering these compatibility slots.
     u32 fallback_opcode_counts[IR_OPCODE_COUNT + 1];
     // Fallbacks past selection: rows that failed the structural verifier,
     // placements over the guard-page-probe frame limit, and encodings that
@@ -390,9 +388,8 @@ struct CodegenStatistics
     u32 fallback_verify_count;
     u32 fallback_placement_count;
     u32 fallback_encode_count;
-    // Allocator traffic summed over the functions the machine path
-    // emitted: slot reloads, slot spills, and register-to-register moves
-    // the placement inserted. Zero under NONE.
+    // Allocator traffic summed over retained machine functions. NONE is a
+    // MIR_STACK compatibility alias at the entrypoint, so it is not zeroed.
     u64 allocator_reload_count;
     u64 allocator_spill_count;
     u64 allocator_copy_count;
@@ -458,9 +455,8 @@ struct CodegenModule
     IrFunctionId failed_function;
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;
-    // First fallback in source order, valid when fallback_function_count is
-    // nonzero. Retained even when canonical emission succeeds, so strict
-    // driver coverage can identify the function before writing any artifact.
+    // Retained fallback-census ABI. Native production failures use the
+    // structured failed_function/failed_instruction fields above.
     IrFunctionId first_fallback_function;
     IrOpcode first_fallback_opcode;
     CodegenFallbackReason first_fallback_reason;
@@ -498,14 +494,13 @@ struct CodegenExecutable
     CodegenError error;
 };
 
-// Register-allocation strategy for the machine-IR backend path. `NONE` uses
-// the canonical direct emitter and is the explicit compatibility/diagnostic
-// escape hatch. `MIR_STACK` places every eligible value in a stack location
-// through the machine selector/encoder for differential testing. `FAST` is
-// the driver default and minimizes allocation latency; `QUALITY` maximizes
-// generated-code performance under a compile-time budget. Every non-NONE
-// mode falls back to the canonical path per unsupported function, and the
-// fallback is counted in CodegenStatistics.
+// Register-allocation strategy for the machine-IR backend path. `NONE` is a
+// compatibility spelling remapped to `MIR_STACK`; it never selects a direct
+// emitter. `MIR_STACK` places every eligible value in a stack location through
+// the machine selector/encoder. `FAST` is the driver default and minimizes
+// allocation latency; `QUALITY` maximizes generated-code performance under a
+// compile-time budget. Selection, placement, encoding, unwind, and output
+// failures are structured CodegenErrors, never per-function direct fallback.
 typedef enum CodegenRegisterAllocatorMode
 {
     CODEGEN_REGISTER_ALLOCATOR_NONE,
@@ -537,10 +532,10 @@ struct CodegenModuleOptions
     bool debug_info;
     bool assume_validated;
     // Test/audit mode: validate certified IR and selected/scheduled MIR too;
-    // verifier/placement failures must not disappear into canonical fallback.
+    // verifier/placement failures remain structured errors.
     bool verify_invariants;
-    // Keep diagnostic flags independently addressable during self-hosting.
-    // Packed _Bool fields can lose their load type during local promotion.
+    // Retained diagnostic compatibility flag. It cannot enable direct
+    // emission; packed _Bool fields can lose their load type during promotion.
     bool record_fallbacks;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
