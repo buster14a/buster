@@ -11,7 +11,8 @@
 typedef enum BqOperation
 {
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
-    BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE
+    BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
+    BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE
 } BqOperation;
 
 typedef struct BqPacket
@@ -20,7 +21,7 @@ typedef struct BqPacket
     u8 bytes[BQ_CONTROL_CAP];
 } BqPacket;
 
-BUSTER_GLOBAL_LOCAL char const bq_capabilities[] =
+BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
     "schema=1 executor=fake-only repository=buster pending=8 lifetime-jobs=64\n"
     "recipes=fake-success-v1,fake-failure-v1 workload=fake-steps-v1\n"
     "profile=unmeasured toolchain=none oracle=fake-v1 validity=not-evaluated\n"
@@ -31,14 +32,26 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities[] =
     "storage=private-local-posix-directory\n";
 #endif
 
-BUSTER_GLOBAL_LOCAL void bq_packet(BqPacket* packet, u32 operation, u64 correlation, u8 const* body, u32 size)
+BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
+    "schema=2 journal-schema=2 legacy-journal-schema=1 executor=fake-only repository=buster pending=8 lifetime-jobs=64\n"
+    "recipes=fake-success-v1,fake-failure-v1,validate-buster-v1 workload=fake-steps-v1\n"
+    "profile=unmeasured toolchain=none oracle=fake-v1 validity=not-evaluated\n"
+    "materialization=installed-read-only-manifest workspace=per-attempt-isolated\n"
+    "retention=journal-lifetime transport=none authentication=none\n"
+#ifdef _WIN32
+    "storage=unsupported-on-windows\n";
+#else
+    "storage=private-local-posix-directory\n";
+#endif
+
+BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
     *packet = (BqPacket){0};
     if (size <= BQ_CONTROL_BODY)
     {
         packet->size = BQ_CONTROL_HEADER + size;
         memcpy(packet->bytes, "BQP1", 4);
-        bq_put32(packet->bytes + 4, BQ_SCHEMA);
+        bq_put32(packet->bytes + 4, schema);
         bq_put32(packet->bytes + 8, operation);
         bq_put32(packet->bytes + 12, size);
         bq_put64(packet->bytes + 16, correlation);
@@ -49,17 +62,25 @@ BUSTER_GLOBAL_LOCAL void bq_packet(BqPacket* packet, u32 operation, u64 correlat
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_packet(BqPacket* packet, u32 operation, u64 correlation, u8 const* body, u32 size)
+{
+    bq_packet_schema(packet, BQ_CONTROL_SCHEMA, operation, correlation, body, size);
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 size, BqPacket* response)
 {
     u32 operation = 0;
+    u32 schema = BQ_CONTROL_SCHEMA;
     u64 correlation = 0;
     u64 id = 0;
     u8 output[BQ_CONTROL_BODY] = {0};
-    u32 output_size = 120;
+    u32 output_size = 124;
     BqError error = BQ_BAD_REQUEST;
     if (size >= BQ_CONTROL_HEADER && size <= BQ_CONTROL_CAP && !memcmp(input, "BQP1", 4) &&
-        bq_u32(input + 4) == BQ_SCHEMA && bq_u32(input + 12) == size - BQ_CONTROL_HEADER)
+        (bq_u32(input + 4) == 1 || bq_u32(input + 4) == BQ_CONTROL_SCHEMA) && bq_u32(input + 12) == size - BQ_CONTROL_HEADER)
     {
+        schema = bq_u32(input + 4);
+        output_size = schema == 1 ? 120 : 124;
         operation = bq_u32(input + 8);
         correlation = bq_u64(input + 16);
         u32 length = size - BQ_CONTROL_HEADER;
@@ -67,8 +88,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         if (operation == BQ_OP_CAPABILITIES && !length)
         {
             error = BQ_OK;
-            output_size = 4 + (u32)sizeof(bq_capabilities) - 1;
-            memcpy(output + 4, bq_capabilities, sizeof(bq_capabilities) - 1);
+            char const* capabilities = schema == 1 ? bq_capabilities_v1 : bq_capabilities_v2;
+            u32 capabilities_size = schema == 1 ? (u32)sizeof(bq_capabilities_v1) - 1 : (u32)sizeof(bq_capabilities_v2) - 1;
+            output_size = 4 + capabilities_size;
+            memcpy(output + 4, capabilities, capabilities_size);
         }
         else if (queue->poisoned || queue->journal_fd < 0)
         {
@@ -78,12 +101,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             BqRequest request = {.size = length};
             memcpy(request.bytes, body, length);
-            error = bq_submit(queue, &request, &id);
+            error = schema == 1 && bq_recipe_real(&request) ? BQ_BAD_REQUEST : bq_submit(queue, &request, &id);
         }
         else if ((operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL) && length == 8)
         {
             id = bq_u64(body);
-            error = bq_job(&queue->state, id) ? BQ_OK : BQ_NOT_FOUND;
+            BqJob* job = bq_job(&queue->state, id);
+            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED : BQ_OK;
             if (error == BQ_OK && operation == BQ_OP_CANCEL)
             {
                 error = bq_cancel(queue, id);
@@ -98,11 +122,37 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             id = bq_u64(body);
             error = bq_fake_reconcile(queue, id, bq_u64(body + 8));
         }
+        else if (schema == BQ_CONTROL_SCHEMA && operation == BQ_OP_MATERIALIZE && length >= 8)
+        {
+            u32 installed_length = bq_u32(body);
+            u32 workspace_length = bq_u32(body + 4);
+            if (installed_length <= BQ_PATH_CAP && workspace_length <= BQ_PATH_CAP &&
+                installed_length + workspace_length == length - 8)
+            {
+                String8 installed = {(char8*)body + 8, installed_length};
+                String8 workspace = {(char8*)body + 8 + installed_length, workspace_length};
+                u64 token = 0;
+                error = bq_materialize(queue, installed, workspace, &id, &token);
+            }
+        }
+        else if (schema == BQ_CONTROL_SCHEMA && operation == BQ_OP_WORKSPACE_RECONCILE && length >= 20)
+        {
+            id = bq_u64(body);
+            u64 token = bq_u64(body + 8);
+            u32 workspace_length = bq_u32(body + 16);
+            if (workspace_length <= BQ_PATH_CAP && workspace_length == length - 20)
+            {
+                String8 workspace = {(char8*)body + 20, workspace_length};
+                error = bq_workspace_reconcile(queue, workspace, id, token);
+            }
+        }
         else if (operation == BQ_OP_LOGS && length == 16)
         {
             id = bq_u64(body);
             u64 after = bq_u64(body + 8);
-            error = !bq_job(&queue->state, id) ? BQ_NOT_FOUND : after > queue->state.sequence ? BQ_BAD_REQUEST : BQ_OK;
+            BqJob* job = bq_job(&queue->state, id);
+            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED :
+                    after > queue->state.sequence ? BQ_BAD_REQUEST : BQ_OK;
             if (error == BQ_OK)
             {
                 u32 count = 0;
@@ -138,7 +188,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             }
         }
     }
-    if (output_size == 120)
+    if (output_size == 120 || output_size == 124)
     {
         BqJob const* job = bq_job(&queue->state, id);
         bq_put64(output + 4, job ? job->id : 0);
@@ -155,8 +205,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             memcpy(output + 56, job->digest, 64);
         }
+        if (output_size == 124)
+        {
+            BqError failure = job ? bq_failure_evidence(queue, job) : BQ_NOT_FOUND;
+            bq_put32(output + 120, failure != BQ_NOT_FOUND && failure != BQ_UNSUPPORTED ? (u32)failure : 0);
+            if (error == BQ_OK && (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT) &&
+                (failure == BQ_CORRUPT || failure == BQ_IO))
+            {
+                error = failure;
+            }
+        }
     }
     bq_put32(output, (u32)error);
-    bq_packet(response, operation | 0x80000000u, correlation, output, output_size);
+    bq_packet_schema(response, schema, operation | 0x80000000u, correlation, output, output_size);
     return error;
 }

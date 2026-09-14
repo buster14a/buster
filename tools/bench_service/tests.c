@@ -36,13 +36,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         BQ_CHECK(bq_dispatch(&queue, request.bytes, prefix, &response) == BQ_BAD_REQUEST);
     }
     BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size + 1, &response) == BQ_BAD_REQUEST);
-    bq_put32(request.bytes + 4, BQ_SCHEMA + 1);
+    bq_put32(request.bytes + 4, BQ_CONTROL_SCHEMA + 1);
     BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
-    bq_put32(request.bytes + 4, BQ_SCHEMA);
+    bq_put32(request.bytes + 4, BQ_CONTROL_SCHEMA);
     bq_put32(request.bytes + 12, BQ_CONTROL_BODY + 1);
     BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
     bq_packet(&request, BQ_OP_CAPABILITIES, 0, NULL, BQ_CONTROL_BODY + 1);
     BQ_CHECK(request.size == 0);
+    bq_packet_schema(&request, 1, BQ_OP_CAPABILITIES, 42, NULL, 0);
+    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_OK && bq_u32(response.bytes + 4) == 1 &&
+             response.size == BQ_CONTROL_HEADER + 4 + sizeof(bq_capabilities_v1) - 1);
     BqRequest valid = bq_test_request(1, false);
     for (u32 size = 0; size < valid.size; size += 1)
     {
@@ -76,12 +79,131 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     BQ_CHECK(!bq_decimal("-1", true, &value));
     BQ_CHECK(!bq_decimal("0", true, &value));
     BQ_CHECK(bq_decimal("0", false, &value) && value == 0);
+    FILE* attributes_file = fopen(".gitattributes", "rb");
+    char attributes[4096];
+    u32 attributes_size = attributes_file ? (u32)fread(attributes, 1, sizeof(attributes), attributes_file) : 0;
+    int attributes_extra = attributes_file ? fgetc(attributes_file) : 0;
+    bool attributes_complete = attributes_file && attributes_size < sizeof(attributes) &&
+                               attributes_extra == EOF && !ferror(attributes_file);
+    if (attributes_file)
+    {
+        fclose(attributes_file);
+    }
+    char const rule[] = "tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf";
+    bool rule_found = false;
+    for (u32 start = 0; attributes_complete && !rule_found && start < attributes_size;)
+    {
+        u32 end = start;
+        while (end < attributes_size && attributes[end] != '\n')
+        {
+            end += 1;
+        }
+        u32 content_end = end > start && attributes[end - 1] == '\r' ? end - 1 : end;
+        rule_found = content_end - start == sizeof(rule) - 1 && !memcmp(attributes + start, rule, sizeof(rule) - 1);
+        start = end < attributes_size ? end + 1 : end;
+    }
+    BQ_CHECK(attributes_complete && rule_found);
+    FILE* profile = fopen("tools/bench_service/profiles/validate-buster-v1.recipe", "rb");
+    char recipe[sizeof(bq_real_recipe)] = {0};
+    BQ_CHECK(profile && fread(recipe, 1, sizeof(recipe), profile) == sizeof(bq_real_recipe) - 1 &&
+             !memcmp(recipe, bq_real_recipe, sizeof(bq_real_recipe)));
+    if (profile)
+    {
+        fclose(profile);
+    }
 #ifdef _WIN32
     BQ_CHECK(bq_open(&queue, ".") == BQ_UNSUPPORTED);
 #endif
 }
 
 #ifndef _WIN32
+BUSTER_GLOBAL_LOCAL BqRequest bq_test_real_request(u32 number)
+{
+    char key[32];
+    snprintf(key, sizeof(key), "real-request-%u", number);
+    String8 fields[BQ_FIELD_COUNT] = {
+        S8("test-principal"), string_from_pointer(key), S8("validate-buster-v1"),
+        S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+    BqRequest request;
+    BQ_CHECK(bq_request_make(fields, &request) == BQ_OK);
+    return request;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_mkdtemp_physical(char* path, u32 capacity)
+{
+    bool created = mkdtemp(path) != NULL;
+    char* physical = created ? realpath(path, NULL) : NULL;
+    bool ok = physical != NULL;
+    if (ok)
+    {
+        u64 size = (u64)strlen(physical);
+        ok = size < capacity;
+        if (ok)
+        {
+            memcpy(path, physical, (size_t)size + 1);
+        }
+    }
+    if (created && !ok)
+    {
+        BQ_CHECK(rmdir(path) == 0);
+        path[0] = 0;
+    }
+    free(physical);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_physical_temp_paths(void)
+{
+    char root[BQ_PATH_CAP + 1] = "/tmp/buster-physical-root-XXXXXX";
+    bool root_ok = bq_test_mkdtemp_physical(root, sizeof(root));
+    BQ_CHECK(root_ok);
+    if (root_ok)
+    {
+        char alias[BQ_PATH_CAP + 1] = "/tmp/buster-physical-alias-XXXXXX";
+        bool alias_ok = mkdtemp(alias) != NULL && rmdir(alias) == 0 && symlink(root, alias) == 0;
+        BQ_CHECK(alias_ok);
+        if (alias_ok)
+        {
+            char child[BQ_PATH_CAP + 1];
+            int length = snprintf(child, sizeof(child), "%s/child-XXXXXX", alias);
+            bool child_ok = length > 0 && (u32)length < sizeof(child) &&
+                            bq_test_mkdtemp_physical(child, sizeof(child));
+            BQ_CHECK(child_ok);
+            if (child_ok)
+            {
+                char through_alias[BQ_PATH_CAP + 1];
+                char const* leaf = strrchr(child, '/');
+                length = snprintf(through_alias, sizeof(through_alias), "%s/%s", alias, leaf ? leaf + 1 : "");
+                BQ_CHECK(leaf && length > 0 && (u32)length < sizeof(through_alias));
+                int rejected = leaf && length > 0 && (u32)length < sizeof(through_alias) ?
+                               bq_open_absolute_directory(string_from_pointer(through_alias)) : -1;
+                BQ_CHECK(rejected < 0);
+                if (rejected >= 0)
+                {
+                    close(rejected);
+                }
+                int physical = bq_open_absolute_directory(string_from_pointer(child));
+                BQ_CHECK(physical >= 0);
+                if (physical >= 0)
+                {
+                    close(physical);
+                }
+                BQ_CHECK(rmdir(child) == 0);
+            }
+            BQ_CHECK(unlink(alias) == 0);
+        }
+        char bounded[BQ_PATH_CAP + 1];
+        int length = snprintf(bounded, sizeof(bounded), "%s/bounded-XXXXXX", root);
+        BQ_CHECK(length > 0 && (u32)length < sizeof(bounded));
+        if (length > 0 && (u32)length < sizeof(bounded))
+        {
+            BQ_CHECK(!bq_test_mkdtemp_physical(bounded, (u32)strlen(root) + 1) && !bounded[0]);
+        }
+        BQ_CHECK(rmdir(root) == 0);
+    }
+}
+
 typedef struct BqFixture
 {
     char path[80];
@@ -92,7 +214,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_begin(BqFixture* fixture)
 {
     *fixture = (BqFixture){.queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1}};
     snprintf(fixture->path, sizeof(fixture->path), "/tmp/buster-queue-XXXXXX");
-    bool ok = mkdtemp(fixture->path) != NULL;
+    bool ok = bq_test_mkdtemp_physical(fixture->path, sizeof(fixture->path));
     BQ_CHECK(ok);
     if (ok)
     {
@@ -110,10 +232,770 @@ BUSTER_GLOBAL_LOCAL void bq_test_end(BqFixture* fixture)
     if (directory >= 0)
     {
         /* Test-owned fixtures only; production never unlinks the stable lock. */
+        DIR* stream = fdopendir(dup(directory));
+        struct dirent* entry = NULL;
+        while (stream && (entry = readdir(stream)) != NULL)
+        {
+            if (!strncmp(entry->d_name, "failure-", 8) || !strncmp(entry->d_name, "attempt-", 8) ||
+                !strncmp(entry->d_name, "cleanup-", 8))
+            {
+                BQ_CHECK(unlinkat(directory, entry->d_name, 0) == 0);
+            }
+        }
+        if (stream)
+        {
+            closedir(stream);
+        }
         BQ_CHECK(unlinkat(directory, "journal", 0) == 0);
         BQ_CHECK(unlinkat(directory, "writer.lock", 0) == 0);
         close(directory);
         BQ_CHECK(rmdir(fixture->path) == 0);
+    }
+}
+
+typedef struct BqMaterialFixture
+{
+    BqFixture queue;
+    char installed[BQ_PATH_CAP + 1];
+    char workspaces[BQ_PATH_CAP + 1];
+} BqMaterialFixture;
+
+BUSTER_GLOBAL_LOCAL bool bq_test_write_path(char const* path, char const* text, u32 mode)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    u32 size = (u32)strlen(text);
+    bool ok = fd >= 0 && bq_write_all(fd, (u8 const*)text, size) && fsync(fd) == 0;
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_source(char const* installed, char const* revision, char const* contents, u32 defect)
+{
+    char sources[512], root[1024], source[2048], file[4096], manifest[2048];
+    snprintf(sources, sizeof(sources), "%s/sources", installed);
+    snprintf(root, sizeof(root), "%s/%s", sources, revision);
+    snprintf(source, sizeof(source), "%s/src", root);
+    snprintf(file, sizeof(file), "%s/main.c", source);
+    snprintf(manifest, sizeof(manifest), "%s/source.manifest", root);
+    bool file_ok = false;
+    bool ok = (mkdir(sources, 0700) == 0 || errno == EEXIST) && mkdir(root, 0700) == 0 && mkdir(source, 0700) == 0;
+    if (ok)
+    {
+        file_ok = defect == 8 ? mkfifo(file, 0400) == 0 : bq_test_write_path(file, contents, 0400);
+        ok = file_ok;
+    }
+    char8 digest[SHA256_HEX_CAPACITY];
+    if (ok)
+    {
+        bq_digest(contents, (u32)strlen(contents), digest);
+        if (defect == 3)
+        {
+            digest[0] = digest[0] == '0' ? '1' : '0';
+        }
+        char text[1024];
+        char const* identity = defect == 1 ? "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" : revision;
+        char const* path = defect == 2 ? "../escape.c" : "src/main.c";
+        int length = snprintf(text, sizeof(text), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n%.64s %s\n",
+                              identity, digest, path);
+        bool manifest_ok = defect == 7 ? mkfifo(manifest, 0400) == 0 : bq_test_write_path(manifest, text, 0400);
+        ok = length > 0 && (u32)length < sizeof(text) && manifest_ok &&
+             chmod(source, defect == 5 ? 0700 : 0500) == 0 && chmod(root, 0500) == 0;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_material_test_begin(BqMaterialFixture* fixture, u32 defect)
+{
+    *fixture = (BqMaterialFixture){0};
+    snprintf(fixture->installed, sizeof(fixture->installed), "/tmp/buster-installed-XXXXXX");
+    snprintf(fixture->workspaces, sizeof(fixture->workspaces), "/tmp/buster-workspaces-XXXXXX");
+    bool ok = bq_test_begin(&fixture->queue) &&
+              bq_test_mkdtemp_physical(fixture->installed, sizeof(fixture->installed)) &&
+              bq_test_mkdtemp_physical(fixture->workspaces, sizeof(fixture->workspaces));
+    if (ok)
+    {
+        char recipes[512], recipe[1024];
+        snprintf(recipes, sizeof(recipes), "%s/recipes", fixture->installed);
+        snprintf(recipe, sizeof(recipe), "%s/validate-buster-v1.recipe", recipes);
+        ok = mkdir(recipes, 0700) == 0 &&
+             (defect == 6 ? mkfifo(recipe, 0400) == 0 :
+              bq_test_write_path(recipe, defect == 4 ? "bad-recipe\n" : bq_real_recipe, 0400)) &&
+             bq_test_source(fixture->installed, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base-source\n", defect) &&
+             bq_test_source(fixture->installed, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "candidate-source\n", 0) &&
+             chmod(recipes, 0500) == 0;
+        char sources[512];
+        snprintf(sources, sizeof(sources), "%s/sources", fixture->installed);
+        ok = ok && chmod(sources, 0500) == 0 && chmod(fixture->installed, 0500) == 0;
+    }
+    BQ_CHECK(ok);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_material_test_end(BqMaterialFixture* fixture)
+{
+    int temporary = open("/tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (temporary >= 0)
+    {
+        char const* installed = strrchr(fixture->installed, '/');
+        char const* workspaces = strrchr(fixture->workspaces, '/');
+        int installed_fd = installed ? openat(temporary, installed + 1, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        int workspaces_fd = workspaces ? openat(temporary, workspaces + 1, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        BQ_CHECK(installed_fd >= 0 && bq_remove_workspace_payload(installed_fd) &&
+                 unlinkat(temporary, installed + 1, AT_REMOVEDIR) == 0);
+        BQ_CHECK(workspaces_fd >= 0 && bq_remove_workspace_payload(workspaces_fd) &&
+                 unlinkat(temporary, workspaces + 1, AT_REMOVEDIR) == 0);
+        if (installed_fd >= 0)
+        {
+            close(installed_fd);
+        }
+        if (workspaces_fd >= 0)
+        {
+            close(workspaces_fd);
+        }
+        close(temporary);
+    }
+    bq_test_end(&fixture->queue);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_materialization_failures(void)
+{
+    BqError expected[] = {BQ_OK, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
+                          BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH,
+                          BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH};
+    for (u32 defect = 1; defect < BUSTER_ARRAY_LENGTH(expected); defect += 1)
+    {
+        BqMaterialFixture fixture;
+        if (bq_material_test_begin(&fixture, defect))
+        {
+            BqRequest request = bq_test_real_request(defect);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed), string_from_pointer(fixture.workspaces),
+                                    &id, &token) == expected[defect]);
+            BqJob* job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED && !fixture.queue.queue.state.active_id);
+            BQ_CHECK(bq_failure_evidence(&fixture.queue.queue, job) == expected[defect]);
+            u8 status_body[8];
+            BqPacket status, response;
+            bq_put64(status_body, id);
+            bq_packet(&status, BQ_OP_STATUS, 80 + defect, status_body, sizeof(status_body));
+            BQ_CHECK(bq_dispatch(&fixture.queue.queue, status.bytes, status.size, &response) == BQ_OK &&
+                     bq_u32(response.bytes + BQ_CONTROL_HEADER + 120) == expected[defect]);
+            bq_packet(&status, BQ_OP_RESULT, 90 + defect, status_body, sizeof(status_body));
+            BQ_CHECK(bq_dispatch(&fixture.queue.queue, status.bytes, status.size, &response) == BQ_OK &&
+                     bq_u32(response.bytes + BQ_CONTROL_HEADER + 120) == expected[defect]);
+            char name[64], path[512];
+            BQ_CHECK(bq_workspace_name(name, id, token));
+            snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+            BQ_CHECK(access(path, F_OK) != 0 && errno == ENOENT);
+            bq_close(&fixture.queue.queue);
+            BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->outcome == BQ_FAILED && bq_failure_evidence(&fixture.queue.queue, job) == expected[defect]);
+            if (defect == 1)
+            {
+                char failure_name[48];
+                BQ_CHECK(bq_failure_name(failure_name, id));
+                int failure = openat(fixture.queue.queue.directory_fd, failure_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+                BQ_CHECK(failure >= 0 && fchmod(failure, 0600) == 0);
+                BQ_CHECK(bq_failure_evidence(&fixture.queue.queue, job) == BQ_CORRUPT);
+                bq_packet(&status, BQ_OP_STATUS, 100, status_body, sizeof(status_body));
+                BQ_CHECK(bq_dispatch(&fixture.queue.queue, status.bytes, status.size, &response) == BQ_CORRUPT &&
+                         bq_u32(response.bytes + BQ_CONTROL_HEADER) == BQ_CORRUPT &&
+                         bq_u32(response.bytes + BQ_CONTROL_HEADER + 120) == BQ_CORRUPT);
+                BQ_CHECK(failure >= 0 && fchmod(failure, 0400) == 0);
+                if (failure >= 0)
+                {
+                    close(failure);
+                }
+            }
+            if (defect == 2)
+            {
+                char failure_name[48];
+                BQ_CHECK(bq_failure_name(failure_name, id) &&
+                         unlinkat(fixture.queue.queue.directory_fd, failure_name, 0) == 0 &&
+                         fsync(fixture.queue.queue.directory_fd) == 0);
+                bq_packet(&status, BQ_OP_RESULT, 101, status_body, sizeof(status_body));
+                BQ_CHECK(bq_dispatch(&fixture.queue.queue, status.bytes, status.size, &response) == BQ_CORRUPT &&
+                         bq_failure_evidence(&fixture.queue.queue, job) == BQ_CORRUPT);
+            }
+            bq_material_test_end(&fixture);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(1);
+        BqPacket legacy, legacy_response;
+        bq_packet_schema(&legacy, 1, BQ_OP_SUBMIT, 90, request.bytes, request.size);
+        BQ_CHECK(bq_dispatch(&fixture.queue.queue, legacy.bytes, legacy.size, &legacy_response) == BQ_BAD_REQUEST &&
+                 fixture.queue.queue.state.job_count == 0 && legacy_response.size == BQ_CONTROL_HEADER + 120);
+        u64 id = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        u8 legacy_body[16] = {0};
+        bq_put64(legacy_body, id);
+        bq_packet_schema(&legacy, 1, BQ_OP_STATUS, 91, legacy_body, 8);
+        BQ_CHECK(bq_dispatch(&fixture.queue.queue, legacy.bytes, legacy.size, &legacy_response) == BQ_UNSUPPORTED &&
+                 legacy_response.size == BQ_CONTROL_HEADER + 120);
+        bq_packet_schema(&legacy, 1, BQ_OP_LOGS, 92, legacy_body, 16);
+        BQ_CHECK(bq_dispatch(&fixture.queue.queue, legacy.bytes, legacy.size, &legacy_response) == BQ_UNSUPPORTED);
+        BQ_CHECK(bq_fake_run(&fixture.queue.queue, &id) == BQ_UNSUPPORTED && !fixture.queue.queue.state.active_id);
+        u8 body[BQ_CONTROL_BODY];
+        String8 installed = string_from_pointer(fixture.installed), workspaces = string_from_pointer(fixture.workspaces);
+        bq_put32(body, (u32)installed.length);
+        bq_put32(body + 4, (u32)workspaces.length);
+        memcpy(body + 8, installed.pointer, (size_t)installed.length);
+        memcpy(body + 8 + installed.length, workspaces.pointer, (size_t)workspaces.length);
+        BqPacket packet, response;
+        bq_packet(&packet, BQ_OP_MATERIALIZE, 91, body, 8 + (u32)installed.length + (u32)workspaces.length);
+        BQ_CHECK(bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response) == BQ_OK);
+        id = bq_u64(response.bytes + BQ_CONTROL_HEADER + 4);
+        u64 token = bq_u64(response.bytes + BQ_CONTROL_HEADER + 12);
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_PREPARING && fixture.queue.queue.state.active_id == id && token == job->token);
+        BQ_CHECK(bq_u32(response.bytes + BQ_CONTROL_HEADER + 120) == BQ_OK);
+        char name[64], workspace[512], base_source[1024], candidate_source[1024];
+        BQ_CHECK(bq_workspace_name(name, id, token));
+        snprintf(workspace, sizeof(workspace), "%s/%s", fixture.workspaces, name);
+        snprintf(base_source, sizeof(base_source), "%s/base/source/src/main.c", workspace);
+        snprintf(candidate_source, sizeof(candidate_source), "%s/candidate/source/src/main.c", workspace);
+        struct stat base, candidate;
+        BQ_CHECK(stat(base_source, &base) == 0 && stat(candidate_source, &candidate) == 0 && base.st_ino != candidate.st_ino);
+        BQ_CHECK((base.st_mode & 0222) == 0 && (candidate.st_mode & 0222) == 0);
+        BQ_CHECK(chmod(base_source, 0600) == 0);
+        int same_euid_mutation = open(base_source, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(same_euid_mutation >= 0 && bq_write_all(same_euid_mutation, (u8 const*)"mutated\n", 8) &&
+                 fsync(same_euid_mutation) == 0);
+        if (same_euid_mutation >= 0)
+        {
+            close(same_euid_mutation);
+        }
+        BQ_CHECK(chmod(base_source, 0400) == 0);
+        char copied_manifest[1024];
+        snprintf(copied_manifest, sizeof(copied_manifest), "%s/base/source/.source-manifest", workspace);
+        BQ_CHECK(stat(copied_manifest, &base) == 0 && (base.st_mode & 0222) == 0);
+        char identity[1024];
+        snprintf(identity, sizeof(identity), "%s/.identity", workspace);
+        BQ_CHECK(stat(identity, &base) == 0 && (base.st_mode & 0222) == 0);
+        char base_build[1024], candidate_build[1024], sentinel[2048];
+        snprintf(base_build, sizeof(base_build), "%s/base/build", workspace);
+        snprintf(candidate_build, sizeof(candidate_build), "%s/candidate/build", workspace);
+        BQ_CHECK(stat(base_build, &base) == 0 && stat(candidate_build, &candidate) == 0 && base.st_ino != candidate.st_ino);
+        snprintf(sentinel, sizeof(sentinel), "%s/generated", base_build);
+        BQ_CHECK(bq_test_write_path(sentinel, "base-only\n", 0600));
+        snprintf(sentinel, sizeof(sentinel), "%s/generated", candidate_build);
+        BQ_CHECK(access(sentinel, F_OK) != 0 && errno == ENOENT);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_fake_reconcile(&fixture.queue.queue, id, token) == BQ_UNSUPPORTED);
+        BQ_CHECK(chmod(identity, 0600) == 0);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, workspaces, id, token) == BQ_WORKSPACE_MISMATCH);
+        BQ_CHECK(fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation && access(workspace, F_OK) == 0);
+        BQ_CHECK(chmod(identity, 0400) == 0);
+        bq_put64(body, id);
+        bq_put64(body + 8, token);
+        bq_put32(body + 16, (u32)workspaces.length);
+        memcpy(body + 20, workspaces.pointer, (size_t)workspaces.length);
+        bq_packet(&packet, BQ_OP_WORKSPACE_RECONCILE, 92, body, 20 + (u32)workspaces.length);
+        BqError reconcile_error = bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response);
+        if (reconcile_error != BQ_OK)
+        {
+            fprintf(stderr, "QUEUE_TEST reconciliation error=%s\n", bq_error_name(reconcile_error));
+        }
+        BQ_CHECK(reconcile_error == BQ_OK);
+        job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED && !fixture.queue.queue.state.active_id);
+        BQ_CHECK(access(workspace, F_OK) != 0 && errno == ENOENT);
+        BQ_CHECK(bq_failure_evidence(&fixture.queue.queue, job) == BQ_NOT_FOUND);
+        BqRequest second = bq_test_real_request(2);
+        u64 second_id = 0, second_token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &second, &second_id) == BQ_OK && second_id != id);
+        BQ_CHECK(bq_materialize(&fixture.queue.queue, installed, workspaces, &second_id, &second_token) == BQ_OK);
+        char second_name[64], second_workspace[512];
+        BQ_CHECK(bq_workspace_name(second_name, second_id, second_token) && strcmp(name, second_name));
+        snprintf(second_workspace, sizeof(second_workspace), "%s/%s", fixture.workspaces, second_name);
+        BQ_CHECK(access(second_workspace, F_OK) == 0 && access(workspace, F_OK) != 0);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, workspaces, second_id, second_token) == BQ_INVALID_TRANSITION);
+        BQ_CHECK(fixture.queue.queue.state.active_id == second_id && !fixture.queue.queue.needs_reconciliation &&
+                 access(second_workspace, F_OK) == 0);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, workspaces, second_id, second_token) == BQ_OK);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_workspace_collision(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(1);
+        u64 id = 0, token = 2;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK && id == 1);
+        char name[64], path[512];
+        BQ_CHECK(bq_workspace_name(name, id, token));
+        snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+        BQ_CHECK(mkdir(path, 0700) == 0);
+        BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed), string_from_pointer(fixture.workspaces),
+                                &id, &token) == BQ_WORKSPACE_MISMATCH);
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_RESERVED && fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_failure_evidence(&fixture.queue.queue, job) == BQ_WORKSPACE_MISMATCH);
+        BQ_CHECK(rmdir(path) == 0);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED && !fixture.queue.queue.state.active_id);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_materialization_configuration(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(1);
+        u64 id = 0, token = 0, expected_id = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &expected_id) == BQ_OK);
+        BQ_CHECK(bq_materialize(&fixture.queue.queue, S8("relative-installed"), string_from_pointer(fixture.workspaces),
+                                &id, &token) == BQ_BAD_REQUEST);
+        BqJob* job = bq_job(&fixture.queue.queue.state, expected_id);
+        BQ_CHECK(job && job->phase == BQ_QUEUED && !fixture.queue.queue.state.active_id);
+        char alias[80] = "/tmp/buster-installed-alias-XXXXXX";
+        bool alias_ok = mkdtemp(alias) && rmdir(alias) == 0 && symlink("/tmp", alias) == 0;
+        char const* leaf = strrchr(fixture.installed, '/');
+        char installed_through_alias[512];
+        int length = snprintf(installed_through_alias, sizeof(installed_through_alias), "%s/%s", alias, leaf ? leaf + 1 : "");
+        BQ_CHECK(alias_ok && leaf && length > 0 && (u32)length < sizeof(installed_through_alias));
+        if (alias_ok && leaf && length > 0 && (u32)length < sizeof(installed_through_alias))
+        {
+            BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(installed_through_alias),
+                                    string_from_pointer(fixture.workspaces), &id, &token) == BQ_CONFIGURATION_MISMATCH);
+            job = bq_job(&fixture.queue.queue.state, expected_id);
+            BQ_CHECK(id == expected_id && job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                     !fixture.queue.queue.state.active_id && !fixture.queue.queue.needs_reconciliation);
+            BQ_CHECK(bq_failure_evidence(&fixture.queue.queue, job) == BQ_CONFIGURATION_MISMATCH);
+        }
+        if (alias_ok)
+        {
+            BQ_CHECK(unlink(alias) == 0);
+        }
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_workspace_entry_mismatch(void)
+{
+    for (u32 scenario = 0; scenario < 2; scenario += 1)
+    {
+        BqMaterialFixture fixture;
+        if (bq_material_test_begin(&fixture, 0))
+        {
+            BqRequest request = bq_test_real_request(20 + scenario);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
+                                    string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK);
+            char name[64], path[512], saved[512];
+            BQ_CHECK(bq_workspace_name(name, id, token));
+            snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+            snprintf(saved, sizeof(saved), "%s/saved-%u", fixture.workspaces, scenario);
+            bq_close(&fixture.queue.queue);
+            BQ_CHECK(rename(path, saved) == 0);
+            if (scenario == 0)
+            {
+                BQ_CHECK(symlink(saved, path) == 0);
+            }
+            else
+            {
+                BQ_CHECK(bq_test_write_path(path, "not-a-directory\n", 0600));
+            }
+            BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+            BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) ==
+                     BQ_WORKSPACE_MISMATCH);
+            BQ_CHECK(fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation &&
+                     access(path, F_OK) == 0 && access(saved, F_OK) == 0);
+            BQ_CHECK(unlink(path) == 0 && rename(saved, path) == 0);
+            BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+            bq_material_test_end(&fixture);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_workspace_root_substitution(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(30);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
+                                string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK);
+        char original[BQ_PATH_CAP + 32];
+        snprintf(original, sizeof(original), "%s-original", fixture.workspaces);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(rename(fixture.workspaces, original) == 0 && mkdir(fixture.workspaces, 0700) == 0);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) ==
+                 BQ_WORKSPACE_MISMATCH);
+        BQ_CHECK(fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(rmdir(fixture.workspaces) == 0 && rename(original, fixture.workspaces) == 0);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_partial_cleanup_recovery(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(40);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
+                                string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK);
+        char name[64], path[512], saved[512];
+        BQ_CHECK(bq_workspace_name(name, id, token));
+        snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+        snprintf(saved, sizeof(saved), "%s/original-workspace", fixture.workspaces);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        int root = open(fixture.workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int workspace = root >= 0 ? openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        struct stat root_info, workspace_info;
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(root >= 0 && workspace >= 0 && fstat(root, &root_info) == 0 && fstat(workspace, &workspace_info) == 0 &&
+                 bq_cleanup_record(&fixture.queue.queue, job, &root_info, &workspace_info, true) == BQ_OK);
+        if (workspace >= 0)
+        {
+            close(workspace);
+        }
+        BQ_CHECK(rename(path, saved) == 0 && mkdir(path, 0700) == 0);
+        int replacement = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(replacement >= 0 && bq_workspace_seal(replacement, job, true));
+        if (replacement >= 0)
+        {
+            close(replacement);
+        }
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) ==
+                 BQ_WORKSPACE_MISMATCH);
+        replacement = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(replacement >= 0 && bq_remove_workspace_payload(replacement) && unlinkat(replacement, ".identity", 0) == 0);
+        if (replacement >= 0)
+        {
+            close(replacement);
+        }
+        BQ_CHECK(rmdir(path) == 0 && rename(saved, path) == 0);
+        workspace = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(workspace >= 0 && bq_remove_workspace_payload(workspace) && unlinkat(workspace, ".identity", 0) == 0 &&
+                 fsync(workspace) == 0);
+        if (workspace >= 0)
+        {
+            close(workspace);
+        }
+        if (root >= 0)
+        {
+            close(root);
+        }
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        BQ_CHECK(access(path, F_OK) != 0 && errno == ENOENT && !fixture.queue.queue.state.active_id);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_uncertain_failure_cleanup(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(50);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        int installed = bq_open_absolute_directory(string_from_pointer(fixture.installed));
+        int root = bq_open_absolute_directory(string_from_pointer(fixture.workspaces));
+        struct stat installed_info, root_info, workspace_info;
+        char name[64], path[512];
+        BQ_CHECK(installed >= 0 && root >= 0 && fstat(installed, &installed_info) == 0 && fstat(root, &root_info) == 0 &&
+                 bq_workspace_name(name, id, token));
+        BQ_CHECK(bq_attempt_write(&fixture.queue.queue, job, string_from_pointer(fixture.installed),
+                                  string_from_pointer(fixture.workspaces), &installed_info, &root_info) == BQ_OK);
+        BQ_CHECK(mkdirat(root, name, 0700) == 0);
+        int workspace = openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(workspace >= 0 && fstat(workspace, &workspace_info) == 0 && bq_workspace_seal(workspace, job, true));
+        BQ_CHECK(mkdirat(workspace, "partial-copy", 0700) == 0);
+        fixture.queue.queue.fault.fail_write_at = 2;
+        BQ_CHECK(bq_materialization_finish_failure(&fixture.queue.queue, job, BQ_SOURCE_MISMATCH, root, name, workspace,
+                                                    &root_info, &workspace_info, true) == BQ_IO);
+        snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+        BQ_CHECK(fixture.queue.queue.poisoned && fixture.queue.queue.state.active_id == id && access(path, F_OK) == 0);
+        if (workspace >= 0)
+        {
+            close(workspace);
+        }
+        if (root >= 0)
+        {
+            close(root);
+        }
+        if (installed >= 0)
+        {
+            close(installed);
+        }
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation &&
+                 fixture.queue.queue.recovered_tail_bytes == 1);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                 bq_failure_evidence(&fixture.queue.queue, job) == BQ_SOURCE_MISMATCH && access(path, F_OK) != 0);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_no_attempt_recovery(void)
+{
+    /* The RESERVE itself may be the last durable action before a crash. */
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(55);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation &&
+                 fixture.queue.queue.state.active_id == id && bq_job(&fixture.queue.queue.state, id)->phase == BQ_RESERVED);
+        char name[64], path[512];
+        BQ_CHECK(bq_workspace_name(name, id, token));
+        snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+        BQ_CHECK(bq_test_write_path(path, "unexpected-entry\n", 0600));
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) ==
+                 BQ_WORKSPACE_MISMATCH && fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(unlink(path) == 0);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED &&
+                 !fixture.queue.queue.state.active_id && !fixture.queue.queue.needs_reconciliation);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_configuration_transition_recovery(void)
+{
+    /* Reproduce uncertainty at each journal transition used after root
+     * configuration fails, before an attempt/workspace can exist. */
+    for (u32 scenario = 0; scenario < 2; scenario += 1)
+    {
+        BqMaterialFixture fixture;
+        if (bq_material_test_begin(&fixture, 0))
+        {
+            BqRequest request = bq_test_real_request(56 + scenario);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+            BqJob* job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(bq_failure_write(&fixture.queue.queue, job, BQ_CONFIGURATION_MISMATCH) == BQ_OK);
+            if (scenario == 1)
+            {
+                BQ_CHECK(bq_real_advance(&fixture.queue.queue, job, BQ_CLEANING, BQ_FAILED) == BQ_OK);
+                job = bq_job(&fixture.queue.queue.state, id);
+            }
+            fixture.queue.queue.fault.fail_write_at = 2;
+            BQ_CHECK(bq_real_advance(&fixture.queue.queue, job, scenario ? BQ_FINISHED : BQ_CLEANING, BQ_FAILED) == BQ_IO &&
+                     fixture.queue.queue.poisoned && fixture.queue.queue.state.active_id == id);
+            bq_close(&fixture.queue.queue);
+            BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation &&
+                     fixture.queue.queue.recovered_tail_bytes == 1);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == (scenario ? BQ_CLEANING : BQ_RESERVED));
+            BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, S8("/definitely-missing-buster-workspace-root"), id, token) == BQ_OK);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                     bq_failure_evidence(&fixture.queue.queue, job) == BQ_CONFIGURATION_MISMATCH &&
+                     !fixture.queue.queue.state.active_id);
+            bq_material_test_end(&fixture);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_cancelled_failure_recovery(void)
+{
+    for (u32 attempted = 0; attempted < 3; attempted += 1)
+    {
+        BqMaterialFixture fixture;
+        if (bq_material_test_begin(&fixture, 0))
+        {
+            BqRequest request = bq_test_real_request(58 + attempted);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+            BqJob* job = bq_job(&fixture.queue.queue.state, id);
+            int installed = -1, root = -1, workspace = -1;
+            struct stat installed_info = {0}, root_info = {0}, workspace_info = {0};
+            char name[64] = {0}, path[512] = {0};
+            if (attempted)
+            {
+                installed = bq_open_absolute_directory(string_from_pointer(fixture.installed));
+                root = bq_open_absolute_directory(string_from_pointer(fixture.workspaces));
+                BQ_CHECK(installed >= 0 && root >= 0 && fstat(installed, &installed_info) == 0 &&
+                         fstat(root, &root_info) == 0 && bq_workspace_name(name, id, token));
+                BQ_CHECK(bq_attempt_write(&fixture.queue.queue, job, string_from_pointer(fixture.installed),
+                                          string_from_pointer(fixture.workspaces), &installed_info, &root_info) == BQ_OK);
+                BQ_CHECK(mkdirat(root, name, 0700) == 0);
+                workspace = openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                BQ_CHECK(workspace >= 0 && fstat(workspace, &workspace_info) == 0 &&
+                         bq_workspace_seal(workspace, job, true));
+                snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+            }
+            BqError reason = attempted ? BQ_SOURCE_MISMATCH : BQ_CONFIGURATION_MISMATCH;
+            BQ_CHECK(bq_failure_write(&fixture.queue.queue, job, reason) == BQ_OK);
+            if (attempted == 2)
+            {
+                BQ_CHECK(bq_cleanup_record(&fixture.queue.queue, job, &root_info, &workspace_info, true) == BQ_OK);
+                BQ_CHECK(bq_real_advance(&fixture.queue.queue, job, BQ_CLEANING, BQ_FAILED) == BQ_OK);
+            }
+            if (workspace >= 0)
+            {
+                close(workspace);
+            }
+            if (root >= 0)
+            {
+                close(root);
+            }
+            if (installed >= 0)
+            {
+                close(installed);
+            }
+            bq_close(&fixture.queue.queue);
+            BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+            BQ_CHECK(bq_cancel(&fixture.queue.queue, id) == BQ_OK && bq_job(&fixture.queue.queue.state, id)->cancel_requested);
+            String8 workspace_root = attempted ? string_from_pointer(fixture.workspaces) :
+                                     S8("/definitely-missing-buster-workspace-root");
+            BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, workspace_root, id, token) == BQ_OK);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_CANCELLED &&
+                     bq_failure_evidence(&fixture.queue.queue, job) == reason && !fixture.queue.queue.state.active_id);
+            if (attempted)
+            {
+                BQ_CHECK(access(path, F_OK) != 0 && errno == ENOENT);
+            }
+            bq_material_test_end(&fixture);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_cleanup_bounds_and_failure(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        int root = open(fixture.workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(root >= 0 && mkdirat(root, "bounded-topology", 0700) == 0);
+        int topology = root >= 0 ? openat(root, "bounded-topology", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        u32 directories = 1;
+        for (u32 i = 0; i < BQ_SOURCE_DIRECTORY_CAP - 1; i += 1)
+        {
+            char path[32];
+            snprintf(path, sizeof(path), "d%03u", i);
+            int directory = bq_open_destination_directory(topology, string_from_pointer(path), &directories);
+            BQ_CHECK(directory >= 0);
+            if (directory >= 0)
+            {
+                close(directory);
+            }
+        }
+        BQ_CHECK(directories == BQ_SOURCE_DIRECTORY_CAP);
+        int overflow = bq_open_destination_directory(topology, S8("overflow"), &directories);
+        BQ_CHECK(overflow < 0 && directories == BQ_SOURCE_DIRECTORY_CAP && bq_remove_workspace_payload(topology));
+        if (overflow >= 0)
+        {
+            close(overflow);
+        }
+        if (topology >= 0)
+        {
+            close(topology);
+        }
+        BQ_CHECK(unlinkat(root, "bounded-topology", AT_REMOVEDIR) == 0);
+        BQ_CHECK(mkdirat(root, "deep-topology", 0700) == 0);
+        int deep = openat(root, "deep-topology", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bool deep_ok = deep >= 0;
+        for (u32 i = 0; deep_ok && i < 220; i += 1)
+        {
+            deep_ok = mkdirat(deep, "child", 0700) == 0;
+            int next = deep_ok ? openat(deep, "child", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+            deep_ok = next >= 0;
+            close(deep);
+            deep = next;
+        }
+        BQ_CHECK(deep_ok);
+        if (deep >= 0)
+        {
+            close(deep);
+        }
+        deep = openat(root, "deep-topology", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(deep >= 0 && bq_remove_workspace_payload(deep));
+        if (deep >= 0)
+        {
+            close(deep);
+        }
+        BQ_CHECK(unlinkat(root, "deep-topology", AT_REMOVEDIR) == 0);
+        BqRequest request = bq_test_real_request(60);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
+                                string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK);
+        char name[64], build[512];
+        BQ_CHECK(bq_workspace_name(name, id, token));
+        snprintf(build, sizeof(build), "%s/%s/base/build", fixture.workspaces, name);
+        int build_fd = open(build, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bool created = build_fd >= 0;
+        for (u32 i = 0; created && i < BQ_DIRECTORY_CAP + 1; i += 1)
+        {
+            char child[32];
+            snprintf(child, sizeof(child), "overflow-%04u", i);
+            created = mkdirat(build_fd, child, 0700) == 0;
+        }
+        BQ_CHECK(created);
+        if (build_fd >= 0)
+        {
+            close(build_fd);
+        }
+        if (root >= 0)
+        {
+            close(root);
+        }
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) ==
+                 BQ_CLEANUP_FAILED);
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation &&
+                 bq_failure_evidence(&fixture.queue.queue, job) == BQ_CLEANUP_FAILED);
+        u8 body[8];
+        bq_put64(body, id);
+        BqPacket packet, response;
+        bq_packet(&packet, BQ_OP_STATUS, 150, body, sizeof(body));
+        BQ_CHECK(bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response) == BQ_OK &&
+                 bq_u32(response.bytes + BQ_CONTROL_HEADER + 120) == BQ_CLEANUP_FAILED);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(!fixture.queue.queue.state.active_id && bq_failure_evidence(&fixture.queue.queue, job) == BQ_CLEANUP_FAILED);
+        bq_material_test_end(&fixture);
     }
 }
 
@@ -146,6 +1028,86 @@ BUSTER_GLOBAL_LOCAL void bq_test_image(BqFixture* fixture, u8 const* image, u32 
     if (directory >= 0)
     {
         close(directory);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_legacy_replay(u8 const* image, u32 size)
+{
+    BqState state = {0};
+    u32 offset = 0;
+    bool ok = true;
+    while (ok && offset < size)
+    {
+        ok = size - offset >= BQ_HEADER_SIZE;
+        u8 const* frame = image + offset;
+        u32 length = ok ? bq_u32(frame + 16) : 0;
+        char8 digest[SHA256_HEX_CAPACITY];
+        if (ok)
+        {
+            bq_header_digest(frame, digest);
+            ok = !memcmp(frame, "BQJNL001", 8) && bq_u32(frame + 8) == BQ_SCHEMA_LEGACY &&
+                 length <= BQ_REQUEST_CAP && size - offset - BQ_HEADER_SIZE >= length &&
+                 !memcmp(frame + 32, digest, 64);
+        }
+        if (ok)
+        {
+            bq_digest(frame + BQ_HEADER_SIZE, length, digest);
+            ok = !memcmp(frame + 96, digest, 64) &&
+                 bq_apply(&state, BQ_SCHEMA_LEGACY, (BqRecordKind)bq_u32(frame + 12), bq_u64(frame + 24),
+                          frame + BQ_HEADER_SIZE, length) == BQ_OK;
+        }
+        if (ok)
+        {
+            offset += BQ_HEADER_SIZE + length;
+        }
+    }
+    return ok && offset == size;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_journal_schema_migration(void)
+{
+    BqFixture fixture;
+    if (bq_test_begin(&fixture))
+    {
+        BqRequest legacy = bq_test_request(1, false);
+        u8 image[BQ_RECORD_CAP * 3];
+        bq_frame_schema(image, BQ_SCHEMA_LEGACY, BQ_SUBMIT, 1, legacy.bytes, legacy.size);
+        u32 legacy_size = BQ_HEADER_SIZE + legacy.size;
+        BQ_CHECK(bq_test_legacy_replay(image, legacy_size));
+        bq_test_image(&fixture, image, legacy_size);
+        BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_OK && fixture.queue.state.job_count == 1 &&
+                 fixture.queue.state.journal_schema == BQ_SCHEMA_LEGACY && fixture.queue.bytes == legacy_size);
+        BqRequest second = bq_test_request(2, false);
+        u64 id = 0;
+        BQ_CHECK(bq_submit(&fixture.queue, &second, &id) == BQ_OK && id == 2 &&
+                 fixture.queue.state.journal_schema == BQ_SCHEMA);
+        u32 mixed_size = (u32)fixture.queue.bytes;
+        BQ_CHECK(bq_read(fixture.queue.journal_fd, image, mixed_size, 0));
+        BQ_CHECK(bq_u32(image + 8) == BQ_SCHEMA_LEGACY && bq_u32(image + legacy_size + 8) == BQ_SCHEMA);
+        BQ_CHECK(!bq_test_legacy_replay(image, mixed_size));
+        u8 status_body[8];
+        bq_put64(status_body, 1);
+        BqPacket status, response;
+        bq_packet_schema(&status, 1, BQ_OP_STATUS, 70, status_body, sizeof(status_body));
+        BQ_CHECK(bq_dispatch(&fixture.queue, status.bytes, status.size, &response) == BQ_OK &&
+                 response.size == BQ_CONTROL_HEADER + 120);
+        bq_close(&fixture.queue);
+        BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_OK && fixture.queue.state.job_count == 2 &&
+                 fixture.queue.state.journal_schema == BQ_SCHEMA);
+        bq_frame_schema(image, BQ_SCHEMA, BQ_SUBMIT, 1, legacy.bytes, legacy.size);
+        u32 current_size = BQ_HEADER_SIZE + legacy.size;
+        bq_frame_schema(image + current_size, BQ_SCHEMA_LEGACY, BQ_SUBMIT, 2, second.bytes, second.size);
+        bq_test_image(&fixture, image, current_size + BQ_HEADER_SIZE);
+        BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_CORRUPT);
+        bq_test_image(&fixture, image, current_size + BQ_HEADER_SIZE + second.size);
+        BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_CORRUPT);
+        BqRequest real = bq_test_real_request(3);
+        bq_frame_schema(image, BQ_SCHEMA_LEGACY, BQ_SUBMIT, 1, real.bytes, real.size);
+        u32 real_size = BQ_HEADER_SIZE + real.size;
+        BQ_CHECK(!bq_test_legacy_replay(image, real_size));
+        bq_test_image(&fixture, image, real_size);
+        BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_CORRUPT);
+        bq_test_end(&fixture);
     }
 }
 
@@ -567,6 +1529,7 @@ int main(int argc, char** argv)
     (void)argv;
     bq_test_codec();
 #ifndef _WIN32
+    bq_test_physical_temp_paths();
     bq_test_closed_handle();
     bq_test_admission();
     bq_test_prefixes_and_corruption();
@@ -574,8 +1537,21 @@ int main(int argc, char** argv)
     bq_test_phase_restarts();
     bq_test_completion_failures();
     bq_test_protocol_mutations();
+    bq_test_journal_schema_migration();
     bq_test_lifetime_and_logs();
     bq_test_cli_acknowledgment();
+    bq_test_materialization_failures();
+    bq_test_materialization_and_recovery();
+    bq_test_workspace_collision();
+    bq_test_materialization_configuration();
+    bq_test_workspace_entry_mismatch();
+    bq_test_workspace_root_substitution();
+    bq_test_partial_cleanup_recovery();
+    bq_test_uncertain_failure_cleanup();
+    bq_test_no_attempt_recovery();
+    bq_test_configuration_transition_recovery();
+    bq_test_cancelled_failure_recovery();
+    bq_test_cleanup_bounds_and_failure();
     char const* storage = "posix-real-journal";
 #else
     char const* storage = "unsupported-codec-only";

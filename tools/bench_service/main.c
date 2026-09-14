@@ -8,6 +8,7 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
 #include "queue.c"
+#include "workspace.c"
 #include "protocol.c"
 #include <inttypes.h>
 
@@ -41,7 +42,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqError error = BQ_BAD_REQUEST;
     u32 operation = 0;
-    u8 body[BQ_REQUEST_CAP] = {0};
+    u8 body[BQ_CONTROL_BODY] = {0};
     u32 body_size = 0;
     bool raw = false;
     bool valid = false;
@@ -92,6 +93,35 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             bq_put64(body, id);
             bq_put64(body + 8, argument);
             body_size = 16;
+        }
+        else if (argc == 5 && !strcmp(argv[1], "materialize"))
+        {
+            String8 installed = string_from_pointer(argv[3]);
+            String8 workspace = string_from_pointer(argv[4]);
+            operation = BQ_OP_MATERIALIZE;
+            valid = installed.length <= BQ_PATH_CAP && workspace.length <= BQ_PATH_CAP;
+            if (valid)
+            {
+                bq_put32(body, (u32)installed.length);
+                bq_put32(body + 4, (u32)workspace.length);
+                memcpy(body + 8, installed.pointer, (size_t)installed.length);
+                memcpy(body + 8 + installed.length, workspace.pointer, (size_t)workspace.length);
+                body_size = 8 + (u32)installed.length + (u32)workspace.length;
+            }
+        }
+        else if (argc == 6 && !strcmp(argv[1], "workspace-reconcile"))
+        {
+            String8 workspace = string_from_pointer(argv[3]);
+            operation = BQ_OP_WORKSPACE_RECONCILE;
+            valid = bq_decimal(argv[4], true, &id) && bq_decimal(argv[5], true, &argument) && workspace.length <= BQ_PATH_CAP;
+            if (valid)
+            {
+                bq_put64(body, id);
+                bq_put64(body + 8, argument);
+                bq_put32(body + 16, (u32)workspace.length);
+                memcpy(body + 20, workspace.pointer, (size_t)workspace.length);
+                body_size = 20 + (u32)workspace.length;
+            }
         }
         else if (argc == 3 && !strcmp(argv[1], "fake-run"))
         {
@@ -154,10 +184,11 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         {
             written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
                               " phase=%s outcome=%s validity=not-evaluated cancel-requested=%u reconciliation=%u"
-                              " pending=%u retained=%u request-sha256=%.64s\n",
+                              " pending=%u retained=%u request-sha256=%.64s failure=%s\n",
                               (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12), (uint64_t)bq_u64(data + 20),
                               bq_phase_name(bq_u32(data + 28)), bq_outcome_name(bq_u32(data + 32)), bq_u32(data + 40),
-                              bq_u32(data + 44), bq_u32(data + 48), bq_u32(data + 52), (char const*)data + 56) >= 0;
+                              bq_u32(data + 44), bq_u32(data + 48), bq_u32(data + 52), (char const*)data + 56,
+                              bq_error_name((BqError)bq_u32(data + 120))) >= 0;
         }
     }
     if (fflush(output) != 0)
@@ -175,7 +206,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         {
             fprintf(diagnostics, "commands: capabilities | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
                     "status/result/cancel DIR JOB | logs DIR JOB [AFTER_SEQUENCE] | fake-run DIR | "
-                    "fake-reconcile DIR JOB TOKEN | protocol DIR\n");
+                    "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
+                    "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | protocol DIR\n");
         }
     }
     bq_close(&queue);
