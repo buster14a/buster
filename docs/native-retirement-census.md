@@ -259,6 +259,14 @@ an unexpected defect is still fatal. The acceptance gate additionally requires
 every retained reference/control to resolve. This class distinction does not
 waive unexpected compile, object, process, fallback or telemetry defects: those
 remain fatal for any applicable cell, including platform-inapplicable controls.
+A production manifest is admitted only as `profile=full-census`: it must bind
+the exact 548-input/402-subject/77,184-row, four-shard population. The producer
+also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
+directory and binds its SHA-256 in the manifest. The validator checks that
+authenticated seven-column ledger, including all 192 immutable row identities,
+before deriving applicability; result `disposition` text cannot add, remove or
+reclassify a declared gap. Smaller fixtures must explicitly use
+`profile=self-test` and can never satisfy production profile acceptance.
 A bounded, deterministic
 `residual.tsv` is emitted beside `applicability.tsv`; it retains at most 256
 diagnostic rows and joins fallback attribution to fixture, function, target,
@@ -307,10 +315,13 @@ are unchanged.
 `CODEGEN_FALLBACK_CENSUS version=1 records=N` precedes the versioned
 `CODEGEN_FALLBACK_FUNCTION` rows. Each row includes target, allocator, function
 ID, reason, stage and opcode ID (`UINT32_MAX` means no applicable opcode).
-`source_hex` and `function_hex` encode the exact UTF-8 bytes as lowercase hex;
-`-` denotes an empty string. This preserves spaces, tabs, quotes and non-ASCII
-names without ambiguous escaping. `fallback-functions.tsv` retains the rows
-keyed to their exact matrix configurations.
+The retained `fallback-functions.tsv` telemetry also carries `version=1 row=N`;
+the authenticated inner row must equal the TSV row key. `source_hex` and
+`function_hex` encode non-empty exact UTF-8 bytes as lowercase hex. The `-`
+sentinel is invalid for a retained function record, so missing source/function
+identity cannot be admitted as fallback evidence. This preserves spaces, tabs,
+quotes and non-ASCII names without ambiguous escaping. The rows remain keyed
+to their exact matrix configurations.
 
 The census requires one supported record-count marker, valid fields, strictly
 increasing function IDs within its single-TU invocation, and exactly as many
