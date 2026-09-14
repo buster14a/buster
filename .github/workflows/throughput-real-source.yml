@@ -277,6 +277,8 @@ jobs:
             local path=$1 identity=$2
             shift 2
             manifest_begin "$path" runtime "$identity" runtime
+            # The manifest must retain this placeholder for admission-time binding.
+            # shellcheck disable=SC2016
             manifest_argument "$path" runtime '$EXECUTABLE'
             manifest_file "$path" /lib64/ld-linux-x86-64.so.2
             for library in "$@"; do runtime_file "$library" "$path"; done
