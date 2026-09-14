@@ -7048,7 +7048,8 @@ struct MachineX64CandidateRow
 #include <buster/lib/compiler/codegen/machine_x86_64_predicate.c>
 
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                              bool position_independent, bool assume_validated, bool predicate_residency, MachineSelectionModule* module)
+                                                              bool position_independent, bool assume_validated, bool predicate_residency,
+                                                              bool preserve_debug_values, MachineSelectionModule* module)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
@@ -8683,6 +8684,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     if (select_predicates) machine_x64_select_predicates(arena, &result.function);
     result.mutable_virtual_register_count = machine_function_compact_virtual_registers(arena, &result.function);
     if (result.mutable_virtual_register_count == UINT32_MAX)
+    {
+        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+    }
+    if (preserve_debug_values &&
+        !machine_debug_values_build(arena, program, function, &result.function, selector.value_stack_slots, selector.value_indirect_slots))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }

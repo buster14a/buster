@@ -849,6 +849,37 @@ struct MachineLineMark
     u32 row;
     u32 instruction;
 };
+
+typedef enum MachineDebugValueKind
+{
+    MACHINE_DEBUG_VALUE_UNAVAILABLE,
+    MACHINE_DEBUG_VALUE_REFERENCE,
+    MACHINE_DEBUG_VALUE_CONSTANT,
+    MACHINE_DEBUG_VALUE_PIECEWISE,
+    MACHINE_DEBUG_VALUE_KIND_COUNT,
+} MachineDebugValueKind;
+
+// Debug-only canonical-local identity carried through selection. Instruction
+// spans remain canonical IDs, while references name finished MIR identities;
+// scheduling therefore neither copies nor rewrites this cold side table.
+typedef struct MachineDebugValue MachineDebugValue;
+struct MachineDebugValue
+{
+    MachineRef pieces[2];
+    u64 constant;
+    IrLocalId local;
+    u32 first_instruction;
+    u32 instruction_count;
+    u8 kind;
+    u8 piece_count;
+    u8 piece_sizes[2];
+    // Logical byte width. Register mappings reject architectural aliases
+    // which cannot describe the whole value (notably an x86 ZMM as XMM).
+    u8 value_size;
+    u8 reserved[3];
+};
+
+BUSTER_CT_CHECK(sizeof(MachineDebugValue) == 40);
 BUSTER_CT_CHECK(sizeof(MachineLineMark) == 8);
 
 typedef struct MachineSwitchCase MachineSwitchCase;
@@ -1293,6 +1324,7 @@ struct MachineFunction
     u8* call_target_references;
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
+    MachineDebugValue* debug_values;
     MachineVaArg* va_args;
     MachineInlineAssembly* inline_assemblies;
     MachineInlineAssemblyOperand* inline_assembly_operands;
@@ -1311,6 +1343,7 @@ struct MachineFunction
     u32 call_target_count;
     u32 switch_case_count;
     u32 line_mark_count;
+    u32 debug_value_count;
     u32 va_arg_count;
     u32 inline_assembly_count;
     u32 inline_assembly_operand_count;
@@ -1842,11 +1875,13 @@ BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena
 // retain registers across rows. Stack-only source selection keeps its existing
 // integer bridges; explicit MASK MIR remains valid in every machine allocator.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                             bool position_independent, bool predicate_residency, MachineSelectionModule* module);
+                                                                               bool position_independent, bool predicate_residency,
+                                                                               bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent, bool assume_validated, bool predicate_residency, MachineSelectionModule* module);
+                                                                            bool position_independent, bool assume_validated, bool predicate_residency,
+                                                                            bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                            bool assume_validated);
+                                                                            bool assume_validated, bool preserve_debug_values);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);

@@ -4718,7 +4718,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
                     if (function->state == IR_FUNCTION_DECLARATION) continue;
                     MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
                     BUSTER_TEST(arguments, selected.supported);
-                    MachineSelectResult stack_selected = machine_select_validated_canonical_function(temporary.arena, program, function, target, false, false, 0);
+                    MachineSelectResult stack_selected = machine_select_validated_canonical_function(temporary.arena, program, function, target, false, false, false, 0);
                     BUSTER_TEST(arguments, stack_selected.supported && stack_selected.function.predicate_absence_certified);
                     if (stack_selected.supported)
                     {

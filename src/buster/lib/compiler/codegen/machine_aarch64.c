@@ -5901,7 +5901,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                               bool assume_validated)
+                                                               bool assume_validated, bool preserve_debug_values)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
@@ -7194,6 +7194,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         result.mutable_virtual_register_count = machine_function_compact_virtual_registers(arena, &result.function);
         if (result.mutable_virtual_register_count == UINT32_MAX)
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+        }
+        if (preserve_debug_values &&
+            !machine_debug_values_build(arena, program, function, &result.function, selector.value_stack_slots, selector.value_indirect_slots))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }

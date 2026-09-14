@@ -2089,7 +2089,7 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctio
             {
                 (*pairs)[value].registers[part] = machine_builder_virtual_register(builder, (MachineVirtualRegister){
                     .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                    .typed_origin = IR_ID_UNDERLYING_INVALID});
+                    .typed_origin = value});
             }
         }
     }
@@ -2620,6 +2620,226 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena,
     function->virtual_register_count = new_count;
     scratch_end(scratch);
     return mutable_count;
+}
+
+BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make(IrProgram* program, IrFunction* ir_function,
+                                                                MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                                u32 const* value_indirect_slots, IrLocalId local, IrValueId value,
+                                                                u32 first_instruction, u32 instruction_count)
+{
+    MachineDebugValue result = {
+        .local = local,
+        .first_instruction = first_instruction,
+        .instruction_count = instruction_count,
+        .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+    };
+    IrType* type = value.value < ir_function->value_count
+                       ? ir_type_from_id(&program->types, ir_function->values[value.value].canonical_type)
+                       : 0;
+    u64 constant = 0;
+    bool indirect = value.value < ir_function->value_count && value_indirect_slots && value_indirect_slots[value.value] != UINT32_MAX;
+    if (type && type->layout.resolved && type->layout.size <= UINT8_MAX)
+    {
+        result.value_size = (u8)type->layout.size;
+    }
+    if (!indirect && type && type->layout.resolved && type->layout.size <= 8 && ir_constant_index_value(ir_function, value, &constant))
+    {
+        result.kind = MACHINE_DEBUG_VALUE_CONSTANT;
+        result.constant = constant;
+    }
+    else if (!indirect && value.value < ir_function->value_count)
+    {
+        u32 registers[2] = {UINT32_MAX, UINT32_MAX};
+        u32 register_count = 0;
+        for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
+        {
+            if (machine_function->virtual_registers[register_index].typed_origin == value.value)
+            {
+                if (register_count < BUSTER_ARRAY_LENGTH(registers))
+                {
+                    registers[register_count] = register_index;
+                }
+                register_count += 1;
+            }
+        }
+        if (register_count == 1)
+        {
+            // The debug register namespaces exposed by the consumers describe
+            // at most a 128-bit vector. Do not mislabel a wider allocated value.
+            if (result.value_size && result.value_size <= 16)
+            {
+                result.kind = MACHINE_DEBUG_VALUE_REFERENCE;
+                result.pieces[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[0]);
+                result.piece_count = 1;
+                result.piece_sizes[0] = result.value_size;
+            }
+        }
+        else if (register_count == 2 && type && type->layout.resolved && type->layout.size > 8 && type->layout.size <= 16)
+        {
+            result.kind = MACHINE_DEBUG_VALUE_PIECEWISE;
+            result.pieces[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[0]);
+            result.pieces[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[1]);
+            result.piece_count = 2;
+            result.piece_sizes[0] = 8;
+            result.piece_sizes[1] = (u8)(type->layout.size - 8);
+        }
+        else if (!register_count && value_stack_slots && value_stack_slots[value.value] != UINT32_MAX)
+        {
+            result.kind = MACHINE_DEBUG_VALUE_REFERENCE;
+            result.pieces[0] = machine_ref_make(MACHINE_REF_STACK_SLOT, value_stack_slots[value.value]);
+            result.piece_count = 1;
+            result.piece_sizes[0] = result.value_size;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* program, IrFunction* ir_function,
+                                                     MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                     u32 const* value_indirect_slots)
+{
+    bool result = arena && program && ir_function && machine_function;
+    u64 capacity64 = result ? (u64)ir_function->debug_local_count * ((u64)ir_function->block_count + 1u) : 0;
+    result = result && capacity64 <= UINT32_MAX;
+    if (result && ir_function->debug_local_count)
+    {
+        u32 capacity = (u32)capacity64;
+        MachineDebugValue* values = arena_allocate(arena, MachineDebugValue, capacity ? capacity : 1);
+        IrValueId* local_places = arena_allocate(arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
+        IrInstructionId* local_definitions = arena_allocate(arena, IrInstructionId, ir_function->local_count ? ir_function->local_count : 1);
+        memset(local_places, 0xff, sizeof(*local_places) * ir_function->local_count);
+        memset(local_definitions, 0xff, sizeof(*local_definitions) * ir_function->local_count);
+        for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = ir_function->instructions + instruction_index;
+            if (instruction->result.value < ir_function->value_count && instruction->canonical_local.value < ir_function->local_count &&
+                local_places[instruction->canonical_local.value].value == IR_ID_UNDERLYING_INVALID)
+            {
+                local_places[instruction->canonical_local.value] = instruction->result;
+                if (instruction->opcode != IR_OPCODE_LOCAL && instruction->opcode != IR_OPCODE_ARGUMENT)
+                {
+                    local_definitions[instruction->canonical_local.value].value = instruction_index;
+                }
+            }
+        }
+        u32 value_count = 0;
+        u32 parameter_ordinal = 0;
+        for (u32 debug_index = 0; debug_index < ir_function->debug_local_count; debug_index += 1)
+        {
+            IrDebugLocal* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId place = local->id.value < ir_function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+            if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID && ir_function->published_cfg)
+            {
+                for (u32 parameter_index = 0; parameter_index < ir_function->published_cfg->parameter_count; parameter_index += 1)
+                {
+                    IrCfgParameter const* parameter = ir_function->published_cfg->parameters + parameter_index;
+                    if (parameter->canonical_local.value == local->id.value)
+                    {
+                        place = parameter->value;
+                        break;
+                    }
+                }
+            }
+            if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = ir_function->instructions + instruction_index;
+                    if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < ir_function->value_count &&
+                        instruction->immediate_count && instruction->immediates && instruction->immediates[0] == parameter_ordinal)
+                    {
+                        place = instruction->result;
+                        break;
+                    }
+                }
+            }
+            if (place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
+                {
+                    MachineVirtualRegister const* reg = machine_function->virtual_registers + register_index;
+                    if (reg->typed_origin == place.value && (reg->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE))
+                    {
+                        // A promoted place is only an implementation cell.
+                        // Canonical block-local SSA values carry the source
+                        // variable's changing value and constant provenance.
+                        place = IR_VALUE_ID_INVALID;
+                        break;
+                    }
+                }
+            }
+            parameter_ordinal += local->is_parameter;
+            bool emitted = false;
+            if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= ir_function->local_count)
+            {
+                for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = ir_function->instructions + instruction_index;
+                    if (instruction->result.value < ir_function->value_count && instruction->canonical_local.value == local->id.value &&
+                        (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+                    {
+                        place = instruction->result;
+                        break;
+                    }
+                }
+            }
+            if (place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrInstructionId first = local->id.value < ir_function->local_count ? local_definitions[local->id.value] : IR_INSTRUCTION_ID_INVALID;
+                u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
+                values[value_count++] = machine_debug_value_make(program, ir_function, machine_function, value_stack_slots,
+                                                                 value_indirect_slots, local->id, place,
+                                                                 first.value < ir_function->instruction_count ? first.value : UINT32_MAX,
+                                                                 instruction_count);
+                emitted = true;
+            }
+            else
+            {
+                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                {
+                    IrBlock* block = ir_function->blocks + block_index;
+                    IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
+                    IrValueId value = block->local_values && local->id.value < ir_function->local_count
+                                          ? block->local_values[local->id.value]
+                                          : IR_VALUE_ID_INVALID;
+                    if (value.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        for (u32 parameter_index = 0; parameter_index < published->parameter_count; parameter_index += 1)
+                        {
+                            IrCfgParameter const* parameter = ir_function->published_cfg->parameters + published->parameter_offset + parameter_index;
+                            if (parameter->canonical_local.value == local->id.value)
+                            {
+                                value = parameter->value;
+                                break;
+                            }
+                        }
+                    }
+                    if (value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count)
+                    {
+                        values[value_count++] = machine_debug_value_make(program, ir_function, machine_function, value_stack_slots,
+                                                                         value_indirect_slots, local->id, value,
+                                                                         block->first_instruction.value, published->instruction_count);
+                        emitted = true;
+                    }
+                }
+            }
+            if (!emitted)
+            {
+                values[value_count++] = (MachineDebugValue){
+                    .local = local->id,
+                    .first_instruction = UINT32_MAX,
+                    .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+                };
+            }
+        }
+        machine_function->debug_values = values;
+        machine_function->debug_value_count = value_count;
+    }
+    return result;
 }
 
 // Loop-depth frequency classes from the finished block structure. A
@@ -3453,7 +3673,8 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         (function->edge_copy_source_count && !function->edge_copy_sources) ||
         (function->switch_case_count && !function->switch_cases) || (function->immediate_count && !function->immediates) ||
         (function->stack_slot_count && !function->stack_slot_sizes) || (function->call_target_count && !function->call_targets) ||
-        (function->line_mark_count && !function->line_marks) || (function->va_arg_count && !function->va_args) ||
+        (function->line_mark_count && !function->line_marks) || (function->debug_value_count && !function->debug_values) ||
+        (function->va_arg_count && !function->va_args) ||
         (function->inline_assembly_count && !function->inline_assemblies) ||
         (function->inline_assembly_operand_count && !function->inline_assembly_operands) ||
         (function->inline_assembly_relocation_count && !function->inline_assembly_relocations))
@@ -3521,6 +3742,36 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         if (row > function->instruction_count || (mark_index && row < function->line_marks[mark_index - 1u].row))
         {
             result.operand = mark_index;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
+        }
+    }
+    for (u32 debug_index = 0; debug_index < function->debug_value_count; debug_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + debug_index;
+        bool valid = value->kind < MACHINE_DEBUG_VALUE_KIND_COUNT && value->local.value != IR_ID_UNDERLYING_INVALID &&
+                     (value->first_instruction == UINT32_MAX ||
+                      (value->instruction_count && value->first_instruction <= UINT32_MAX - value->instruction_count));
+        if (value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
+        {
+            u32 expected_count = value->kind == MACHINE_DEBUG_VALUE_REFERENCE ? 1u : 2u;
+            valid = valid && value->piece_count == expected_count;
+            for (u32 piece_index = 0; piece_index < value->piece_count && valid; piece_index += 1)
+            {
+                MachineRef piece = value->pieces[piece_index];
+                MachineRefKind kind = machine_ref_kind(piece);
+                u32 payload = machine_ref_payload(piece);
+                valid = (kind == MACHINE_REF_VIRTUAL_REGISTER && payload < function->virtual_register_count) ||
+                        (kind == MACHINE_REF_STACK_SLOT && payload < function->stack_slot_count);
+                valid = valid && (value->kind != MACHINE_DEBUG_VALUE_PIECEWISE || value->piece_sizes[piece_index]);
+            }
+        }
+        else
+        {
+            valid = valid && !value->piece_count;
+        }
+        if (!valid)
+        {
+            result.operand = debug_index;
             MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
         }
     }
@@ -4413,7 +4664,7 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                                     bool assume_validated, bool position_independent, bool predicate_residency,
-                                                                                    MachineSelectionModule* module)
+                                                                                    bool preserve_debug_values, MachineSelectionModule* module)
 {
     MachineSelectResult result = {.failed_opcode = IR_OPCODE_COUNT};
     if (arena && program && function)
@@ -4423,8 +4674,8 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
         {
             switch (target.cpu_arch)
             {
-                break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, predicate_residency, module);
-                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
+                break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, predicate_residency, preserve_debug_values, module);
+                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated, preserve_debug_values);
                 break; default: BUSTER_TODO();
             }
         }
@@ -4439,13 +4690,15 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
 
 MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, false, false, true, 0);
+    return machine_select_canonical_function_internal(arena, program, function, target, false, false, true, false, 0);
 }
 
 MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                bool position_independent, bool predicate_residency, MachineSelectionModule* module)
+                                                                bool position_independent, bool predicate_residency, bool preserve_debug_values,
+                                                                MachineSelectionModule* module)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, predicate_residency, module);
+    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, predicate_residency,
+                                                      preserve_debug_values, module);
 }
 
 MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target)
