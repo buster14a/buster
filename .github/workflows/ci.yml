@@ -164,6 +164,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
           "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
 
       - name: Install mold
         id: mold
@@ -361,7 +362,7 @@ jobs:
             "$driver" generate --cc clang --config Release --linker DEFAULT
           fi
           "$driver" build --config Release -t ide
-          "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle
+          "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
 
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}

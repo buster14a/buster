@@ -1,0 +1,781 @@
+name: Issue 408 worker qualification
+
+# Temporary, branch-scoped qualification for the already-landed native case
+# workers. This file is removed before the production rollout is submitted.
+on:
+  push:
+    branches:
+      - 'sol/408-qualification-20260914'
+    paths:
+      - '.github/workflows/ci-408-worker-qualification.yml'
+
+concurrency:
+  group: issue-408-worker-qualification-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: ${{ github.event_name == 'push' && github.server_url == 'https://github.com' && github.repository == 'buster14a/buster' && github.ref_name == 'sol/408-qualification-20260914' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64 differential qualification
+            runner: ubuntu-26.04
+            os: linux
+            arch: x86_64
+          - name: Linux AArch64 differential qualification
+            runner: ubuntu-26.04-arm
+            os: linux
+            arch: aarch64
+          - name: macOS x86-64 differential qualification
+            runner: macos-26-intel
+            os: macos
+            arch: x86_64
+          - name: macOS AArch64 differential qualification
+            runner: macos-26
+            os: macos
+            arch: aarch64
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Record qualification context
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/buster-ci"
+          mkdir -p "$evidence/differential" "$evidence/resources" "$evidence/comparison" "$evidence/logs" "$evidence/cohorts" "$evidence/build-policy"
+          {
+            printf 'source_commit=%s\n' "$(git rev-parse --verify HEAD)"
+            printf 'source_tree=%s\n' "$(git rev-parse --verify 'HEAD^{tree}')"
+            printf 'runner=%s os=%s arch=%s\n' '${{ matrix.runner }}' '${{ matrix.os }}' '${{ matrix.arch }}'
+            printf 'logical_cpus=%s\n' "$(getconf _NPROCESSORS_ONLN)"
+            for variable in BUSTER_TEST_JOBS BUSTER_SINGLE_THREADED CMAKE_BUILD_PARALLEL_LEVEL CTEST_PARALLEL_LEVEL MAKEFLAGS NINJAFLAGS OMP_NUM_THREADS; do
+              if value="$(printenv "$variable" 2>/dev/null)"; then
+                printf '%s=%s\n' "$variable" "$value"
+              else
+                printf '%s=<unset>\n' "$variable"
+              fi
+            done
+            uname -a
+            clang --version
+            cmake --version
+            ninja --version
+            if [[ -r /proc/cpuinfo ]]; then
+              grep -m1 -E '^(model name|Hardware)' /proc/cpuinfo || true
+            fi
+            if command -v sysctl >/dev/null 2>&1; then
+              sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+              sysctl -n hw.logicalcpu 2>/dev/null || true
+              sysctl -n hw.memsize 2>/dev/null || true
+            fi
+            for control in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events; do
+              if [[ -r "$control" ]]; then
+                printf '%s=' "$control"
+                tr '\n' ' ' < "$control"
+                printf '\n'
+              fi
+            done
+          } 2>&1 | tee "$evidence/host.txt"
+
+      - name: Qualify one, two and four requested workers
+        id: qualification
+        shell: bash
+        env:
+          CFLAGS: -Wno-invalid-feature-combination
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/buster-ci"
+          driver="$RUNNER_TEMP/buster-build-408"
+          active_child=""
+          active_observed=""
+          mkdir -p "$evidence/differential" "$evidence/resources" "$evidence/comparison" "$evidence/logs" "$evidence/cohorts" "$evidence/build-policy"
+
+          rotations=("1 2 4" "2 4 1" "4 1 2")
+          python3 - "${rotations[@]}" <<'PY'
+          import sys
+
+          rotations = [tuple(map(int, value.split())) for value in sys.argv[1:]]
+          expected = [(1, 2, 4), (2, 4, 1), (4, 1, 2)]
+          if rotations != expected or len(set(rotations)) != 3:
+              raise SystemExit(f"invalid worker-order rotations: {rotations!r}")
+          for index, rotation in enumerate(rotations):
+              if rotation != rotations[0][index:] + rotations[0][:index]:
+                  raise SystemExit(f"worker order is not rotation {index}: {rotation!r}")
+          for position in range(3):
+              if {rotation[position] for rotation in rotations} != {1, 2, 4}:
+                  raise SystemExit(f"position {position + 1} is not budget-balanced")
+          PY
+          if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'invalid github.run_attempt: %s\n' "$RUN_ATTEMPT" >&2
+            exit 1
+          fi
+          first_rotation="$(((RUN_ATTEMPT - 1) % 3))"
+
+          start_us="$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver" 2>&1 | tee "$evidence/producer.log"
+          "$driver" generate --cc clang --config Release --linker DEFAULT 2>&1 | tee -a "$evidence/producer.log"
+          "$driver" build --config Release -t ide 2>&1 | tee -a "$evidence/producer.log"
+          end_us="$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
+          printf 'producer_wall_us=%s\n' "$((end_us - start_us))" | tee "$evidence/producer-metrics.txt"
+
+          for policy in CMakeCache.txt compile_commands.json build.ninja build-Release.ninja CMakeFiles/common.ninja CMakeFiles/rules.ninja CMakeFiles/impl-Release.ninja; do
+            if [[ ! -f "build/$policy" ]]; then
+              printf 'missing generated build policy: build/%s\n' "$policy" >&2
+              exit 1
+            fi
+            mkdir -p "$evidence/build-policy/$(dirname "$policy")"
+            cp "build/$policy" "$evidence/build-policy/$policy"
+          done
+          ninja -C build -f build-Release.ninja -t commands > "$evidence/build-policy/ninja-release-commands.txt"
+          if [[ ! -s "$evidence/build-policy/ninja-release-commands.txt" ]]; then
+            printf 'empty Ninja Release command inventory\n' >&2
+            exit 1
+          fi
+
+          "$driver" test_differential --self-test 2>&1 | tee "$evidence/self-test.log"
+
+          sample_tree()
+          {
+            ps -Ao pid=,ppid=,rss=,lstart= | awk -v root="$1" -v observed="$2" '
+              {
+                pid[NR] = $1
+                parent[NR] = $2
+                rss[NR] = $3
+                started[NR] = $4 " " $5 " " $6 " " $7 " " $8
+              }
+              END {
+                member[root] = 1
+                changed = 1
+                while (changed) {
+                  changed = 0
+                  for (i = 1; i <= NR; i += 1) {
+                    if (member[parent[i]] && !member[pid[i]]) {
+                      member[pid[i]] = 1
+                      changed = 1
+                    }
+                  }
+                }
+                direct = 0
+                descendants = 0
+                total_rss = 0
+                for (i = 1; i <= NR; i += 1) {
+                  if (member[pid[i]]) {
+                    total_rss += rss[i]
+                    if (pid[i] != root) { descendants += 1 }
+                    if (parent[i] == root) { direct += 1 }
+                    if (pid[i] != root) { print pid[i] "\t" started[i] >> observed }
+                  }
+                }
+                printf "%d %d %d\n", direct, descendants, total_rss
+              }'
+          }
+
+          identity_alive()
+          {
+            local pid="$1"
+            local started="$2"
+            local current
+            current="$(ps -p "$pid" -o lstart= 2>/dev/null | awk '{$1=$1; print}')" || return 1
+            [[ "$current" == "$started" ]]
+          }
+
+          signal_identities()
+          {
+            local signal="$1"
+            local identities="$2"
+            local pid started
+            [[ -f "$identities" ]] || return 0
+            while IFS=$'\t' read -r pid started; do
+              if identity_alive "$pid" "$started"; then
+                kill "-$signal" "$pid" 2>/dev/null || true
+              fi
+            done < "$identities"
+          }
+
+          cleanup_active()
+          {
+            local status="$?"
+            local pass
+            trap - EXIT INT TERM
+            if [[ -n "$active_child" ]]; then
+              kill -TERM "$active_child" 2>/dev/null || true
+              signal_identities TERM "$active_observed"
+              for pass in 1 2 3 4 5 6 7 8 9 10; do
+                if ! kill -0 "$active_child" 2>/dev/null; then break; fi
+                sleep 1
+              done
+              kill -KILL "$active_child" 2>/dev/null || true
+              signal_identities KILL "$active_observed"
+              wait "$active_child" 2>/dev/null || true
+            fi
+            exit "$status"
+          }
+          trap cleanup_active EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          run_corpus()
+          {
+            local repetition="$1"
+            local position="$2"
+            local requested="$3"
+            local order="$4"
+            local output="$evidence/differential/repetition-$repetition/jobs-$requested"
+            local log="$evidence/logs/repetition-$repetition/jobs-$requested.log"
+            local metrics="$evidence/resources/repetition-$repetition/jobs-$requested.txt"
+            local observed_log="$evidence/resources/repetition-$repetition/jobs-$requested-observed.tmp"
+            local observed="$evidence/resources/repetition-$repetition/jobs-$requested-observed-pids.txt"
+            local survivors="$evidence/resources/repetition-$repetition/jobs-$requested-surviving-pids.txt"
+            local start_us command_pid peak_direct peak_descendants peak_rss_kib samples
+            local direct descendants rss_kib status end_us effective valid eligibility current pid started
+            local observed_count survivor_count
+            mkdir -p "$(dirname "$log")" "$(dirname "$metrics")"
+            : > "$observed_log"
+            start_us="$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
+            "$driver" test_differential --ide build/Release/ide --out "$output" --sanitize-oracle --jobs "$requested" > "$log" 2>&1 &
+            command_pid="$!"
+            active_child="$command_pid"
+            active_observed="$observed_log"
+            peak_direct=0
+            peak_descendants=0
+            peak_rss_kib=0
+            samples=0
+            while kill -0 "$command_pid" 2>/dev/null; do
+              read -r direct descendants rss_kib <<< "$(sample_tree "$command_pid" "$observed_log")"
+              if ((direct > peak_direct)); then peak_direct="$direct"; fi
+              if ((descendants > peak_descendants)); then peak_descendants="$descendants"; fi
+              if ((rss_kib > peak_rss_kib)); then peak_rss_kib="$rss_kib"; fi
+              samples="$((samples + 1))"
+              if ((samples % 60 == 0)); then
+                printf 'DIFFERENTIAL_QUALIFICATION_PROGRESS repetition=%s position=%s requested=%s samples=%s peak_direct=%s peak_descendants=%s peak_rss_kib=%s\n' \
+                  "$repetition" "$position" "$requested" "$samples" "$peak_direct" "$peak_descendants" "$peak_rss_kib"
+              fi
+              sleep 1
+            done
+            set +e
+            wait "$command_pid"
+            status="$?"
+            set -e
+            active_child=""
+            active_observed=""
+            end_us="$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
+            sort -u "$observed_log" > "$observed"
+            rm "$observed_log"
+            : > "$survivors"
+            while IFS=$'\t' read -r pid started; do
+              if identity_alive "$pid" "$started"; then
+                printf '%s\t%s\n' "$pid" "$started" >> "$survivors"
+              fi
+            done < "$observed"
+            observed_count="$(wc -l < "$observed" | tr -d ' ')"
+            survivor_count="$(wc -l < "$survivors" | tr -d ' ')"
+            if [[ "$survivor_count" != 0 ]]; then
+              printf 'descendant cleanup failure repetition=%s requested=%s survivors=%s\n' \
+                "$repetition" "$requested" "$survivor_count" >&2
+              while IFS=$'\t' read -r pid started; do
+                printf 'survivor pid=%s observed_start=%s current=' "$pid" "$started" >&2
+                ps -p "$pid" -o pid=,ppid=,state=,lstart=,command= >&2 || true
+              done < "$survivors"
+            fi
+            cat "$log"
+            if [[ ! -f "$output/manifest.txt" || ! -f "$output/processes.tsv" ]]; then
+              printf 'missing differential evidence for requested=%s\n' "$requested" >&2
+              return 1
+            fi
+            effective="$(sed -n 's/.*jobs_effective=\([0-9][0-9]*\).*/\1/p' "$output/manifest.txt")"
+            eligibility=eligible
+            if [[ ! "$effective" =~ ^[1-9][0-9]*$ ]]; then
+              eligibility=invalid-effective-worker-count
+            elif ((effective > requested)); then
+              eligibility=invalid-effective-exceeds-requested
+            elif ((requested == 1 && effective != 1)); then
+              eligibility=invalid-one-worker-reproduction
+            elif ((requested > 1 && effective == 1)); then
+              eligibility=ineligible-parallel-budget-clamped-to-one
+            elif ((effective < requested)); then
+              eligibility=eligible-quota-clamp-above-one
+            fi
+            {
+              printf 'repetition=%s\n' "$repetition"
+              printf 'position=%s\n' "$position"
+              printf 'order=%s\n' "${order// /,}"
+              printf 'requested=%s\n' "$requested"
+              printf 'effective=%s\n' "$effective"
+              printf 'platform_eligibility=%s\n' "$eligibility"
+              printf 'exit_status=%s\n' "$status"
+              printf 'wall_us=%s\n' "$((end_us - start_us))"
+              printf 'sample_interval_ms=1000\n'
+              printf 'samples=%s\n' "$samples"
+              printf 'peak_direct_children_sampled=%s\n' "$peak_direct"
+              printf 'peak_descendants_sampled=%s\n' "$peak_descendants"
+              printf 'peak_process_tree_rss_kib_sampled=%s\n' "$peak_rss_kib"
+              printf 'peak_process_tree_rss_accounting=sum of sampled per-process RSS; shared pages are not deduplicated\n'
+              printf 'observed_descendant_identities=%s\n' "$observed_count"
+              printf 'surviving_descendant_identities_after_wait=%s\n' "$survivor_count"
+              awk -F '\t' '
+                NR > 1 {
+                  fields = split($1, path, "/")
+                  phase = path[fields]
+                  count[phase] += 1
+                  elapsed[phase] += $6
+                  total_count += 1
+                  total_elapsed += $6
+                }
+                END {
+                  printf "process_count=%d process_elapsed_us=%d\n", total_count, total_elapsed
+                  printf "compile_count=%d compile_elapsed_us=%d\n", count["compile"], elapsed["compile"]
+                  printf "link_count=%d link_elapsed_us=%d\n", count["link"], elapsed["link"]
+                  printf "run_count=%d run_elapsed_us=%d\n", count["run"], elapsed["run"]
+                }' "$output/processes.tsv"
+            } | tee "$metrics"
+            valid=1
+            if [[ "$status" != 0 ]]; then valid=0; fi
+            if [[ "$eligibility" == invalid-* || "$eligibility" == ineligible-* ]]; then valid=0; fi
+            if [[ "$peak_direct" != "$effective" ]]; then valid=0; fi
+            if [[ "$survivor_count" != 0 ]]; then valid=0; fi
+            [[ "$valid" == 1 ]]
+          }
+
+          run_cancellation_control()
+          {
+            local output="$evidence/differential/cancellation-control"
+            local log="$evidence/logs/cancellation-control.log"
+            local observed_log="$evidence/resources/cancellation-control-observed.tmp"
+            local observed="$evidence/resources/cancellation-control-observed-pids.txt"
+            local survivors="$evidence/resources/cancellation-control-surviving-pids.txt"
+            local metrics="$evidence/resources/cancellation-control.txt"
+            local command_pid direct descendants rss_kib status pass pid started
+            local descendant_observed=0 term_delivered=0 forced_kill=0 observed_count survivor_count
+            : > "$observed_log"
+            "$driver" test_differential --ide build/Release/ide --out "$output" --sanitize-oracle --jobs 4 > "$log" 2>&1 &
+            command_pid="$!"
+            active_child="$command_pid"
+            active_observed="$observed_log"
+            for pass in {1..300}; do
+              if ! kill -0 "$command_pid" 2>/dev/null; then break; fi
+              read -r direct descendants rss_kib <<< "$(sample_tree "$command_pid" "$observed_log")"
+              if ((descendants > 0)); then
+                descendant_observed=1
+                break
+              fi
+              sleep 0.2
+            done
+            if kill -TERM "$command_pid" 2>/dev/null; then
+              term_delivered=1
+            fi
+            for pass in 1 2 3 4 5 6 7 8 9 10; do
+              if ! kill -0 "$command_pid" 2>/dev/null; then break; fi
+              sleep 1
+            done
+            if kill -0 "$command_pid" 2>/dev/null; then
+              forced_kill=1
+              kill -KILL "$command_pid" 2>/dev/null || true
+            fi
+            set +e
+            wait "$command_pid"
+            status="$?"
+            set -e
+            active_child=""
+            active_observed=""
+            sort -u "$observed_log" > "$observed"
+            rm "$observed_log"
+            : > "$survivors"
+            while IFS=$'\t' read -r pid started; do
+              if identity_alive "$pid" "$started"; then
+                printf '%s\t%s\n' "$pid" "$started" >> "$survivors"
+              fi
+            done < "$observed"
+            observed_count="$(wc -l < "$observed" | tr -d ' ')"
+            survivor_count="$(wc -l < "$survivors" | tr -d ' ')"
+            {
+              printf 'requested=4\n'
+              printf 'descendant_observed_before_term=%s\n' "$descendant_observed"
+              printf 'term_delivered=%s\n' "$term_delivered"
+              printf 'observed_descendant_identities=%s\n' "$observed_count"
+              printf 'exit_status_after_term=%s\n' "$status"
+              printf 'expected_term_exit_status=143\n'
+              printf 'forced_root_kill=%s\n' "$forced_kill"
+              printf 'surviving_descendant_identities_after_wait=%s\n' "$survivor_count"
+            } | tee "$metrics"
+            if [[ "$survivor_count" != 0 ]]; then
+              while IFS=$'\t' read -r pid started; do
+                printf 'cancellation survivor pid=%s observed_start=%s current=' "$pid" "$started" >&2
+                ps -p "$pid" -o pid=,ppid=,state=,lstart=,command= >&2 || true
+              done < "$survivors"
+              signal_identities TERM "$survivors"
+              sleep 1
+              signal_identities KILL "$survivors"
+            fi
+            [[ "$descendant_observed" == 1 && "$term_delivered" == 1 && "$status" == 143 && "$forced_kill" == 0 && "$survivor_count" == 0 ]]
+          }
+
+          # Each job attempt contains every budget in every position. The one
+          # producer, source, runner image, toolchain and flags stay fixed;
+          # repeated corpus inputs and filesystem state are intentionally warm.
+          run_failures=0
+          for repetition in 1 2 3; do
+            rotation_index="$(((first_rotation + repetition - 1) % 3))"
+            worker_order="${rotations[$rotation_index]}"
+            printf 'workflow_run_attempt=%s\nrepetition=%s\nrotation_index=%s\norder=%s\ncache_state=one producer reused; source/toolchain/flags fixed; differential inputs and filesystem warm; cyclic order balances each budget across all three positions\nsafe_platform_eligibility=requested budgets 2 and 4 must each admit more than one effective worker; quota clamping for requested 4 remains eligible only above one\n' \
+              "$RUN_ATTEMPT" "$repetition" "$rotation_index" "${worker_order// /,}" \
+              > "$evidence/cohorts/repetition-$repetition.txt"
+            read -r -a requested_order <<< "$worker_order"
+            position=0
+            for requested in "${requested_order[@]}"; do
+              position="$((position + 1))"
+              if ! run_corpus "$repetition" "$position" "$requested" "$worker_order"; then
+                printf 'DIFFERENTIAL_QUALIFICATION_FAIL repetition=%s position=%s requested=%s\n' \
+                  "$repetition" "$position" "$requested"
+                run_failures="$((run_failures + 1))"
+              fi
+            done
+          done
+
+          cancellation_failed=0
+          if ! run_cancellation_control; then
+            printf 'DIFFERENTIAL_CANCELLATION_CONTROL_FAIL\n'
+            cancellation_failed=1
+          fi
+
+          comparison_failed=0
+          if ! python3 - "$evidence" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import re
+          import sys
+
+          evidence = Path(sys.argv[1])
+
+          PROCESS_HEADER = b"prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us"
+          PATH_OPTION_PREFIXES = (b"-I", b"-L", b"-o", b"-F", b"-isysroot", b"--sysroot=")
+
+          def path_delimiter(value):
+              return value < 0 or value <= 0x20 or value in b"'\"`=,:;()[]{}<>"
+
+          def path_option_prefix(data, index):
+              return any(index >= len(prefix) and data[index - len(prefix):index] == prefix
+                         for prefix in PATH_OPTION_PREFIXES)
+
+          def root_occurrence(data, index, root_length):
+              end = index + root_length
+              before = data[index - 1] if index else -1
+              after = data[end] if end < len(data) else -1
+              before_is_boundary = index == 0 or path_delimiter(before) or path_option_prefix(data, index)
+              after_is_boundary = end == len(data) or after <= 0x20 or after in b"/\\'\"`=,:;()[]{}<>"
+              return before_is_boundary and after_is_boundary
+
+          def normalize_embedded_root(data, root_bytes):
+              if not root_bytes:
+                  raise RuntimeError("empty evidence output root")
+              pieces = []
+              cursor = 0
+              while cursor < len(data):
+                  index = data.find(root_bytes, cursor)
+                  if index < 0:
+                      pieces.append(data[cursor:])
+                      cursor = len(data)
+                  elif root_occurrence(data, index, len(root_bytes)):
+                      pieces.extend((data[cursor:index], b"$OUTPUT"))
+                      cursor = index + len(root_bytes)
+                  else:
+                      pieces.append(data[cursor:index + len(root_bytes)])
+                      cursor = index + len(root_bytes)
+              if not pieces:
+                  return data
+              return b"".join(pieces)
+
+          def normalize_path(value, root_bytes):
+              return normalize_embedded_root(value, root_bytes)
+
+          def process_line_parts(raw, path, line_number):
+              if raw.endswith(b"\r\n"):
+                  return raw[:-2], b"\r\n"
+              if raw.endswith(b"\n"):
+                  return raw[:-1], b"\n"
+              if raw.endswith(b"\r"):
+                  raise RuntimeError(f"unsupported process line ending: {path}:{line_number}")
+              return raw, b""
+
+          def canonical_processes(data, path, root_bytes):
+              lines = data.splitlines(keepends=True)
+              if not lines:
+                  raise RuntimeError(f"empty process report: {path}")
+              normalized = []
+              header_seen = False
+              for line_number, raw in enumerate(lines, 1):
+                  body, ending = process_line_parts(raw, path, line_number)
+                  if body == PROCESS_HEADER:
+                      if line_number != 1 or header_seen:
+                          raise RuntimeError(f"duplicate or misplaced process header: {path}:{line_number}")
+                      header_seen = True
+                      normalized.append(raw)
+                      continue
+                  if body.startswith(b"prefix\t"):
+                      raise RuntimeError(f"malformed process header: {path}:{line_number}")
+                  fields = body.split(b"\t")
+                  if len(fields) != 6 or not fields[0]:
+                      raise RuntimeError(f"malformed process row: {path}:{line_number}")
+                  for field_index in (1, 2, 3, 4):
+                      if not re.fullmatch(rb"[0-9]+", fields[field_index]):
+                          raise RuntimeError(f"malformed process status: {path}:{line_number}")
+                  if int(fields[1]) > 4 or fields[4] not in (b"0", b"1"):
+                      raise RuntimeError(f"invalid process status: {path}:{line_number}")
+                  if fields[5] != b"elapsed_us" and not re.fullmatch(rb"[0-9]+", fields[5]):
+                      raise RuntimeError(f"malformed process elapsed field: {path}:{line_number}")
+                  fields[0] = normalize_path(fields[0], root_bytes)
+                  fields[5] = b"elapsed_us"
+                  normalized.append(b"\t".join(fields) + ending)
+              return b"".join(normalized)
+
+          def normalize_argv(data, root_bytes, path):
+              if not data.endswith(b"\0"):
+                  raise RuntimeError(f"unterminated argv evidence: {path}")
+              tokens = data.split(b"\0")
+              if tokens[-1] != b"":
+                  raise RuntimeError(f"malformed argv evidence: {path}")
+              for index, token in enumerate(tokens[:-1]):
+                  tokens[index] = normalize_path(token, root_bytes)
+              return b"\0".join(tokens)
+
+          def mutate_first_process_field(data, path, field_index, value):
+              lines = data.splitlines(keepends=True)
+              changed = False
+              result = []
+              for line_number, raw in enumerate(lines, 1):
+                  body, ending = process_line_parts(raw, path, line_number)
+                  if body == PROCESS_HEADER:
+                      result.append(raw)
+                      continue
+                  fields = body.split(b"\t")
+                  if len(fields) != 6:
+                      raise RuntimeError(f"malformed process row: {path}:{line_number}")
+                  if not changed:
+                      fields[field_index] = value
+                      changed = True
+                  result.append(b"\t".join(fields) + ending)
+              if not changed:
+                  raise RuntimeError(f"process report has no data rows: {path}")
+              return b"".join(result)
+
+          def canonical(root):
+              if root.is_symlink() or not root.is_dir():
+                  raise RuntimeError(f"missing evidence output root: {root}")
+              rows = {}
+              root_bytes = str(root).encode()
+              for path in sorted(root.rglob("*")):
+                  if path.is_symlink():
+                      raise RuntimeError(f"refusing evidence link: {path}")
+                  if not path.is_file() or path.name in ("program", "subject.o"):
+                      continue
+                  relative = path.relative_to(root).as_posix()
+                  data = path.read_bytes()
+                  if path.suffix == ".argv":
+                      data = normalize_argv(data, root_bytes, path)
+                  elif path.name == "processes.tsv":
+                      data = canonical_processes(data, path, root_bytes)
+                  else:
+                      data = normalize_embedded_root(data, root_bytes)
+                  if relative == "manifest.txt":
+                      data, replacements = re.subn(rb"(?m)^jobs_requested=[0-9]+ jobs_effective=[0-9]+( cases=[0-9]+)$",
+                                                   rb"jobs_requested=N jobs_effective=N\1", data)
+                      if replacements != 1:
+                          raise RuntimeError(f"missing or duplicate jobs identity: {path}")
+                  rows[relative] = hashlib.sha256(data).hexdigest()
+              for required in ("manifest.txt", "processes.tsv"):
+                  if required not in rows:
+                      raise RuntimeError(f"missing required evidence file: {root / required}")
+              return rows
+
+          def listing(population):
+              return "".join(f"{digest}  {name}\n" for name, digest in sorted(population.items())).encode()
+
+          populations = {}
+          for repetition in (1, 2, 3):
+              for requested in (1, 2, 4):
+                  key = (repetition, requested)
+                  population = canonical(evidence / "differential" / f"repetition-{repetition}" / f"jobs-{requested}")
+                  populations[key] = population
+
+          baseline_key = (1, 1)
+          baseline = populations[baseline_key]
+          baseline_root = evidence / "differential" / "repetition-1" / "jobs-1"
+          baseline_listing = listing(baseline)
+          baseline_digest = hashlib.sha256(baseline_listing).hexdigest()
+          baseline_directory = evidence / "comparison" / "repetition-1" / "jobs-1"
+          baseline_directory.mkdir(parents=True, exist_ok=True)
+          (baseline_directory / "canonical.sha256").write_bytes(baseline_listing)
+
+          process_paths = sorted(baseline_root.rglob("processes.tsv"))
+          if not process_paths:
+              raise RuntimeError(f"missing process report for comparison controls: {baseline_root}")
+          process_path = process_paths[0]
+          process_relative = process_path.relative_to(baseline_root).as_posix()
+          process_bytes = process_path.read_bytes()
+          process_lines = process_bytes.splitlines(keepends=True)
+          first_status = None
+          for line_number, raw in enumerate(process_lines, 1):
+              body, _ = process_line_parts(raw, process_path, line_number)
+              if body != PROCESS_HEADER:
+                  fields = body.split(b"\t")
+                  if len(fields) == 6:
+                      first_status = fields[2]
+                      break
+          if first_status is None:
+              raise RuntimeError(f"process report has no data rows for comparison controls: {process_path}")
+          status_value = b"1" if first_status != b"1" else b"0"
+          status_variant = canonical_processes(
+              mutate_first_process_field(process_bytes, process_path, 2, status_value),
+              process_path, str(baseline_root).encode())
+          status_population = dict(baseline)
+          status_population[process_relative] = hashlib.sha256(status_variant).hexdigest()
+          status_differences = [name for name in sorted(set(baseline) | set(status_population))
+                                if baseline.get(name) != status_population.get(name)]
+          if not status_differences:
+              raise RuntimeError("status-difference negative control was normalized away")
+
+          outside_path = b"/outside/issue-408-comparison-control"
+          if normalize_path(outside_path, str(baseline_root).encode()) != outside_path:
+              raise RuntimeError("outside-path negative control unexpectedly matches output root")
+          outside_variant = canonical_processes(
+              mutate_first_process_field(process_bytes, process_path, 0, outside_path),
+              process_path, str(baseline_root).encode())
+          outside_population = dict(baseline)
+          outside_population[process_relative] = hashlib.sha256(outside_variant).hexdigest()
+          outside_differences = [name for name in sorted(set(baseline) | set(outside_population))
+                                 if baseline.get(name) != outside_population.get(name)]
+          if not outside_differences:
+              raise RuntimeError("outside-path negative control was normalized away")
+          (evidence / "comparison" / "negative-controls.txt").write_text(
+              "status_difference=fail-closed\n"
+              "outside_path_difference=fail-closed\n"
+              f"process_file={process_relative}\n")
+          print("DIFFERENTIAL_COMPARISON_NEGATIVE_CONTROL name=status-difference status=pass")
+          print("DIFFERENTIAL_COMPARISON_NEGATIVE_CONTROL name=outside-path-difference status=pass")
+          failures = []
+          for key, candidate in populations.items():
+              candidate_listing = listing(candidate)
+              candidate_digest = hashlib.sha256(candidate_listing).hexdigest()
+              directory = evidence / "comparison" / f"repetition-{key[0]}" / f"jobs-{key[1]}"
+              directory.mkdir(parents=True, exist_ok=True)
+              matches = baseline == candidate
+              (directory / "summary.txt").write_text(
+                  f"repetition={key[0]}\nrequested={key[1]}\nfiles={len(candidate)}\n"
+                  f"canonical_mapping_sha256={candidate_digest}\n"
+                  f"baseline_files={len(baseline)}\nbaseline_mapping_sha256={baseline_digest}\n"
+                  f"matches_baseline={'true' if matches else 'false'}\n")
+              mismatch_listing = directory / "canonical-mismatch.sha256"
+              difference = directory / "difference.txt"
+              mismatch_listing.unlink(missing_ok=True)
+              difference.unlink(missing_ok=True)
+              if not matches:
+                  names = sorted(set(baseline) | set(candidate))
+                  differences = [name for name in names if baseline.get(name) != candidate.get(name)]
+                  mismatch_listing.write_bytes(candidate_listing)
+                  difference.write_text("".join(
+                      f"file={name}\nbaseline={baseline.get(name, 'MISSING')}\ncandidate={candidate.get(name, 'MISSING')}\n"
+                      for name in differences))
+                  failures.append(key)
+                  for name in differences[:50]:
+                      print(f"DIFFERENTIAL_EQUIVALENCE_FAIL repetition={key[0]} jobs={key[1]} file={name}")
+                  continue
+              print(f"DIFFERENTIAL_EQUIVALENCE baseline=1/1 repetition={key[0]} jobs={key[1]} files={len(baseline)} status=pass")
+          if failures:
+              raise SystemExit(1)
+          PY
+          then
+            comparison_failed=1
+          fi
+
+          retention_report="$RUNNER_TEMP/issue-408-retention-estimate.txt"
+          python3 - "$evidence" <<'PY' > "$retention_report"
+          from pathlib import Path
+          import sys
+
+          evidence = Path(sys.argv[1])
+          files = retained_files = generated_files = 0
+          bytes_total = bytes_retained = bytes_generated = 0
+          for path in evidence.rglob("*"):
+              if not path.is_file():
+                  continue
+              size = path.stat().st_size
+              files += 1
+              bytes_total += size
+              relative = path.relative_to(evidence).parts
+              generated = len(relative) > 1 and relative[0] == "differential" and relative[-1] in ("program", "subject.o")
+              if generated:
+                  generated_files += 1
+                  bytes_generated += size
+              else:
+                  retained_files += 1
+                  bytes_retained += size
+          print(f"raw_files={files} raw_bytes={bytes_total}")
+          print(f"generated_files_excluded={generated_files} generated_bytes_excluded={bytes_generated}")
+          print(f"semantic_files_planned={retained_files} semantic_bytes_planned={bytes_retained}")
+          print("inventory_scope=qualification evidence before this report and result/summary files")
+          print("retention_policy=verified archive retains every semantic file and excludes only differential program/subject.o outputs")
+          PY
+          tee "$evidence/retention-estimate.txt" < "$retention_report"
+          [[ "$run_failures" == 0 && "$cancellation_failed" == 0 && "$comparison_failed" == 0 ]]
+
+      - name: Record qualification execution
+        id: execution
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ${{ matrix.runner }}
+          BUSTER_CI_REQUIRED: qualification
+          BUSTER_CI_REPRO: Run the exact workflow revision on the named hosted image; use one CI-style Clang Release producer, three position-balanced repetitions with fresh outputs for test_differential --sanitize-oracle --jobs 1, 2 and 4, and the bounded cancellation control.
+        run: python3 tools/ci_summary.py
+
+      - name: Pack qualification evidence
+        id: pack
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/issue-408-upload"
+          python3 -c 'from pathlib import Path; path = Path("${{ runner.temp }}/issue-408-upload/native-ci-logs.tar.gz"); print(f"CI_EVIDENCE archive_bytes={path.stat().st_size}")'
+
+      - name: Retain qualification evidence
+        if: ${{ always() && steps.pack.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-408-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-408-upload/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record qualification packaging failure
+        if: ${{ always() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success' }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ${{ matrix.runner }}
+          BUSTER_CI_REQUIRED: qualification pack
+          BUSTER_CI_REPRO: Run the exact workflow revision on the named hosted image; require the execution controls and verified evidence pack; a pack failure retains raw semantic evidence as a fallback.
+        run: python3 tools/ci_summary.py
+
+      - name: Retain unpacked qualification evidence
+        if: ${{ always() && steps.pack.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-408-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-unpacked
+          path: |
+            ${{ runner.temp }}/buster-ci/
+            !${{ runner.temp }}/buster-ci/differential/**/program
+            !${{ runner.temp }}/buster-ci/differential/**/subject.o
+          if-no-files-found: error
+          retention-days: 14
