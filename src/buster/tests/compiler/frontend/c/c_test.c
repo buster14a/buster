@@ -5409,6 +5409,136 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     CParseResult aarch64_macos_builtins_parse = c_parse(arguments->arena, aarch64_macos_builtins);
     BUSTER_TEST(arguments, aarch64_macos_builtins_parse.diagnostic_count == 0);
 
+    // #640: __is_target_os answers for the selected compilation target. The
+    // conditions below use nothing but the target queries, so a wrong answer
+    // reaches #error instead of being masked by a target macro that happens to
+    // be defined; the probe declaration that follows proves the guarded region
+    // was actually preprocessed rather than skipped. Spellings and aliases are
+    // clang 18's, read back with -target and -E: Windows answers `win32` too,
+    // a Darwin target answers `darwin` beside its own name, and an Android
+    // target answers `linux` because its triple's OS is Linux and `android` is
+    // the environment, never an OS spelling.
+    typedef struct CTargetOsQueryCase CTargetOsQueryCase;
+    struct CTargetOsQueryCase
+    {
+        Target target;
+        String8 source;
+        String8 probe;
+    };
+    CTargetOsQueryCase target_os_cases[] = {
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            .source = S8("#if !__is_target_os(windows) || !__is_target_os(win32)\n"
+                         "#error windows target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(linux) || __is_target_os(macos) || __is_target_os(macosx) || "
+                         "__is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error windows target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_arch(x86_64) || __is_target_vendor(apple)\n"
+                         "#error windows target arch or vendor\n"
+                         "#endif\n"
+                         "int windows_os_probe;\n"),
+            .probe = S8("windows_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID, .os_version_major = 35},
+            .source = S8("#if !__is_target_os(linux)\n"
+                         "#error android target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(android) || __is_target_os(windows) || __is_target_os(win32) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi)\n"
+                         "#error android target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_arch(arm64) || !__is_target_arch(aarch64) || __is_target_vendor(apple)\n"
+                         "#error android target arch or vendor\n"
+                         "#endif\n"
+                         "int android_os_probe;\n"),
+            .probe = S8("android_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            .source = S8("#if !__is_target_os(linux)\n"
+                         "#error linux target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(windows) || __is_target_os(win32) || __is_target_os(macos) || "
+                         "__is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error linux target cross-OS\n"
+                         "#endif\n"
+                         "int linux_os_probe;\n"),
+            .probe = S8("linux_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+            .source = S8("#if !__is_target_os(macos) || !__is_target_os(macosx) || !__is_target_os(darwin)\n"
+                         "#error macos target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(ios) || __is_target_os(linux) || __is_target_os(windows) || "
+                         "__is_target_os(win32) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error macos target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_vendor(apple) || !__is_target_arch(arm64)\n"
+                         "#error macos target arch or vendor\n"
+                         "#endif\n"
+                         "int macos_os_probe;\n"),
+            .probe = S8("macos_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_IOS},
+            .source = S8("#if !__is_target_os(ios) || !__is_target_os(darwin)\n"
+                         "#error ios target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(macos) || __is_target_os(macosx) || __is_target_os(linux) || "
+                         "__is_target_os(windows) || __is_target_os(win32) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error ios target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_vendor(apple)\n"
+                         "#error ios target vendor\n"
+                         "#endif\n"
+                         "int ios_os_probe;\n"),
+            .probe = S8("ios_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_UEFI},
+            .source = S8("#if !__is_target_os(uefi)\n"
+                         "#error uefi target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(windows) || __is_target_os(win32) || __is_target_os(linux) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin)\n"
+                         "#error uefi target cross-OS\n"
+                         "#endif\n"
+                         "int uefi_os_probe;\n"),
+            .probe = S8("uefi_os_probe"),
+        },
+        {
+            // A freestanding target has no triple OS, so it answers nothing.
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_FREESTANDING},
+            .source = S8("#if __is_target_os(linux) || __is_target_os(windows) || __is_target_os(win32) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin) || "
+                         "__is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error freestanding target OS\n"
+                         "#endif\n"
+                         "int freestanding_os_probe;\n"),
+            .probe = S8("freestanding_os_probe"),
+        },
+    };
+    for (u32 os_case = 0; os_case < BUSTER_ARRAY_LENGTH(target_os_cases); os_case += 1)
+    {
+        CTargetOsQueryCase target_os_case = target_os_cases[os_case];
+        CPreprocessResult target_os_queries =
+            c_preprocess(arguments->arena, target_os_case.source, (CPreprocessOptions){.target = target_os_case.target});
+        BUSTER_TEST(arguments, target_os_queries.diagnostic_count == 0);
+        // `int <probe>;` plus the end-of-file token: the probe is only in the
+        // stream when the guarded region above was actually preprocessed.
+        BUSTER_TEST(arguments, target_os_queries.token_count == 4);
+        if (target_os_queries.token_count == 4)
+        {
+            c_test_preprocessed_token(arguments, &result, target_os_queries, 1, C_TOKEN_IDENTIFIER, target_os_case.probe);
+        }
+        CParseResult target_os_parse = c_parse(arguments->arena, target_os_queries);
+        BUSTER_TEST(arguments, target_os_parse.diagnostic_count == 0);
+    }
+
     // #639: __has_attribute answers for the GNU attributes this frontend
     // implements, in every spelling the parser accepts, and denies one it only
     // steps over. `returns_twice` is the control for that: clang implements it

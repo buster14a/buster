@@ -5305,6 +5305,49 @@ BUSTER_C_INTERNAL bool c_conditional_c_attribute_supported(void)
     return false;
 }
 
+// `__is_target_os` asks about the selected compilation target, and answers the
+// spellings clang accepts for it rather than this compiler's internal enum
+// names. The alias sets were read back out of clang 18 with `-target` and
+// `-E`, which parses the spelling as a triple's OS component and compares it
+// with the target's own: a Windows target answers `windows` and `win32`; a
+// Darwin target answers `darwin` as well as its own `macos`/`macosx` or `ios`;
+// UEFI answers `uefi`.
+//
+// Android is the case that cannot be answered from the enum name. Its triple
+// carries Linux as the OS and Android as the environment, so clang answers
+// `linux` for an Android target and never answers `android` at all -- the
+// spelling is not an OS. A freestanding target has no triple OS and answers
+// nothing (#640).
+BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, String8 spelling)
+{
+    bool result;
+    switch (os)
+    {
+    case OPERATING_SYSTEM_LINUX:
+    case OPERATING_SYSTEM_ANDROID:
+        result = string_equal(spelling, S8("linux"));
+        break;
+    case OPERATING_SYSTEM_MACOS:
+        result = string_equal(spelling, S8("macos")) || string_equal(spelling, S8("macosx")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_IOS:
+        result = string_equal(spelling, S8("ios")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_WINDOWS:
+        result = string_equal(spelling, S8("windows")) || string_equal(spelling, S8("win32"));
+        break;
+    case OPERATING_SYSTEM_UEFI:
+        result = string_equal(spelling, S8("uefi"));
+        break;
+    case OPERATING_SYSTEM_FREESTANDING:
+    case OPERATING_SYSTEM_COUNT:
+    default:
+        result = false;
+        break;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                                          CPreprocessTokenNode* first, CPreprocessOptions* options, String8 including_path,
                                                          CIncludeSearchOrigin including_origin)
@@ -5429,13 +5472,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
                                                             string_equal(argument, S8("ebpf"))
                                                       : string_equal(argument, S8("x86_64")))
-                        : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
-                                                       ? string_equal(argument, S8("macos"))
-                                                   : options->target.os == OPERATING_SYSTEM_IOS
-                                                       ? string_equal(argument, S8("ios"))
-                                                   : options->target.os == OPERATING_SYSTEM_LINUX
-                                                       ? string_equal(argument, S8("linux"))
-                                                       : false)
+                        : is_target_os          ? c_conditional_target_os_supported(options->target.os, argument)
                         : is_target_vendor      ? (options->target.os == OPERATING_SYSTEM_MACOS || options->target.os == OPERATING_SYSTEM_IOS) &&
                                                       string_equal(argument, S8("apple"))
                         : is_target_environment ? false
