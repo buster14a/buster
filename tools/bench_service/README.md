@@ -1,12 +1,14 @@
-# Native queue and installed-input materializer for #437
+# Native queued execution service boundary for #437
 
 This is a local, one-shot control tool with a deterministic fake worker and a
 real installed-input materialization boundary and a Linux containment
-supervisor. It is not yet the dedicated-host service: its fixed installed
-helper returns `unsupported`. It does not execute source, change server
-configuration, listen on a socket, authenticate callers, measure performance
-or qualify a 9700X. Do not close #437 or accept compiler performance changes
-because these tests pass.
+supervisor. Linux also provides a long-lived local service endpoint: it owns
+the single queue writer, authenticates Unix peer credentials, and dispatches
+bounded public control frames. The fixed installed helper still returns
+`unsupported` until the build-driver recipe handoff below is reviewed. This
+does not change server configuration, measure performance or qualify a 9700X.
+Do not close #437 or accept compiler performance changes because these tests
+pass.
 
 ## Linux installed worker boundary
 
@@ -17,7 +19,9 @@ timeout. The service constructs one fixed `/usr/bin/systemd-run --scope`
 invocation of `/usr/local/libexec/buster-bench-service worker-unit`.
 `worker-unit` currently exits unsupported after proving it inherited the exact
 stable lease open-file description. This cannot be interpreted as a successful
-performance result.
+validation or performance result. The service endpoint may admit and track
+this request, but it will retain the resulting failure evidence rather than
+turning an unimplemented executor into success.
 
 For a fresh real job the server acquires the cooperative host lease before FIFO
 reservation and materialization. It keeps that descriptor while the scoped
@@ -351,6 +355,47 @@ deterministic attempt entry. A recorded configuration failure also permits an
 unopenable root because workspace creation occurs only after the attempt record.
 All other missing-attempt combinations retain active admission.
 
+## Local authenticated service
+
+`serve` is the operator-owned service loop. It opens the private queue once and
+never lets clients provide installed roots, workspace roots, lease paths,
+resource values, unit names or executable paths. Those six values are fixed at
+startup by the deployment command; the client protocol carries only a named
+recipe request and bounded status/cancel/log operations. The endpoint is a
+Linux `AF_UNIX` `SOCK_SEQPACKET` socket. Each connection contains exactly one
+frame, is capped at the existing 536-byte control limit, and must have the
+daemon's effective UID and GID through `SO_PEERCRED`. The service refuses the
+materialize, workspace-reconcile and worker-run operations over this endpoint;
+the worker configuration is service-owned.
+
+The service checks for a queued `validate-buster-v1` request after each control
+frame and runs the existing supervisor with that fixed configuration. A queued
+real request therefore follows the same lease-before-materialization and
+cleanup/recovery path as the local worker command. Until the build-driver
+handoff is installed, its terminal result is an explicit unsupported/failure
+record. The synchronous worker path remains listener-free: it does not accept,
+poll or process client traffic during preparation, measurement or cleanup.
+`STATUS`, `RESULT`, `LOGS` and `CANCEL` sent while the worker owns the host are
+therefore deferred until the worker returns; a client may hit its bounded I/O
+deadline and must retry. A queued `CANCEL` is acknowledged only after the
+single queue owner durably appends it at a safe boundary. The live cancellation
+path during a worker is the operator's `SIGTERM` or `SIGINT`, which cancels and
+exits the service after durable cleanup. A disconnected client never releases
+the queue or host lease.
+
+```sh
+./build.sh bench_service serve STATE SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU
+./build.sh bench_service rpc SOCKET <request-frame >response-frame
+```
+
+`SOCKET`'s parent must already be a private, operator-provisioned directory;
+the service refuses an existing socket, final symlink, non-private parent or
+replacement inode. The bind uses a scoped restrictive umask and validates the
+pathname inode before listening and again after setup. On shutdown it removes
+only the socket inode it created and reports cleanup or replacement failures.
+Windows and macOS compile the bounded codec but report `unsupported` for
+`serve` and `rpc`; no network listener is added there.
+
 ## CLI
 
 Use a pre-provisioned durable private directory, represented here by `STATE`:
@@ -382,9 +427,12 @@ because stdout or the response channel failed.
 ## Bounded one-frame control protocol
 
 `bench_service protocol STATE` accepts exactly one frame followed by EOF on
-stdin, and writes one response frame. It is a local pipe codec, not a daemon,
-network transport, timeout policy or authentication service. Human CLI commands
-use this same dispatcher.
+stdin, and writes one response frame through the queue opened by that process.
+It remains a local pipe codec without caller authentication and retains the
+fake recipes for deterministic regression work. `bench_service rpc SOCKET`
+forwards schema-2 frames to the authenticated Linux service; that endpoint
+advertises `service-recipes=validate-buster-v1`, rejects fake and supervisor
+internals, and performs the only service queue mutation.
 
 The 24-byte header is `BQP1` (four bytes), schema (u32), operation (u32), payload
 length (u32 <=512), correlation (u64). Control schema 2 adds operations 9..11 and the
@@ -426,7 +474,8 @@ status/result response at the top-level error field.
 | Idempotency and FIFO admission | Same retry after lost stdout/after-sync acknowledgment; conflicting keys; principal separation; queued cancellation; pending and lifetime exhaustion |
 | Explicit active ownership | Persisted fake reservation token; stale-token rejection; one-active through cancellation/cleaning; restart at every phase |
 | Recovery without exactly-once fiction | Poisoned I/O handles; partial/full reservation boundaries; reconciliation required before reuse; recorded outcome preserved |
-| Bounded CLI/control operations | Same dispatcher for CLI and binary frames; truncation/version/length/numeric validation; bounded journal-event pagination |
+| Bounded CLI/control operations | Same dispatcher for CLI, pipe and authenticated socket frames; truncation/version/length/numeric validation; bounded journal-event pagination |
+| Authenticated service loop | One queue writer; bounded Unix seqpacket; peer UID/GID check; service-owned recipe/paths/resources |
 | Separate execution outcome/validity | Successful, failed, cancelled and interrupted fake jobs remain not-evaluated |
 | Lease before installed inputs | `bq_worker_run`; busy inherited-lease fixture leaves the FIFO job queued with no attempt |
 | Durable scoped identity/recovery | intent plus immutable invocation/cgroup-inode binding; same-boot exact termination, same-name reuse quarantine, reboot interruption without contradicting a durable outcome |
@@ -442,11 +491,11 @@ belong in the PR evidence; this document is not an assertion that unrun gates
 passed.
 
 Still outside this slice: build/validate/compare execution and real measurement;
-live-systemd/polkit/deployment qualification; transport/authentication;
-multi-client service loop; retention migration; qualification, A/A, physical
-9700X acceptance and real result bundles. This slice contains repository-only
-systemd/cgroup supervision, inherited lease handling and boot/unit
-reconciliation with injected fixtures; those are not claims about a deployed
-host.
+live-systemd/polkit/deployment qualification; transport credentials beyond the
+local peer UID/GID boundary; retention migration; qualification, A/A, physical
+9700X acceptance and real result bundles. This slice contains a repository-only
+authenticated service loop plus systemd/cgroup supervision, inherited lease
+handling and boot/unit reconciliation with injected fixtures; these are not
+claims about a deployed host.
 No credentials, server settings, benchmark thresholds, production runner
 ownership or parent-issue closure are authorized by this implementation.

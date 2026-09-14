@@ -1566,11 +1566,134 @@ BUSTER_GLOBAL_LOCAL void bq_test_protocol_mutations(void)
         bq_packet(&request, BQ_OP_LOGS, 10, body, 16);
         BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
         BQ_CHECK(queue->state.sequence == sequence);
+        BqRequest real = bq_test_real_request(88);
+        bq_packet(&request, BQ_OP_SUBMIT, 11, real.bytes, real.size);
+        queue->fault.fail_write_at = 1;
+        BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_IO && queue->poisoned);
         bq_test_end(&fixture);
     }
 }
 
 #ifdef __linux__
+BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
+{
+    u32 public_operations[] = {BQ_OP_CAPABILITIES, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT, BQ_OP_CANCEL, BQ_OP_LOGS};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(public_operations); i += 1)
+    {
+        BQ_CHECK(bq_transport_public_operation(public_operations[i]) == BQ_OK);
+    }
+    u32 private_operations[] = {BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE, BQ_OP_MATERIALIZE,
+                                BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(private_operations); i += 1)
+    {
+        BQ_CHECK(bq_transport_public_operation(private_operations[i]) == BQ_BAD_REQUEST);
+    }
+    bq_worker_cancel_signal = 0;
+    bq_worker_shutdown_signal = 0;
+    bq_worker_cancel_handler(SIGTERM);
+    BQ_CHECK(bq_worker_cancel_signal && bq_worker_shutdown_signal);
+    bq_worker_cancel_signal = 0;
+    bq_worker_shutdown_signal = 0;
+    bq_worker_cancel_handler(SIGINT);
+    BQ_CHECK(bq_worker_cancel_signal && bq_worker_shutdown_signal);
+    bq_worker_cancel_signal = bq_worker_shutdown_signal = 0;
+    BQ_CHECK(bq_transport_queue_admissible(&(BqQueue){0}));
+    BqRequest fake = bq_test_request(7, false), real = {0};
+    String8 fields[BQ_FIELD_COUNT] = {S8("test-principal"), S8("request-7"), S8("validate-buster-v1"),
+                                      S8("1111111111111111111111111111111111111111"),
+                                      S8("2222222222222222222222222222222222222222")};
+    BQ_CHECK(bq_request_make(fields, &real) == BQ_OK);
+    BqPacket packet;
+    bq_packet(&packet, BQ_OP_SUBMIT, 7, fake.bytes, fake.size);
+    BQ_CHECK(bq_transport_public_request(packet.bytes, packet.size) == BQ_UNSUPPORTED);
+    bq_packet(&packet, BQ_OP_SUBMIT, 8, real.bytes, real.size);
+    BQ_CHECK(bq_transport_public_request(packet.bytes, packet.size) == BQ_OK);
+    BqQueue incompatible = {0};
+    incompatible.state.job_count = 1;
+    incompatible.state.jobs[0].phase = BQ_QUEUED;
+    incompatible.state.jobs[0].request = fake;
+    BQ_CHECK(!bq_transport_queue_admissible(&incompatible));
+    incompatible.state.jobs[0].phase = BQ_FINISHED;
+    BQ_CHECK(bq_transport_queue_admissible(&incompatible));
+#ifdef __linux__
+    BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1 workload=not-admitted") != NULL);
+    char close_root[BQ_PATH_CAP + 1] = "/tmp/buster-transport-close-XXXXXX";
+    bool close_root_ok = bq_test_mkdtemp_physical(close_root, sizeof(close_root));
+    BQ_CHECK(close_root_ok);
+    if (close_root_ok)
+    {
+        int parent = open(close_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int replacement = parent >= 0 ? openat(parent, "socket", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+        struct stat info = {0};
+        bool inspected = replacement >= 0 && fstat(replacement, &info) == 0;
+        BqTransportEndpoint endpoint = {.listener = -1, .parent = parent, .device = inspected ? info.st_dev : 0,
+                                        .inode = inspected ? info.st_ino : 0};
+        snprintf(endpoint.leaf, sizeof(endpoint.leaf), "%s", "socket");
+        BQ_CHECK(inspected && bq_transport_endpoint_close(&endpoint) == BQ_CONFIGURATION_MISMATCH);
+        if (replacement >= 0) close(replacement);
+        int verify_parent = open(close_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int verify = verify_parent >= 0 ? openat(verify_parent, "socket", O_RDONLY | O_CLOEXEC) : -1;
+        BQ_CHECK(verify >= 0);
+        if (verify >= 0) close(verify);
+        if (verify_parent >= 0)
+        {
+            BQ_CHECK(unlinkat(verify_parent, "socket", 0) == 0);
+            close(verify_parent);
+        }
+        rmdir(close_root);
+    }
+    int packets[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, packets) == 0)
+    {
+        u8 short_frame = 0;
+        u8 received[BQ_CONTROL_CAP];
+        u32 received_size = 0;
+        BQ_CHECK(send(packets[0], &short_frame, 1, MSG_NOSIGNAL) == 1);
+        BQ_CHECK(bq_transport_receive(packets[1], received, &received_size) == BQ_BAD_REQUEST && received_size == 0);
+        u64 before = bq_worker_monotonic_milliseconds();
+        BQ_CHECK(bq_transport_receive(packets[1], received, &received_size) == BQ_IO &&
+                 bq_worker_monotonic_milliseconds() - before >= BQ_TRANSPORT_IO_MILLISECONDS);
+        close(packets[0]);
+        close(packets[1]);
+    }
+    else
+    {
+        BQ_CHECK(errno == EPERM || errno == EAFNOSUPPORT || errno == ENOSYS);
+    }
+    int stream[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, stream) == 0)
+    {
+        int flags = fcntl(stream[0], F_GETFL);
+        bool full = flags >= 0 && fcntl(stream[0], F_SETFL, flags | O_NONBLOCK) == 0;
+        char fill[4096] = {0};
+        for (u32 i = 0; full && i < 4096; i += 1)
+        {
+            ssize_t count = send(stream[0], fill, sizeof(fill), MSG_NOSIGNAL);
+            if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            {
+                break;
+            }
+            if (count < 0)
+            {
+                full = false;
+            }
+        }
+        BqPacket response;
+        bq_packet(&response, BQ_OP_CAPABILITIES, 0, NULL, 0);
+        u64 before = bq_worker_monotonic_milliseconds();
+        BQ_CHECK(full && bq_transport_send(stream[0], response.bytes, response.size) == BQ_IO &&
+                 bq_worker_monotonic_milliseconds() - before >= BQ_TRANSPORT_IO_MILLISECONDS);
+        close(stream[0]);
+        close(stream[1]);
+    }
+    else
+    {
+        BQ_CHECK(errno == EPERM || errno == EAFNOSUPPORT || errno == ENOSYS);
+    }
+#endif
+}
+
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_alarm_count;
 
 BUSTER_GLOBAL_LOCAL void bq_test_alarm_handler(int signal_number)
@@ -2671,6 +2794,7 @@ int main(int argc, char** argv)
     bq_test_cancelled_failure_recovery();
     bq_test_cleanup_bounds_and_failure();
 #ifdef __linux__
+    bq_test_transport_boundaries();
     bq_test_worker_deadlines();
     bq_test_worker_success_and_tree_cleanup();
     bq_test_worker_term_grace();

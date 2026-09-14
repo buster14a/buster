@@ -21,6 +21,7 @@ typedef struct BqSystemdContext
 } BqSystemdContext;
 
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_cancel_signal;
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_shutdown_signal;
 
 BUSTER_GLOBAL_LOCAL u64 bq_worker_monotonic_milliseconds(void)
 {
@@ -62,7 +63,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_sleep_until(u64 deadline)
 
 BUSTER_GLOBAL_LOCAL void bq_worker_cancel_handler(int signal_number)
 {
-    (void)signal_number;
+    if (signal_number == SIGTERM || signal_number == SIGINT)
+    {
+        bq_worker_shutdown_signal = 1;
+    }
     bq_worker_cancel_signal = 1;
 }
 
@@ -1326,6 +1330,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         cancel_action.sa_handler = bq_worker_cancel_handler;
         sigemptyset(&cancel_action.sa_mask);
         bq_worker_cancel_signal = 0;
+        bq_worker_shutdown_signal = 0;
         term_handler = sigaction(SIGTERM, &cancel_action, &old_term) == 0;
         interrupt_handler = term_handler && sigaction(SIGINT, &cancel_action, &old_interrupt) == 0;
         if (!interrupt_handler) error = BQ_IO;
