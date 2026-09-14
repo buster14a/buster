@@ -1,5 +1,5 @@
-/* Queue/materializer software for #437. No host execution, transport or benchmark
- * qualification lives here. queue.c owns persistence and all state changes;
+/* Queue/materializer/supervisor software for #437. No recipe execution,
+ * transport or benchmark qualification lives here. queue.c owns persistence and all state changes;
  * protocol.c is the bounded control boundary. See README.md before extending.
  */
 #ifndef BUSTER_BENCH_SERVICE_QUEUE_H
@@ -13,7 +13,8 @@
 #include <errno.h>
 
 #define BQ_SCHEMA_LEGACY 1u
-#define BQ_SCHEMA 2u
+#define BQ_SCHEMA_MATERIALIZATION 2u
+#define BQ_SCHEMA 3u
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 #define BQ_JOB_CAP 64u
@@ -30,7 +31,9 @@ typedef enum BqError
     BQ_CORRUPT, BQ_RECONCILIATION_REQUIRED, BQ_NOT_FOUND,
     BQ_UNSUPPORTED, BQ_INVALID_TRANSITION, BQ_RECIPE_MISMATCH,
     BQ_SOURCE_MISMATCH, BQ_WORKSPACE_MISMATCH, BQ_CLEANUP_FAILED,
-    BQ_CONFIGURATION_MISMATCH
+    BQ_CONFIGURATION_MISMATCH, BQ_WORKER_MISMATCH, BQ_RESOURCE_MISMATCH,
+    BQ_WORKER_FAILED, BQ_WORKER_OOM_FAILURE, BQ_WORKER_TIMEOUT,
+    BQ_WORKER_INTERRUPTED, BQ_BOOT_INTERRUPTED, BQ_WORKER_CANCEL_SIGNAL
 } BqError;
 
 typedef enum BqPhase

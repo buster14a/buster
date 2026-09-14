@@ -189,7 +189,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
 {
     BqError error = BQ_OK;
     BqJob* job = NULL;
-    if ((schema != BQ_SCHEMA_LEGACY && schema != BQ_SCHEMA) || (state->journal_schema && schema < state->journal_schema) ||
+    if ((schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA) || (state->journal_schema && schema < state->journal_schema) ||
         sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE)
     {
         error = BQ_INVALID_TRANSITION;
@@ -270,8 +270,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
             }
             else if (kind == BQ_CANCEL)
             {
+                /* A real worker has not crossed its terminal reconciliation
+                 * boundary while FINALIZING/CLEANING remains active. */
                 bool cancellable = job->phase < BQ_FINALIZING ||
-                                   (job->phase == BQ_CLEANING && bq_recipe_real(&job->request));
+                                   ((job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING) &&
+                                    bq_recipe_real(&job->request));
                 if (!cancellable || job->cancel_requested)
                 {
                     error = BQ_INVALID_TRANSITION;
@@ -303,18 +306,29 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 BqOutcome expected = job->outcome;
                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
-                bool failure_cleanup = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
+                bool failure_outcome = outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED) ||
+                                       (schema == BQ_SCHEMA && !job->cancel_requested && outcome == BQ_INTERRUPTED);
+                bool failure_cleanup = schema >= BQ_SCHEMA_MATERIALIZATION && bq_recipe_real(&job->request) &&
                                        job->phase < BQ_CLEANING && next == BQ_CLEANING &&
-                                       outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED);
+                                       failure_outcome;
                 if (next == BQ_FINALIZING)
                 {
-                    expected = string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
+                    bool worker_terminal = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
+                                           outcome == BQ_SUCCEEDED;
+                    expected = worker_terminal ? (BqOutcome)outcome :
+                               string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
                 }
                 if (job->cancel_requested && next >= BQ_CLEANING)
                 {
                     expected = BQ_CANCELLED;
                 }
-                if ((!advance && !cancel_cleanup && !failure_cleanup) || (!failure_cleanup && outcome != (u32)expected))
+                if (schema == BQ_SCHEMA && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
+                    next == BQ_FINISHED && outcome == BQ_INTERRUPTED)
+                {
+                    expected = BQ_INTERRUPTED;
+                }
+                if (outcome > BQ_INTERRUPTED || (!advance && !cancel_cleanup && !failure_cleanup) ||
+                    (!failure_cleanup && outcome != (u32)expected))
                 {
                     error = BQ_INVALID_TRANSITION;
                 }
@@ -477,7 +491,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 kind = bq_u32(frame + 12);
             u64 sequence = bq_u64(frame + 24);
             u32 schema = bq_u32(frame + 8);
-            if (memcmp(frame, "BQJNL001", 8) || (schema != BQ_SCHEMA_LEGACY && schema != BQ_SCHEMA) ||
+            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA ||
                 (queue->state.journal_schema && schema < queue->state.journal_schema) || bq_u32(frame + 20) ||
                 length > BQ_REQUEST_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE ||
                 sequence != queue->state.sequence + 1 || memcmp(frame + 32, digest, 64))
@@ -689,7 +703,8 @@ BqError bq_cancel(BqQueue* queue, u64 id)
     BqJob* job = bq_job(&queue->state, id);
     BqError error = queue->poisoned ? BQ_IO : !job ? BQ_NOT_FOUND : BQ_OK;
     bool cancellable = job && (job->phase < BQ_FINALIZING ||
-                       (job->phase == BQ_CLEANING && bq_recipe_real(&job->request)));
+                       ((job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING) &&
+                        bq_recipe_real(&job->request)));
     if (error == BQ_OK && cancellable && !job->cancel_requested)
     {
         u8 body[8];
@@ -770,7 +785,9 @@ char const* bq_error_name(BqError error)
 {
     char const* names[] = {"ok", "bad-request", "conflicting-key", "queue-full", "busy", "io-uncertain",
                            "corrupt-journal", "reconciliation-required", "not-found", "unsupported", "invalid-transition",
-                           "recipe-mismatch", "source-mismatch", "workspace-mismatch", "cleanup-failed", "configuration-mismatch"};
+                           "recipe-mismatch", "source-mismatch", "workspace-mismatch", "cleanup-failed", "configuration-mismatch",
+                           "worker-mismatch", "resource-mismatch", "worker-failed", "worker-oom", "worker-timeout",
+                           "worker-interrupted", "boot-interrupted", "worker-cancel-signal"};
     char const* result = (u32)error < sizeof(names) / sizeof(names[0]) ? names[error] : "unknown-error";
     return result;
 }

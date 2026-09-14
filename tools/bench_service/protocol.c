@@ -8,11 +8,13 @@
 #define BQ_CONTROL_CAP (BQ_CONTROL_HEADER + BQ_CONTROL_BODY)
 #define BQ_LOG_PAGE 4u
 
+BUSTER_GLOBAL_LOCAL BqWorkerQuarantine bq_worker_quarantine = {.descriptor = -1};
+
 typedef enum BqOperation
 {
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
     BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
-    BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE
+    BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN
 } BqOperation;
 
 typedef struct BqPacket
@@ -33,11 +35,10 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal-schema=2 legacy-journal-schema=1 executor=fake-only repository=buster pending=8 lifetime-jobs=64\n"
+    "schema=2 journal=3 materialization-journal=2 legacy-journal=1 executor=linux-supervisor pending=8 jobs=64\n"
     "recipes=fake-success-v1,fake-failure-v1,validate-buster-v1 workload=fake-steps-v1\n"
-    "profile=unmeasured toolchain=none oracle=fake-v1 validity=not-evaluated\n"
-    "materialization=installed-read-only-manifest workspace=per-attempt-isolated\n"
-    "retention=journal-lifetime transport=none authentication=none\n"
+    "profile=unmeasured validity=not-evaluated materialization=installed-read-only workspace=per-attempt\n"
+    "worker=fixed-systemd-scope recipe-execution=not-admitted transport=none authentication=none\n"
 #ifdef _WIN32
     "storage=unsupported-on-windows\n";
 #else
@@ -144,6 +145,27 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             {
                 String8 workspace = {(char8*)body + 20, workspace_length};
                 error = bq_workspace_reconcile(queue, workspace, id, token);
+            }
+        }
+        else if (schema == BQ_CONTROL_SCHEMA && operation == BQ_OP_WORKER_RUN && length >= 16)
+        {
+            u32 installed_length = bq_u32(body);
+            u32 workspace_length = bq_u32(body + 4);
+            u32 lease_length = bq_u32(body + 8);
+            u32 cpu = bq_u32(body + 12);
+            if (installed_length <= BQ_PATH_CAP && workspace_length <= BQ_PATH_CAP && lease_length <= BQ_PATH_CAP &&
+                installed_length + workspace_length + lease_length == length - 16)
+            {
+                BqWorkerConfig config = {
+                    .installed_root = {(char8*)body + 16, installed_length},
+                    .workspace_root = {(char8*)body + 16 + installed_length, workspace_length},
+                    .lease_file = {(char8*)body + 16 + installed_length + workspace_length, lease_length},
+                    .boot_id_file = S8("/proc/sys/kernel/random/boot_id"),
+                    .cgroup_root = S8("/sys/fs/cgroup"),
+                    .limits = {cpu, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
+                    .quarantine = &bq_worker_quarantine
+                };
+                error = bq_worker_run(queue, &config, &id);
             }
         }
         else if (operation == BQ_OP_LOGS && length == 16)
