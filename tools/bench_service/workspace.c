@@ -30,7 +30,7 @@ BUSTER_GLOBAL_LOCAL char const bq_real_recipe[] =
 #define BQ_SOURCE_DIRECTORY_CAP 480u
 #define BQ_DIRECTORY_CAP 1024u
 #define BQ_CLEANUP_ENTRY_CAP 16384u
-#define BQ_CLEANUP_DEPTH_CAP (BQ_PATH_CAP + 1u)
+#define BQ_CLEANUP_DEPTH_CAP 256u
 
 typedef struct BqDirectoryList
 {
@@ -282,7 +282,7 @@ BUSTER_GLOBAL_LOCAL int bq_open_source_file(int root, String8 path)
         char name[BQ_PATH_CAP + 1];
         memcpy(name, leaf.pointer, (size_t)leaf.length);
         name[leaf.length] = 0;
-        result = openat(parent, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        result = openat(parent, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         close(parent);
     }
     return result;
@@ -380,7 +380,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     int length = snprintf(name, sizeof(name), "sources/%.*s", (int)revision.length, revision.pointer);
     int source_root = length > 0 && (u32)length < sizeof(name) ?
                       bq_open_installed_directory(installed, string_from_pointer(name)) : -1;
-    int manifest_fd = source_root >= 0 ? openat(source_root, "source.manifest", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int manifest_fd = source_root >= 0 ?
+                      openat(source_root, "source.manifest", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info;
     u8 manifest_bytes[BQ_SOURCE_MANIFEST_CAP];
     u32 manifest_size = 0;
@@ -681,7 +682,8 @@ BUSTER_GLOBAL_LOCAL bool bq_workspace_seal(int workspace, BqJob const* job, bool
     char expected[512];
     u32 expected_size = 0;
     bool ok = bq_workspace_seal_bytes(job, expected, &expected_size);
-    int fd = ok ? openat(workspace, ".identity", (create ? O_WRONLY | O_CREAT | O_EXCL : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+    int fd = ok ? openat(workspace, ".identity", (create ? O_WRONLY | O_CREAT | O_EXCL : O_RDONLY | O_NONBLOCK) |
+                         O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
     if (create)
     {
         ok = fd >= 0 && bq_write_all(fd, (u8 const*)expected, expected_size) && fsync(fd) == 0 && fsync(workspace) == 0;
@@ -711,7 +713,7 @@ BUSTER_GLOBAL_LOCAL bool bq_record_name(char result[48], char const* prefix, u64
 
 BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8* bytes, u32 capacity, u32* size)
 {
-    int fd = openat(queue->directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(queue->directory_fd, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     BqError error = BQ_NOT_FOUND;
     if (fd >= 0)
     {
@@ -822,6 +824,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_attempt_validate(BqQueue* queue, BqJob const* job
     {
         error = BQ_WORKSPACE_MISMATCH;
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_attempt_presence(BqQueue* queue, BqJob const* job)
+{
+    char name[48];
+    u8 bytes[640];
+    u32 size = 0;
+    BqError error = bq_record_name(name, "attempt", job->id) ?
+                    bq_record_read(queue, name, bytes, sizeof(bytes), &size) : BQ_CORRUPT;
     return error;
 }
 
@@ -966,7 +978,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_real_advance(BqQueue* queue, BqJob const* job, Bq
 BUSTER_GLOBAL_LOCAL bool bq_installed_recipe(int installed)
 {
     int recipes = openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    int recipe = recipes >= 0 ? openat(recipes, "validate-buster-v1.recipe", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int recipe = recipes >= 0 ?
+                 openat(recipes, "validate-buster-v1.recipe", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info;
     u8 bytes[sizeof(bq_real_recipe)];
     u32 size = 0;
@@ -1177,22 +1190,44 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     {
         error = BQ_BAD_REQUEST;
     }
+    BqError failure = error == BQ_OK ? bq_failure_evidence(queue, job) : BQ_NOT_FOUND;
+    if (error == BQ_OK && failure != BQ_NOT_FOUND && failure != BQ_RECIPE_MISMATCH &&
+        failure != BQ_SOURCE_MISMATCH && failure != BQ_WORKSPACE_MISMATCH &&
+        failure != BQ_CLEANUP_FAILED && failure != BQ_CONFIGURATION_MISMATCH)
+    {
+        error = failure;
+    }
+    BqError attempt = error == BQ_OK ? bq_attempt_presence(queue, job) : BQ_NOT_FOUND;
+    bool has_attempt = attempt == BQ_OK;
+    if (error == BQ_OK && attempt != BQ_OK && attempt != BQ_NOT_FOUND)
+    {
+        error = attempt;
+    }
     int workspaces = error == BQ_OK ? bq_open_absolute_directory(workspace_root) : -1;
     struct stat workspaces_info = {0}, workspace_info = {0};
     if (error == BQ_OK && (workspaces < 0 || fstat(workspaces, &workspaces_info) != 0 ||
                            !bq_owned_directory(workspaces, true, false)))
     {
-        error = BQ_CONFIGURATION_MISMATCH;
+        bool recoverable_configuration = !has_attempt && failure == BQ_CONFIGURATION_MISMATCH &&
+                                         (job->phase == BQ_RESERVED || job->phase == BQ_CLEANING);
+        error = recoverable_configuration ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
-    if (error == BQ_OK)
+    if (error == BQ_OK && has_attempt)
     {
         error = bq_attempt_validate(queue, job, workspace_root, &workspaces_info);
     }
     errno = 0;
-    int workspace = error == BQ_OK ? openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int workspace = error == BQ_OK && workspaces >= 0 ?
+                    openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int workspace_error = errno;
     bool exists = workspace >= 0;
-    if (error == BQ_OK && !exists && workspace_error != ENOENT)
+    if (error == BQ_OK && workspaces >= 0 && !exists && workspace_error != ENOENT)
+    {
+        error = BQ_WORKSPACE_MISMATCH;
+    }
+    if (error == BQ_OK && !has_attempt && (exists || (job->phase != BQ_RESERVED && job->phase != BQ_CLEANING) ||
+                                           (job->phase == BQ_CLEANING && failure != BQ_CONFIGURATION_MISMATCH) ||
+                                           (failure != BQ_NOT_FOUND && failure != BQ_CONFIGURATION_MISMATCH)))
     {
         error = BQ_WORKSPACE_MISMATCH;
     }
@@ -1201,7 +1236,7 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
         error = BQ_WORKSPACE_MISMATCH;
     }
     BqError cleanup = BQ_NOT_FOUND;
-    if (error == BQ_OK && exists)
+    if (error == BQ_OK && has_attempt && exists)
     {
         cleanup = bq_cleanup_record(queue, job, &workspaces_info, &workspace_info, false);
         bool seal = bq_workspace_seal(workspace, job, false);
@@ -1220,14 +1255,7 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
             error = cleanup;
         }
     }
-    BqError failure = error == BQ_OK ? bq_failure_evidence(queue, job) : BQ_NOT_FOUND;
-    if (error == BQ_OK && failure != BQ_NOT_FOUND && failure != BQ_RECIPE_MISMATCH &&
-        failure != BQ_SOURCE_MISMATCH && failure != BQ_WORKSPACE_MISMATCH &&
-        failure != BQ_CLEANUP_FAILED && failure != BQ_CONFIGURATION_MISMATCH)
-    {
-        error = failure;
-    }
-    if (error == BQ_OK && !exists)
+    if (error == BQ_OK && has_attempt && !exists)
     {
         cleanup = bq_cleanup_record_missing(queue, job, &workspaces_info);
         bool absent_before_cleanup = cleanup == BQ_NOT_FOUND && job->phase == BQ_RESERVED && failure != BQ_NOT_FOUND;
@@ -1236,7 +1264,7 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
             error = cleanup == BQ_NOT_FOUND ? BQ_WORKSPACE_MISMATCH : cleanup;
         }
     }
-    if (error == BQ_OK && exists && cleanup == BQ_NOT_FOUND)
+    if (error == BQ_OK && has_attempt && exists && cleanup == BQ_NOT_FOUND)
     {
         error = bq_cleanup_record(queue, job, &workspaces_info, &workspace_info, true);
         cleanup = error == BQ_OK ? BQ_OK : cleanup;

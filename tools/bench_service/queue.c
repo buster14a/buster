@@ -474,7 +474,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 kind = bq_u32(frame + 12);
             u64 sequence = bq_u64(frame + 24);
             u32 schema = bq_u32(frame + 8);
-            if (memcmp(frame, "BQJNL001", 8) || (schema != BQ_SCHEMA_LEGACY && schema != BQ_SCHEMA) || bq_u32(frame + 20) ||
+            if (memcmp(frame, "BQJNL001", 8) || (schema != BQ_SCHEMA_LEGACY && schema != BQ_SCHEMA) ||
+                (queue->state.journal_schema && schema < queue->state.journal_schema) || bq_u32(frame + 20) ||
                 length > BQ_REQUEST_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE ||
                 sequence != queue->state.sequence + 1 || memcmp(frame + 32, digest, 64))
             {

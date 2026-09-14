@@ -150,7 +150,8 @@ repository `buster`, workload `fake-steps-v1`, profile `unmeasured`, toolchain
 `none`, oracle `fake-v1`. The CLI cannot supply flags or arbitrary programs.
 `validate-buster-v1` is the first real materialization recipe. Its exact installed
 bytes are checked against `profiles/validate-buster-v1.recipe`; it still does
-not execute a build.
+not execute a build. The recipe's own `schema=1` field is independent of the
+journal and control schema numbers.
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.
 
@@ -208,6 +209,8 @@ files are capped at 64 MiB, each snapshot at 512 MiB, and each copied source
 tree at 480 directories. Empty components, `.`, `..`, absolute paths,
 backslashes, symbolic-link traversal, writable/nonregular source files, hash or
 revision mismatch, missing files, duplicates, and unsorted paths fail closed.
+Recipe, manifest, and source-file leaves are opened nonblocking and type-checked
+before reads, so FIFOs and devices are rejected rather than waited on.
 Only listed, verified bytes are copied, so unlisted installed files cannot
 affect a job. These are implementation limits, not a claim that an operator has
 installed a complete Buster snapshot.
@@ -235,8 +238,10 @@ inode binding before it changes either journal phase or workspace contents;
 `cleanup-failure-<job>` durably overrides the reported reason when removal
 fails. Cleanup walks already-open directory descriptors, verifies child and
 root inode identities, preserves `.identity` until all other removals are
-synced, and is bounded at 1,024 directories and 16,384 entries. It never follows
-symbolic links.
+synced, and is bounded at 1,024 directories, 256 nested directory descriptors,
+and 16,384 entries. Native coverage exercises a 220-level writable build tree;
+deeper or larger unexpected output fails closed with the active job retained.
+It never follows symbolic links.
 
 `workspace-reconcile` is accepted only after reopen has marked the active job
 as needing reconciliation. It may remove only the deterministic directory
@@ -246,6 +251,14 @@ prepared workspace is an error. This does not inspect cgroups or prove process-
 tree cleanup, and mode-read-only files remain mutable by the same effective
 UID, so no real command can execute until the later Linux supervisor
 and containment slice supplies that boundary.
+
+There is one narrower crash case before root provenance exists: a durable real-
+job reservation can survive before `attempt-<job>` is written. Reconciliation
+accepts that state only while reserved (or while cleaning a recorded
+configuration failure), and only when a valid private workspace root has no
+deterministic attempt entry. A recorded configuration failure also permits an
+unopenable root because workspace creation occurs only after the attempt record.
+All other missing-attempt combinations retain active admission.
 
 ## CLI
 

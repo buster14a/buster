@@ -182,8 +182,13 @@ BUSTER_GLOBAL_LOCAL bool bq_test_source(char const* installed, char const* revis
     snprintf(source, sizeof(source), "%s/src", root);
     snprintf(file, sizeof(file), "%s/main.c", source);
     snprintf(manifest, sizeof(manifest), "%s/source.manifest", root);
-    bool ok = (mkdir(sources, 0700) == 0 || errno == EEXIST) && mkdir(root, 0700) == 0 && mkdir(source, 0700) == 0 &&
-              bq_test_write_path(file, contents, 0400);
+    bool file_ok = false;
+    bool ok = (mkdir(sources, 0700) == 0 || errno == EEXIST) && mkdir(root, 0700) == 0 && mkdir(source, 0700) == 0;
+    if (ok)
+    {
+        file_ok = defect == 8 ? mkfifo(file, 0400) == 0 : bq_test_write_path(file, contents, 0400);
+        ok = file_ok;
+    }
     char8 digest[SHA256_HEX_CAPACITY];
     if (ok)
     {
@@ -197,7 +202,8 @@ BUSTER_GLOBAL_LOCAL bool bq_test_source(char const* installed, char const* revis
         char const* path = defect == 2 ? "../escape.c" : "src/main.c";
         int length = snprintf(text, sizeof(text), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n%.64s %s\n",
                               identity, digest, path);
-        ok = length > 0 && (u32)length < sizeof(text) && bq_test_write_path(manifest, text, 0400) &&
+        bool manifest_ok = defect == 7 ? mkfifo(manifest, 0400) == 0 : bq_test_write_path(manifest, text, 0400);
+        ok = length > 0 && (u32)length < sizeof(text) && manifest_ok &&
              chmod(source, defect == 5 ? 0700 : 0500) == 0 && chmod(root, 0500) == 0;
     }
     return ok;
@@ -215,7 +221,8 @@ BUSTER_GLOBAL_LOCAL bool bq_material_test_begin(BqMaterialFixture* fixture, u32 
         snprintf(recipes, sizeof(recipes), "%s/recipes", fixture->installed);
         snprintf(recipe, sizeof(recipe), "%s/validate-buster-v1.recipe", recipes);
         ok = mkdir(recipes, 0700) == 0 &&
-             bq_test_write_path(recipe, defect == 4 ? "bad-recipe\n" : bq_real_recipe, 0400) &&
+             (defect == 6 ? mkfifo(recipe, 0400) == 0 :
+              bq_test_write_path(recipe, defect == 4 ? "bad-recipe\n" : bq_real_recipe, 0400)) &&
              bq_test_source(fixture->installed, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base-source\n", defect) &&
              bq_test_source(fixture->installed, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "candidate-source\n", 0) &&
              chmod(recipes, 0500) == 0;
@@ -256,7 +263,8 @@ BUSTER_GLOBAL_LOCAL void bq_material_test_end(BqMaterialFixture* fixture)
 BUSTER_GLOBAL_LOCAL void bq_test_materialization_failures(void)
 {
     BqError expected[] = {BQ_OK, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
-                          BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH};
+                          BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH,
+                          BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH};
     for (u32 defect = 1; defect < BUSTER_ARRAY_LENGTH(expected); defect += 1)
     {
         BqMaterialFixture fixture;
@@ -657,6 +665,72 @@ BUSTER_GLOBAL_LOCAL void bq_test_uncertain_failure_cleanup(void)
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_no_attempt_recovery(void)
+{
+    /* The RESERVE itself may be the last durable action before a crash. */
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        BqRequest request = bq_test_real_request(55);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+        bq_close(&fixture.queue.queue);
+        BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation &&
+                 fixture.queue.queue.state.active_id == id && bq_job(&fixture.queue.queue.state, id)->phase == BQ_RESERVED);
+        char name[64], path[512];
+        BQ_CHECK(bq_workspace_name(name, id, token));
+        snprintf(path, sizeof(path), "%s/%s", fixture.workspaces, name);
+        BQ_CHECK(bq_test_write_path(path, "unexpected-entry\n", 0600));
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) ==
+                 BQ_WORKSPACE_MISMATCH && fixture.queue.queue.state.active_id == id && fixture.queue.queue.needs_reconciliation);
+        BQ_CHECK(unlink(path) == 0);
+        BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, string_from_pointer(fixture.workspaces), id, token) == BQ_OK);
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED &&
+                 !fixture.queue.queue.state.active_id && !fixture.queue.queue.needs_reconciliation);
+        bq_material_test_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_configuration_transition_recovery(void)
+{
+    /* Reproduce uncertainty at each journal transition used after root
+     * configuration fails, before an attempt/workspace can exist. */
+    for (u32 scenario = 0; scenario < 2; scenario += 1)
+    {
+        BqMaterialFixture fixture;
+        if (bq_material_test_begin(&fixture, 0))
+        {
+            BqRequest request = bq_test_real_request(56 + scenario);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
+            BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
+            BqJob* job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(bq_failure_write(&fixture.queue.queue, job, BQ_CONFIGURATION_MISMATCH) == BQ_OK);
+            if (scenario == 1)
+            {
+                BQ_CHECK(bq_real_advance(&fixture.queue.queue, job, BQ_CLEANING, BQ_FAILED) == BQ_OK);
+                job = bq_job(&fixture.queue.queue.state, id);
+            }
+            fixture.queue.queue.fault.fail_write_at = 2;
+            BQ_CHECK(bq_real_advance(&fixture.queue.queue, job, scenario ? BQ_FINISHED : BQ_CLEANING, BQ_FAILED) == BQ_IO &&
+                     fixture.queue.queue.poisoned && fixture.queue.queue.state.active_id == id);
+            bq_close(&fixture.queue.queue);
+            BQ_CHECK(bq_open(&fixture.queue.queue, fixture.queue.path) == BQ_OK && fixture.queue.queue.needs_reconciliation &&
+                     fixture.queue.queue.recovered_tail_bytes == 1);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == (scenario ? BQ_CLEANING : BQ_RESERVED));
+            BQ_CHECK(bq_workspace_reconcile(&fixture.queue.queue, S8("/definitely-missing-buster-workspace-root"), id, token) == BQ_OK);
+            job = bq_job(&fixture.queue.queue.state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                     bq_failure_evidence(&fixture.queue.queue, job) == BQ_CONFIGURATION_MISMATCH &&
+                     !fixture.queue.queue.state.active_id);
+            bq_material_test_end(&fixture);
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_cleanup_bounds_and_failure(void)
 {
     BqMaterialFixture fixture;
@@ -689,6 +763,29 @@ BUSTER_GLOBAL_LOCAL void bq_test_cleanup_bounds_and_failure(void)
             close(topology);
         }
         BQ_CHECK(unlinkat(root, "bounded-topology", AT_REMOVEDIR) == 0);
+        BQ_CHECK(mkdirat(root, "deep-topology", 0700) == 0);
+        int deep = openat(root, "deep-topology", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bool deep_ok = deep >= 0;
+        for (u32 i = 0; deep_ok && i < 220; i += 1)
+        {
+            deep_ok = mkdirat(deep, "child", 0700) == 0;
+            int next = deep_ok ? openat(deep, "child", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+            deep_ok = next >= 0;
+            close(deep);
+            deep = next;
+        }
+        BQ_CHECK(deep_ok);
+        if (deep >= 0)
+        {
+            close(deep);
+        }
+        deep = openat(root, "deep-topology", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_CHECK(deep >= 0 && bq_remove_workspace_payload(deep));
+        if (deep >= 0)
+        {
+            close(deep);
+        }
+        BQ_CHECK(unlinkat(root, "deep-topology", AT_REMOVEDIR) == 0);
         BqRequest request = bq_test_real_request(60);
         u64 id = 0, token = 0;
         BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK);
@@ -834,6 +931,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_journal_schema_migration(void)
         bq_frame_schema(image, BQ_SCHEMA, BQ_SUBMIT, 1, legacy.bytes, legacy.size);
         u32 current_size = BQ_HEADER_SIZE + legacy.size;
         bq_frame_schema(image + current_size, BQ_SCHEMA_LEGACY, BQ_SUBMIT, 2, second.bytes, second.size);
+        bq_test_image(&fixture, image, current_size + BQ_HEADER_SIZE);
+        BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_CORRUPT);
         bq_test_image(&fixture, image, current_size + BQ_HEADER_SIZE + second.size);
         BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_CORRUPT);
         BqRequest real = bq_test_real_request(3);
@@ -1282,6 +1381,8 @@ int main(int argc, char** argv)
     bq_test_workspace_root_substitution();
     bq_test_partial_cleanup_recovery();
     bq_test_uncertain_failure_cleanup();
+    bq_test_no_attempt_recovery();
+    bq_test_configuration_transition_recovery();
     bq_test_cleanup_bounds_and_failure();
     char const* storage = "posix-real-journal";
 #else
