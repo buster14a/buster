@@ -15,6 +15,7 @@
 #include "platform.h"
 #include "hash.h"
 #include "stats.h"
+#include "retirement_stats.h"
 #include <stdarg.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -78,6 +79,7 @@ typedef struct TpConfig
     char const* sdk_manifest;
     char const* environment_manifest;
     char const* runtime_manifest;
+    char const* retirement_input;
     char const* flags[TP_MAX_FLAGS];
     unsigned flag_count;
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
@@ -266,6 +268,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--sdk-manifest")) config->sdk_manifest = value;
             else if (!strcmp(key, "--environment-manifest")) config->environment_manifest = value;
             else if (!strcmp(key, "--runtime-manifest")) config->runtime_manifest = value;
+            else if (!strcmp(key, "--input")) config->retirement_input = value;
             else if (!strcmp(key, "--pairs")) ok = tp_number(value, &config->pairs);
             else if (!strcmp(key, "--warmups")) ok = tp_number(value, &config->warmups);
             else if (!strcmp(key, "--timeout")) ok = tp_number(value, &config->timeout);
@@ -362,6 +365,12 @@ static int tp_options(int argc, char** argv, TpConfig* config)
          !config->environment_manifest || !config->runtime_manifest))
     {
         tp_error("admit-workload requires DESCRIPTOR, source/compiler/oracle evidence, output, qualification id and all closure manifests");
+        ok = 0;
+    }
+    if (!strcmp(config->command, "retirement-replay") &&
+        (!config->retirement_input || !config->output_explicit))
+    {
+        tp_error("retirement-replay requires --input SERIES_FILE and --output RESULT_JSON");
         ok = 0;
     }
     if (config->machine_id || config->lock_file || config->lease_fd_explicit || !strcmp(config->command, "qualify"))
@@ -1712,12 +1721,170 @@ static int tp_self_test(void)
     return failures ? 1 : 0;
 }
 
+/* Replay the approved #619 family through its C implementation.  This is an
+ * intentionally small adapter for the performance-binding workflow: input is
+ * a predeclared text stream of one logical member per block, and each member
+ * invokes tp_retirement_assess exactly once.  The one result contains both
+ * rounds and the pooled scope; callers must not run one invocation per scope.
+ * It computes no acceptance verdict for the workflow binding itself. */
+static char const* tp_retirement_outcome_name(TpRetirementOutcome outcome)
+{
+    char const* result = "invalid";
+    if (outcome == TP_RETIREMENT_PASS) result = "pass";
+    else if (outcome == TP_RETIREMENT_REGRESSION) result = "regression";
+    else if (outcome == TP_RETIREMENT_INCONCLUSIVE) result = "inconclusive";
+    return result;
+}
+
+static int tp_retirement_replay(TpConfig const* config)
+{
+    FILE* input = fopen(config->retirement_input, "rb");
+    FILE* output = NULL;
+    double* workspace = NULL;
+    int ok = input != NULL;
+    unsigned version = 0, bootstrap_members = 0, cell_members = 0, pairs = 0;
+    unsigned resamples = 0, frozen = 0, members = 0;
+    uint64_t seed = 0;
+    char line[4096];
+    if (!ok) tp_error("cannot open retirement series input %s", config->retirement_input);
+    if (ok)
+    {
+        ok = fgets(line, sizeof(line), input) != NULL &&
+             sscanf(line, "version=%u seed=%" SCNu64 " bootstrap_members=%u cell_members=%u pairs=%u resamples=%u frozen=%u members=%u",
+                    &version, &seed, &bootstrap_members, &cell_members, &pairs,
+                    &resamples, &frozen, &members) == 8;
+        ok = ok && version == TP_RETIREMENT_STATISTICS_VERSION && frozen == 1 &&
+             members > 0;
+    }
+    TpRetirementPlan plan = {
+        .seed = seed,
+        .version = version,
+        .bootstrap_members_per_scope = bootstrap_members,
+        .cell_members_per_scope = cell_members,
+        .pairs_per_round = pairs,
+        .resamples = resamples,
+        .frozen_before_samples = frozen,
+    };
+    unsigned expected_members = bootstrap_members + cell_members;
+    if (ok && (bootstrap_members == 0 ||
+               bootstrap_members > TP_RETIREMENT_MAX_BOOTSTRAP_MEMBERS_PER_SCOPE ||
+               cell_members == 0 ||
+               cell_members > TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE ||
+               pairs < TP_RETIREMENT_MIN_PAIRS_PER_ROUND ||
+               pairs > TP_RETIREMENT_MAX_PAIRS_PER_ROUND || (pairs & 1) ||
+               resamples < TP_RETIREMENT_MIN_RESAMPLES ||
+               resamples > TP_RETIREMENT_MAX_RESAMPLES || seed == 0 ||
+               expected_members != bootstrap_members + cell_members ||
+               members != expected_members))
+        ok = 0;
+    if (ok) workspace = (double*)malloc((size_t)resamples * sizeof(*workspace));
+    if (ok && !workspace) ok = 0;
+    if (ok)
+    {
+        output = fopen(config->output, "wb");
+        ok = output != NULL;
+    }
+    if (ok) fputs("{\"schema\":\"buster-native-retirement-statistics-replay-v1\",\"version\":1,\"members\":[", output);
+    char previous_member[128] = {0};
+    unsigned previous_metric = 0;
+    for (unsigned member_index = 0; ok && member_index < members; ++member_index)
+    {
+        char member[128];
+        unsigned metric = 0, kind = 0, family_index = 0, cells = 0;
+        unsigned member_pairs = 0, member_resamples = 0;
+        double limit = 0.0;
+        ok = fgets(line, sizeof(line), input) != NULL &&
+             sscanf(line, "member=%127s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%lf",
+                    member, &metric, &kind, &family_index, &cells, &member_pairs,
+                    &member_resamples, &limit) == 8;
+        if (!ok) break;
+        if (member_index && (strcmp(member, previous_member) < 0 ||
+                             (strcmp(member, previous_member) == 0 && metric <= previous_metric)))
+            ok = 0;
+        if (ok)
+        {
+            memcpy(previous_member, member, strlen(member) + 1);
+            previous_metric = metric;
+        }
+        size_t ratio_count = 0;
+        if (ok) ok = metric < TP_RETIREMENT_VARIABLE_METRICS &&
+                    kind < TP_RETIREMENT_MEMBER_KINDS && cells > 0 &&
+                    cells <= TP_RETIREMENT_MAX_CELLS && member_pairs == pairs &&
+                    member_resamples == (kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? resamples : 0) &&
+                    isfinite(limit) && limit > 0.0 &&
+                    (size_t)cells <= SIZE_MAX / (TP_RETIREMENT_ROUNDS * (size_t)pairs);
+        if (ok) ratio_count = (size_t)cells * TP_RETIREMENT_ROUNDS * pairs;
+        double* ratios = ok ? (double*)malloc(ratio_count * sizeof(*ratios)) : NULL;
+        if (ok && !ratios) ok = 0;
+        for (size_t ratio_index = 0; ok && ratio_index < ratio_count; ++ratio_index)
+        {
+            double ratio = 0.0;
+            char extra = 0;
+            ok = fgets(line, sizeof(line), input) != NULL &&
+                 sscanf(line, "ratio=%lf %c", &ratio, &extra) == 1 &&
+                 isfinite(ratio) && ratio > 0.0;
+            if (ok) ratios[ratio_index] = ratio;
+        }
+        if (ok) ok = fgets(line, sizeof(line), input) != NULL && !strcmp(line, "end\n");
+        TpRetirementSeries series = {
+            .ratios = ratios,
+            .ratio_count = ratio_count,
+            .cell_count = cells,
+            .observed_pairs = {pairs, pairs},
+            .member_kind = kind,
+            .family_index = family_index,
+            .metric_index = metric,
+            .limit = limit,
+        };
+        TpRetirementResult result = {0};
+        if (ok)
+        {
+            result = tp_retirement_assess(&plan, &series,
+                                          kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? workspace : NULL,
+                                          kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? resamples : 0);
+            ok = result.valid;
+        }
+        if (ok)
+        {
+            if (member_index) fputc(',', output);
+            fputs("{\"member\":", output); tp_json_string(output, member);
+            fprintf(output, ",\"metric\":%u,\"kind\":%u,\"family_index\":%u,\"outcome\":\"%s\",\"valid\":true,\"resampled\":%s,\"resamples\":%u,\"tail_alpha\":",
+                    metric, kind, family_index, tp_retirement_outcome_name(result.outcome),
+                    result.resampled ? "true" : "false", result.resamples);
+            tp_json_number(output, result.tail_alpha);
+            fputs(",\"round\":[{\"estimate\":", output); tp_json_number(output, result.round[0].estimate);
+            fputs(",\"lower\":", output); tp_json_number(output, result.round[0].lower);
+            fputs(",\"upper\":", output); tp_json_number(output, result.round[0].upper);
+            fputs("},{\"estimate\":", output); tp_json_number(output, result.round[1].estimate);
+            fputs(",\"lower\":", output); tp_json_number(output, result.round[1].lower);
+            fputs(",\"upper\":", output); tp_json_number(output, result.round[1].upper);
+            fputs("}],\"pooled\":{\"estimate\":", output); tp_json_number(output, result.pooled.estimate);
+            fputs(",\"lower\":", output); tp_json_number(output, result.pooled.lower);
+            fputs(",\"upper\":", output); tp_json_number(output, result.pooled.upper);
+            fputs("}}", output);
+        }
+        free(ratios);
+    }
+    if (ok)
+    {
+        char extra = 0;
+        ok = !fgets(line, sizeof(line), input) || (sscanf(line, " %c", &extra) != 1);
+        if (ok) fputs("]}\n", output);
+    }
+    if (output && fclose(output) != 0) ok = 0;
+    if (input && fclose(input) != 0) ok = 0;
+    free(workspace);
+    if (!ok) tp_error("invalid #619 retirement statistics replay input or result");
+    return ok ? 0 : 2;
+}
+
 static void tp_help(void)
 {
     fputs("Compiler throughput (native C; result schema 2, input schema 1)\n\n"
           "  throughput generate --output DIR [--profile smoke|ci|full] [--seed N] [--scale N]\n"
           "  throughput run --baseline IDE --candidate IDE --output NEW_DIR [options]\n"
           "  throughput compare --output RESULT_DIR\n"
+          "  throughput retirement-replay --input SERIES_FILE --output RESULT_JSON\n"
           "  throughput self-test\n"
           "  throughput check-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome OUTCOME\n"
           "  throughput admit-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome pass\n"
@@ -1822,6 +1989,10 @@ int main(int argc, char** argv)
         else if (!strcmp(config.command, "compare"))
         {
             result = tp_compare(config.output);
+        }
+        else if (!strcmp(config.command, "retirement-replay"))
+        {
+            result = tp_retirement_replay(&config);
         }
         else
         {
