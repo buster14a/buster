@@ -47,6 +47,7 @@ BUSTER_GLOBAL_LOCAL void bq_transport_stop_handler(int signal_number)
 {
     (void)signal_number;
     bq_transport_stop_signal = 1;
+    bq_worker_transport_stop_signal = 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_transport_peer_allowed(int client)
@@ -406,9 +407,19 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_serve(char const* state_path, char cons
     if (error == BQ_OK)
     {
         bq_transport_worker_once(&queue, config);
+        if (queue.poisoned) error = BQ_IO;
     }
     while (error == BQ_OK && !bq_transport_stop_signal)
     {
+        /* Retry durable queued work on the idle tick.  worker_once is
+         * synchronous: once it owns the lease, this loop does not poll or
+         * process client traffic until the whole job has cleaned up. */
+        bq_transport_worker_once(&queue, config);
+        if (queue.poisoned)
+        {
+            error = BQ_IO;
+            break;
+        }
         struct pollfd waiting = {endpoint.listener, POLLIN, 0};
         int ready = poll(&waiting, 1, BQ_TRANSPORT_POLL_MILLISECONDS);
         if (ready < 0 && errno != EINTR)

@@ -34,6 +34,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
 {
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqPacket request, response;
+    BQ_CHECK(sizeof(bq_capabilities_v2) - 1 <= BQ_CONTROL_BODY - 4);
     bq_packet(&request, BQ_OP_CAPABILITIES, UINT64_MAX, NULL, 0);
     BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_OK);
     BQ_CHECK(response.size <= BQ_CONTROL_CAP && bq_u64(response.bytes + 16) == UINT64_MAX);
@@ -124,7 +125,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     BqWorkerConfig worker = {0};
     u64 worker_id = UINT64_MAX;
     BQ_CHECK(bq_worker_run(&queue, &worker, &worker_id) == BQ_UNSUPPORTED && worker_id == 0);
-    BQ_CHECK(bq_worker_unit(S8("/unsupported"), 3) == BQ_UNSUPPORTED);
+    BQ_CHECK(bq_worker_unit(S8("/unsupported"), 3, S8("1"), S8("2"), S8("/workspace"),
+                             S8("1111111111111111111111111111111111111111"),
+                             S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) == BQ_UNSUPPORTED);
 #else
     char boot_id[BQ_WORKER_BOOT_CAP];
     BQ_CHECK(bq_worker_read_regular("/proc/sys/kernel/random/boot_id", boot_id, sizeof(boot_id)) &&
@@ -1597,6 +1600,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     bq_worker_cancel_handler(SIGINT);
     BQ_CHECK(bq_worker_cancel_signal && bq_worker_shutdown_signal);
     bq_worker_cancel_signal = bq_worker_shutdown_signal = 0;
+    bq_transport_stop_signal = 0;
+    bq_worker_transport_stop_signal = 0;
+    bq_transport_stop_handler(SIGTERM);
+    BQ_CHECK(bq_transport_stop_signal && bq_worker_transport_stop_signal);
+    bq_transport_stop_signal = 0;
+    bq_worker_transport_stop_signal = 0;
+    bq_transport_stop_handler(SIGINT);
+    BQ_CHECK(bq_transport_stop_signal && bq_worker_transport_stop_signal);
+    bq_transport_stop_signal = 0;
+    bq_worker_transport_stop_signal = 0;
     BQ_CHECK(bq_transport_queue_admissible(&(BqQueue){0}));
     BqRequest fake = bq_test_request(7, false), real = {0};
     String8 fields[BQ_FIELD_COUNT] = {S8("test-principal"), S8("request-7"), S8("validate-buster-v1"),
@@ -1817,14 +1830,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
 {
     BqWorkerFake* fake = backend->context;
     fake->starts += 1;
-    fake->argv_valid = count == 17 && !strcmp(argv[0], BQ_SYSTEMD_RUN) && !strcmp(argv[1], "--quiet") &&
+    fake->argv_valid = count == 23 && !strcmp(argv[0], BQ_SYSTEMD_RUN) && !strcmp(argv[1], "--quiet") &&
         !strcmp(argv[2], "--scope") && !strncmp(argv[3], "--unit=buster-bench-", 20) &&
         !strcmp(argv[4], "--slice=buster-bench.slice") && !strcmp(argv[5], "--property=KillMode=control-group") &&
         !strcmp(argv[6], "--property=SendSIGKILL=yes") && !strcmp(argv[7], "--property=TimeoutStopSec=10s") &&
         !strcmp(argv[8], "--property=AllowedCPUs=2") && !strcmp(argv[9], "--property=MemoryMax=8589934592") &&
         !strcmp(argv[10], "--property=MemorySwapMax=0") && !strcmp(argv[11], "--property=TasksMax=256") &&
         !strcmp(argv[12], "--property=RuntimeMaxSec=3600000000us") && !strcmp(argv[13], BQ_WORKER_EXECUTABLE) &&
-        !strcmp(argv[14], "worker-unit") && argv[15][0] == '/';
+        !strcmp(argv[14], "worker-unit") && argv[15][0] == '/' && !strcmp(argv[17], "1") && argv[18][0] &&
+        strstr(argv[19], "/job-1-attempt-") != NULL && strlen(argv[20]) == 64 && strlen(argv[21]) == 64 &&
+        argv[22][0] == '/' && strstr(argv[22], "/results/job-1-attempt-") != NULL &&
+        strstr(argv[22], "/result") != NULL;
     u64 descriptor = 0;
     fake->argv_valid = fake->argv_valid && bq_decimal(argv[16], true, &descriptor) && descriptor <= INT_MAX &&
                        bq_test_worker_probe_locked(argv[15]);
@@ -2760,6 +2776,54 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lock_precedes_materialization(void)
         bq_test_worker_end(&fixture);
     }
 }
+
+BUSTER_GLOBAL_LOCAL void bq_test_transport_worker_retries_after_busy(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqWorkerLease blocker = {.descriptor = -1};
+        BqRequest request = bq_test_real_request(81);
+        u64 submitted = 0;
+        bq_transport_stop_signal = 0;
+        bq_worker_cancel_signal = 0;
+        bq_worker_shutdown_signal = 0;
+        bq_worker_transport_stop_signal = 0;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &submitted) == BQ_OK);
+        BQ_CHECK(bq_worker_lease_acquire(fixture.lease, &blocker) == 0);
+        BQ_CHECK(bq_transport_worker_once(&fixture.material.queue.queue, &fixture.config) == BQ_BUSY &&
+                 bq_job(&fixture.material.queue.queue.state, submitted)->phase == BQ_QUEUED && fixture.fake.starts == 0);
+        bq_worker_lease_release(&blocker);
+        /* This second tick is the autonomous retry; no client request is
+         * involved between the busy result and successful execution. */
+        BqError retried = bq_transport_worker_once(&fixture.material.queue.queue, &fixture.config);
+        BQ_CHECK(retried == BQ_OK && bq_job(&fixture.material.queue.queue.state, submitted)->phase == BQ_FINISHED && fixture.fake.starts == 1);
+        bq_test_worker_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_transport_worker_signal_handoff(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqRequest request = bq_test_real_request(82);
+        u64 submitted = 0;
+        bq_transport_stop_signal = 0;
+        bq_worker_cancel_signal = 0;
+        bq_worker_shutdown_signal = 0;
+        bq_worker_transport_stop_signal = 1;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &submitted) == BQ_OK);
+        BQ_CHECK(bq_transport_worker_once(&fixture.material.queue.queue, &fixture.config) == BQ_WORKER_CANCEL_SIGNAL &&
+                 bq_job(&fixture.material.queue.queue.state, submitted)->phase == BQ_QUEUED && fixture.fake.starts == 0 &&
+                 bq_transport_stop_signal);
+        bq_worker_transport_stop_signal = 0;
+        bq_worker_cancel_signal = 0;
+        bq_worker_shutdown_signal = 0;
+        bq_transport_stop_signal = 0;
+        bq_test_worker_end(&fixture);
+    }
+}
 #endif
 #endif
 
@@ -2811,12 +2875,14 @@ int main(int argc, char** argv)
     bq_test_worker_ancestor_budget();
     bq_test_worker_boot_and_identity_recovery();
     bq_test_worker_lock_precedes_materialization();
+    bq_test_transport_worker_retries_after_busy();
+    bq_test_transport_worker_signal_handoff();
 #endif
     char const* storage = "posix-real-journal";
 #else
     char const* storage = "unsupported-codec-only";
 #endif
-    printf("BENCH_SERVICE_SELF_TEST assertions=%u failures=%u storage=%s executor=fake-plus-supervisor-no-recipe-execution\n",
+    printf("BENCH_SERVICE_SELF_TEST assertions=%u failures=%u storage=%s executor=fake-plus-supervisor-fixed-recipe-handoff\n",
            bq_test_assertions, bq_test_failures, storage);
     int result = bq_test_failures ? 1 : 0;
     return result;

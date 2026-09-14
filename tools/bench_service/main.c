@@ -53,10 +53,12 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     bool valid = false;
     u64 id = 0;
     u64 argument = 0;
-    if (argc == 4 && !strcmp(argv[1], "worker-unit"))
+    if (argc == 10 && !strcmp(argv[1], "worker-unit"))
     {
         valid = bq_decimal(argv[3], true, &argument) && argument <= INT_MAX;
-        error = valid ? bq_worker_unit(string_from_pointer(argv[2]), (int)argument) : BQ_BAD_REQUEST;
+        error = valid ? bq_worker_unit(string_from_pointer(argv[2]), (int)argument, string_from_pointer(argv[4]),
+                                        string_from_pointer(argv[5]), string_from_pointer(argv[6]), string_from_pointer(argv[7]),
+                                        string_from_pointer(argv[8]), string_from_pointer(argv[9])) : BQ_BAD_REQUEST;
         if (error != BQ_OK)
         {
             fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
