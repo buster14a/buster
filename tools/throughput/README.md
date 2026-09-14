@@ -51,7 +51,7 @@ measurement host. Use a new output directory for every run; existing results
 are not silently overwritten. Comparison never downloads historical numbers
 from a different runner and never automatically updates a golden baseline.
 
-### Real-source descriptor preflight
+### Real-source preflight and hosted functional admission
 
 The opt-in `check-workload` command validates a real-source descriptor and an
 already staged input tree without compiling, linking, executing or measuring
@@ -65,11 +65,13 @@ anything:
   --evidence-outcome pass
 ```
 
-Descriptors for cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 bind their exact
+Version-1 descriptors remain accepted for durable preflight receipts. The
+version-2 descriptors for cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 bind their exact
 upstream identities, complete staged-file inventory, aggregate tree hash,
 requested translation-unit bytes, dependency/resource/sysroot/SDK/environment
 identities, target/ABI/features, C lowerings, PIC and allocator modes,
-operations, artifacts, oracle and ordered compile/link argv templates. The
+operations, artifacts, oracle and separate ordered object, compile-link and
+runtime argv templates. The
 preflight independently hashes the descriptor, every declared input, the
 complete tree, compiler binary and caller-supplied oracle evidence, and repeats
 the identities and exact templates in its receipt.
@@ -85,13 +87,22 @@ failure. A new qualification must run the existing build.c oracle after
 installing the declared native dependencies before Lua can be admitted.
 
 The branch-only `throughput-real-source.yml` workflow stages these exact roots,
-runs the existing cJSON/Lua/SQLite oracles, then writes the preflight receipts
-to its evidence artifact. It does not enlarge the default CI corpus, run on a
-dedicated benchmark host or make a performance/admission claim. A later
-performance admission must additionally freeze the runtime resource headers,
-sysroot/SDK and native library closure named as runtime-required by these
-descriptors, expand the templates into exact argv/working directories, and
-bind the admitted host and experiment policy.
+runs the existing cJSON/Lua/SQLite oracles, and always writes the preflight and
+outcome evidence. For each freshly passing oracle, `admit-workload` then verifies
+parsed dependency, compiler-resource, system-header, SDK, sanitized-environment
+and runtime-library manifests; compiles every declared source/generated file to
+an object; independently compile-links the declared source list; executes that
+artifact; and revalidates all identities before emitting a receipt. Expanded
+absolute argv, working directories, process results, metrics and artifact hashes
+are retained. Failed attempts retain their partial evidence but emit no success
+receipt.
+
+Each receipt admits only the explicitly performed Linux x86-64 baseline CPU,
+direct-SSA, non-PIC, fast-allocator cells for object, compile-link and runtime
+operations. The broader frontend/PIC/allocator lists remain requested descriptor
+metadata, not performed work. This is hosted functional admission only: it does
+not enlarge the default CI corpus, run timing samples, qualify a dedicated host,
+or establish A/A or A/B performance acceptance. Those remain separate work.
 
 ## Shared library boundary
 

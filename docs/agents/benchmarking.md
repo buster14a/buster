@@ -16,7 +16,12 @@
   `check-workload` provides a separate, non-timing preflight for the pinned
   cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
   staged tree plus compiler and oracle evidence, but always reports
-  `admitted=false` and requires a fresh functional and host admission.
+  `admitted=false` and requires fresh admission. The branch-only real-source
+  workflow may additionally emit a hosted functional receipt for each fresh
+  passing oracle after parsed closure verification, separate object and
+  compile-link operations, and an exact runtime transcript. That receipt covers
+  only its one direct-SSA/non-PIC/fast cell; it is not timing, dedicated-host,
+  A/A or A/B performance admission.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
