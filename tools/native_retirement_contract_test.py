@@ -2,6 +2,7 @@
 """Filesystem-backed regressions for the native-retirement v2 validator."""
 
 import csv
+import copy
 import hashlib
 import json
 import shutil
@@ -155,9 +156,10 @@ class ContractTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
 
-    def validate(self, require_clean=True):
+    def validate(self, require_clean=True, require_clean_acceptance=False):
         output = self.root / "report.json"
-        return contract.validate_shards(list(reversed(self.shards)), output, require_clean)
+        return contract.validate_shards(list(reversed(self.shards)), output, require_clean,
+                                        require_clean_acceptance)
 
     def test_clean_complete_partition_passes(self):
         report = self.validate()
@@ -165,6 +167,10 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(report["groups"], 48)
         self.assertEqual(report["candidate_failure_rows"], [])
         self.assertEqual(report["baseline_dispositions"], {"baseline-supported": 48})
+        self.assertTrue(report["require_clean_candidate"])
+        self.assertFalse(report["require_clean_acceptance"])
+        self.assertTrue(report["clean_candidate"])
+        self.assertTrue(report["clean_acceptance"])
         self.assertEqual(report["rows_identity_sha256"], contract.validate(self.shards[0])["rows_identity_sha256"])
         self.assertTrue(json.loads((self.root / "report.json").read_text(encoding="utf-8"))["complete_row_partition"])
 
@@ -191,7 +197,7 @@ class ContractTests(unittest.TestCase):
         report = self.validate(require_clean=False)
         self.assertIn(1, report["candidate_failure_rows"])
         self.assertIn(1, report["telemetry_defect_rows"])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
 
     def test_counters_must_be_canonical_unsigned_decimals(self):
@@ -242,7 +248,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn(int(strict[0]["row"]), report["telemetry_defect_rows"])
         self.assertIn(int(strict[1]["row"]), report["fallback_defect_rows"])
         self.assertEqual(len(report["candidate_failure_rows"]), 2)
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
         self.assertFalse(json.loads((self.root / "report.json").read_text(encoding="utf-8"))["clean_candidate"])
 
@@ -255,7 +261,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn(5, report["candidate_failure_rows"])
         self.assertIn(5, report["acceptance_failure_rows"])
         self.assertNotIn(5, report["telemetry_defect_rows"])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
 
     def test_baseline_disposition_is_preserved(self):
@@ -268,8 +274,9 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(report["candidate_failure_rows"], [])
         self.assertEqual(report["reference_failure_rows"], [0])
         self.assertEqual(report["acceptance_failure_rows"], [0])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
-            self.validate()
+        self.assertTrue(self.validate()["clean_candidate"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_baseline_disposition_is_explicitly_preserved(self):
         fields, rows = read_table(self.shards[0] / "results.tsv")
@@ -284,8 +291,9 @@ class ContractTests(unittest.TestCase):
         self.assertIn(128, report["inapplicable_rows"])
         self.assertEqual(report["reference_failure_rows"], [128])
         self.assertEqual(report["acceptance_failure_rows"], [128])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
-            self.validate()
+        self.assertTrue(self.validate()["clean_candidate"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_control_rejects_compile_and_telemetry_defects(self):
         fields, rows = read_table(self.shards[0] / "results.tsv")
@@ -304,8 +312,10 @@ class ContractTests(unittest.TestCase):
         self.assertIn(128, report["fallback_defect_rows"])
         self.assertIn(128, report["telemetry_defect_rows"])
         self.assertIn(128, report["execution_defect_rows"])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_inapplicable_target_does_not_excuse_candidate_telemetry(self):
         fields, rows = read_table(self.shards[0] / "results.tsv")
@@ -319,8 +329,56 @@ class ContractTests(unittest.TestCase):
         self.assertIn(129, report["inapplicable_rows"])
         self.assertIn(129, report["telemetry_defect_rows"])
         self.assertIn(129, report["acceptance_failure_rows"])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
+
+    def test_inapplicable_target_does_not_excuse_unresolved_strict_reference(self):
+        reference = contract.validate(self.shards[0])
+        fields, rows = read_table(self.shards[0] / "results.tsv")
+        strict = next(row for row in rows if row["row"] == "129")
+        census_fields, census_rows = read_table(self.shards[0] / "rows.tsv")
+        census_row = next(row for row in census_rows if row["row"] == "129")
+        self.assertEqual(census_row["execution_obligation"], "unavailable-platform-control")
+        strict["disposition"] = "strict-success-baseline-unresolved"
+        write_table(self.shards[0] / "results.tsv", fields, rows)
+
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["candidate_failure_rows"], [])
+        self.assertEqual(report["reference_failure_rows"], [129])
+        self.assertEqual(report["acceptance_failure_rows"], [129])
+        self.assertTrue(report["clean_candidate"])
+        self.assertFalse(report["clean_acceptance"])
+        self.assertTrue(self.validate()["clean_candidate"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
+
+        candidate = contract.validate(self.shards[0])
+        output = self.root / "reconcile-inapplicable-reference.json"
+        transition = contract.reconcile(reference, candidate, output, True)
+        self.assertEqual(transition["candidate_common_failure_rows"], [])
+        self.assertEqual(transition["reference_common_failure_rows"], [129])
+        self.assertEqual(transition["acceptance_common_failure_rows"], [129])
+        self.assertTrue(transition["clean_candidate"])
+        self.assertFalse(transition["clean_acceptance"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved common rows"):
+            contract.reconcile(reference, candidate, output, False, True)
+
+    def test_inapplicable_target_does_not_excuse_combined_reference_failure(self):
+        fields, rows = read_table(self.shards[0] / "results.tsv")
+        strict = next(row for row in rows if row["row"] == "129")
+        strict["disposition"] = "baseline-and-supported-native-gap"
+        write_table(self.shards[0] / "results.tsv", fields, rows)
+
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["candidate_failure_rows"], [129])
+        self.assertEqual(report["reference_failure_rows"], [129])
+        self.assertEqual(report["acceptance_failure_rows"], [129])
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
+            self.validate()
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
 
     def test_reference_disposition_is_preserved(self):
         fields, rows = read_table(self.shards[1] / "results.tsv")
@@ -332,8 +390,54 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(report["candidate_failure_rows"], [])
         self.assertEqual(report["reference_failure_rows"], [5])
         self.assertEqual(report["acceptance_failure_rows"], [5])
-        with self.assertRaisesRegex(AssertionError, "candidate acceptance has unresolved rows"):
+        self.assertTrue(self.validate()["clean_candidate"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
+
+    def test_candidate_gate_ignores_reference_only_failure_but_rejects_mixed_candidate_failure(self):
+        fields, rows = read_table(self.shards[1] / "results.tsv")
+        reference_only = next(row for row in rows if row["row"] == "5")
+        candidate_failure = next(row for row in rows if row["row"] == "7")
+        reference_only["disposition"] = "strict-success-baseline-unresolved"
+        candidate_failure["fallbacks"] = "1"
+        write_table(self.shards[1] / "results.tsv", fields, rows)
+
+        report = self.validate(require_clean=False)
+        self.assertEqual(report["candidate_failure_rows"], [7])
+        self.assertEqual(report["reference_failure_rows"], [5])
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
+        gated_report = json.loads((self.root / "report.json").read_text(encoding="utf-8"))
+        self.assertFalse(gated_report["require_clean_candidate"])
+        self.assertTrue(gated_report["require_clean_acceptance"])
+        self.assertEqual(gated_report["acceptance_failure_rows"], [5, 7])
+
+        candidate_failure["fallbacks"] = "0"
+        write_table(self.shards[1] / "results.tsv", fields, rows)
+        report = self.validate()
+        self.assertTrue(report["clean_candidate"])
+        self.assertFalse(report["clean_acceptance"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            self.validate(require_clean=False, require_clean_acceptance=True)
+
+    def test_partition_gates_use_their_own_failure_sets(self):
+        reports = [contract.validate(shard) for shard in self.shards]
+        reference_only = reports[1]["outcomes"]["5"]
+        reference_only.update({"candidate_failure": False, "reference_failure": True,
+                               "acceptance_failure": True})
+        contract.partition_shards(reports, require_clean_candidate=True)
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            contract.partition_shards(reports, require_clean_acceptance=True)
+
+        candidate_failure = reports[1]["outcomes"]["7"]
+        candidate_failure.update({"candidate_failure": True, "reference_failure": False,
+                                  "acceptance_failure": True})
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
+            contract.partition_shards(reports, require_clean_candidate=True)
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved rows"):
+            contract.partition_shards(reports, require_clean_acceptance=True)
 
     def test_setup_disposition_is_preserved_but_not_clean(self):
         fields, rows = read_table(self.shards[0] / "results.tsv")
@@ -406,6 +510,49 @@ class ContractTests(unittest.TestCase):
         self.assertNotEqual(report["reference_compiler_sha256"], report["candidate_compiler_sha256"])
         self.assertNotEqual(report["reference_compiler_revision_claim"],
                              report["candidate_compiler_revision_claim"])
+
+    def test_reconcile_separates_candidate_and_reference_common_failures(self):
+        reference = contract.validate(self.shards[1])
+        candidate = copy.deepcopy(reference)
+        candidate["directory"] = str(self.root / "candidate-report")
+        reference_key = next(key for key, item in candidate["identities"].items() if item["row"] == 5)
+        candidate_key = next(key for key, item in candidate["identities"].items() if item["row"] == 7)
+        candidate["identities"][reference_key].update({
+            "disposition": "strict-success-baseline-unresolved",
+            "candidate_failure": False,
+            "reference_failure": True,
+            "acceptance_failure": True,
+        })
+        candidate["identities"][candidate_key].update({
+            "fallbacks": 1,
+            "candidate_failure": True,
+            "reference_failure": False,
+            "acceptance_failure": True,
+        })
+        output = self.root / "reconcile-gates.json"
+
+        report = contract.reconcile(reference, candidate, output, False)
+        self.assertEqual(report["schema"], 2)
+        self.assertEqual(report["candidate_common_failure_rows"], [7])
+        self.assertEqual(report["reference_common_failure_rows"], [5])
+        self.assertEqual(report["acceptance_common_failure_rows"], [5, 7])
+        self.assertFalse(report["require_clean_candidate"])
+        self.assertFalse(report["require_clean_acceptance"])
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved common rows"):
+            contract.reconcile(reference, candidate, output, True)
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved common rows"):
+            contract.reconcile(reference, candidate, output, False, True)
+
+        candidate["identities"][candidate_key].update({
+            "fallbacks": 0,
+            "candidate_failure": False,
+            "acceptance_failure": False,
+        })
+        report = contract.reconcile(reference, candidate, output, True)
+        self.assertTrue(report["clean_candidate"])
+        self.assertFalse(report["clean_acceptance"])
+        with self.assertRaisesRegex(AssertionError, "acceptance has unresolved common rows"):
+            contract.reconcile(reference, candidate, output, False, True)
 
     def test_reconcile_keeps_common_rows_across_unrelated_input_addition(self):
         candidate_dir = self.root / "candidate-expanded"
