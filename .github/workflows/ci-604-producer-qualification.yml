@@ -1,0 +1,459 @@
+name: "Buster #604 producer qualification"
+
+# Temporary, qualification-branch-only measurement of the native Release
+# producer. This is evidence collection, not a production profile selection or
+# replacement correctness gate. It must never run for a pull request or another
+# branch.
+on:
+  push:
+    branches:
+      - luna/604-producer-qualification-20260914
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-604-producer-qualification-${{ github.ref }}
+  # Keep an in-flight evidence run for reproducibility; a later push must not
+  # discard the only partial/diagnostic artifact from this expensive screen.
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: "#604 producer qualification (${{ matrix.name }})"
+    if: ${{ github.event_name == 'push' && github.repository == 'buster14a/buster' && github.ref == 'refs/heads/luna/604-producer-qualification-20260914' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      BUSTER_604_RUNNER: ${{ matrix.runner }}
+      BUSTER_604_ARCH: ${{ matrix.arch }}
+      CFLAGS: -Wno-invalid-feature-combination
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64
+            runner: ubuntu-26.04
+            os: linux
+            arch: x86_64
+          - name: Linux AArch64
+            runner: ubuntu-26.04-arm
+            os: linux
+            arch: aarch64
+          - name: macOS x86-64
+            runner: macos-26-intel
+            os: macos
+            arch: x86_64
+          - name: macOS AArch64
+            runner: macos-26
+            os: macos
+            arch: aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Assert workflow command budgets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/ci-604-producer-qualification.yml')
+          lines = p.read_text(encoding='utf-8').splitlines()
+          blocks = []
+          for i, line in enumerate(lines):
+              if line != '        run: |':
+                  continue
+              body = []
+              for item in lines[i + 1:]:
+                  if item.startswith('          '):
+                      body.append(item[10:])
+                  elif not item.strip():
+                      body.append('')
+                  else:
+                      break
+              blocks.append('\n'.join(body) + '\n')
+          assert blocks, 'no run blocks found'
+          lengths = [len(block) for block in blocks]
+          assert max(lengths) < 20500, f'run block exceeds GitHub limit: {lengths}'
+          assert ' --cpu' + ' auto' not in ''.join(blocks), 'portable hosted throughput must use the default CPU policy'
+          print(f'run_blocks={len(blocks)} max_chars={max(lengths)}')
+          PY
+
+      - name: Prepare #604 qualification
+        id: prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          root="$RUNNER_TEMP/buster-604-qualification"
+          profiles="$root/profiles"; recovery="$root/recovery"; evidence="$root/evidence"; throughput="$root/throughput"; diagnostics="$root/diagnostics"; bin="$root/bin"; curated="$root/curated"
+          mkdir -p "$profiles" "$recovery" "$evidence" "$throughput" "$diagnostics" "$bin" "$curated"
+          now_ns() { python3 -c 'import time; print(time.time_ns())'; }
+          printf 'repetition\tposition\tprofile\tstage\tstatus\n' > "$root/results.tsv"
+          printf 'repetition\tposition\tprofile\torder\tbuild_directory\tevidence_directory\n' > "$root/profile-order.tsv"
+          printf 'attempt\tbaseline\tcandidate\toutput\n' > "$root/throughput-attempts.tsv"
+          printf 'timestamp_utc\tstage\tcompleted\ttotal\telapsed_ns\n' > "$root/progress.tsv"
+          started="$(now_ns)"; source_sha="$(git rev-parse HEAD)"; source_tree="$(git rev-parse HEAD^{tree})"; workflow_blob="$(git hash-object .github/workflows/ci-604-producer-qualification.yml)"
+          printf '%s\n' "$source_sha" > "$root/source-sha"; printf '%s\n' "$source_tree" > "$root/source-tree"; printf '%s\n' "$workflow_blob" > "$root/workflow-blob"; printf '%s\n' "$started" > "$root/job-start-ns"
+          {
+            printf 'source_sha=%s\nsource_tree=%s\nworkflow_blob=%s\ngithub_sha=%s\n' "$source_sha" "$source_tree" "$workflow_blob" "${GITHUB_SHA:-unknown}"
+            printf 'github_run_id=%s\ngithub_run_attempt=%s\n' "${GITHUB_RUN_ID:-unknown}" "${GITHUB_RUN_ATTEMPT:-unknown}"
+            printf 'image_os=%s\nimage_version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            printf 'runner=%s\nrunner_os=%s\nrunner_arch=%s\nmatrix_arch=%s\nstarted_at_utc=%s\n' "$BUSTER_604_RUNNER" "$RUNNER_OS" "$RUNNER_ARCH" "$BUSTER_604_ARCH" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            printf '\n-- uname --\n'; uname -a; printf '\n-- compiler --\n'; command -v clang; clang --version; clang -dumpmachine
+            printf '\n-- cmake --\n'; command -v cmake; cmake --version; printf '\n-- ninja --\n'; command -v ninja; ninja --version; printf '\n-- python --\n'; command -v python3; python3 --version
+            printf '\n-- cpu and memory --\n'; getconf _NPROCESSORS_ONLN || true
+            if [[ "$RUNNER_OS" == macOS ]]; then
+              if ! sysctl -n hw.logicalcpu; then :; fi
+              if ! sysctl -n hw.memsize; then :; fi
+              printf 'cpu_model_hw_model='
+              if ! sysctl -n hw.model; then printf unknown; fi
+              printf '\n'
+              printf 'cpu_model_brand='
+              if ! sysctl -n machdep.cpu.brand_string; then printf unknown; fi
+              printf '\n'
+              if ! sw_vers; then :; fi
+            else
+              if ! lscpu; then :; fi
+              printf 'cpu_model='
+              model=''
+              if command -v lscpu >/dev/null 2>&1; then model="$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -n 1)"; fi
+              if [[ -z "$model" ]]; then model=unknown; fi
+              printf '%s\n' "$model"
+              if ! grep -E '^(MemTotal|MemAvailable|Cpus_allowed_list):' /proc/meminfo /proc/self/status 2>/dev/null; then :; fi
+              if [[ -r /sys/fs/cgroup/cpu.max ]]; then cat /sys/fs/cgroup/cpu.max; fi
+              if [[ -r /sys/fs/cgroup/memory.max ]]; then cat /sys/fs/cgroup/memory.max; fi
+            fi
+            printf '\n-- shell limits --\n'; ulimit -a || true
+          } > "$root/host.txt" 2>&1
+          {
+            printf 'budget_minutes=180\n'; printf 'screening_scope=three fresh-directory warm-filesystem A-D repetitions plus one separate E characterization per platform\n'; printf 'planned_profile_builds=13\nplanned_recovery_runs=5\nplanned_throughput_comparisons=9\n'; printf 'rotation_orders=ABCD;BCDA;CDAB\nrotation_position_sums=A:8;B:7;C:6;D:9\n'; printf 'rotation_note=each profile has three distinct positions; equal sums are impossible for four profiles with only three positions from 1..4\n'; printf 'runner_admission=standard hosted labels only; no dedicated-host lease or #437 service path\n'; printf 'stage_budgets_minutes=prepare:10;profiles:130;recovery:20;throughput:15;finalize:5\n'; printf 'cache_cohort=fresh build directories on a warm filesystem; order and repetition are retained\n'; printf 'rss_metric=child-process ru_maxrss sample; nested process RSS is not deduplicated\n'
+            printf 'queue_delay=not inferred from elapsed time; join from GitHub run metadata after collection\n'
+          } > "$root/budget.txt"
+          {
+            printf 'contract_status=preliminary_contract_inventory_only\n'; printf 'canonical_E=Linux CI/O2/tests/unity/fuzz-on/mold/CMAKE_CROSS_CONFIGS=all; Apple AArch64 CI/O2/tests/unity/fuzz-off/default-linker/CMAKE_CROSS_CONFIGS=all; Intel Apple CI/O2/tests/unity/fuzz-off/default-linker/direct-matrix-cross-configs-omitted\n'; printf 'diagnostics=invalid-input nonzero-status and nonempty-diagnostic controls plus debug sections, symbolization and backtrace inventory; compiler text/stream parity is not required\n'; printf 'debug_info_off_loss=DWARF line/type information may be absent; symbolization contract is not yet accepted\n'; printf 'frame_pointers_off_loss=simple frame-pointer unwinding may be absent; CFI/backtrace behavior needs final qualification\n'; printf 'screening_limit=no profile winner and no full native-job timing claim\n'; printf 'next_step=winner requires a separate three-attempt full mode+differential qualification including self-host\n'
+          } > "$root/diagnostic-contract.txt"
+          cat > "$bin/time-command.py" <<'PY'
+          #!/usr/bin/env python3
+          import json, resource, subprocess, sys, time
+          if len(sys.argv) < 3: raise SystemExit('usage: time-command.py OUTPUT COMMAND [ARGUMENT ...]')
+          output, argv = sys.argv[1], sys.argv[2:]; start = time.time_ns(); rc = 127; error = None
+          try: child = subprocess.Popen(argv); rc = child.wait()
+          except OSError as exc: error = str(exc)
+          end = time.time_ns(); rss = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+          if sys.platform != 'darwin': rss *= 1024
+          record = {'argv': argv, 'start_ns': start, 'end_ns': end, 'elapsed_ns': end-start, 'exit_status': rc, 'max_rss_bytes': rss, 'rss_metric': 'child-process ru_maxrss sample; nested process RSS is not deduplicated'}
+          if error: record['error'] = error
+          with open(output, 'w', encoding='utf-8') as stream:
+              for key, value in record.items(): stream.write(f'{key}={json.dumps(value, sort_keys=True)}\n')
+          raise SystemExit(rc)
+          PY
+          chmod 700 "$bin/time-command.py"
+          cat > "$bin/summarize-profile.py" <<'PY'
+          #!/usr/bin/env python3
+          import hashlib, json, re, shlex, sys
+          from pathlib import Path
+          (profile, evidence_name, binary_name, build_name, source_sha, source_tree, workflow_blob, runner, runner_os, runner_arch, expected_linker, expected_fuzz, expected_opt, expected_debug, expected_frame) = sys.argv[1:]
+          evidence, binary, build = Path(evidence_name), Path(binary_name), Path(build_name)
+          def cache_values(path):
+              result = {}
+              for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+                  if ':' in line and '=' in line and not line.startswith('#'):
+                      key, value = line.split(':', 1); result[key] = value.split('=', 1)[1]
+              return result
+          def toks(line):
+              try: return shlex.split(line)
+              except ValueError: return []
+          def output(tokens):
+              for i, token in enumerate(tokens[:-1]):
+                  if token == '-o': return tokens[i+1]
+              return ''
+          cache = cache_values(build / 'CMakeCache.txt'); rows = [(line, toks(line)) for line in (evidence / 'ninja-commands.txt').read_text(encoding='utf-8', errors='replace').splitlines() if line.strip()]
+          comp = [(line, ts) for line, ts in rows if '-c' in ts and output(ts)]; unity = [(line, ts) for line, ts in comp if any(t == 'src/buster/apps/ide/ide.c' or t.endswith('/src/buster/apps/ide/ide.c') for t in ts)]; links = [(line, ts) for line, ts in rows if '-c' not in ts and Path(output(ts)).name in {'ide','ide.exe'}]
+          if len(comp) != 1 or len(unity) != 1 or len(links) != 1: raise SystemExit(f'{profile}: expected one unity compile/link, got {len(comp)}/{len(unity)}/{len(links)}')
+          compile_line, compile_ts = unity[0]; link_line, link_ts = links[0]; log_rows = []
+          log_path = build / '.ninja_log'
+          if log_path.is_file():
+              for line in log_path.read_text(encoding='utf-8', errors='replace').splitlines():
+                  if line and not line.startswith('#'):
+                      fields = line.split('\t')
+                      if len(fields) >= 5:
+                          try: log_rows.append((int(fields[0]), int(fields[1]), fields[3], fields[4]))
+                          except ValueError: pass
+          def edge(command):
+              wanted = output(toks(command)).replace('\\','/').lstrip('./'); found = [row for row in log_rows if row[2].replace('\\','/').lstrip('./').endswith(wanted) or wanted.endswith(row[2].replace('\\','/').lstrip('./'))]
+              if len(found) != 1: raise SystemExit(f'{profile}: expected one ninja edge for {wanted}, got {len(found)}')
+              start, end, name, digest = found[0]; return {'start_ms':start,'end_ms':end,'duration_ns':(end-start)*1000000,'output':name,'command_hash':digest}
+          debug = [t for t in compile_ts if t == '-g' or t.startswith('-gline-') or t.startswith('-gmodules') or t in {'/Zi','-gcodeview'}]; frame = [t for t in compile_ts if t in {'-fno-omit-frame-pointer','-fomit-frame-pointer'}]; fuzz = [t for t in compile_ts if t.startswith('-DBUSTER_FUZZ_AVAILABLE=')]
+          opts = [t for t in compile_ts if re.fullmatch(r'-O(?:[0-3s]|fast|g|z)', t)]
+          checks = {'one_unity_compile_and_one_native_link':True,'unity_source_identity':any(t == 'src/buster/apps/ide/ide.c' or t.endswith('/src/buster/apps/ide/ide.c') for t in compile_ts),'unity_define':'-DBUSTER_UNITY_BUILD=1' in compile_ts,'final_optimization_token':(opts or [None])[-1] == expected_opt,'debug_info_token_presence':bool(debug) == (expected_debug == 'ON'),'frame_pointer_token_presence':('-fno-omit-frame-pointer' in frame) == (expected_frame == 'ON'),'fuzz_cache':cache.get('BUSTER_FUZZ_AVAILABLE') == expected_fuzz,'fuzz_compile_define':f"-DBUSTER_FUZZ_AVAILABLE={'1' if expected_fuzz == 'ON' else '0'}" in fuzz,'linker_cache':cache.get('CMAKE_LINKER_TYPE','').upper() == expected_linker.upper(),'linker_command':('mold' in link_line.lower()) if expected_linker.upper() == 'MOLD' else ('mold' not in link_line.lower()),'no_cmake_compiler_or_link_launcher':all(cache.get(k,'') in {'','NOTFOUND'} for k in ('CMAKE_C_COMPILER_LAUNCHER','CMAKE_RULE_LAUNCH_LINK'))}
+          if not all(checks.values()): raise SystemExit("%s: failed checks: %s" % (profile, ','.join(k for k,v in checks.items() if not v)))
+          def timed(path):
+              result = {}
+              if path.is_file():
+                  for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+                      if '=' in line:
+                          key, value = line.split('=',1)
+                          if key in {'start_ns','end_ns','elapsed_ns','exit_status','max_rss_bytes'}:
+                              try: result[key] = int(value)
+                              except ValueError: pass
+              return result
+          payload = {'schema':1,'profile':profile,'source_sha':source_sha,'source_tree':source_tree,'workflow_blob':workflow_blob,'runner':runner,'runner_os':runner_os,'runner_arch':runner_arch,'build_directory':str(build),'cache_identity':cache,'cmake_cache_sha256':hashlib.sha256((build/'CMakeCache.txt').read_bytes()).hexdigest(),'producer_commands':{'exact_unity_compile_argv':compile_line,'exact_native_link_argv':link_line,'compile_tokens':compile_ts,'link_tokens':link_ts,'debug_info_tokens':debug,'frame_pointer_tokens':frame,'fuzz_tokens':fuzz,'compile_ninja_edge':edge(compile_line),'link_ninja_edge':edge(link_line),'final_optimization_token':(opts or [None])[-1]},'checks':checks,'command_time_samples':{p.stem:timed(p) for p in evidence.glob('*.time')},'binary':{'path':str(binary),'present':binary.is_file(),'bytes':binary.stat().st_size if binary.is_file() else 0,'sha256':hashlib.sha256(binary.read_bytes()).hexdigest() if binary.is_file() else None},'rss_metric':'child-process ru_maxrss sample; nested process RSS is not deduplicated','screening_preliminary':True,'diagnostic_contract_status':'preliminary_contract_inventory_only'}
+          (evidence/'metrics.json').write_text(json.dumps(payload,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+          chmod 700 "$bin/summarize-profile.py"
+          { if [[ "$RUNNER_OS" == Linux ]]; then if command -v mold >/dev/null 2>&1; then echo status=already-installed; else sudo apt-get update && sudo apt-get install -y mold; echo status=installed; fi; command -v mold; mold --version; else echo status=not-applicable; fi; } > "$root/mold-install.log" 2>&1 || echo status=failed >> "$root/mold-install.log"
+          mold_missing=false
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            if ! command -v mold >/dev/null 2>&1; then mold_missing=true; fi
+          fi
+          if [[ "$mold_missing" == true ]]; then echo failed > "$root/mold-status"; else echo pass > "$root/mold-status"; fi
+          driver="$bin/buster-build"; printf 'argv:' > "$root/bootstrap.log"; printf ' %q' clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver" >> "$root/bootstrap.log"; printf '\n' >> "$root/bootstrap.log"
+          if python3 "$bin/time-command.py" "$root/bootstrap.time" clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver" >> "$root/bootstrap.log" 2>&1; then echo pass > "$root/bootstrap-status"; else echo failed > "$root/bootstrap-status"; fi
+          printf '%s\tprepare\t1\t1\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(( $(now_ns) - started ))" >> "$root/progress.tsv"
+
+      - name: Run A-D and canonical E profiles
+        id: profiles
+        if: ${{ always() && steps.prepare.outcome != 'cancelled' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/buster-604-qualification"; profiles="$root/profiles"; recovery="$root/recovery"; evidence="$root/evidence"; diagnostics="$root/diagnostics"; bin="$root/bin"; driver="$bin/buster-build"; source_sha="$(cat "$root/source-sha")"; source_tree="$(cat "$root/source-tree")"; workflow_blob="$(cat "$root/workflow-blob")"
+          fail() { printf '%s\t%s\t%s\t%s\tfail\n' "$1" "$2" "$3" "$4" >> "$root/results.tsv"; }; measure() { local label="$1" log="$2" timefile="$3"; shift 3; { printf 'label=%s\nargv:' "$label"; printf ' %q' "$@"; printf '\n'; } > "$log"; local rc=0; python3 "$bin/time-command.py" "$timefile" "$@" >> "$log" 2>&1 || rc=$?; printf 'exit_status=%s\n' "$rc" >> "$log"; return "$rc"; }; partial() { printf 'partial=true\npartial_at_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$root/partial-summary.txt"; }; on_exit() { local rc=$?; trap - EXIT; [[ "$rc" != 0 ]] && partial; exit "$rc"; }; trap on_exit EXIT; trap 'partial; exit 143' TERM; trap 'partial; exit 130' INT
+          profile_args() {
+            local id="$1" dir="$2"; GEN=(generate --build-directory "$dir" --cc clang --config Release); CMAKE=(); EXPECTED_LINKER=DEFAULT; EXPECTED_FUZZ=OFF; EXPECTED_OPT=-O3; EXPECTED_DEBUG=ON; EXPECTED_FRAME=ON; EXPECTED_CROSS_CONFIGS=
+            case "$id" in
+              A) DESCRIPTION='A: current native CI lane (CI=OFF, Release/-O3, debug info/frame pointers ON)'; GEN+=(--linker DEFAULT) ;;
+              B) DESCRIPTION='B: profiling-isolation candidate (CI=OFF, Release/-O3, debug info/frame pointers OFF)'; GEN+=(--linker DEFAULT); CMAKE+=(-DBUSTER_DEBUG_INFO=OFF -DBUSTER_FRAME_POINTERS=OFF); EXPECTED_DEBUG=OFF; EXPECTED_FRAME=OFF ;;
+              C) DESCRIPTION='C: debug-info-only control (CI=OFF, Release/-O3, debug info OFF/frame pointers ON)'; GEN+=(--linker DEFAULT); CMAKE+=(-DBUSTER_DEBUG_INFO=OFF); EXPECTED_DEBUG=OFF ;;
+              D) DESCRIPTION='D: frame-pointer-only control (CI=OFF, Release/-O3, debug info ON/frame pointers OFF)'; GEN+=(--linker DEFAULT); CMAKE+=(-DBUSTER_FRAME_POINTERS=OFF); EXPECTED_FRAME=OFF ;;
+              E)
+                EXPECTED_OPT=-O2; EXPECTED_DEBUG=OFF; EXPECTED_FRAME=OFF
+                if [[ "$RUNNER_OS" == Linux ]]; then
+                  DESCRIPTION='E: canonical CI Clang Release Linux (CI=ON, effective -O2, tests/unity ON, fuzz ON, linker=MOLD, CMAKE_CROSS_CONFIGS=all; one build)'
+                  GEN+=(--ci --optimize --fuzz --no-check-optional-warnings --no-developer-targets --linker MOLD); EXPECTED_LINKER=MOLD; EXPECTED_FUZZ=ON; EXPECTED_CROSS_CONFIGS=all
+                else
+                  DESCRIPTION='E: canonical CI Clang Release Apple (CI=ON, effective -O2, tests/unity ON, fuzz OFF, linker=DEFAULT; CMAKE_CROSS_CONFIGS=all only on AArch64; one build)'
+                  GEN+=(--ci --optimize --no-check-optional-warnings --no-developer-targets --linker DEFAULT)
+                  if [[ "$BUSTER_604_ARCH" == aarch64 ]]; then EXPECTED_CROSS_CONFIGS=all; fi
+                fi
+                CMAKE+=(-DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY)
+                if [[ -n "$EXPECTED_CROSS_CONFIGS" ]]; then CMAKE+=(-DCMAKE_CROSS_CONFIGS="$EXPECTED_CROSS_CONFIGS"); fi
+                ;;
+              *) return 2 ;;
+            esac
+            # Bash 3.2 treats an empty array expansion as an unset variable
+            # under `set -u`. Profile A intentionally has no CMake overrides.
+            GEN+=(--)
+            if [[ "$id" != A ]]; then GEN+=("${CMAKE[@]}"); fi
+          }
+          cache_value() { sed -n "s/^$2:[^=]*=//p" "$1" | head -n 1; }; cache_expect() { [[ "$(cache_value "$1" "$2")" == "$3" ]]; }
+          cache_check() {
+            local id="$1" cache="$2" ok=true; [[ -f "$cache" ]] || return 1; profile_args "$id" dummy; local ci=OFF warnings=ON developer=ON config='Debug;Release'; [[ "$id" == E ]] && { ci=ON; warnings=OFF; developer=OFF; config=Release; }
+            keys=(BUSTER_CI BUSTER_DEBUG_INFO BUSTER_FRAME_POINTERS BUSTER_FUZZ_AVAILABLE BUSTER_UNITY_BUILD BUSTER_INCLUDE_TESTS BUSTER_SANITIZE BUSTER_LTO BUSTER_TIME_TRACE BUSTER_INSTRUMENT BUSTER_LINK_LIBC BUSTER_SINGLE_THREADED BUSTER_CHECK_OPTIONAL_WARNINGS BUSTER_DEVELOPER_TARGETS CMAKE_CONFIGURATION_TYPES CMAKE_DEFAULT_BUILD_TYPE CMAKE_C_FLAGS_RELEASE CMAKE_CROSS_CONFIGS)
+            values=("$ci" "$EXPECTED_DEBUG" "$EXPECTED_FRAME" "$EXPECTED_FUZZ" ON ON OFF OFF OFF OFF ON OFF "$warnings" "$developer" "$config" Release '-O3 -DNDEBUG' "$EXPECTED_CROSS_CONFIGS")
+            for i in "${!keys[@]}"; do cache_expect "$cache" "${keys[$i]}" "${values[$i]}" || ok=false; done
+            cache_expect "$cache" CMAKE_LINKER_TYPE "$EXPECTED_LINKER" || ok=false; [[ "$id" != E || "$(cache_value "$cache" CMAKE_TRY_COMPILE_TARGET_TYPE)" == STATIC_LIBRARY ]] || ok=false; $ok
+          }
+          profile_position() { local rep="$1" id="$2"; case "$rep" in 1) order=(A B C D);; 2) order=(B C D A);; 3) order=(C D A B);; esac; for i in "${!order[@]}"; do [[ "${order[$i]}" == "$id" ]] && { echo $((i+1)); return; }; done; return 1; }; profile_dir() { echo "$profiles/r$1-p$(profile_position "$1" "$2")-$2"; }
+          diagnostic() {
+            local id="$1" rep="$2" pos="$3" binary="$4" ev="$5"; local invalid="$diagnostics/invalid-r${rep}-p${pos}-${id}.c"; printf 'int main( {\n' > "$invalid"; local c=0 r=0; "$binary" cc -fsyntax-only "$invalid" > "$ev/diagnostic-ide.stdout" 2> "$ev/diagnostic-ide.stderr" || c=$?; clang -fsyntax-only "$invalid" > "$ev/diagnostic-clang.stdout" 2> "$ev/diagnostic-clang.stderr" || r=$?; printf '%q\n' "$binary" cc -fsyntax-only "$invalid" > "$ev/diagnostic-ide.argv"; printf '%q\n' clang -fsyntax-only "$invalid" > "$ev/diagnostic-clang.argv"
+            python3 - "$ev/diagnostic-contract.json" "$c" "$r" "$ev/diagnostic-ide.stdout" "$ev/diagnostic-clang.stdout" "$ev/diagnostic-ide.stderr" "$ev/diagnostic-clang.stderr" <<'PY'
+          import hashlib, json, pathlib, sys
+          out, cs, rs, co, ro, ce, re_ = sys.argv[1:]
+          read=lambda p:pathlib.Path(p).read_bytes(); cb,rb,ce_,re_b=read(co),read(ro),read(ce),read(re_)
+          data={'schema':1,'candidate_status':int(cs),'reference_status':int(rs),'candidate_failed':int(cs)!=0,'reference_failed':int(rs)!=0,'candidate_diagnostic_nonempty':bool(cb or ce_),'reference_diagnostic_nonempty':bool(rb or re_b),'candidate_stdout':cb.decode(errors='replace'),'reference_stdout':rb.decode(errors='replace'),'candidate_stderr':ce_.decode(errors='replace'),'reference_stderr':re_b.decode(errors='replace'),'diagnostic_sha256':{'candidate_stdout':hashlib.sha256(cb).hexdigest(),'candidate_stderr':hashlib.sha256(ce_).hexdigest(),'reference_stdout':hashlib.sha256(rb).hexdigest(),'reference_stderr':hashlib.sha256(re_b).hexdigest()},'text_or_stream_parity_required':False}
+          data['contract_pass']=all(data[k] for k in ('candidate_failed','reference_failed','candidate_diagnostic_nonempty','reference_diagnostic_nonempty')); pathlib.Path(out).write_text(json.dumps(data,indent=2,sort_keys=True)+'\n'); raise SystemExit(0 if data['contract_pass'] else 1)
+          PY
+          }
+          inventory() {
+            local id="$1" binary="$2" ev="$3"; local status="$ev/diagnostic-tool-status.tsv" sections="$ev/diagnostic-sections.txt"; : > "$status"; : > "$sections"; : > "$ev/diagnostic-capabilities.txt"
+            probe() { local name="$1"; shift; local tool="${1##*/}"; if command -v "$tool" >/dev/null 2>&1; then printf '%s\tpresent\t%s\n' "$name" "$(command -v "$tool")" >> "$status"; set +e; "$@" >> "$ev/diagnostic-capabilities.txt" 2>&1; local rc=$?; set -e; printf '%s\tstatus\t%s\n' "$name" "$rc" >> "$status"; else printf '%s\tmissing\t%s\n' "$name" "$tool" >> "$status"; fi; }
+            if [[ "$RUNNER_OS" == Linux ]]; then if command -v readelf >/dev/null 2>&1; then readelf -SW "$binary" > "$sections" 2>&1 || true; else echo 'readelf missing' > "$sections"; fi; probe elf-debug-sections readelf --debug-dump=info --dwarf-depth=1 "$binary" || true; probe file file "$binary" || true; probe symbol-table nm -an "$binary" || true; else if command -v otool >/dev/null 2>&1; then otool -l "$binary" > "$sections" 2>&1 || true; else echo 'otool missing' > "$sections"; fi; probe mach-uuid dwarfdump --uuid "$binary" || true; probe file file "$binary" || true; probe symbol-table nm -an "$binary" || true; fi
+            for tool in llvm-symbolizer addr2line atos gdb lldb; do probe "symbolizer-$tool" "$tool" --version || true; done; { echo contract_status=preliminary_contract_inventory_only; echo debug_section_inventory=see\ diagnostic-sections.txt; echo symbolization_and_backtrace_inventory=see\ diagnostic-tool-status.tsv; echo debug_info_off_loss=DWARF\ line/type\ information\ may\ be\ absent; echo frame_pointers_off_loss=simple\ frame-pointer\ unwinding\ may\ be\ absent; } >> "$ev/diagnostic-capabilities.txt"
+            python3 - "$ev/diagnostic-capabilities.json" "$id" "$RUNNER_OS" "$sections" "$status" <<'PY'
+          import json, pathlib, sys
+          out, profile, osname, sec, status = sys.argv[1:]; tools={}
+          for line in pathlib.Path(status).read_text(errors='replace').splitlines():
+              x=line.split('\t');
+              if len(x)==3: tools.setdefault(x[0],{})[x[1]]=x[2]
+          s=pathlib.Path(sec).read_text(errors='replace'); pathlib.Path(out).write_text(json.dumps({'schema':1,'profile':profile,'runner_os':osname,'contract_status':'preliminary_contract_inventory_only','tools':tools,'debug_sections_present':any(x in s for x in ('.debug_','__DWARF')),'symbol_table_present':'.symtab' in s or 'LC_SYMTAB' in s,'unwind_sections_present':'.eh_frame' in s or '__unwind_info' in s,'loss_documented':True},indent=2,sort_keys=True)+'\n')
+          PY
+          }
+          run_profile() {
+            local rep="$1" pos="$2" id="$3" order_text="$4" failed=false; local dir="$profiles/r${rep}-p${pos}-${id}" ev="$evidence/r${rep}-p${pos}-${id}"; mkdir -p "$ev"; profile_args "$id" "$dir"
+            { echo "$DESCRIPTION"; printf 'repetition=%s\nposition=%s\nprofile=%s\norder=%s\nsource_sha=%s\nsource_tree=%s\ncache_state=fresh_isolated_directory_warm_filesystem\n' "$rep" "$pos" "$id" "$order_text" "$source_sha" "$source_tree"; printf 'normal_generate_argv:'; printf ' %q' "$driver" "${GEN[@]}"; printf '\nrecovery_generate_policy=identical argv template with only build-directory path changed\nproducer_build=un-instrumented; no CMake compiler or link launcher\nexpected_linker=%s\nexpected_fuzz=%s\nexpected_effective_optimization=%s\nexpected_debug_info=%s\nexpected_frame_pointers=%s\nexpected_cross_configs=%s\n' "$EXPECTED_LINKER" "$EXPECTED_FUZZ" "$EXPECTED_OPT" "$EXPECTED_DEBUG" "$EXPECTED_FRAME" "$EXPECTED_CROSS_CONFIGS"; } > "$ev/profile-definition.txt"
+            if ! measure "$id-generate" "$ev/generate.log" "$ev/generate.time" "$driver" "${GEN[@]}"; then fail "$rep" "$pos" "$id" generate; failed=true; fi
+            if [[ ! -f "$dir/CMakeCache.txt" ]] || ! cache_check "$id" "$dir/CMakeCache.txt" > "$ev/cache-check.txt" 2>&1; then fail "$rep" "$pos" "$id" cache-profile; failed=true; fi
+            if ! measure "$id-build" "$ev/build.log" "$ev/build.time" "$driver" build --build-directory "$dir" --config Release -t ide --verbose; then fail "$rep" "$pos" "$id" build; failed=true; fi
+            ninja -C "$dir" -f build-Release.ninja -t commands ide > "$ev/ninja-commands.txt" 2>&1 || { fail "$rep" "$pos" "$id" ninja-commands; failed=true; }
+            for f in CMakeCache.txt compile_commands.json build.ninja build-Release.ninja rules.ninja .ninja_log; do [[ -f "$dir/$f" ]] && cp "$dir/$f" "$ev/$f"; done
+            meta="$(find "$dir/CMakeFiles" -name CMakeCCompiler.cmake -type f -print -quit 2>/dev/null || true)"; [[ -n "$meta" ]] && cp "$meta" "$ev/CMakeCCompiler.cmake"; if ! cache_check "$id" "$dir/CMakeCache.txt" > "$ev/cache-check.txt" 2>&1; then fail "$rep" "$pos" "$id" cache-profile-post-build; failed=true; fi
+            binary="$dir/Release/ide"; if [[ ! -f "$binary" ]]; then fail "$rep" "$pos" "$id" mode-no-producer; failed=true; else if ! python3 "$bin/summarize-profile.py" "$id" "$ev" "$binary" "$dir" "$source_sha" "$source_tree" "$workflow_blob" "$BUSTER_604_RUNNER" "$RUNNER_OS" "$RUNNER_ARCH" "$EXPECTED_LINKER" "$EXPECTED_FUZZ" "$EXPECTED_OPT" "$EXPECTED_DEBUG" "$EXPECTED_FRAME" > "$ev/metrics-check.log" 2>&1; then fail "$rep" "$pos" "$id" producer-identity; failed=true; fi; if ! measure "$id-mode" "$ev/mode.log" "$ev/mode.time" "$driver" test_mode_matrix --build-directory "$dir" --config Release; then fail "$rep" "$pos" "$id" mode; failed=true; fi; if ! diagnostic "$id" "$rep" "$pos" "$binary" "$ev"; then fail "$rep" "$pos" "$id" diagnostic-contract; failed=true; fi; inventory "$id" "$binary" "$ev"; fi
+            if [[ "$rep" == 1 ]]; then
+              local rec="$recovery/r${rep}-p${pos}-${id}"; local rec_sentinel="${rec}.sibling-sentinel" initial_ok=true
+              printf sentinel > "$rec_sentinel"
+              profile_args "$id" "$rec"
+              if ! measure "$id-recovery-initial-generate" "$ev/recovery-initial.log" "$ev/recovery-initial.time" "$driver" "${GEN[@]}"; then
+                fail "$rep" "$pos" "$id" recovery-initial; failed=true; initial_ok=false
+              fi
+              if [[ ! -f "$rec/CMakeCache.txt" ]]; then
+                fail "$rep" "$pos" "$id" recovery-initial-cache; failed=true; initial_ok=false
+              fi
+              if [[ ! -e "$rec_sentinel" ]]; then
+                fail "$rep" "$pos" "$id" recovery-sibling-replaced; failed=true
+              fi
+              if [[ "$initial_ok" == true ]]; then
+                rm "$rec/CMakeCache.txt"
+                profile_args "$id" "$rec"
+                if ! measure "$id-recovery-regenerate" "$ev/recovery-regenerate.log" "$ev/recovery-regenerate.time" "$driver" "${GEN[@]}"; then
+                  fail "$rep" "$pos" "$id" recovery-regenerate; failed=true
+                fi
+                if [[ ! -e "$rec_sentinel" ]]; then
+                  fail "$rep" "$pos" "$id" recovery-sibling-replaced; failed=true
+                fi
+              fi
+              if [[ -f "$rec/CMakeCache.txt" ]]; then
+                if ! cache_check "$id" "$rec/CMakeCache.txt" > "$ev/recovery-cache-check.txt" 2>&1; then
+                  fail "$rep" "$pos" "$id" recovery-cache-profile; failed=true
+                fi
+                cp "$rec/CMakeCache.txt" "$ev/recovery-CMakeCache.txt"
+              else
+                fail "$rep" "$pos" "$id" recovery-no-cache; failed=true
+              fi
+              printf 'recovery_sentinel=sibling:%s\n' "$rec_sentinel" >> "$ev/profile-definition.txt"
+              rm -f "$rec_sentinel"
+            fi
+            [[ "$failed" == false ]] && printf '%s\t%s\t%s\tall\tpass\n' "$rep" "$pos" "$id" >> "$root/results.tsv"
+          }
+          if [[ -x "$driver" ]]; then for rep in 1 2 3; do case "$rep" in 1) text='A B C D';; 2) text='B C D A';; 3) text='C D A B';; esac; read -r -a order <<< "$text"; for i in "${!order[@]}"; do pos=$((i+1)); id="${order[$i]}"; printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$rep" "$pos" "$id" "$text" "$profiles/r${rep}-p${pos}-${id}" "$evidence/r${rep}-p${pos}-${id}" >> "$root/profile-order.tsv"; run_profile "$rep" "$pos" "$id" "$text"; done; done; printf '1\t5\tE\tE (separate canonical platform characterization)\t%s\t%s\n' "$profiles/r1-p5-E" "$evidence/r1-p5-E" >> "$root/profile-order.tsv"; run_profile 1 5 E 'E (separate canonical platform characterization)'; else for rep in 1 2 3; do case "$rep" in 1) text='A B C D';; 2) text='B C D A';; 3) text='C D A B';; esac; read -r -a order <<< "$text"; for i in "${!order[@]}"; do pos=$((i+1)); id="${order[$i]}"; printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$rep" "$pos" "$id" "$text" "$profiles/r${rep}-p${pos}-${id}" "$evidence/r${rep}-p${pos}-${id}" >> "$root/profile-order.tsv"; fail "$rep" "$pos" "$id" bootstrap; done; done; printf '1\t5\tE\tE (separate canonical platform characterization)\t%s\t%s\n' "$profiles/r1-p5-E" "$evidence/r1-p5-E" >> "$root/profile-order.tsv"; fail 1 5 E bootstrap; fi
+          printf 'profiles_completed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$root/progress.tsv"
+
+      - name: Run compiler throughput comparisons
+        id: throughput
+        if: ${{ always() && steps.prepare.outcome != 'cancelled' && steps.profiles.outcome != 'cancelled' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/buster-604-qualification"; bin="$root/bin"; driver="$bin/buster-build"; global_fail() { printf '0\t0\t%s\t%s\tfail\n' "$1" "$2" >> "$root/results.tsv"; }; measure() { local label="$1" log="$2" timefile="$3"; shift 3; { printf 'label=%s\nargv:' "$label"; printf ' %q' "$@"; printf '\n'; } > "$log"; local rc=0; python3 "$bin/time-command.py" "$timefile" "$@" >> "$log" 2>&1 || rc=$?; printf 'exit_status=%s\n' "$rc" >> "$log"; return "$rc"; }; profile_ok() { awk -F '\t' -v r="$1" -v p="$2" '$1==r && $3==p && $4=="all" && $5=="pass" {ok=1} END{exit !ok}' "$root/results.tsv"; }; profile_dir() { local r="$1" p="$2"; case "$r" in 1) o=(A B C D);; 2) o=(B C D A);; 3) o=(C D A B);; esac; for i in "${!o[@]}"; do [[ "${o[$i]}" == "$p" ]] && { echo "$root/profiles/r${r}-p$((i+1))-$p"; return; }; done; return 1; }
+          if [[ ! -x "$driver" ]]; then global_fail ALL throughput-no-driver; else count="$(awk -F '\t' '$4=="all" && $5=="pass" {n++} END{print n+0}' "$root/results.tsv")"; if [[ "$count" -lt 2 ]]; then global_fail ALL throughput-insufficient-profiles; else if ! measure throughput-self-test "$root/throughput-self-test.log" "$root/throughput-self-test.time" "$driver" bench_throughput self-test; then global_fail ALL throughput-self-test; fi; tool="$PWD/build/throughput-tools/throughput"; if ! measure throughput-tool-build "$root/throughput-tool-build.log" "$root/throughput-tool-build.time" "$driver" bench_throughput || [[ ! -x "$tool" ]]; then global_fail ALL throughput-tool-build; else n=0; for r in 1 2 3; do if profile_ok "$r" A; then base="$(profile_dir "$r" A)/Release/ide"; for c in B C D; do if profile_ok "$r" "$c"; then out="$root/throughput/r${r}-A-vs-$c"; mkdir -p "$out"; printf 'r%d-A-vs-%s\t%s\t%s\t%s\n' "$r" "$c" "$base" "$(profile_dir "$r" "$c")/Release/ide" "$out" >> "$root/throughput-attempts.tsv"; n=$((n+1)); if ! measure "throughput-r${r}-A-vs-$c" "$root/throughput-r${r}-A-vs-$c.log" "$root/throughput-r${r}-A-vs-$c.time" "$tool" run --baseline "$base" --candidate "$(profile_dir "$r" "$c")/Release/ide" --baseline-id "$(cat "$root/source-sha")-r${r}-profile-A" --candidate-id "$(cat "$root/source-sha")-r${r}-profile-$c" --output "$out" --profile ci --mode all --pairs 4 --warmups 1 --timeout 120 --no-guard --require-identical-output; then global_fail "r${r}-$c" throughput; fi; fi; done; fi; done; fi; fi; fi
+          printf 'throughput_completed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$root/progress.tsv"
+
+      - name: Finalize and pack #604 evidence
+        id: finalize
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PREPARE_RESULT: ${{ steps.prepare.outcome }}
+          PROFILES_RESULT: ${{ steps.profiles.outcome }}
+          THROUGHPUT_RESULT: ${{ steps.throughput.outcome }}
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/buster-604-qualification"; curated="$root/curated"; upload="$root/upload"; evidence="$root/evidence"; throughput="$root/throughput"; mkdir -p "$curated/profiles" "$curated/throughput" "$upload"
+          cp_if() { if [[ -f "$1" ]]; then mkdir -p "$(dirname "$2")"; cp "$1" "$2"; fi; return 0; }
+          stage() {
+            for f in host.txt budget.txt diagnostic-contract.txt progress.tsv results.tsv profile-order.tsv throughput-attempts.tsv bootstrap.log bootstrap.time mold-install.log throughput-self-test.log throughput-self-test.time throughput-tool-build.log throughput-tool-build.time qualification-summary.txt pack.log partial-summary.txt; do cp_if "$root/$f" "$curated/$f"; done
+            for f in "$root"/throughput-r*.log "$root"/throughput-r*.time; do cp_if "$f" "$curated/$(basename "$f")"; done
+            for d in "$evidence"/r*; do [[ -d "$d" ]] || continue; n="${d##*/}"; for f in profile-definition.txt generate.log generate.time cache-check.txt build.log build.time ninja-commands.txt .ninja_log CMakeCache.txt compile_commands.json build.ninja build-Release.ninja rules.ninja CMakeCCompiler.cmake metrics.json metrics-check.log mode.log mode.time recovery-initial.log recovery-initial.time recovery-regenerate.log recovery-regenerate.time recovery-cache-check.txt recovery-CMakeCache.txt diagnostic-contract.json diagnostic-ide.argv diagnostic-ide.stdout diagnostic-ide.stderr diagnostic-clang.argv diagnostic-clang.stdout diagnostic-clang.stderr diagnostic-tool-status.tsv diagnostic-sections.txt diagnostic-capabilities.txt diagnostic-capabilities.json; do cp_if "$d/$f" "$curated/profiles/$n/$f"; done; done
+            for d in "$throughput"/r*; do [[ -d "$d" ]] || continue; n="${d##*/}"; while IFS= read -r -d '' f; do b="${f##*/}"; case "$b" in program|subject.o|*.o|*.a|*.so|*.dylib|*.dll|*.exe) continue;; esac; case "$b" in *.json|*.md|*.csv|*.tsv|*.jsonl|*.txt|*.log|*.time) cp_if "$f" "$curated/throughput/$n/${f#"$d/"}";; esac; done < <(find "$d" -type f -print0); done
+          }
+          validate() {
+            local bad=false; local -a expected_results actual_results
+            local expected_header='repetition	position	profile	stage	status'
+            expected_results=(
+              $'1\t1\tA\tall\tpass' $'1\t2\tB\tall\tpass' $'1\t3\tC\tall\tpass' $'1\t4\tD\tall\tpass'
+              $'2\t1\tB\tall\tpass' $'2\t2\tC\tall\tpass' $'2\t3\tD\tall\tpass' $'2\t4\tA\tall\tpass'
+              $'3\t1\tC\tall\tpass' $'3\t2\tD\tall\tpass' $'3\t3\tA\tall\tpass' $'3\t4\tB\tall\tpass'
+              $'1\t5\tE\tall\tpass'
+            )
+            for f in host.txt budget.txt diagnostic-contract.txt progress.tsv results.tsv profile-order.tsv throughput-attempts.tsv qualification-summary.txt; do [[ -f "$curated/$f" ]] || { echo "missing-curated=$f" >&2; bad=true; }; done
+            if [[ ! -f "$root/results.tsv" ]]; then
+              echo 'missing-results-contract' >&2; bad=true
+            else
+              if [[ "$(head -n 1 "$root/results.tsv")" != "$expected_header" ]]; then
+                echo 'malformed-results-header' >&2; bad=true
+              fi
+              actual_results=()
+              while IFS= read -r line || [[ -n "$line" ]]; do
+                actual_results[${#actual_results[@]}]="$line"
+              done < <(tail -n +2 "$root/results.tsv")
+              if [[ "${#actual_results[@]}" != "${#expected_results[@]}" ]]; then
+                echo "result-contract-count=${#actual_results[@]} expected=${#expected_results[@]}" >&2; bad=true
+              fi
+              for i in "${!expected_results[@]}"; do
+                if [[ "${actual_results[$i]-}" != "${expected_results[$i]}" ]]; then
+                  echo "result-contract-mismatch index=$i expected=${expected_results[$i]} actual=${actual_results[$i]-}" >&2; bad=true
+                fi
+              done
+            fi
+            if [[ -f "$root/profile-order.tsv" ]]; then rows="$(tail -n +2 "$root/profile-order.tsv" | wc -l | tr -d ' ')"; [[ "$rows" == 13 ]] || { echo "profile-order-count=$rows expected=13" >&2; bad=true; }; while IFS=$'\t' read -r r p id order dir ev; do [[ "$r" == repetition ]] && continue; n="${ev##*/}"; for f in profile-definition.txt generate.log generate.time; do [[ -f "$curated/profiles/$n/$f" ]] || { echo "missing-profile=$n/$f" >&2; bad=true; }; done; done < "$root/profile-order.tsv"; fi
+            if [[ -f "$root/results.tsv" ]]; then while IFS=$'\t' read -r r p id st rc; do [[ "$st" == all && "$rc" == pass ]] || continue; n="r${r}-p${p}-${id}"; for f in metrics.json ninja-commands.txt .ninja_log build.time mode.time diagnostic-contract.json diagnostic-capabilities.txt diagnostic-capabilities.json; do [[ -f "$curated/profiles/$n/$f" ]] || { echo "missing-success=$n/$f" >&2; bad=true; }; done; done < "$root/results.tsv"; fi
+            if [[ -f "$root/throughput-attempts.tsv" ]]; then attempts="$(tail -n +2 "$root/throughput-attempts.tsv" | wc -l | tr -d ' ')"; [[ "$attempts" == 9 ]] || { echo "throughput-attempt-count=$attempts expected=9" >&2; bad=true; }; while IFS=$'\t' read -r attempt base cand out; do [[ "$attempt" == attempt ]] && continue; n="${out##*/}"; [[ -f "$curated/throughput/$n/metadata.json" || -f "$curated/throughput/$n/summary.md" ]] || { echo "missing-throughput=$n" >&2; bad=true; }; [[ -f "$curated/throughput-${attempt}.log" && -f "$curated/throughput-${attempt}.time" ]] || { echo "missing-throughput-timing=$attempt" >&2; bad=true; }; done < "$root/throughput-attempts.tsv"; fi
+            if find "$curated" -type f \( -name '*.o' -o -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.exe' -o -name 'program' -o -name 'subject.o' \) -print -quit | grep -q .; then echo 'binary leaked into curated evidence' >&2; bad=true; fi; [[ "$bad" == false ]]
+          }
+          mark_failed() {
+            python3 - "$root/qualification-summary.txt" "$curated/result.json" "$curated/summary.md" <<'PY'
+          import json, pathlib, sys
+          summary, result, markdown = map(pathlib.Path, sys.argv[1:])
+          if summary.is_file():
+              lines=summary.read_text(errors='replace').splitlines()
+              summary.write_text('\n'.join('screening_status=fail' if line.startswith('screening_status=') else line for line in lines)+'\n')
+          if result.is_file():
+              data=json.loads(result.read_text()); data['status']='fail'; data['validation_failed']=True; result.write_text(json.dumps(data,indent=2,sort_keys=True)+'\n')
+          if markdown.is_file():
+              markdown.write_text(markdown.read_text(errors='replace').replace('Status: **pass**','Status: **fail**'))
+          PY
+          }
+          status=0; [[ "$PREPARE_RESULT" == success && "$PROFILES_RESULT" == success && "$THROUGHPUT_RESULT" == success ]] || status=1
+          if [[ -f "$root/results.tsv" ]] && awk -F '\t' '$5=="fail" {bad=1} END{exit !bad}' "$root/results.tsv"; then status=1; fi
+          if [[ ! -f "$root/source-sha" ]]; then printf 'screening_status=fail\nscreening_preliminary=true\nprofile_winner=none\n' > "$root/qualification-summary.txt"; else source_sha="$(cat "$root/source-sha")"; source_tree="$(cat "$root/source-tree")"; workflow_blob="$(cat "$root/workflow-blob")"; python3 - "$root/qualification-summary.txt" "$curated/result.json" "$curated/summary.md" "$status" "$source_sha" "$source_tree" "$workflow_blob" "$BUSTER_604_RUNNER" "$RUNNER_OS" "$RUNNER_ARCH" "$BUSTER_604_ARCH" "${GITHUB_RUN_ID:-unknown}" "${GITHUB_RUN_ATTEMPT:-unknown}" "${ImageOS:-unknown}" "${ImageVersion:-unknown}" "$PREPARE_RESULT" "$PROFILES_RESULT" "$THROUGHPUT_RESULT" <<'PY'
+          import json, pathlib, sys
+          summary, result, markdown, status, sha, tree, blob, runner, osname, arch, matrix_arch, run_id, run_attempt, image_os, image_version, prep, prof, thru = sys.argv[1:]; root=pathlib.Path(summary).parent; results=root/'results.tsv'; failures=[]; success=[]
+          expected_header='repetition\tposition\tprofile\tstage\tstatus'
+          expected_results=[
+              '1\t1\tA\tall\tpass','1\t2\tB\tall\tpass','1\t3\tC\tall\tpass','1\t4\tD\tall\tpass',
+              '2\t1\tB\tall\tpass','2\t2\tC\tall\tpass','2\t3\tD\tall\tpass','2\t4\tA\tall\tpass',
+              '3\t1\tC\tall\tpass','3\t2\tD\tall\tpass','3\t3\tA\tall\tpass','3\t4\tB\tall\tpass',
+              '1\t5\tE\tall\tpass']
+          actual_results=results.read_text(errors='replace').splitlines() if results.exists() else []
+          header_ok=bool(actual_results) and actual_results[0]==expected_header
+          result_rows=actual_results[1:] if actual_results else []
+          result_contract_ok=header_ok and result_rows==expected_results
+          if results.exists():
+              for line in result_rows:
+                  f=line.split('\t');
+                  if len(f)>=5 and f[4]=='fail': failures.append(':'.join(f[:4]))
+                  if len(f)>=5 and f[3]=='all' and f[4]=='pass': success.append(f'{f[0]}:{f[2]}')
+          obj={'schema':1,'status':'pass' if status=='0' and not failures and result_contract_ok else 'fail','screening_preliminary':True,'profile_winner':None,'full_native_job_timing_satisfied':False,'diagnostic_contract_status':'preliminary_contract_inventory_only','source_sha':sha,'source_tree':tree,'workflow_blob':blob,'runner':runner,'runner_os':osname,'runner_arch':arch,'matrix_arch':matrix_arch,'github_run_id':run_id,'github_run_attempt':run_attempt,'image_os':image_os,'image_version':image_version,'cohort':'fresh-directory-warm-filesystem','repetitions':3,'rotation_orders':['A B C D','B C D A','C D A B'],'rotation_position_sums':{'A':8,'B':7,'C':6,'D':9},'canonical_profile_E':'separate platform-exact one-build characterization','result_contract':'exact ordered unique 13 rows: (repetition,position,profile,all,pass)','result_contract_expected_rows':len(expected_results),'result_contract_actual_rows':len(result_rows),'result_contract_ok':result_contract_ok,'step_results':{'prepare':prep,'profiles':prof,'throughput':thru},'successful_runs':success,'failures':failures,'failure_count':len(failures),'next_required_validation':'winner requires a separate three-attempt full mode+differential qualification including self-host and complete native-job timing'}
+          pathlib.Path(summary).write_text('\n'.join(f'{k}={v}' for k,v in [('screening_status',obj['status']),('screening_preliminary','true'),('profile_winner','none'),('full_native_job_timing_satisfied','false'),('source_sha',sha),('source_tree',tree),('workflow_blob',blob),('runner',runner),('runner_os',osname),('runner_arch',arch),('matrix_arch',matrix_arch),('github_run_id',run_id),('github_run_attempt',run_attempt),('image_os',image_os),('image_version',image_version),('rotation_orders','r1:A,B,C,D;r2:B,C,D,A;r3:C,D,A,B'),('rotation_position_sums','A:8;B:7;C:6;D:9'),('diagnostic_contract_status','preliminary_contract_inventory_only'),('result_contract','exact ordered unique 13 rows: repetition,position,profile,all,pass'),('result_contract_expected_rows',len(expected_results)),('result_contract_actual_rows',len(result_rows)),('result_contract_ok',str(result_contract_ok).lower()),('successful_runs',' '.join(success) or 'none'),('failure_count',len(failures))]+[(f'failure',x) for x in failures])+'\n')
+          pathlib.Path(result).write_text(json.dumps(obj,indent=2,sort_keys=True)+'\n'); pathlib.Path(markdown).write_text(f"## #604 producer screening\n\nStatus: **{obj['status']}**; preliminary only; profile winner: none.\n\nSource `{sha}` (tree `{tree}`), runner `{runner}` ({osname}/{arch}), matrix arch `{matrix_arch}`, run `{run_id}` attempt `{run_attempt}`, image `{image_os}` version `{image_version}`. A-D use fresh directories on a warm filesystem in `ABCD`, `BCDA`, `CDAB`; E is a separate canonical platform characterization. Exact uninstrumented Ninja compile/link commands and edge timing, cache identities, diagnostics and throughput evidence are retained.\n\nA later winner requires a separate three-attempt full mode+differential qualification including self-host.\n\nFailures: {len(failures)}\n")
+          PY
+          fi
+          stage; if ! validate; then status=1; mark_failed; fi; stage
+          if [[ -d "$curated" ]]; then python3 tools/ci_pack_evidence.py --source "$curated" --output "$upload" > "$root/pack.log" 2>&1 || { status=1; echo 'pack=failed' >> "$root/qualification-summary.txt"; mark_failed; stage; }; fi
+          summary_status=fail
+          if [[ "$status" == 0 ]]; then summary_status=pass; fi
+          printf '## #604 producer screening\n\nStatus: **%s**; preliminary=true; profile winner=none.\n\nRetained evidence is curated text/JSON only; profile/recovery trees and binaries remain outside the artifact.\n' "$summary_status" >> "${GITHUB_STEP_SUMMARY:-$root/github-step-summary.txt}"
+          exit "$status"
+
+      - name: Retain packed #604 evidence
+        if: ${{ always() && steps.finalize.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-604-producer-qualification-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-604-qualification/upload/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Retain partial #604 evidence
+        if: ${{ always() && steps.finalize.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-604-producer-qualification-partial-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-604-qualification/curated/
+          if-no-files-found: warn
+          retention-days: 7
