@@ -321,6 +321,13 @@ and multiple completed observations. No speedup is claimed before that evidence.
 `Clang analyzer shards` analyzes the generated split-source Release database
 with bounded module workers and mandatory fail-closed aggregation. Desktop
 unity analysis remains covered. The job exercises native failure controls and
-compares the reference and candidate drivers on identical commands, retaining
-coverage, diagnostics, timing and child RSS evidence. `CI complete` requires its
-result. See [the analyzer contract and reproduction](clang-analyze-shards.md).
+resolves the candidate and reference commit identities before analysis. Equal
+identities on pushes and dispatches run the full candidate campaign once and
+retain an explicit skip reason; pull-request, merge-group and distinct identities
+keep the reference/candidate comparison on identical commands. Missing or invalid
+selection evidence fails before candidate analysis; the campaign re-resolves the
+identities and checks the complete retained record rather than trusting an
+exported decision alone.
+Both modes retain candidate coverage, diagnostics, timing and child RSS evidence,
+and `CI complete` requires the result. See
+[the analyzer contract and reproduction](clang-analyze-shards.md).
