@@ -1558,6 +1558,54 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, object_write(arguments->arena, &page, OBJECT_FORMAT_COFF).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
         }
 
+        ByteSlice load_bytes = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
+                                                                   UINT32_C(0xfd401d00), 0x0007);
+        ObjectFile load = object_read(arguments->arena, load_bytes, arm64_coff_target);
+        BUSTER_TEST(arguments, load.error == OBJECT_ERROR_NONE && load.relocation_count == 2);
+        if (load.error == OBJECT_ERROR_NONE && load.relocation_count == 2)
+        {
+            u32 load_word = 0;
+            memcpy(&load_word, load.sections[OBJECT_SECTION_TEXT].data.pointer + 4, sizeof(load_word));
+            BUSTER_TEST(arguments, load.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L &&
+                                       load.relocations[1].addend == 56 && load_word == UINT32_C(0xfd400100));
+            ObjectArtifact rewritten_load = object_write(arguments->arena, &load, OBJECT_FORMAT_COFF);
+            ObjectFile reread_load = object_read(arguments->arena, rewritten_load.bytes, arm64_coff_target);
+            BUSTER_TEST(arguments, rewritten_load.error == OBJECT_ERROR_NONE && reread_load.error == OBJECT_ERROR_NONE &&
+                                       reread_load.relocation_count == 2 &&
+                                       reread_load.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L &&
+                                       reread_load.relocations[1].addend == 56);
+            load.relocations[1].addend = (s64)A64_IMM12_MAX * 8;
+            BUSTER_TEST(arguments, object_write(arguments->arena, &load, OBJECT_FORMAT_COFF).error == OBJECT_ERROR_NONE);
+            load.relocations[1].addend = (s64)(A64_IMM12_MAX + 1) * 8;
+            ObjectArtifact oversized_load = object_write(arguments->arena, &load, OBJECT_FORMAT_COFF);
+            BUSTER_TEST(arguments, oversized_load.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !oversized_load.bytes.length);
+            load.relocations[1].addend = 1;
+            ObjectArtifact misaligned_load = object_write(arguments->arena, &load, OBJECT_FORMAT_COFF);
+            BUSTER_TEST(arguments, misaligned_load.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !misaligned_load.bytes.length);
+            load.relocations[1].addend = 56;
+            u32 stored_load = UINT32_C(0xfd000100);
+            memcpy(load.sections[OBJECT_SECTION_TEXT].data.pointer + 4, &stored_load, sizeof(stored_load));
+            ObjectArtifact stored_load_output = object_write(arguments->arena, &load, OBJECT_FORMAT_COFF);
+            ObjectFile stored_load_reread = object_read(arguments->arena, stored_load_output.bytes, arm64_coff_target);
+            BUSTER_TEST(arguments, stored_load_output.error == OBJECT_ERROR_NONE && stored_load_reread.error == OBJECT_ERROR_NONE &&
+                                       stored_load_reread.relocation_count == 2 &&
+                                       stored_load_reread.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L &&
+                                       stored_load_reread.relocations[1].addend == 56);
+            load.symbols[load.relocations[1].symbol].name = S8("__tls_index");
+            ObjectArtifact reserved_load = object_write(arguments->arena, &load, OBJECT_FORMAT_COFF);
+            BUSTER_TEST(arguments, reserved_load.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !reserved_load.bytes.length);
+        }
+
+        ByteSlice prfm_bytes = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
+                                                                   UINT32_C(0xf9801d00), 0x0007);
+        ObjectFile prfm = object_read(arguments->arena, prfm_bytes, arm64_coff_target);
+        ObjectArtifact rewritten_prfm = object_write(arguments->arena, &prfm, OBJECT_FORMAT_COFF);
+        ObjectFile reread_prfm = object_read(arguments->arena, rewritten_prfm.bytes, arm64_coff_target);
+        BUSTER_TEST(arguments, prfm.error == OBJECT_ERROR_NONE && prfm.relocation_count == 2 &&
+                                   prfm.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L &&
+                                   prfm.relocations[1].addend == 56 && rewritten_prfm.error == OBJECT_ERROR_NONE &&
+                                   reread_prfm.error == OBJECT_ERROR_NONE && reread_prfm.relocations[1].addend == 56);
+
         typedef struct ObjectTestArm64CoffMalformed ObjectTestArm64CoffMalformed;
         struct ObjectTestArm64CoffMalformed
         {
@@ -1571,7 +1619,10 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             {UINT32_C(0x90000008), UINT32_C(0xd1000100), 0x0006}, // SUB
             {UINT32_C(0x90000008), UINT32_C(0xb1000100), 0x0006}, // ADDS is not an admitted form
             {UINT32_C(0x90000008), UINT32_C(0xd65f03c0), 0x0006}, // unrelated instruction
-            {UINT32_C(0x90000008), UINT32_C(0x91000100), 0x0007}, // ordinary PAGEOFFSET_12L
+            {UINT32_C(0x90000008), UINT32_C(0x91000100), 0x0007}, // ADD, not PAGEOFFSET_12L LDR
+            {UINT32_C(0x90000008), UINT32_C(0x5c000100), 0x0007}, // literal LDR, not indexed unsigned immediate
+            {UINT32_C(0x90000008), UINT32_C(0xfc400100), 0x0007}, // unscaled LDR
+            {UINT32_C(0x90000008), UINT32_C(0xf8606900), 0x0007}, // register-offset LDR
             {UINT32_C(0x90000008), UINT32_C(0x91000100), 0x000f}, // BRANCH19, never TLS
         };
         for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed); malformed_index += 1)
@@ -1580,6 +1631,33 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             ByteSlice bytes = object_test_coff_arm64_page_object(arguments->arena, S8("target"), row.first_word, row.second_word, row.second_type);
             BUSTER_TEST(arguments, object_read(arguments->arena, bytes, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
         }
+
+        u32 pageoffset_load_store_words[] = {
+            UINT32_C(0x39000100), UINT32_C(0x79000100), UINT32_C(0xb9000100), UINT32_C(0xf9000100),
+            UINT32_C(0x39400100), UINT32_C(0x79400100), UINT32_C(0xb9400100), UINT32_C(0xf9400100),
+            UINT32_C(0xb9800100), UINT32_C(0x3d000100), UINT32_C(0x7d000100), UINT32_C(0xbd000100),
+            UINT32_C(0xfd000100), UINT32_C(0x3d400100), UINT32_C(0x7d400100), UINT32_C(0xbd400100),
+            UINT32_C(0xfd400100), UINT32_C(0x3d800100), UINT32_C(0x3dc00100), UINT32_C(0xf9800100),
+        };
+        u8 pageoffset_load_store_scales[] = {0, 1, 2, 3, 0, 1, 2, 3, 2, 0, 1, 2, 3, 0, 1, 2, 3, 4, 4, 3};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(pageoffset_load_store_words) == BUSTER_ARRAY_LENGTH(pageoffset_load_store_scales));
+        for (u32 word_index = 0; word_index < BUSTER_ARRAY_LENGTH(pageoffset_load_store_words); word_index += 1)
+        {
+            u32 patched = 0;
+            u32 shift = pageoffset_load_store_scales[word_index];
+            BUSTER_TEST(arguments,
+                        object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L,
+                                                         pageoffset_load_store_words[word_index], 0, 0x17f0, 0, &patched) &&
+                            (patched & ~(A64_IMM12_MAX << 10)) == pageoffset_load_store_words[word_index] &&
+                            ((patched >> 10) & A64_IMM12_MAX) == (0x7f0u >> shift));
+        }
+        u32 pageoffset_patched = 0;
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, UINT32_C(0xfd400100), 0, 0x1001, 0,
+                                                      &pageoffset_patched));
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, UINT32_C(0xfd400100), 0, UINT64_MAX, 8,
+                                                      &pageoffset_patched));
 
         ByteSlice tls_bytes = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_index"), UINT32_C(0x90000008),
                                                                   UINT32_C(0xb9400120), 0x0007);
@@ -1640,7 +1718,10 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         ByteSlice near_name_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_indexx"), UINT32_C(0x90000008),
                                                                             UINT32_C(0xb9400120), 0x0007);
         object_test_coff_write_u16(near_name_tls_index.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 12, 0);
-        BUSTER_TEST(arguments, object_read(arguments->arena, near_name_tls_index, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        ObjectFile near_name = object_read(arguments->arena, near_name_tls_index, arm64_coff_target);
+        BUSTER_TEST(arguments, near_name.error == OBJECT_ERROR_NONE && near_name.relocation_count == 2 &&
+                                   near_name.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 &&
+                                   near_name.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L);
 
         ByteSlice tls_offset_bytes = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
                                                                          UINT32_C(0x91000100), 0x0009);

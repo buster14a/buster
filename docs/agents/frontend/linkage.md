@@ -300,10 +300,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and clears both before publishing a relocation, and the writer restores
   them without replacing opcode or register bits. This implementation admits
   the exact zero-shift ADD form emitted by VC14.44 and rejects shifted ADD,
-  SUB, ADDS and unrelated instructions. Type 7 is admitted only for the exact
-  `__tls_index` symbol and a 32-bit unsigned-immediate LDR; the writer binds
-  index-pair relocations to that loader symbol. Other
-  `PAGEOFFSET_12L` inputs fail closed. TLS section offsets use type 9
+  SUB, ADDS and unrelated instructions. Type 7 ordinarily accepts the scaled
+  unsigned-immediate load/store and PRFM encodings, preserving the operation
+  and registers while clearing or restoring the immediate. Reserved,
+  unscaled and register-offset forms fail closed. The exact `__tls_index`
+  symbol remains a distinct DATA-symbol contract restricted to a 32-bit
+  unsigned-immediate LDR; the writer binds index-pair relocations to that
+  loader symbol. TLS section offsets use type 9
   (`SECREL_LOW12A`); type 15 is `BRANCH19` and is not treated as TLS. ARM64
   CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
   checked inline addends. The PE linker applies all of these only after final

@@ -7348,7 +7348,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
-                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
                 {
                     u32 instruction = link_read_u32(bytes, output_offset);
                     u32 encoded = 0;
@@ -8573,7 +8574,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
-                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A)
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
                 {
                     u32 instruction = 0;
                     u32 patched = 0;
