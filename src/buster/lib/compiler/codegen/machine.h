@@ -1995,6 +1995,8 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFun
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
+                                                    MachineFunction* machine_function);
 BUSTER_F_DECL bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
 BUSTER_F_DECL bool machine_a64_test_expand_inline_short_branch(u8 kind, u32 word, u32 words[2]);
 BUSTER_F_DECL bool machine_a64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);

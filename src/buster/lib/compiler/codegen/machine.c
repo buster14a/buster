@@ -2714,21 +2714,98 @@ BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make(IrProgram* progra
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, MachineFunction* machine_function,
+                                                         IrValueId const* local_places, IrDebugLocal const* local,
+                                                         u32 parameter_ordinal)
+{
+    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID && function->published_cfg)
+    {
+        for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
+        {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + parameter_index;
+            if (parameter->canonical_local.value == local->id.value)
+            {
+                place = parameter->value;
+                break;
+            }
+        }
+    }
+    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+    {
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction const* instruction = function->instructions + instruction_index;
+            if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < function->value_count &&
+                instruction->immediate_count && instruction->immediates && instruction->immediates[0] == parameter_ordinal)
+            {
+                place = instruction->result;
+                break;
+            }
+        }
+    }
+    if (place.value != IR_ID_UNDERLYING_INVALID)
+    {
+        for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
+        {
+            MachineVirtualRegister const* reg = machine_function->virtual_registers + register_index;
+            if (reg->typed_origin == place.value && (reg->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE))
+            {
+                // A promoted place is only an implementation cell. Canonical
+                // block-local SSA values carry the source variable's value.
+                place = IR_VALUE_ID_INVALID;
+                break;
+            }
+        }
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
+    {
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction const* instruction = function->instructions + instruction_index;
+            if (instruction->result.value < function->value_count && instruction->canonical_local.value == local->id.value &&
+                (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+            {
+                place = instruction->result;
+                break;
+            }
+        }
+    }
+    return place;
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId machine_debug_block_value(IrFunction* function, IrDebugLocal const* local, u32 block_index)
+{
+    IrBlock const* block = function->blocks + block_index;
+    IrCfgBlock const* published = function->published_cfg->blocks + block_index;
+    IrValueId value = block->local_values && local->id.value < function->local_count
+                          ? block->local_values[local->id.value]
+                          : IR_VALUE_ID_INVALID;
+    if (value.value == IR_ID_UNDERLYING_INVALID)
+    {
+        for (u32 parameter_index = 0; parameter_index < published->parameter_count; parameter_index += 1)
+        {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + published->parameter_offset + parameter_index;
+            if (parameter->canonical_local.value == local->id.value)
+            {
+                value = parameter->value;
+                break;
+            }
+        }
+    }
+    return value;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* program, IrFunction* ir_function,
                                                      MachineFunction* machine_function, u32 const* value_stack_slots,
                                                      u32 const* value_indirect_slots)
 {
     bool result = arena && program && ir_function && machine_function;
-    u64 capacity64 = result ? (u64)ir_function->debug_local_count * ((u64)ir_function->block_count + 1u) : 0;
-    result = result && capacity64 <= UINT32_MAX;
+    u64 capacity64 = 0;
     if (result && ir_function->debug_local_count)
     {
-        u32 capacity = (u32)capacity64;
-        MachineDebugValue* values = arena_allocate(arena, MachineDebugValue, capacity ? capacity : 1);
         IrValueId* local_places = arena_allocate(arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
-        IrInstructionId* local_definitions = arena_allocate(arena, IrInstructionId, ir_function->local_count ? ir_function->local_count : 1);
         memset(local_places, 0xff, sizeof(*local_places) * ir_function->local_count);
-        memset(local_definitions, 0xff, sizeof(*local_definitions) * ir_function->local_count);
         for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
         {
             IrInstruction* instruction = ir_function->instructions + instruction_index;
@@ -2736,80 +2813,57 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 local_places[instruction->canonical_local.value].value == IR_ID_UNDERLYING_INVALID)
             {
                 local_places[instruction->canonical_local.value] = instruction->result;
-                if (instruction->opcode != IR_OPCODE_LOCAL && instruction->opcode != IR_OPCODE_ARGUMENT)
-                {
-                    local_definitions[instruction->canonical_local.value].value = instruction_index;
-                }
             }
         }
-        u32 value_count = 0;
         u32 parameter_ordinal = 0;
-        for (u32 debug_index = 0; debug_index < ir_function->debug_local_count; debug_index += 1)
+        for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
+        {
+            IrDebugLocal const* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId place = machine_debug_local_place(ir_function, machine_function, local_places, local, parameter_ordinal);
+            parameter_ordinal += local->is_parameter;
+            u64 local_capacity = place.value != IR_ID_UNDERLYING_INVALID;
+            if (!local_capacity)
+            {
+                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                {
+                    IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
+                    IrValueId value = machine_debug_block_value(ir_function, local, block_index);
+                    local_capacity += value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count;
+                }
+            }
+            local_capacity = local_capacity ? local_capacity : 1;
+            result = local_capacity <= UINT32_MAX - capacity64;
+            capacity64 += result ? local_capacity : 0;
+        }
+        u32 capacity = result ? (u32)capacity64 : 0;
+        MachineDebugValue* values = result ? arena_allocate(arena, MachineDebugValue, capacity ? capacity : 1) : 0;
+        u32 value_count = 0;
+        parameter_ordinal = 0;
+        for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
         {
             IrDebugLocal* local = ir_function->debug_locals + debug_index;
             if (local->id.value == IR_ID_UNDERLYING_INVALID)
             {
                 continue;
             }
-            IrValueId place = local->id.value < ir_function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
-            if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID && ir_function->published_cfg)
-            {
-                for (u32 parameter_index = 0; parameter_index < ir_function->published_cfg->parameter_count; parameter_index += 1)
-                {
-                    IrCfgParameter const* parameter = ir_function->published_cfg->parameters + parameter_index;
-                    if (parameter->canonical_local.value == local->id.value)
-                    {
-                        place = parameter->value;
-                        break;
-                    }
-                }
-            }
-            if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
-            {
-                for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
-                {
-                    IrInstruction* instruction = ir_function->instructions + instruction_index;
-                    if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < ir_function->value_count &&
-                        instruction->immediate_count && instruction->immediates && instruction->immediates[0] == parameter_ordinal)
-                    {
-                        place = instruction->result;
-                        break;
-                    }
-                }
-            }
-            if (place.value != IR_ID_UNDERLYING_INVALID)
-            {
-                for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
-                {
-                    MachineVirtualRegister const* reg = machine_function->virtual_registers + register_index;
-                    if (reg->typed_origin == place.value && (reg->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE))
-                    {
-                        // A promoted place is only an implementation cell.
-                        // Canonical block-local SSA values carry the source
-                        // variable's changing value and constant provenance.
-                        place = IR_VALUE_ID_INVALID;
-                        break;
-                    }
-                }
-            }
+            IrValueId place = machine_debug_local_place(ir_function, machine_function, local_places, local, parameter_ordinal);
             parameter_ordinal += local->is_parameter;
             bool emitted = false;
-            if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= ir_function->local_count)
-            {
-                for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
-                {
-                    IrInstruction* instruction = ir_function->instructions + instruction_index;
-                    if (instruction->result.value < ir_function->value_count && instruction->canonical_local.value == local->id.value &&
-                        (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
-                    {
-                        place = instruction->result;
-                        break;
-                    }
-                }
-            }
             if (place.value != IR_ID_UNDERLYING_INVALID)
             {
-                IrInstructionId first = local->id.value < ir_function->local_count ? local_definitions[local->id.value] : IR_INSTRUCTION_ID_INVALID;
+                IrInstructionId first = IR_INSTRUCTION_ID_INVALID;
+                IrInstructionId definition = place.value < ir_function->value_count ? ir_function->values[place.value].definition : IR_INSTRUCTION_ID_INVALID;
+                IrInstruction* instruction = definition.value < ir_function->instruction_count ? ir_function->instructions + definition.value : 0;
+                if (local->id.value < ir_function->local_count && instruction && instruction->result.value == place.value &&
+                    instruction->canonical_local.value == local->id.value && instruction->opcode != IR_OPCODE_LOCAL &&
+                    instruction->opcode != IR_OPCODE_ARGUMENT)
+                {
+                    first = definition;
+                }
                 u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
                 values[value_count++] = machine_debug_value_make(program, ir_function, machine_function, value_stack_slots,
                                                                  value_indirect_slots, local->id, place,
@@ -2823,21 +2877,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 {
                     IrBlock* block = ir_function->blocks + block_index;
                     IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
-                    IrValueId value = block->local_values && local->id.value < ir_function->local_count
-                                          ? block->local_values[local->id.value]
-                                          : IR_VALUE_ID_INVALID;
-                    if (value.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        for (u32 parameter_index = 0; parameter_index < published->parameter_count; parameter_index += 1)
-                        {
-                            IrCfgParameter const* parameter = ir_function->published_cfg->parameters + published->parameter_offset + parameter_index;
-                            if (parameter->canonical_local.value == local->id.value)
-                            {
-                                value = parameter->value;
-                                break;
-                            }
-                        }
-                    }
+                    IrValueId value = machine_debug_block_value(ir_function, local, block_index);
                     if (value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count)
                     {
                         values[value_count++] = machine_debug_value_make(program, ir_function, machine_function, value_stack_slots,
@@ -2856,8 +2896,12 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 };
             }
         }
-        machine_function->debug_values = values;
-        machine_function->debug_value_count = value_count;
+        result = result && value_count == capacity;
+        if (result)
+        {
+            machine_function->debug_values = values;
+            machine_function->debug_value_count = value_count;
+        }
     }
     return result;
 }
@@ -4736,6 +4780,11 @@ MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* p
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function, MachineFunction* machine_function)
+{
+    return machine_debug_values_build(arena, program, function, machine_function, 0, 0);
+}
+
 BUSTER_GLOBAL_LOCAL void machine_fast_picker_test_state_reset(MachineFastState* state, MachineTargetDescription const* description,
                                                               MachineStackPlacement* placement, u32* locations, u32* last_use,
                                                               u8* escapes, u32* rematerialize_immediates)
