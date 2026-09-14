@@ -200,7 +200,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArgument
 // for machine-selection tests. Diagnostics fail the caller's assertions.
 BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c_with_options(Arena* arena, String8 name, String8 source, Target target, CIRLowerOptions options)
 {
-    CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){.target = target});
+    CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){.source_path = name, .target = target});
     if (tokens.error_count)
     {
         return 0;
@@ -3451,6 +3451,271 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
     return result;
 }
 
+// The x86-64 atomic fixtures use the GNU asm idiom `=a` plus `a`: both the
+// output and its comparison input intentionally name RAX.  Keep this check on
+// the whole fixture so selection, placement and emitted execution agree on
+// the alias instead of only accepting a synthetic instruction.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_fixed_register_alias(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 paths[] = {S8("tests/basic_c_atomic_asm.c"), S8("tests/basic_musl_freestanding.c"),
+                       S8("tests/basic_c_register_variable.c")};
+    String8 names[][3] = {{S8("a_cas"), S8("a_cas_p")},
+                          {S8("system_call3")},
+                          {S8("syscall2"), S8("syscall4"), S8("syscall6")}};
+    u32 name_counts[] = {2, 1, 3};
+    u32 operand_counts[][3] = {{4, 4}, {5}, {4, 6, 8}};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(paths); fixture_index += 1)
+    {
+        String8 path = paths[fixture_index];
+        ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
+        String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+        BUSTER_TEST_RAW(arguments, input.length != 0, path);
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, path, source, target,
+                                                                      (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 name_index = 0; name_index < name_counts[fixture_index]; name_index += 1)
+                {
+                    String8 name = names[fixture_index][name_index];
+                    IrFunction* function = machine_test_ir_function_find(module, name);
+                    BUSTER_TEST_RAW(arguments, function != 0, name);
+                    if (!function) continue;
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    BUSTER_TEST_RAW(arguments, selected.supported, name);
+                    if (!selected.supported) continue;
+                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, selected.function.inline_assembly_count == 1);
+                    if (selected.function.inline_assembly_count == 1)
+                    {
+                        MachineInlineAssembly* descriptor = selected.function.inline_assemblies;
+                        BUSTER_TEST(arguments, descriptor->operand_count == operand_counts[fixture_index][name_index]);
+                        if (descriptor->operand_count == operand_counts[fixture_index][name_index])
+                        {
+                            MachineInlineAssemblyOperand* operands = selected.function.inline_assembly_operands + descriptor->first_operand;
+                            if (fixture_index == 0)
+                            {
+                                // GCC's descriptor order keeps both outputs
+                                // first: A output, M output, A input, R
+                                // input. The tied fixed register is therefore
+                                // the (0, 2) pair, not adjacent operands.
+                                BUSTER_TEST(arguments, operands[0].constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_A &&
+                                                           operands[1].constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_M &&
+                                                           operands[2].constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_A &&
+                                                           operands[3].constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_R);
+                                BUSTER_TEST(arguments, operands[0].physical_register == MACHINE_X64_RAX &&
+                                                           operands[2].physical_register == MACHINE_X64_RAX);
+                                BUSTER_TEST(arguments, (operands[0].flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) != 0 &&
+                                                           (operands[1].flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) != 0 &&
+                                                           (operands[2].flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT) != 0 &&
+                                                           (operands[3].flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT) != 0);
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, operands[0].constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_A &&
+                                                           operands[1].constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                                BUSTER_TEST(arguments, operands[0].physical_register == MACHINE_X64_RAX &&
+                                                           operands[1].physical_register == MACHINE_X64_RAX);
+                                BUSTER_TEST(arguments, (operands[0].flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) != 0 &&
+                                                           (operands[1].flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT) != 0);
+                            }
+                        }
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(
+                        temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                    if (fixture_index == 0 && generated.error == CODEGEN_ERROR_NONE && generated.relocation_count == 0)
+                    {
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            u32 cas_offset = machine_test_module_offset(&generated, module, names[fixture_index][0]);
+                            u32 cas_pointer_offset = machine_test_module_offset(&generated, module, names[fixture_index][1]);
+                            BUSTER_TEST(arguments, cas_offset != UINT32_MAX && cas_pointer_offset != UINT32_MAX);
+                            if (cas_offset != UINT32_MAX)
+                            {
+                                typedef int AtomicCompareExchange(volatile int*, int, int);
+                                AtomicCompareExchange* call = 0;
+                                void* address = (u8*)executable.address + cas_offset;
+                                memcpy(&call, &address, sizeof(call));
+                                volatile int cell = 5;
+                                BUSTER_TEST(arguments, call(&cell, 5, 9) == 5 && cell == 9);
+                                BUSTER_TEST(arguments, call(&cell, 5, 11) == 9 && cell == 9);
+                            }
+                            if (cas_pointer_offset != UINT32_MAX)
+                            {
+                                typedef void* AtomicCompareExchangePointer(volatile void*, void*, void*);
+                                AtomicCompareExchangePointer* call = 0;
+                                void* address = (u8*)executable.address + cas_pointer_offset;
+                                memcpy(&call, &address, sizeof(call));
+                                volatile void* cell = 0;
+                                int first = 0;
+                                int second = 0;
+                                BUSTER_TEST(arguments, call(&cell, 0, &first) == 0 && cell == &first);
+                                BUSTER_TEST(arguments, call(&cell, 0, &second) == &first && cell == &first);
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// C validation rejects malformed duplicate fixed operands, but the selector
+// is also a direct IR boundary. Probe duplicate outputs and an explicit RAX
+// clobber against the valid atomic fixture without widening the source corpus
+// or weakening the accepted output/input alias.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_fixed_register_overlap(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("tests/basic_c_atomic_asm.c");
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrProgram* program = machine_test_compile_c(temporary.arena, path,
+                                                 (String8){.pointer = (char8*)input.pointer, .length = input.length}, target);
+    BUSTER_TEST(arguments, program && program->module_count == 1);
+    if (program && program->module_count == 1)
+    {
+        IrFunction* function = machine_test_ir_function_find(program->modules, S8("a_cas"));
+        BUSTER_TEST(arguments, function != 0);
+        if (function)
+        {
+            MachineSelectResult baseline = machine_select_canonical_function(temporary.arena, program, function, target);
+            BUSTER_TEST(arguments, baseline.supported);
+            IrInstruction* inline_instruction = 0;
+            IrInstructionId inline_id = {.value = IR_ID_UNDERLYING_INVALID};
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                {
+                    inline_instruction = function->instructions + instruction_index;
+                    inline_id.value = instruction_index;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, inline_instruction && inline_instruction->operand_count >= 3);
+            if (baseline.supported && inline_instruction && inline_instruction->operand_count >= 3)
+            {
+                u64 original_input_constraint = inline_instruction->immediates[2];
+                inline_instruction->immediates[2] |= IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT;
+                MachineSelectResult duplicate_outputs = machine_select_canonical_function_x86_64(
+                    temporary.arena, program, function, target, false, true, true, false, 0);
+                BUSTER_TEST(arguments, !duplicate_outputs.supported);
+                inline_instruction->immediates[2] = original_input_constraint;
+
+                IrInstructionExtra* extra = ir_instruction_extra_ensure(temporary.arena, function, inline_id);
+                BUSTER_TEST(arguments, extra != 0);
+                if (extra)
+                {
+                    String8* clobbers = arena_allocate(temporary.arena, String8, 1);
+                    String8* original_clobbers = extra->clobbers;
+                    u32 original_clobber_count = extra->clobber_count;
+                    *clobbers = S8("rax");
+                    extra->clobbers = clobbers;
+                    extra->clobber_count = 1;
+                    MachineSelectResult clobber_overlap = machine_select_canonical_function_x86_64(
+                        temporary.arena, program, function, target, false, true, true, false, 0);
+                    BUSTER_TEST(arguments, !clobber_overlap.supported);
+                    extra->clobbers = original_clobbers;
+                    extra->clobber_count = original_clobber_count;
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// UEFI uses the Win64 va_list pointer representation. Keep the complete
+// platform-variadic fixtures as the regression input: the fold/forward pair
+// exercises by-value and pointer va_list exchange, while each fixture's main
+// (or host_run) retains its independent semantic oracle. UEFI objects cannot
+// execute under a Linux host ABI, so this test proves the target ABI rows,
+// verifier, module generation, and every MIR allocator across both frontend
+// forms and PIC settings.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_uefi_platform_variadic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 paths[] = {S8("tests/basic_c_aarch64_platform_variadic.c"), S8("tests/differential/aarch64_platform_variadic.c"),
+                       S8("tests/differential/aarch64_platform_variadic_host.c")};
+    String8 names[][2] = {{S8("platform_va_fold"), S8("platform_va_forward")},
+                          {S8("platform_va_fold"), S8("platform_va_forward")},
+                          {S8("platform_va_host_fold"), S8("platform_va_host_forward")}};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_UEFI};
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(paths); fixture += 1)
+    {
+        ByteSlice input = file_read(arguments->arena, paths[fixture], (FileReadOptions){0});
+        String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+        BUSTER_TEST_RAW(arguments, input.length != 0, paths[fixture]);
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            for (u32 position_independent = 0; position_independent < 2; position_independent += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                IrProgram* program = machine_test_compile_c_with_options(
+                    temporary.arena, paths[fixture], source, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (program && program->module_count == 1)
+                {
+                    IrModule* module = program->modules;
+                    for (u32 name_index = 0; name_index < 2; name_index += 1)
+                    {
+                        String8 name = names[fixture][name_index];
+                        IrFunction* function = machine_test_ir_function_find(module, name);
+                        BUSTER_TEST_RAW(arguments, function != 0, name);
+                        if (!function) continue;
+                        MachineSelectResult selected = machine_select_validated_canonical_function(
+                            temporary.arena, program, function, target, position_independent != 0, true, false, 0);
+                        BUSTER_TEST_RAW(arguments, selected.supported, name);
+                        if (!selected.supported) continue;
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        bool pointer_load = false;
+                        for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                        {
+                            u16 opcode = selected.function.instructions[row].opcode;
+                            pointer_load |= opcode == MACHINE_X64_LOAD_PTR64;
+                            BUSTER_TEST(arguments, opcode != MACHINE_X64_VA_ARG);
+                        }
+                        BUSTER_TEST(arguments, selected.function.va_arg_count == 0 && pointer_load);
+                    }
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(
+                            temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.position_independent = position_independent != 0,
+                                                    .register_allocator = (u8)mode,
+                                                    .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5383,6 +5648,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_alias);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_overlap);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_uefi_platform_variadic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);

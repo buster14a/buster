@@ -17518,6 +17518,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
+    CIrPreparedCallStepResult finished_result = C_IR_PREPARED_CALL_STEP_FINISHED;
     u32 call_index = frame->as.prepared_call.call_index;
     bool child_success = frame->stage == C_IR_LOWER_STAGE_CHILD && machine->child_result.success;
     IrValueId child_value = machine->child_result.value;
@@ -18647,7 +18648,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 if (!c_ir_emit_clear_cache_runtime_call(builder, token, first, second))
                 {
-                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                    finished_result = C_IR_PREPARED_CALL_STEP_FAILED;
+                    remaining = 0;
+                    continue;
                 }
             }
             else
@@ -19478,7 +19481,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         remaining -= 1;
     } while (false);
     BUSTER_CHECK(!remaining);
-    return true;
+    return finished_result;
 }
 
 BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)

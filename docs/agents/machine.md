@@ -647,8 +647,10 @@
   in parallel. Each row snapshots zero-extended results to a private frame
   object before ordinary stores publish output places. XGETBV requires XSAVE
   on the compile target. Partial-width, read/write, partial-output and other
-  assembly shapes retain their existing fallback; these rows do not implement
-  unrestricted inline assembly.
+  assembly shapes retain their existing fallback; the driver's partial-width
+  CPUID control binds this boundary to permissive telemetry and strict failure
+  on x86-64 Linux and Windows. These rows do not implement unrestricted inline
+  assembly.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain

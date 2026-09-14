@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 547
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 548
 explicit SHA-256 rows bind every tracked test byte at the approval point: 402
-supported object subjects, 12 registered rejection controls, 69 support files
+supported object subjects, 12 registered rejection controls, 70 support files
 and 64 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
 is therefore a reviewed support decision, not an automatic side effect of adding
@@ -119,6 +119,11 @@ The full product is:
 - frontend SSA enabled and disabled;
 - PIC enabled and disabled.
 
+The current 402-subject support contract therefore freezes exactly
+`402 x 12 x 2 x 2 x 4 = 77,184` row identities. Applicability evidence is an
+additional validator-owned projection; it never removes a row or changes the
+input-byte ledger.
+
 Every row supplies `-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char
 -fverify-codegen -nostdinc`, the frozen resource include, an explicit target,
 CPU model and allocator. The default CPU
@@ -221,6 +226,53 @@ reference and combined-acceptance common-row failure counts and row lists. The
 candidate gate rejects only `candidate_common_failure_rows`; the acceptance gate
 rejects `acceptance_common_failure_rows`, including unresolved references.
 
+### Schema-2 applicability and admission evidence
+
+The Python contract validator derives a closed applicability class for every
+selected cell; the producer cannot provide or override this field. The derived
+classes are:
+
+| Class | Meaning | Owner |
+| --- | --- | --- |
+| `admitted-supported` | The supported-object obligation is admitted to the candidate compiler. | candidate |
+| `retained-control` | The allocator-`none` direct compilation is retained as the group control. | reference |
+| `retained-reference` | Candidate evidence is retained, but its direct reference is unresolved. | reference |
+| `platform-inapplicable` | Native execution belongs to a platform owner that is unavailable for this object cell. | platform |
+| `unavailable` | Compiler/process/evidence admission is unavailable or not admitted. | admission |
+
+`validate-shards` writes `applicability.tsv` next to its JSON output. It has
+one deterministic row for every selected cell, including the original fixture,
+target, CPU, frontend, allocator and PIC identity plus the producer disposition,
+validator reason, ownership and separate candidate/reference/acceptance failure
+bits. The original `rows.tsv` identity map and the frozen input-byte ledger are
+unchanged. A supported-native gap remains `admitted-supported`; its candidate
+failure cannot be hidden by relabeling it as a reference or unavailable row.
+The validator also records the exact supported-gap row list and rejects any
+attempt to move those rows to another class (the current evidence has 192).
+This candidate-owned rule takes precedence over the platform execution-control
+label for a declared gap; the object evidence still has to explain the gap.
+
+The candidate gate applies candidate cleanliness to admitted-supported cells;
+reference-only retained rows do not become candidate failures merely because
+their direct reference is unresolved. A retained row whose candidate side has
+an unexpected defect is still fatal. The acceptance gate additionally requires
+every retained reference/control to resolve. This class distinction does not
+waive unexpected compile, object, process, fallback or telemetry defects: those
+remain fatal for any applicable cell, including platform-inapplicable controls.
+A production manifest is admitted only as `profile=full-census`: it must bind
+the exact 548-input/402-subject/77,184-row, four-shard population. The producer
+also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
+directory and binds its SHA-256 in the manifest. The validator checks that
+authenticated seven-column ledger, including all 192 immutable row identities,
+before deriving applicability; result `disposition` text cannot add, remove or
+reclassify a declared gap. Smaller fixtures must explicitly use
+`profile=self-test` and can never satisfy production profile acceptance.
+A bounded, deterministic
+`residual.tsv` is emitted beside `applicability.tsv`; it retains at most 256
+diagnostic rows and joins fallback attribution to fixture, function, target,
+CPU, frontend, allocator and PIC. The JSON report records both evidence paths,
+class counts and whether residual attribution was truncated.
+
 ## Observations and failure accounting
 
 `results.tsv` joins to `rows.tsv` by row ID and records process kind/status,
@@ -263,10 +315,13 @@ are unchanged.
 `CODEGEN_FALLBACK_CENSUS version=1 records=N` precedes the versioned
 `CODEGEN_FALLBACK_FUNCTION` rows. Each row includes target, allocator, function
 ID, reason, stage and opcode ID (`UINT32_MAX` means no applicable opcode).
-`source_hex` and `function_hex` encode the exact UTF-8 bytes as lowercase hex;
-`-` denotes an empty string. This preserves spaces, tabs, quotes and non-ASCII
-names without ambiguous escaping. `fallback-functions.tsv` retains the rows
-keyed to their exact matrix configurations.
+The retained `fallback-functions.tsv` telemetry also carries `version=1 row=N`;
+the authenticated inner row must equal the TSV row key. `source_hex` and
+`function_hex` encode non-empty exact UTF-8 bytes as lowercase hex. The `-`
+sentinel is invalid for a retained function record, so missing source/function
+identity cannot be admitted as fallback evidence. This preserves spaces, tabs,
+quotes and non-ASCII names without ambiguous escaping. The rows remain keyed
+to their exact matrix configurations.
 
 The census requires one supported record-count marker, valid fields, strictly
 increasing function IDs within its single-TU invocation, and exactly as many

@@ -10,10 +10,13 @@ on:
       - docs/agents/build.md
       - docs/native-retirement-census.md
       - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-supported-gaps-v1.tsv
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
+      - tools/native_retirement_result_input.py
+      - tools/native_retirement_result_input_test.py
       - tests/**
   workflow_dispatch:
 
@@ -43,6 +46,8 @@ jobs:
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
+      - name: Validate streamed result input under strict resource warnings
+        run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
       - name: Prove unreviewed input drift fails closed
         run: |
           printf '\n' >> tests/basic_c_operations.c

@@ -50,7 +50,9 @@ struct NrcSettings
     String8 resource_include;
     String8 resource_snapshot;
     String8 contract_path;
+    String8 supported_gap_ledger_path;
     String8 contract_sha256;
+    String8 supported_gap_ledger_sha256;
     String8 resource_sha256;
     FILE* rows;
     FILE* counters;
@@ -545,7 +547,7 @@ BUSTER_GLOBAL_LOCAL NrcStatistics nrc_statistics(String8 output, String8 allocat
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void nrc_counters(NrcSettings* settings, u64 row, String8 output)
+BUSTER_GLOBAL_LOCAL void nrc_counters(NrcSettings* settings, u64 row, String8 output, String8 target, String8 allocator)
 {
     String8 line = {0};
     while (text_next_line(&output, &line))
@@ -554,7 +556,23 @@ BUSTER_GLOBAL_LOCAL void nrc_counters(NrcSettings* settings, u64 row, String8 ou
             !string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_FUNCTION ")) &&
             !string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_CENSUS ")))
         {
-            fprintf(settings->counters, "%llu\t%.*s\n", (unsigned long long)row, (int)line.length, line.pointer);
+            if (string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_REASON ")))
+            {
+                fprintf(settings->counters, "%llu\tCODEGEN_FALLBACK_REASON %.*s version=1 row=%llu\n",
+                        (unsigned long long)row, (int)(line.length - 24), line.pointer + 24, (unsigned long long)row);
+            }
+            else if (string_starts_with_sequence(line, S8("CODEGEN_FALLBACK opcode=")))
+            {
+                fprintf(settings->counters, "%llu\t%.*s version=1 row=%llu target=%.*s allocator=%.*s\n",
+                        (unsigned long long)row, (int)line.length, line.pointer, (unsigned long long)row,
+                        (int)target.length, target.pointer, (int)allocator.length, allocator.pointer);
+            }
+            else if (string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_STAGES ")))
+            {
+                fprintf(settings->counters, "%llu\t%.*s version=1 row=%llu target=%.*s allocator=%.*s\n",
+                        (unsigned long long)row, (int)line.length, line.pointer, (unsigned long long)row,
+                        (int)target.length, target.pointer, (int)allocator.length, allocator.pointer);
+            }
         }
     }
 }
@@ -627,6 +645,8 @@ BUSTER_GLOBAL_LOCAL bool nrc_function_records(NrcSettings* settings, u64 row, St
                     record_valid &= string_equal(stage, index >= 1 && index <= 3 ? S8("selection") : reason);
                 }
             }
+            record_valid &= source.length && !string_equal(source, S8("-")) &&
+                name.length && !string_equal(name, S8("-"));
             // A census row compiles one TU, so function IDs strictly increase.
             // They need not be dense: declarations need not have lowered bodies.
             record_valid &= reason_found && (records == 0 || function > previous_function);
@@ -635,7 +655,8 @@ BUSTER_GLOBAL_LOCAL bool nrc_function_records(NrcSettings* settings, u64 row, St
             records += 1;
             if (settings->functions)
             {
-                fprintf(settings->functions, "%llu\t%u\t%.*s\n", (unsigned long long)row, (unsigned)record_valid, (int)line.length, line.pointer);
+                fprintf(settings->functions, "%llu\t%u\t%.*s row=%llu\n", (unsigned long long)row,
+                        (unsigned)record_valid, (int)line.length, line.pointer, (unsigned long long)row);
             }
         }
     }
@@ -706,12 +727,16 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         SliceString8 argv = {.pointer = command, .length = command_count};
         DObservation observed = d_observe(&child, argv, prefix);
         NrcStatistics statistics = nrc_statistics(observed.output, nrc_allocators[mode]);
+        u64 row = group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode;
         String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], settings->cpu);
         bool target_valid = expected_features.length && string_equal(statistics.cpu, settings->cpu) &&
                             string_equal(statistics.features, expected_features);
-        bool records_valid = !mode || nrc_function_records(settings, group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode,
-                                                          observed.output, nrc_allocators[mode], statistics.fallbacks);
-        nrc_counters(settings, group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode, observed.output);
+        bool records_valid = !mode || nrc_function_records(settings, row, observed.output, nrc_allocators[mode], statistics.fallbacks);
+        TargetParseResult target_parse = target_parse_triple(nrc_targets[target].triple);
+        String8 diagnostic_target = string_format(temporary.arena, S8("{S8}-{S8}"),
+                                                  cpu_arch_to_string_os(target_parse.target.cpu_arch),
+                                                  operating_system_to_string_os(target_parse.target.os));
+        nrc_counters(settings, row, observed.output, diagnostic_target, nrc_allocators[mode]);
         u64 object_hash = 0, object_bytes = 0;
         String8 object_sha256 = {0};
         bool artifact = build_artifact_fanout_hash_file(temporary.arena, object, &object_hash, &object_bytes);
@@ -759,7 +784,7 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             settings->failures += baseline_supported && (!statistics.valid || !records_valid);
         }
         fprintf(settings->rows, "%llu\t%llu\t%.*s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.*s\t%.*s\t%llu\t%llu\t%.*s\n",
-            (unsigned long long)(group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode), (unsigned long long)group,
+            (unsigned long long)row, (unsigned long long)group,
             (int)disposition.length, disposition.pointer, (unsigned)observed.kind, observed.status,
             (unsigned)statistics.valid, (unsigned)target_valid, (unsigned)records_valid, statistics.functions, statistics.fallbacks,
             baseline.functions, (int)statistics.cpu.length, statistics.cpu.pointer, (int)statistics.features.length, statistics.features.pointer,
@@ -888,6 +913,14 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
     failures += nrc_function_records(&records_settings, 0,
         string_format(arena, S8("CODEGEN_FALLBACK_CENSUS version=2 records=2\n{S8}{S8}"), first_record, second_record), S8("fast"), 2);
     failures += !nrc_function_records(&records_settings, 0, S8("CODEGEN_FALLBACK_CENSUS version=1 records=0\n"), S8("fast"), 0);
+    String8 blank_source_record = S8("CODEGEN_FALLBACK_CENSUS version=1 records=1\n"
+                                     "CODEGEN_FALLBACK_FUNCTION version=1 target=x86_64-linux allocator=fast function_id=7 "
+                                     "reason=signature stage=selection opcode_id=4294967295 line=3 column=1 source_hex=- function_hex=66\n");
+    String8 blank_function_record = S8("CODEGEN_FALLBACK_CENSUS version=1 records=1\n"
+                                       "CODEGEN_FALLBACK_FUNCTION version=1 target=x86_64-linux allocator=fast function_id=7 "
+                                       "reason=signature stage=selection opcode_id=4294967295 line=3 column=1 source_hex=612063 function_hex=-\n");
+    failures += nrc_function_records(&records_settings, 0, blank_source_record, S8("fast"), 1);
+    failures += nrc_function_records(&records_settings, 0, blank_function_record, S8("fast"), 1);
     failures += nrc_hex_field(S8("a")) || nrc_hex_field(S8("0g")) || !nrc_hex_field(S8("-"));
     for (u64 group = 0; group < 101; group += 1)
     {
@@ -917,7 +950,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
 {
     NrcSettings settings = {.child = {.arena = arena, .ide = S8("build/Release/ide"),
         .out = S8("build/native-retirement-census"), .timeout_seconds = 30, .verify = true},
-        .shard_count = 1, .cpu = S8("baseline"), .contract_path = S8("docs/native-retirement-support-v1.tsv")};
+        .shard_count = 1, .cpu = S8("baseline"), .contract_path = S8("docs/native-retirement-support-v1.tsv"),
+        .supported_gap_ledger_path = S8("docs/native-retirement-supported-gaps-v1.tsv")};
     bool valid = true, self_test = false;
     for (u64 index = 0; valid && index < arguments.length; index += 1)
     {
@@ -998,6 +1032,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         u64 input_count = 0;
         NrcInput* inputs = nrc_inventory(&settings, &input_count);
         u64 groups = nrc_manifest(&settings, inputs, input_count, false);
+        u64 subject_count = 0;
+        for (u64 index = 0; index < input_count; index += 1)
+        {
+            subject_count += string_equal(inputs[index].role, S8("subject"));
+        }
+        bool full_profile = !settings.fixture_filter.length && !settings.target_filter.length && settings.shard_count == 4 &&
+                            input_count == 548 && subject_count == 402 && groups == 19296 &&
+                            groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77184;
+        String8 profile = full_profile ? S8("full-census") : S8("self-test");
         u64 compiler_hash = 0, compiler_bytes = 0, baseline_hash = 0, baseline_bytes = 0;
         String8 compiler_sha256 = {0}, baseline_sha256 = {0};
         if (!settings.manifest_only && !settings.child.io_failed)
@@ -1027,21 +1070,33 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             d_write(&settings.child, path_join(arena, settings.child.out, S8("support-contract.tsv")), BYTE_SLICE_TO_STRING(8, contract));
         }
         else { settings.child.io_failed = true; }
+        ByteSlice supported_gap_ledger = file_read(arena, settings.supported_gap_ledger_path, (FileReadOptions){0});
+        if (supported_gap_ledger.pointer)
+        {
+            settings.supported_gap_ledger_sha256 = nrc_sha256(arena, supported_gap_ledger.pointer, supported_gap_ledger.length);
+            d_write(&settings.child, path_join(arena, settings.child.out, S8("supported-gap-ledger.tsv")),
+                    BYTE_SLICE_TO_STRING(8, supported_gap_ledger));
+        }
+        else { settings.child.io_failed = true; }
         String8 dependency_state = settings.manifest_only ? S8("not-executed-manifest-only") : S8("none-for-object-census");
         String8 environment_state = settings.manifest_only ? S8("not-executed-manifest-only") : S8("explicit-replacement-in-environment.tsv");
         String8 metadata = string_format(arena, S8("version=2\nkind=object-coverage\nidentity_hash=sha256\nrow_artifact_hash=buster_hash_64-noncryptographic\n"
             "support_contract=docs/native-retirement-support-v1.tsv\nsupport_contract_sha256={S8}\n"
+            "supported_gap_ledger=docs/native-retirement-supported-gaps-v1.tsv\nsupported_gap_ledger_sha256={S8}\n"
             "compiler_revision_claim={S8}\nbaseline_revision_claim={S8}\ncompiler_hash={u64}\ncompiler_bytes={u64}\n"
             "compiler_sha256={S8}\nbaseline_hash={u64}\nbaseline_bytes={u64}\nbaseline_sha256={S8}\n"
-            "cpu={S8}\nresource_include_sha256={S8}\nsysroot=none\nsystem_include=none\ninputs={u64}\nrows={u64}\n"
+            "cpu={S8}\nresource_include_sha256={S8}\nsysroot=none\nsystem_include=none\ninputs={u64}\nsubjects={u64}\nrows={u64}\n"
+            "profile={S8}\nsupported_gap_count={u64}\nsupported_gap_sha256={S8}\n"
             "fixture_filter={S8}\ntarget_filter={S8}\nshard_index={u32}\nshard_count={u32}\nmanifest_only={u32}\ntimeout_seconds={u32}\n"
             "function_evidence=all-observed-fallbacks-plus-first-fatal-diagnostic\n"
             "fixture_flags=exact-path-recipes-in-inputs.tsv\nsource_dependencies=tracked-tests-plus-snapshotted-resource-include\n"
             "environment={S8}\nunfrozen_dependencies={S8}\n"
             "flags=-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem SNAPSHOT\n"),
-            settings.contract_sha256, settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
-            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, input_count,
-            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), settings.fixture_filter, settings.target_filter,
+            settings.contract_sha256, settings.supported_gap_ledger_sha256, settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
+            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, input_count, subject_count,
+            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, full_profile ? 192 : 0,
+            full_profile ? S8("a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec") : S8(""),
+            settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds,
             environment_state, dependency_state);
         d_write(&settings.child, path_join(arena, settings.child.out, S8("manifest.txt")), metadata);
