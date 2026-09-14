@@ -1,0 +1,2 @@
+# Preserve upstream license bytes and their existing EOF/trailing whitespace.
+*.txt -text whitespace=-blank-at-eol,-blank-at-eof
