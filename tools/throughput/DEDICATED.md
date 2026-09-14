@@ -1,6 +1,6 @@
 # Dedicated-host experiments
 
-[Throughput harness](README.md) · Tracking: #46 and #422.
+[Throughput harness](README.md) · Tracking: #46, #422 and #437.
 
 The optional Linux qualification path records observations and serializes
 **cooperating** runs. It does not certify physical isolation, idle SMT siblings,
@@ -82,6 +82,34 @@ is killed. There is no explicit unlock that would release surviving holders.
 A compiler that deliberately closes inherited descriptors is outside that
 protection. Locks in separate filesystem namespaces/inodes do not serialize.
 Other builds or programs that ignore the lease are **not** prevented from running.
+
+A service that already holds the same lease may transfer its inherited file
+descriptor to the harness instead of asking the harness to open a competing
+description:
+
+```sh
+"$BENCH" run \
+  --baseline "$IDE" --candidate "$IDE" --output "$RESULTS" \
+  --cpu "$CPU" --machine-id "$ENV_ID" --lock-file "$LOCK" --lease-fd "$LEASE_FD"
+```
+
+`--lease-fd` is Linux-only and is valid only with the required absolute
+`--lock-file` and the other dedicated-host options. The inherited descriptor
+must be at least 3 and name the exact inode currently selected by that path. It
+must be an owner-matched private regular file with one link. The harness
+reasserts a nonblocking exclusive `flock` on that same open file description;
+it never unlocks or substitutes another description during handoff. A closed
+descriptor, directory, final symlink, replaced path, different inode, separate
+open description, shared permissions or extra link is rejected before host
+capture or result creation.
+
+After admission, the harness marks its descriptor close-on-exec before any
+compiler child. The service's descriptor is in a different process and is not
+changed. The harness copy stays open across preparation, warmups, measurements,
+diagnostic replays, fixed-point checks, sealing and evidence finalization, and
+is closed only on the CLI exit path. The service must retain its own copy for
+the whole supervised job and must not unlink or replace the path. Ordinary
+`--lock-file` acquisition remains inheritable and otherwise unchanged.
 
 For `run`, the lease spans input preparation, warmups, measurements, diagnostic
 replays, fixed-point checks and comparison. It is acquired before any result
