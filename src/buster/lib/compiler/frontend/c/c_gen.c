@@ -6154,26 +6154,29 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
 }
 
 /* Whether an atomic load or store of `type` -- the `_Atomic`-qualified type a
-   place carries -- is one this toolchain can lower.
+   place carries -- has a canonical IR representation.
 
    An atomic aggregate is read and written as a single integer access of its
    *promoted* width, which is what c_atomic_promoted_layout pads the type up to
    (#731): a three-byte record is four bytes aligned four so that one four-byte
-   access covers it.  The widths the backends implement that access at are one,
-   two, four and eight bytes everywhere, plus sixteen on x86-64 when `cx16`
-   gives them CMPXCHG16B and on AArch64 always, through the LDXP/STXP
-   exclusive-pair loops -- see the IR_OPCODE_ATOMIC_LOAD and
-   IR_OPCODE_ATOMIC_STORE branches in codegen.c, which are where the aggregate
-   forms are emitted; the machine selectors refuse the aggregate shapes and fall
-   back to those.  Anything wider would need a `libatomic` lock, and there is
-   none here, so refusing in lowering is what turns an internal code generation
-   failure into a diagnostic that names the type (#762).
+   access covers it.  The widths represented in canonical IR are one, two,
+   four and eight bytes everywhere, plus sixteen on x86-64 and AArch64.
+   The x86-64 machine admission still requires `cx16` for CMPXCHG16B, while
+   AArch64 uses the LDXP/STXP exclusive-pair loops -- see the
+   IR_OPCODE_ATOMIC_LOAD and IR_OPCODE_ATOMIC_STORE branches in codegen.c,
+   which are where the aggregate forms are emitted; the machine selectors
+   refuse the aggregate shapes and fall back to those.  Keeping the sixteen-
+   byte representation in canonical IR on baseline x86-64 lets that downstream
+   admission report its own unsupported-instruction result.  Anything wider
+   would need a `libatomic` lock, and there is none here, so refusing in
+   lowering is what turns an internal code generation failure into a diagnostic
+   that names the type (#762).
 
    Only aggregates are asked about.  Every atomic scalar this frontend builds is
    already a lock-free width or is refused nearer its own kind -- an atomic wide
    float by the c_ir_type_contains_wide_float guards beside the callers -- so
    widening the question here would change behaviour that is not this one's. */
-BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_supported(CIntegerIrBuilder* builder, IrTypeId type)
+BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_representable(CIntegerIrBuilder* builder, IrTypeId type)
 {
     IrType* qualified = ir_type_from_id(&builder->program->types, type);
     IrType* unqualified = qualified && qualified->is_atomic ? ir_type_from_id(&builder->program->types, qualified->unqualified_type) : 0;
@@ -6181,16 +6184,15 @@ BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_supported(CIntegerIrBuilder*
     if (unqualified && (unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION) && qualified->layout.resolved)
     {
         u64 width = qualified->layout.size;
-        bool wide_pair = width == 16 && ((builder->target.cpu_arch == CPU_ARCH_X86_64 &&
-                                          target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16)) ||
-                                         builder->target.cpu_arch == CPU_ARCH_AARCH64);
+        bool wide_pair = width == 16 && (builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64);
         result = width == 1 || width == 2 || width == 4 || width == 8 || wide_pair;
     }
 
     return result;
 }
 
-/* Whether every atomic access the lowered body kept is one the backends emit.
+/* Whether every atomic access the lowered body kept has a canonical IR
+   representation the backend can inspect.
 
    Asked here, over the finished body, rather than where the access is built:
    an operand is lowered as a value first, and an expression that only wanted
@@ -6226,7 +6228,7 @@ BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_accesses_lowerable(CIntegerIrBuilde
             if (atomic_access && instruction->operand_count && instruction->operands[0].value < function->value_count)
             {
                 IrTypeId place_type = function->values[instruction->operands[0].value].canonical_type;
-                if (!c_ir_atomic_aggregate_access_supported(builder, place_type))
+                if (!c_ir_atomic_aggregate_access_representable(builder, place_type))
                 {
                     IrType* qualified = ir_type_from_id(&builder->program->types, place_type);
                     builder->failure_message = string_format(
@@ -18145,7 +18147,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrValueId comparison_desired = desired;
                 if (aggregate_value)
                 {
-                    if (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_supported(builder, atomic_type))
+                    if (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_representable(builder, atomic_type))
                     {
                         builder->failure_message = S8("C IR lowering does not support this atomic aggregate compare-exchange width");
                         return false;
@@ -18341,7 +18343,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     if (aggregate_value)
                     {
                         if (selected->builtin_atomic_gnu || operation != IR_ATOMIC_EXCHANGE ||
-                            !c_ir_atomic_aggregate_access_supported(builder, atomic_type))
+                            !c_ir_atomic_aggregate_access_representable(builder, atomic_type))
                         {
                             builder->failure_message = S8("C IR lowering does not support this atomic aggregate read-modify-write");
                             return false;
