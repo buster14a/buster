@@ -1248,3 +1248,20 @@ class TimingTests(unittest.TestCase):
         changed_runner = self.sample(3)
         changed_runner["jobs"][0]["labels"] = ["other-image"]
         report = github_ci_time.summarize({"runs": [self.sample(1), self.sample(2, revision="b"), changed_runner]})
+        self.assertEqual(len(report["cohorts"]), 3)
+
+    def test_duplicate_observations_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            github_ci_time.summarize({"runs": [self.sample(), self.sample()]})
+
+    def test_missing_times_and_workflow_identity_are_not_imputed(self):
+        samples = [self.sample(1), self.sample(2)]
+        samples[0]["jobs"][0]["completed_at"] = None
+        samples[1].pop("workflow_blob_sha")
+        report = github_ci_time.summarize({"runs": samples})
+        self.assertFalse(report["cohorts"])
+        self.assertEqual(sum(report["excluded"].values()), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
