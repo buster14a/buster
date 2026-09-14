@@ -6011,11 +6011,33 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 {S8(" \t \t"), 0, {{0}}},
                 {S8("\"\""), 1, {S8("")}},
                 {S8("\"\" \"\" \"\""), 3, {S8(""), S8(""), S8("")}},
-                {S8("\"a\"\"b\""), 1, {S8("ab")}},
+                // Two quotes inside a quoted argument are one literal quote
+                // (#637). The pair is consumed and quoting continues, so the
+                // argument does not end here and the quote reaches argv.
+                {S8("\"a\"\"b\""), 1, {S8("a\"b")}},
                 {S8("a\" b\"c d"), 2, {S8("a bc"), S8("d")}},
                 {S8("\"unterminated a b"), 1, {S8("unterminated a b")}},
                 {S8("a\r\nb c"), 2, {S8("a\r\nb"), S8("c")}},
-                {S8("\"\"a a\"\" \"\"\"\""), 3, {S8("a"), S8("a"), S8("")}},
+                {S8("\"\"a a\"\" \"\"\"\""), 3, {S8("a"), S8("a"), S8("\"")}},
+                // The rule applies only while quoted: outside a quoted run the
+                // same two characters open and immediately close one.
+                {S8("a\"\"b"), 1, {S8("ab")}},
+                // The three raw command lines reported in #637, with the
+                // executable name in front as a real command line carries it.
+                {S8("prog \"a\"\"b\""), 2, {S8("prog"), S8("a\"b")}},
+                {S8("prog \"a\"\" b\" tail"), 3, {S8("prog"), S8("a\" b"), S8("tail")}},
+                {S8("prog \"-DNAME=\"\"hello\"\"\""), 2, {S8("prog"), S8("-DNAME=\"hello\"")}},
+                // A literal quote produced by the pair, standing at the end of
+                // a quoted run and against an argument boundary.
+                {S8("\"a\"\"\" b"), 2, {S8("a\""), S8("b")}},
+                // Adjacent backslash runs. An even run before the pair decodes
+                // to half as many backslashes and still leaves the argument
+                // quoted; an odd run escapes its own quote and leaves quoting
+                // untouched, so the pair that follows is still the literal one.
+                {S8("\"a\\\\\"\"b\""), 1, {S8("a\\\"b")}},
+                {S8("\"a\\\"\"\"b\""), 1, {S8("a\"\"b")}},
+                // Empty arguments on both sides of a pair-bearing argument.
+                {S8("\"\" \"a\"\"b\" \"\""), 3, {S8(""), S8("a\"b"), S8("")}},
             };
             u64 before_null = arena->position;
             SliceString8 null_parts = slice_string_from_windows_string_list(arena, 0);
