@@ -24,19 +24,6 @@ BUSTER_GLOBAL_LOCAL BqRequest bq_test_request(u32 number, bool failure)
     return request;
 }
 
-BUSTER_GLOBAL_LOCAL BqRequest bq_test_real_request(u32 number)
-{
-    char key[32];
-    snprintf(key, sizeof(key), "real-request-%u", number);
-    String8 fields[BQ_FIELD_COUNT] = {
-        S8("test-principal"), string_from_pointer(key), S8("validate-buster-v1"),
-        S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
-    BqRequest request;
-    BQ_CHECK(bq_request_make(fields, &request) == BQ_OK);
-    return request;
-}
-
 BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
 {
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
@@ -106,6 +93,93 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
 }
 
 #ifndef _WIN32
+BUSTER_GLOBAL_LOCAL BqRequest bq_test_real_request(u32 number)
+{
+    char key[32];
+    snprintf(key, sizeof(key), "real-request-%u", number);
+    String8 fields[BQ_FIELD_COUNT] = {
+        S8("test-principal"), string_from_pointer(key), S8("validate-buster-v1"),
+        S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+    BqRequest request;
+    BQ_CHECK(bq_request_make(fields, &request) == BQ_OK);
+    return request;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_mkdtemp_physical(char* path, u32 capacity)
+{
+    bool created = mkdtemp(path) != NULL;
+    char* physical = created ? realpath(path, NULL) : NULL;
+    bool ok = physical != NULL;
+    if (ok)
+    {
+        u64 size = (u64)strlen(physical);
+        ok = size < capacity;
+        if (ok)
+        {
+            memcpy(path, physical, (size_t)size + 1);
+        }
+    }
+    if (created && !ok)
+    {
+        BQ_CHECK(rmdir(path) == 0);
+        path[0] = 0;
+    }
+    free(physical);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_physical_temp_paths(void)
+{
+    char root[BQ_PATH_CAP + 1] = "/tmp/buster-physical-root-XXXXXX";
+    bool root_ok = bq_test_mkdtemp_physical(root, sizeof(root));
+    BQ_CHECK(root_ok);
+    if (root_ok)
+    {
+        char alias[BQ_PATH_CAP + 1] = "/tmp/buster-physical-alias-XXXXXX";
+        bool alias_ok = mkdtemp(alias) != NULL && rmdir(alias) == 0 && symlink(root, alias) == 0;
+        BQ_CHECK(alias_ok);
+        if (alias_ok)
+        {
+            char child[BQ_PATH_CAP + 1];
+            int length = snprintf(child, sizeof(child), "%s/child-XXXXXX", alias);
+            bool child_ok = length > 0 && (u32)length < sizeof(child) &&
+                            bq_test_mkdtemp_physical(child, sizeof(child));
+            BQ_CHECK(child_ok);
+            if (child_ok)
+            {
+                char through_alias[BQ_PATH_CAP + 1];
+                char const* leaf = strrchr(child, '/');
+                length = snprintf(through_alias, sizeof(through_alias), "%s/%s", alias, leaf ? leaf + 1 : "");
+                BQ_CHECK(leaf && length > 0 && (u32)length < sizeof(through_alias));
+                int rejected = leaf && length > 0 && (u32)length < sizeof(through_alias) ?
+                               bq_open_absolute_directory(string_from_pointer(through_alias)) : -1;
+                BQ_CHECK(rejected < 0);
+                if (rejected >= 0)
+                {
+                    close(rejected);
+                }
+                int physical = bq_open_absolute_directory(string_from_pointer(child));
+                BQ_CHECK(physical >= 0);
+                if (physical >= 0)
+                {
+                    close(physical);
+                }
+                BQ_CHECK(rmdir(child) == 0);
+            }
+            BQ_CHECK(unlink(alias) == 0);
+        }
+        char bounded[BQ_PATH_CAP + 1];
+        int length = snprintf(bounded, sizeof(bounded), "%s/bounded-XXXXXX", root);
+        BQ_CHECK(length > 0 && (u32)length < sizeof(bounded));
+        if (length > 0 && (u32)length < sizeof(bounded))
+        {
+            BQ_CHECK(!bq_test_mkdtemp_physical(bounded, (u32)strlen(root) + 1) && !bounded[0]);
+        }
+        BQ_CHECK(rmdir(root) == 0);
+    }
+}
+
 typedef struct BqFixture
 {
     char path[80];
@@ -116,7 +190,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_begin(BqFixture* fixture)
 {
     *fixture = (BqFixture){.queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1}};
     snprintf(fixture->path, sizeof(fixture->path), "/tmp/buster-queue-XXXXXX");
-    bool ok = mkdtemp(fixture->path) != NULL;
+    bool ok = bq_test_mkdtemp_physical(fixture->path, sizeof(fixture->path));
     BQ_CHECK(ok);
     if (ok)
     {
@@ -214,7 +288,9 @@ BUSTER_GLOBAL_LOCAL bool bq_material_test_begin(BqMaterialFixture* fixture, u32 
     *fixture = (BqMaterialFixture){0};
     snprintf(fixture->installed, sizeof(fixture->installed), "/tmp/buster-installed-XXXXXX");
     snprintf(fixture->workspaces, sizeof(fixture->workspaces), "/tmp/buster-workspaces-XXXXXX");
-    bool ok = bq_test_begin(&fixture->queue) && mkdtemp(fixture->installed) && mkdtemp(fixture->workspaces);
+    bool ok = bq_test_begin(&fixture->queue) &&
+              bq_test_mkdtemp_physical(fixture->installed, sizeof(fixture->installed)) &&
+              bq_test_mkdtemp_physical(fixture->workspaces, sizeof(fixture->workspaces));
     if (ok)
     {
         char recipes[512], recipe[1024];
@@ -1429,6 +1505,7 @@ int main(int argc, char** argv)
     (void)argv;
     bq_test_codec();
 #ifndef _WIN32
+    bq_test_physical_temp_paths();
     bq_test_closed_handle();
     bq_test_admission();
     bq_test_prefixes_and_corruption();
