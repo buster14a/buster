@@ -1,0 +1,716 @@
+name: Issue 603 analyzer job qualification
+
+on:
+  push:
+    branches:
+      - sol/603-analyzer-job-qualification-20260914
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: issue-603-analyzer-job-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analyzer:
+    name: Analyzer job ${{ matrix.repetition }} ${{ matrix.treatment }}
+    if: ${{ github.repository == 'buster14a/buster' && github.server_url == 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/sol/603-analyzer-job-qualification-20260914' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - repetition: 1
+            treatment: compare
+          - repetition: 1
+            treatment: skip
+          - repetition: 2
+            treatment: skip
+          - repetition: 2
+            treatment: compare
+          - repetition: 3
+            treatment: compare
+          - repetition: 3
+            treatment: skip
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Record identity and bootstrap treatment drivers
+        shell: bash
+        env:
+          REPETITION: ${{ matrix.repetition }}
+          TREATMENT: ${{ matrix.treatment }}
+        run: |
+          set -euo pipefail
+          evidence_root="$RUNNER_TEMP/buster-analyzer-job-603"
+          mkdir -p build "$evidence_root"
+          printf 'EVIDENCE_ROOT=%s\n' "$evidence_root" >> "$GITHUB_ENV"
+          test -z "$(git status --porcelain=v1)"
+          source_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          source_tree="$(git rev-parse --verify 'HEAD^{tree}')"
+          production_revision="$(git rev-parse --verify 'HEAD^{commit}^')"
+          production_tree="$(git rev-parse --verify 'HEAD^{commit}^^{tree}')"
+          test "$source_revision" = "$GITHUB_SHA"
+          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".github/workflows/ci-603-analyzer-job-qualification.yml"
+          {
+            printf 'BUSTER_ANALYZER_JOB_QUALIFICATION_IDENTITY_V1\n'
+            printf 'repository=%s\nserver_url=%s\nevent=%s\nref=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_EVENT_NAME" "$GITHUB_REF"
+            printf 'github_sha=%s\nsource_revision=%s\nsource_tree=%s\n' "$GITHUB_SHA" "$source_revision" "$source_tree"
+            printf 'production_revision=%s\nproduction_tree=%s\n' "$production_revision" "$production_tree"
+            printf 'run_id=%s\nrun_attempt=%s\nrepetition=%s\ntreatment=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$REPETITION" "$TREATMENT"
+            printf 'runner_image=%s\n' "${ImageOS-unknown}-${ImageVersion-unknown}"
+            printf 'workflow_sha256='
+            sha256sum .github/workflows/ci-603-analyzer-job-qualification.yml | cut -d' ' -f1
+          } > "$evidence_root/identity.txt"
+          clang --version | tee "$evidence_root/clang.txt"
+          uname -a > "$evidence_root/uname.txt"
+          lscpu > "$evidence_root/lscpu.txt"
+          cp /proc/meminfo "$evidence_root/meminfo.txt"
+          printf '%s\n' 'clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver' > "$evidence_root/bootstrap-command.txt"
+          phase_start="$(date +%s%N)"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver
+          case "$TREATMENT" in
+            compare)
+              git show "$source_revision:build.c" > "$evidence_root/baseline.c"
+              clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char "$evidence_root/baseline.c" -o build/analyzer-baseline
+              test -f build/analyzer-baseline
+              ;;
+            skip)
+              test ! -e build/analyzer-baseline
+              ;;
+            *)
+              echo '::error::Unknown analyzer job qualification treatment.'
+              exit 1
+              ;;
+          esac
+          phase_end="$(date +%s%N)"
+          printf 'bootstrap\t%s\t%s\t%s\tpass\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" > "$evidence_root/phases.tsv"
+          {
+            sha256sum build/analyzer-driver
+            if [[ "$TREATMENT" == compare ]]; then
+              sha256sum build/analyzer-baseline
+            fi
+          } > "$evidence_root/driver-sha256.txt"
+
+      - name: Exercise analyzer failure and coverage controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          phase_start="$(date +%s%N)"
+          set +e
+          build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$EVIDENCE_ROOT/self-test.log"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          test "${#pipeline[@]}" -eq 2
+          test "${pipeline[0]}" -eq 0
+          test "${pipeline[1]}" -eq 0
+          phase_end="$(date +%s%N)"
+          printf 'self-test\t%s\t%s\t%s\tpass\t%s\t%s\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" "${pipeline[0]}" "${pipeline[1]}" >> "$EVIDENCE_ROOT/phases.tsv"
+
+      - name: Configure the authoritative split-source database
+        shell: bash
+        run: |
+          set -euo pipefail
+          phase_start="$(date +%s%N)"
+          set +e
+          build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$EVIDENCE_ROOT/configure.log"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          test "${#pipeline[@]}" -eq 2
+          test "${pipeline[0]}" -eq 0
+          test "${pipeline[1]}" -eq 0
+          phase_end="$(date +%s%N)"
+          printf 'configure\t%s\t%s\t%s\tpass\t%s\t%s\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" "${pipeline[0]}" "${pipeline[1]}" >> "$EVIDENCE_ROOT/phases.tsv"
+          cp build/analyzer-tree/CMakeCache.txt "$EVIDENCE_ROOT/CMakeCache.txt"
+          cp build/analyzer-tree/compile_commands.json "$EVIDENCE_ROOT/compile_commands.json"
+          sha256sum build/analyzer-tree/CMakeCache.txt build/analyzer-tree/compile_commands.json > "$EVIDENCE_ROOT/configuration-sha256.txt"
+          printf '%s\n' 'build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF' > "$EVIDENCE_ROOT/configure-command.txt"
+
+      - name: Run and aggregate one full analyzer treatment
+        shell: bash
+        env:
+          TREATMENT: ${{ matrix.treatment }}
+        run: |
+          set -euo pipefail
+          results="$EVIDENCE_ROOT/results"
+          baseline_arguments=()
+          if [[ "$TREATMENT" == compare ]]; then
+            test -f build/analyzer-baseline
+            test ! -L build/analyzer-baseline
+            test -x build/analyzer-baseline
+            baseline_arguments=(--baseline-driver build/analyzer-baseline)
+          else
+            if [[ -e build/analyzer-baseline || -L build/analyzer-baseline ]]; then
+              echo '::error::Skip treatment created a baseline driver.'
+              exit 1
+            fi
+          fi
+          campaign_command='build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results RESULTS'
+          if [[ "$TREATMENT" == compare ]]; then
+            campaign_command+=' --baseline-driver build/analyzer-baseline'
+          fi
+          printf '%s\n' "$campaign_command" > "$EVIDENCE_ROOT/campaign-command.txt"
+          phase_start="$(date +%s%N)"
+          set +e
+          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$results" "${baseline_arguments[@]}" 2>&1 | tee "$EVIDENCE_ROOT/campaign.log"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          test "${#pipeline[@]}" -eq 2
+          phase_end="$(date +%s%N)"
+          phase_status=fail
+          if [[ "${pipeline[0]}" == 0 && "${pipeline[1]}" == 0 ]]; then phase_status=pass; fi
+          printf 'campaign\t%s\t%s\t%s\t%s\t%s\t%s\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" "$phase_status" "${pipeline[0]}" "${pipeline[1]}" >> "$EVIDENCE_ROOT/phases.tsv"
+          test "${pipeline[0]}" -eq 0
+          test "${pipeline[1]}" -eq 0
+          if [[ "$TREATMENT" == compare ]]; then
+            test "$(grep -Ec '^ANALYZE_RUN .* status=pass$' "$EVIDENCE_ROOT/campaign.log")" -eq 2
+            test "$(grep -Ec '^ANALYZE_BASELINE .* status=pass$' "$EVIDENCE_ROOT/campaign.log")" -eq 1
+            test -f "$results/baseline.log"
+          else
+            test "$(grep -Ec '^ANALYZE_RUN .* status=pass$' "$EVIDENCE_ROOT/campaign.log")" -eq 1
+            test "$(grep -Ec '^ANALYZE_BASELINE ' "$EVIDENCE_ROOT/campaign.log")" -eq 0
+            test ! -e "$results/baseline.log"
+          fi
+          printf '%s\n' 'build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results RESULTS' > "$EVIDENCE_ROOT/aggregate-command.txt"
+          phase_start="$(date +%s%N)"
+          set +e
+          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$results" 2>&1 | tee "$EVIDENCE_ROOT/aggregate.log"
+          pipeline=("${PIPESTATUS[@]}")
+          set -e
+          test "${#pipeline[@]}" -eq 2
+          phase_end="$(date +%s%N)"
+          phase_status=fail
+          if [[ "${pipeline[0]}" == 0 && "${pipeline[1]}" == 0 ]]; then phase_status=pass; fi
+          printf 'aggregate\t%s\t%s\t%s\t%s\t%s\t%s\n' "$phase_start" "$phase_end" "$((phase_end - phase_start))" "$phase_status" "${pipeline[0]}" "${pipeline[1]}" >> "$EVIDENCE_ROOT/phases.tsv"
+          test "${pipeline[0]}" -eq 0
+          test "${pipeline[1]}" -eq 0
+          test "$(grep -Ec '^ANALYZE_AGGREGATE .* failures=0 .* status=pass$' "$EVIDENCE_ROOT/aggregate.log")" -eq 1
+          python3 - "$results" "$EVIDENCE_ROOT/candidate-results.txt" "$EVIDENCE_ROOT/campaign.log" "$TREATMENT" > "$EVIDENCE_ROOT/metrics.txt" <<'PY'
+          import hashlib
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          log = Path(sys.argv[3]).read_text()
+          treatment = sys.argv[4]
+          manifest = (root / "manifest.txt").read_bytes()
+          if not manifest.endswith(b"\n") or b"\0" in manifest:
+              raise SystemExit("invalid manifest framing")
+          canonical = ["BUSTER_ANALYZER_CANDIDATE_RESULTS_V1",
+                       "manifest_sha256=" + hashlib.sha256(manifest).hexdigest()]
+          expected_roots = {"manifest.txt", "baseline.log"}
+          seen_units = set()
+          for shard in range(8):
+              directory = root / f"shard-{shard}"
+              report = (directory / "result.txt").read_bytes()
+              if not report.endswith(b"\n") or b"\0" in report:
+                  raise SystemExit(f"invalid report framing for shard {shard}")
+              lines = report.decode("utf-8").splitlines()
+              if len(lines) < 6 or lines[0] != "BUSTER_CLANG_ANALYZE_RESULT_V1":
+                  raise SystemExit(f"invalid report header for shard {shard}")
+              recorded_shard = int(lines[2])
+              count = int(lines[3])
+              int(lines[4])
+              int(lines[5])
+              if recorded_shard != shard or count < 0 or len(lines) != 6 + 4 * count:
+                  raise SystemExit(f"invalid report shape for shard {shard}")
+              canonical.extend((f"shard={shard}", f"fingerprint={lines[1]}", f"count={count}"))
+              expected_files = {"result.txt"}
+              for row in range(count):
+                  offset = 6 + 4 * row
+                  unit = int(lines[offset])
+                  status = int(lines[offset + 1])
+                  int(lines[offset + 2])
+                  log_sha = lines[offset + 3]
+                  if unit in seen_units:
+                      raise SystemExit(f"duplicate unit {unit}")
+                  seen_units.add(unit)
+                  log_name = f"unit-{unit}.log"
+                  diagnostic = (directory / log_name).read_bytes()
+                  if hashlib.sha256(diagnostic).hexdigest() != log_sha:
+                      raise SystemExit(f"changed diagnostic log for unit {unit}")
+                  expected_files.add(log_name)
+                  canonical.append(f"unit={unit} status={status} diagnostic_sha256={log_sha}")
+              if {path.name for path in directory.iterdir()} != expected_files:
+                  raise SystemExit(f"unexpected shard files for shard {shard}")
+              expected_roots.add(directory.name)
+          if {path.name for path in root.iterdir()} - expected_roots:
+              raise SystemExit("unexpected candidate result files")
+          output.write_text("\n".join(canonical) + "\n")
+          runs = [int(value) for value in re.findall(
+              r"^ANALYZE_RUN elapsed_us=(\d+).* status=pass$", log, re.M)]
+          wrappers = [int(value) for value in re.findall(
+              r"^ANALYZE_BASELINE .* elapsed_us=(\d+).* status=pass$", log, re.M)]
+          if treatment == "compare":
+              if len(runs) != 2 or len(wrappers) != 1 or wrappers[0] < runs[0]:
+                  raise SystemExit("invalid compare measurement records")
+              nested, candidate = runs
+              print(f"baseline_nested_us={nested}")
+              print(f"baseline_wrapper_us={wrappers[0]}")
+          elif len(runs) == 1 and not wrappers:
+              candidate = runs[0]
+          else:
+              raise SystemExit("invalid skip measurement records")
+          peaks = [int(value) for value in re.findall(r"sampled_peak_tree_rss_bytes=(\d+)", log)]
+          if not peaks:
+              raise SystemExit("missing sampled peak tree RSS")
+          aggregate = re.findall(
+              r"^ANALYZE_AGGREGATE eligible=(\d+) checked=(\d+) excluded_config_or_language=(\d+) failures=(\d+) shards=(\d+).* status=pass$",
+              log, re.M)
+          if not aggregate:
+              raise SystemExit("missing aggregate record")
+          eligible, checked, excluded, failures, shards = aggregate[-1]
+          if eligible != checked or failures != "0" or shards != "8":
+              raise SystemExit("incomplete candidate coverage")
+          print(f"candidate_us={candidate}")
+          print(f"peak_tree_rss_bytes={max(peaks)}")
+          print(f"eligible={eligible}")
+          print(f"checked={checked}")
+          print(f"excluded={excluded}")
+          print(f"failures={failures}")
+          print(f"shards={shards}")
+          PY
+          {
+            printf 'BUSTER_ANALYZER_JOB_QUALIFICATION_RESULT_V1\n'
+            printf 'repetition=%s\ntreatment=%s\n' "${{ matrix.repetition }}" "$TREATMENT"
+            printf 'candidate_results_sha256='
+            sha256sum "$EVIDENCE_ROOT/candidate-results.txt" | cut -d' ' -f1
+            printf 'manifest_sha256='
+            sha256sum "$results/manifest.txt" | cut -d' ' -f1
+            printf 'status=pass\n'
+          } > "$EVIDENCE_ROOT/result.txt"
+
+      - name: Retain full analyzer job evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-603-analyzer-job-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.repetition }}-${{ matrix.treatment }}
+          path: ${{ runner.temp }}/buster-analyzer-job-603
+          if-no-files-found: error
+          retention-days: 14
+
+  equivalence:
+    name: Require all six analyzer jobs and exact candidate equivalence
+    needs: analyzer
+    if: ${{ always() && github.repository == 'buster14a/buster' && github.server_url == 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/sol/603-analyzer-job-qualification-20260914' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify exact identities and candidate equivalence
+        shell: bash
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          MATRIX_RESULT: ${{ needs.analyzer.result }}
+        run: |
+          set -euo pipefail
+          evidence_root="$RUNNER_TEMP/issue-603-analyzer-job-equivalence"
+          downloads="$RUNNER_TEMP/issue-603-analyzer-jobs"
+          mkdir -p "$evidence_root"
+          printf 'matrix_result=%s\n' "$MATRIX_RESULT" > "$evidence_root/admission.txt"
+          source_tree="$(git rev-parse --verify 'HEAD^{tree}')"
+          production_revision="$(git rev-parse --verify 'HEAD^')"
+          production_tree="$(git rev-parse --verify 'HEAD^^{tree}')"
+          workflow_sha256="$(sha256sum .github/workflows/ci-603-analyzer-job-qualification.yml | cut -d' ' -f1)"
+          python3 - "$downloads" "$evidence_root" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$source_tree" "$production_revision" "$production_tree" "$workflow_sha256" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import hashlib
+          import datetime
+          import json
+          import os
+          import re
+          import stat
+          import statistics
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          downloads = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          repository, github_sha, source_tree, production_revision, production_tree, workflow_sha, run_id, run_attempt = sys.argv[3:]
+          expected = {(str(rep), treatment) for rep in range(1, 4)
+                      for treatment in ("compare", "skip")}
+          expected_names = {
+              f"issue-603-analyzer-job-{run_id}-{run_attempt}-{rep}-{treatment}"
+              for rep, treatment in expected
+          }
+          headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": "Bearer " + os.environ["ACTIONS_TOKEN"],
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                  return None
+
+          authenticated = urllib.request.build_opener(NoRedirect)
+          poll_deadline = time.monotonic() + 120
+
+          def api_json(url):
+              remaining = poll_deadline - time.monotonic()
+              if remaining <= 0:
+                  return None
+              request = urllib.request.Request(url, headers=headers)
+              try:
+                  with authenticated.open(request, timeout=min(10, remaining)) as response:
+                      if response.geturl() != url:
+                          raise SystemExit("authenticated API request redirected")
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code in (301, 302, 303, 307, 308):
+                      raise SystemExit("authenticated API request redirected")
+                  if error.code == 429 or 500 <= error.code < 600:
+                      return None
+                  raise
+              except (TimeoutError, urllib.error.URLError, json.JSONDecodeError):
+                  return None
+
+          def poll_pause():
+              remaining = poll_deadline - time.monotonic()
+              if remaining <= 0:
+                  return False
+              time.sleep(min(5, remaining))
+              return True
+
+          prefix = f"issue-603-analyzer-job-{run_id}-{run_attempt}-"
+          artifacts = None
+          for poll in range(24):
+              listing = api_json(
+                  f"https://api.github.com/repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100")
+              if listing is not None:
+                  selected = [item for item in listing.get("artifacts", [])
+                              if item.get("name", "").startswith(prefix)]
+                  candidate = {item["name"]: item for item in selected if not item.get("expired")}
+                  if len(selected) > 6 or any(item.get("name") not in expected_names for item in selected):
+                      raise SystemExit("duplicate or unexpected analyzer job artifact")
+                  if len(selected) == 6 and len(candidate) == 6 and set(candidate) == expected_names:
+                      artifacts = candidate
+                      break
+              if poll == 23 or not poll_pause():
+                  break
+          if artifacts is None:
+              raise SystemExit("artifact index did not publish exactly six valid analyzer jobs")
+
+          expected_jobs = {
+              f"Analyzer job {rep} {treatment}": (rep, treatment)
+              for rep, treatment in expected
+          }
+          jobs = None
+          for poll in range(24):
+              listing = api_json(
+                  f"https://api.github.com/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100")
+              if listing is not None:
+                  selected = [job for job in listing.get("jobs", [])
+                              if job.get("name", "").startswith("Analyzer job ")]
+                  candidate = {job["name"]: job for job in selected}
+                  if len(selected) > 6 or any(job.get("name") not in expected_jobs for job in selected):
+                      raise SystemExit("duplicate or unexpected analyzer qualification job")
+                  if (len(selected) == 6 and len(candidate) == 6 and
+                          set(candidate) == set(expected_jobs) and
+                          all(job.get("status") == "completed" for job in candidate.values())):
+                      jobs = candidate
+                      break
+              if poll == 23 or not poll_pause():
+                  break
+          if jobs is None:
+              raise SystemExit("jobs index did not publish exactly six completed analyzer jobs")
+          (output / "jobs-api.json").write_text(
+              json.dumps({"jobs": [jobs[name] for name in sorted(jobs)]},
+                         sort_keys=True, separators=(",", ":")) + "\n")
+          with (output / "artifacts.tsv").open("w") as stream:
+              stream.write("name\tartifact_id\tsize_bytes\tdigest\n")
+              for name in sorted(artifacts):
+                  item = artifacts[name]
+                  stream.write(
+                      f"{name}\t{item['id']}\t{item['size_in_bytes']}\t{item.get('digest', '')}\n")
+          job_rows = []
+          runner_seconds = {"compare": [], "skip": []}
+          for name, (rep, treatment) in sorted(expected_jobs.items()):
+              job = jobs[name]
+              if (job.get("conclusion") != "success" or job.get("head_sha") != github_sha or
+                      job.get("run_attempt") != int(run_attempt) or
+                      job.get("labels") != ["ubuntu-26.04"]):
+                  raise SystemExit(f"failed or stale hosted job identity for {name}")
+              timestamps = []
+              for key in ("created_at", "started_at", "completed_at"):
+                  value = job.get(key, "")
+                  try:
+                      timestamps.append(datetime.datetime.fromisoformat(
+                          value.replace("Z", "+00:00")))
+                  except (AttributeError, ValueError):
+                      raise SystemExit(f"invalid hosted job timestamp for {name}")
+              created, started, completed = timestamps
+              queue_seconds = int((started - created).total_seconds())
+              wall_seconds = int((completed - started).total_seconds())
+              if queue_seconds < 0 or wall_seconds <= 0:
+                  raise SystemExit(f"invalid hosted job duration for {name}")
+              runner_seconds[treatment].append(wall_seconds)
+              job_rows.append((rep, treatment, job["id"], job["created_at"],
+                               job["started_at"], job["completed_at"],
+                               queue_seconds, wall_seconds))
+          downloads.mkdir()
+          no_redirect = authenticated
+          for name in sorted(expected_names):
+              item = artifacts[name]
+              if not isinstance(item.get("id"), int) or not (0 < item.get("size_in_bytes", 0) <= 5_000_000):
+                  raise SystemExit(f"invalid artifact identity or size for {name}")
+              expected_url = (
+                  f"https://api.github.com/repos/{repository}/actions/artifacts/{item['id']}/zip")
+              if item.get("archive_download_url") != expected_url:
+                  raise SystemExit(f"invalid artifact download identity for {name}")
+              archive_request = urllib.request.Request(
+                  item["archive_download_url"],
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": "Bearer " + os.environ["ACTIONS_TOKEN"],
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  })
+              try:
+                  no_redirect.open(archive_request, timeout=20)
+                  raise SystemExit(f"artifact endpoint did not redirect for {name}")
+              except urllib.error.HTTPError as error:
+                  if error.code not in (302, 303, 307):
+                      raise
+                  redirect = error.headers.get("Location", "")
+              parsed = urllib.parse.urlparse(redirect)
+              allowed_hosts = ("blob.core.windows.net", "actions.githubusercontent.com",
+                               "githubusercontent.com")
+              if (parsed.scheme != "https" or not parsed.hostname or
+                      not any(parsed.hostname == suffix or parsed.hostname.endswith("." + suffix)
+                              for suffix in allowed_hosts)):
+                  raise SystemExit(f"untrusted artifact redirect for {name}")
+              with urllib.request.urlopen(urllib.request.Request(redirect), timeout=20) as response:
+                  archive = response.read(5_000_001)
+              if len(archive) > 5_000_000:
+                  raise SystemExit(f"oversized artifact archive for {name}")
+              archive_path = downloads / f"{name}.zip"
+              archive_path.write_bytes(archive)
+              destination = downloads / name
+              destination.mkdir()
+              seen = set()
+              expanded = 0
+              with zipfile.ZipFile(archive_path) as zipped:
+                  for member in zipped.infolist():
+                      path = Path(member.filename)
+                      if (path.is_absolute() or ".." in path.parts or member.filename in seen or
+                              stat.S_ISLNK(member.external_attr >> 16)):
+                          raise SystemExit(f"unsafe artifact member for {name}")
+                      seen.add(member.filename)
+                      expanded += member.file_size
+                      if expanded > 20_000_000:
+                          raise SystemExit(f"oversized expanded artifact for {name}")
+                  zipped.extractall(destination)
+          directories = {path.name: path for path in downloads.iterdir() if path.is_dir()}
+          if set(directories) != expected_names:
+              raise SystemExit("missing, duplicate or unexpected analyzer job artifacts")
+
+          def framed_lines(path):
+              data = path.read_bytes()
+              if not data.endswith(b"\n") or b"\0" in data:
+                  raise SystemExit(f"invalid record framing for {path.name}")
+              try:
+                  return data[:-1].decode("utf-8").split("\n")
+              except UnicodeDecodeError:
+                  raise SystemExit(f"invalid UTF-8 record for {path.name}")
+
+          def record(lines, header, name):
+              if not lines or lines[0] != header:
+                  raise SystemExit(f"invalid record header for {name}")
+              fields = {}
+              for line in lines[1:]:
+                  if "=" not in line:
+                      raise SystemExit(f"invalid record field for {name}")
+                  key, value = line.split("=", 1)
+                  if not key or key in fields:
+                      raise SystemExit(f"duplicate or empty record key for {name}")
+                  fields[key] = value
+              return fields
+
+          reference_canonical = None
+          reference_manifest = None
+          reference_configuration = None
+          reference_provenance = None
+          reference_toolchain = None
+          rows = []
+          for rep, treatment in sorted(expected):
+              name = f"issue-603-analyzer-job-{run_id}-{run_attempt}-{rep}-{treatment}"
+              root = directories[name]
+              identity_lines = framed_lines(root / "identity.txt")
+              if len(identity_lines) != 16 or identity_lines[0] != "BUSTER_ANALYZER_JOB_QUALIFICATION_IDENTITY_V1":
+                  raise SystemExit(f"invalid identity schema for {name}")
+              identity = record(
+                  identity_lines, "BUSTER_ANALYZER_JOB_QUALIFICATION_IDENTITY_V1", name)
+              required = {
+                  "repository", "server_url", "event", "ref", "github_sha",
+                  "source_revision", "source_tree", "production_revision",
+                  "production_tree", "run_id", "run_attempt", "repetition",
+                  "treatment", "runner_image", "workflow_sha256",
+              }
+              if set(identity) != required:
+                  raise SystemExit(f"invalid identity fields for {name}")
+              if (identity["repository"] != "buster14a/buster" or
+                      identity["server_url"] != "https://github.com" or
+                      identity["event"] != "push" or
+                      identity["ref"] != "refs/heads/sol/603-analyzer-job-qualification-20260914" or
+                      identity["github_sha"] != github_sha or
+                      identity["source_revision"] != github_sha or
+                      identity["run_id"] != run_id or
+                      identity["run_attempt"] != run_attempt or
+                      identity["repetition"] != rep or
+                      identity["treatment"] != treatment or
+                      identity["source_tree"] != source_tree or
+                      identity["production_revision"] != production_revision or
+                      identity["production_tree"] != production_tree or
+                      identity["workflow_sha256"] != workflow_sha or
+                      not identity["runner_image"]):
+                  raise SystemExit(f"stale or inconsistent identity for {name}")
+              provenance = (identity["source_tree"], identity["production_revision"],
+                            identity["production_tree"], identity["workflow_sha256"],
+                            identity["runner_image"])
+              toolchain = (root / "clang.txt").read_bytes()
+              if reference_provenance is None:
+                  reference_provenance = provenance
+                  reference_toolchain = toolchain
+              elif provenance != reference_provenance:
+                  raise SystemExit(f"mismatched analyzer job provenance for {name}")
+              elif toolchain != reference_toolchain:
+                  raise SystemExit(f"mismatched analyzer toolchain for {name}")
+              result_lines = framed_lines(root / "result.txt")
+              expected_result = [
+                  "BUSTER_ANALYZER_JOB_QUALIFICATION_RESULT_V1",
+                  f"repetition={rep}",
+                  f"treatment={treatment}",
+              ]
+              if result_lines[:3] != expected_result or len(result_lines) != 6 or result_lines[-1] != "status=pass":
+                  raise SystemExit(f"invalid result schema for {name}")
+              result = record(
+                  result_lines, "BUSTER_ANALYZER_JOB_QUALIFICATION_RESULT_V1", name)
+              canonical = (root / "candidate-results.txt").read_bytes()
+              manifest = (root / "results/manifest.txt").read_bytes()
+              configuration = (root / "configuration-sha256.txt").read_bytes()
+              cache = (root / "CMakeCache.txt").read_bytes()
+              database = (root / "compile_commands.json").read_bytes()
+              expected_configuration = (
+                  f"{hashlib.sha256(cache).hexdigest()}  build/analyzer-tree/CMakeCache.txt\n"
+                  f"{hashlib.sha256(database).hexdigest()}  build/analyzer-tree/compile_commands.json\n"
+              ).encode()
+              if (hashlib.sha256(canonical).hexdigest() != result["candidate_results_sha256"] or
+                      hashlib.sha256(manifest).hexdigest() != result["manifest_sha256"] or
+                      configuration != expected_configuration):
+                  raise SystemExit(f"damaged retained evidence for {name}")
+              if reference_canonical is None:
+                  reference_canonical = canonical
+                  reference_manifest = manifest
+                  reference_configuration = configuration
+              elif (canonical != reference_canonical or manifest != reference_manifest or
+                    configuration != reference_configuration):
+                  raise SystemExit(f"candidate coverage/configuration mismatch for {name}")
+              metric_lines = framed_lines(root / "metrics.txt")
+              metrics = {}
+              for line in metric_lines:
+                  if "=" not in line:
+                      raise SystemExit(f"invalid metric field for {name}")
+                  key, value = line.split("=", 1)
+                  if not key or key in metrics:
+                      raise SystemExit(f"duplicate or empty metric key for {name}")
+                  metrics[key] = value
+              metric_keys = {"candidate_us", "peak_tree_rss_bytes", "eligible", "checked", "excluded", "failures", "shards"}
+              if treatment == "compare":
+                  metric_keys |= {"baseline_nested_us", "baseline_wrapper_us"}
+              if set(metrics) != metric_keys:
+                  raise SystemExit(f"invalid metric schema for {name}")
+              if metrics["eligible"] != metrics["checked"] or metrics["failures"] != "0" or metrics["shards"] != "8":
+                  raise SystemExit(f"incomplete candidate coverage for {name}")
+              if not all(value.isdecimal() for value in metrics.values()):
+                  raise SystemExit(f"invalid numeric metric for {name}")
+              phases = framed_lines(root / "phases.tsv")
+              if len(phases) != 5:
+                  raise SystemExit(f"missing analyzer job phase for {name}")
+              for expected_phase, phase in zip(
+                      ("bootstrap", "self-test", "configure", "campaign", "aggregate"), phases):
+                  fields = phase.split("\t")
+                  if (len(fields) not in (5, 7) or fields[0] != expected_phase or
+                          fields[4] != "pass" or not all(value.isdecimal() for value in fields[1:4]) or
+                          int(fields[2]) - int(fields[1]) != int(fields[3])):
+                      raise SystemExit(f"failed or malformed phase for {name}")
+                  if len(fields) == 7 and fields[5:] != ["0", "0"]:
+                      raise SystemExit(f"failed analyzer pipeline for {name}")
+              driver_rows = framed_lines(root / "driver-sha256.txt")
+              if len(driver_rows) != (2 if treatment == "compare" else 1):
+                  raise SystemExit(f"invalid driver identity count for {name}")
+              expected_driver_names = ["build/analyzer-driver"]
+              if treatment == "compare":
+                  expected_driver_names.append("build/analyzer-baseline")
+              for row, driver_name in zip(driver_rows, expected_driver_names):
+                  if not re.fullmatch(r"[0-9a-f]{64}  " + re.escape(driver_name), row):
+                      raise SystemExit(f"invalid driver identity for {name}")
+              if treatment == "compare":
+                  if not (root / "baseline.c").is_file() or not (root / "results/baseline.log").is_file():
+                      raise SystemExit(f"missing comparison evidence for {name}")
+              elif (root / "baseline.c").exists() or (root / "results/baseline.log").exists():
+                  raise SystemExit(f"skip treatment retained baseline evidence for {name}")
+              expected_campaign = (
+                  "build/analyzer-driver clang_analyze build/analyzer-tree --config Release "
+                  "--shards 8 --jobs 2 --quiet --results RESULTS" +
+                  (" --baseline-driver build/analyzer-baseline" if treatment == "compare" else "") + "\n")
+              if (root / "campaign-command.txt").read_text() != expected_campaign:
+                  raise SystemExit(f"changed campaign command for {name}")
+              rows.append((rep, treatment, metrics["candidate_us"],
+                           metrics.get("baseline_nested_us", "-"),
+                           metrics["peak_tree_rss_bytes"], metrics["eligible"],
+                           metrics["excluded"]))
+          canonical_sha = hashlib.sha256(reference_canonical).hexdigest()
+          manifest_sha = hashlib.sha256(reference_manifest).hexdigest()
+          compare_total = sum(runner_seconds["compare"])
+          skip_total = sum(runner_seconds["skip"])
+          compare_median = statistics.median(runner_seconds["compare"])
+          skip_median = statistics.median(runner_seconds["skip"])
+          with (output / "equivalence.txt").open("w") as stream:
+              stream.write("BUSTER_ANALYZER_JOB_EQUIVALENCE_V1\n")
+              stream.write(f"source_revision={github_sha}\n")
+              stream.write("jobs=6\ncompare_jobs=3\nskip_jobs=3\n")
+              stream.write(f"candidate_results_sha256={canonical_sha}\n")
+              stream.write(f"manifest_sha256={manifest_sha}\n")
+              stream.write(f"compare_runner_seconds_total={compare_total}\n")
+              stream.write(f"skip_runner_seconds_total={skip_total}\n")
+              stream.write(f"runner_seconds_saved_total={compare_total - skip_total}\n")
+              stream.write(f"compare_job_median_seconds={compare_median:.3f}\n")
+              stream.write(f"skip_job_median_seconds={skip_median:.3f}\n")
+              stream.write(f"job_median_seconds_saved={compare_median - skip_median:.3f}\n")
+              stream.write("status=pass\n")
+          with (output / "job-times.tsv").open("w") as stream:
+              stream.write("repetition\ttreatment\tjob_id\tcreated_at\tstarted_at\tcompleted_at\tqueue_seconds\trunner_seconds\n")
+              for row in sorted(job_rows):
+                  stream.write("\t".join(map(str, row)) + "\n")
+          with (output / "jobs.tsv").open("w") as stream:
+              stream.write("repetition\ttreatment\tcandidate_us\tbaseline_nested_us\tpeak_tree_rss_bytes\teligible\texcluded\n")
+              for row in rows:
+                  stream.write("\t".join(map(str, row)) + "\n")
+          PY
+          test "$MATRIX_RESULT" = success
+
+      - name: Retain equivalence evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-603-analyzer-job-equivalence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-603-analyzer-job-equivalence
+          if-no-files-found: error
+          retention-days: 14
