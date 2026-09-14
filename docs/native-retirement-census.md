@@ -18,8 +18,14 @@ a fixture. Merging a contract change is the maintainer approval record.
 ```sh
 ./build.sh native_retirement_census --self-test
 ./build.sh native_retirement_census --manifest-only --out build/census-inventory
+python3 tools/native_retirement_materializer.py materialize \
+  --manifest docs/native-retirement-dependencies-v1.json \
+  --source-root "$(pwd)" --output "$(pwd)/build/dependency-materialized"
 ./build.sh native_retirement_census --ide build/Release/ide --compiler-revision <40-hex-commit> \
-  --resource-include "$(clang -print-resource-dir)/include" --out build/census-full
+  --resource-include "$(clang -print-resource-dir)/include" \
+  --project-include build/dependency-materialized/dependencies/project-include \
+  --dependency-manifest docs/native-retirement-dependencies-v1.json \
+  --dependency-receipt build/dependency-materialized/dependency-manifest.json --out build/census-full
 ```
 
 Use a new output directory each time. Existing directories are atomically
@@ -34,7 +40,8 @@ An independently frozen earlier compiler can establish the support baseline:
 ```sh
 ./build.sh native_retirement_census --ide build/Release/ide --compiler-revision <candidate-commit> \
   --baseline-ide /path/to/reference-ide --baseline-revision <reference-commit> \
-  --resource-include "$(clang -print-resource-dir)/include" --out build/census-comparison
+  --resource-include "$(clang -print-resource-dir)/include" \
+  --project-include build/dependency-materialized/dependencies/project-include --out build/census-comparison
 ```
 
 Without `--baseline-ide`, the same compiler supplies its direct `none` reference.
@@ -100,17 +107,65 @@ file's SHA-256 in `dependencies.tsv`, and hashes the ordered closure. Both
 compiler legs then receive `-nostdinc -isystem <frozen-copy>`; the resource path
 compiled into either executable and host include search paths are not used.
 Object rows intentionally have no sysroot or additional system include path.
-Fixtures needing libc, SDK, project or generated headers remain visible failing
-subjects until an explicit reviewed classification or existing harness supplies
-their setup; the census never manufactures a successful baseline for them.
+
+Repo-owned project dependencies use the checked-in
+[`native-retirement-dependencies-v1.json`](native-retirement-dependencies-v1.json)
+descriptor. Before `evidence-candidate.txt` is created, the workflow runs the
+offline materializer against the exact candidate checkout. It admits only the
+listed repository paths after matching their authenticated byte count and
+SHA-256, rejects source symlinks, hard links, descriptor/output-parent symlinks,
+TOCTOU changes, and all network provenance (including SCP/SSH spellings), and
+publishes the tree atomically at `evidence/dependency-materialized`. Generated
+metadata names are reserved. Every destination is exactly its kind's compiler
+include root (`dependencies/resource-include` or `dependencies/project-include`)
+and the include-relative path is one global namespace: a `same.h` resource and
+project record cannot coexist. Normalized duplicate destinations or provenance,
+kind/root mismatches, arbitrary destinations, and metadata collisions fail
+closed; an exact repeated resource is emitted once in deterministic order. A
+full census must provide both the project include and the descriptor/receipt
+paths shown above. The C producer replays the materializer's authenticated
+project closure and ledger digests and copies the exact descriptor, receipt, and
+materializer ledger into evidence; alternate self-consistent dependency trees
+are rejected by the independent validator.
+
+The archived replay inventory is an authenticated row-level projection, not an
+arithmetic assertion. Its 28 fixture identities include source SHA-256 values
+and a fixture-to-project-header mapping. The frozen matrix expands each identity
+across the exact target, frontend, PIC, and MIR allocator axes, assigns every
+row a disposition, and authenticates the projection, input map, and row
+identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
+repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
+SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
+SDK headers are not fabricated by the materializer. These counts do not change
+the 548 input rows, 402 supported subjects, 77,184 support-contract identities,
+or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
+generated data, or any other non-repo dependency remain visible diagnostic rows
+until their owning gate supplies that setup.
+
+The binding values are frozen in both the C producer and the independent
+validator: descriptor SHA-256
+`0df1ff3ccc3d776a17143aa8b1336efcb6fc3dcd77f6defc7eb987711634771a`, materializer
+receipt SHA-256
+`9cfbe0faa6d63990a011137bf5af61b4f3878eb5f460c56d7c8c91c044c47556`, project
+closure SHA-256
+`00f987ac3dcaf2768f761bd118a7f607b24e83169246c24f03b12ee355e63c56`, and
+materializer ledger SHA-256
+`7035bf416d79982bd83d58771dc96d06a29cc7058e41fc9d6016dd8311522340`.
+The archived fixture-input map is
+`bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
+fixture-to-project-header map is
+`8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f`, and the
+expanded 4,032-row identity is
+`9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6`.
 
 Compiler children receive a replacement environment recorded in
 `environment.tsv`: `LC_ALL=C`, `LANG=C`, and `TZ=UTC`, plus the minimal explicit
 Windows process/temp values on Windows. They do not inherit `PATH`, compiler or
 include flags, SDK variables, preload settings, sanitizer settings, or user
 configuration. The candidate, direct reference, support contract, tracked input
-files and resource-header closure all carry SHA-256 identities. Manifest-only
-runs state that dependency/environment capture was not executed.
+files, resource-header closure and (when supplied) project-header closure all
+carry SHA-256 identities. Manifest-only runs state that dependency/environment
+capture was not executed.
 
 The full product is:
 
@@ -141,12 +196,13 @@ gates; object success does not silently satisfy them. Rejection controls retain
 their source hashes and registered diagnostic obligation in `inputs.tsv` rather
 than being counted as successful object programs.
 
-Real-project obligations are references, not copied descriptors. The retirement
-contract consumes the admitted descriptors from #423 and the pinned compatibility
-harnesses indexed in [`compatibility.md`](agents/compatibility.md). Until #423
-publishes passing descriptors, those workloads remain an explicit pending gate;
-this object census does not duplicate their pins, setup, correctness or timing
-contracts.
+External real-project obligations remain references, not copied descriptors. The
+retirement contract consumes the admitted descriptors from #423 and the pinned
+compatibility harnesses indexed in [`compatibility.md`](agents/compatibility.md).
+The repo-owned project closure above is only the authenticated include boundary
+for the archived test fixtures; it does not duplicate #423 pins, setup,
+correctness or timing contracts. Until #423 publishes passing descriptors, those
+external workloads remain an explicit pending gate.
 
 One group contains the direct reference followed by every MIR allocator for the
 same subject, target, frontend and PIC settings. `rows.tsv` freezes every group
@@ -347,6 +403,9 @@ entry point for this census and the strict semantic differential. A pull request
 uses GitHub's exact integration commit; a manual dispatch uses its selected
 revision. The workflow rejects a checkout that does not match that identity and
 carries the commit, tree and compiler binary digest in the retained evidence.
+It executes the complete census through four disjoint shards and retains all
+four shard directories for the current-schema aggregate validator before the
+strict differential's six native lanes run.
 Its strict differential is a native six-host matrix: Linux, macOS and Windows
 on both x86-64 and AArch64. A successful object census on the Linux x86-64
 coordinator is therefore not mislabeled as runtime evidence for the other five

@@ -19,12 +19,15 @@ on:
       - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
       - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-dependencies-v1.json
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
       - tools/native_retirement_archive.py
       - tools/native_retirement_evidence_upload_test.py
+      - tools/native_retirement_materializer.py
+      - tools/native_retirement_materializer_test.py
       - tools/native_retirement_result_input.py
       - tools/native_retirement_result_input_test.py
       - tools/native_retirement_performance_binding.py
@@ -77,6 +80,8 @@ jobs:
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
           python3 tools/native_retirement_evidence_upload_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
@@ -103,6 +108,10 @@ jobs:
           git restore -- tests/basic_c_operations.c
       - name: Exercise frozen resource and replacement environment
         run: |
+          python3 tools/native_retirement_materializer.py materialize \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" \
+            --output "$(pwd)/evidence/dependency-materialized"
           resource_include="$(clang -print-resource-dir)/include"
           if "$RUNNER_TEMP/retirement-build" native_retirement_census \
             --ide /bin/false \
@@ -112,6 +121,9 @@ jobs:
             --fixture basic_c_operations.c \
             --target x86_64-unknown-linux-gnu \
             --resource-include "$resource_include" \
+            --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include" \
+            --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json" \
+            --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json" \
             --out evidence/resource-smoke; then
             echo 'error: the deliberately failing compiler was accepted' >&2
             exit 1
