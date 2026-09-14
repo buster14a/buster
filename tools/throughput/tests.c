@@ -7,6 +7,7 @@
 #include "throughput.c"
 #undef main
 #undef TP_WORKLOAD_TEST_ALLOCATIONS
+#include "retirement_stats.h"
 
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
@@ -1295,6 +1296,288 @@ static void test_summary_write_failure(char const* executable, char const* root)
 }
 #endif
 
+static void test_retirement_statistics(void)
+{
+    enum { PAIRS = TP_RETIREMENT_MIN_PAIRS_PER_ROUND };
+    double ratios[2 * TP_RETIREMENT_ROUNDS * TP_RETIREMENT_MAX_PAIRS_PER_ROUND];
+    double* workspace = (double*)malloc((size_t)TP_RETIREMENT_MIN_RESAMPLES * sizeof(*workspace));
+    TpRetirementPlan plan = {
+        .seed = UINT64_C(0x0123456789abcdef),
+        .version = TP_RETIREMENT_STATISTICS_VERSION,
+        .bootstrap_members_per_scope = 1,
+        .cell_members_per_scope = 1,
+        .pairs_per_round = PAIRS,
+        .resamples = TP_RETIREMENT_MIN_RESAMPLES,
+        .frozen_before_samples = 1,
+    };
+    TpRetirementSeries series = {
+        .ratios = ratios,
+        .ratio_count = TP_RETIREMENT_ROUNDS * PAIRS,
+        .cell_count = 1,
+        .observed_pairs = {PAIRS, PAIRS},
+        .member_kind = TP_RETIREMENT_EXACT_CELL_MEMBER,
+        .family_index = 0,
+        .metric_index = TP_RETIREMENT_WALL_TIME,
+        .limit = 1.02,
+    };
+    CHECK(workspace != NULL);
+    if (workspace)
+    {
+        for (unsigned i = 0; i < TP_RETIREMENT_ROUNDS * PAIRS; ++i) ratios[i] = 1.0;
+        TpRetirementResult unchanged = tp_retirement_assess(&plan, &series, NULL, 0);
+        CHECK(unchanged.valid && unchanged.outcome == TP_RETIREMENT_PASS && !unchanged.resampled && !unchanged.resamples);
+        CHECK(unchanged.round[0].estimate == 1.0 && unchanged.round[0].lower == 1.0 && unchanged.round[0].upper == 1.0);
+        CHECK(unchanged.round[1].estimate == 1.0 && unchanged.pooled.estimate == 1.0);
+        CHECK(unchanged.tail_alpha == TP_RETIREMENT_FAMILY_ALPHA / 12.0);
+
+        for (unsigned i = 0; i < TP_RETIREMENT_ROUNDS * PAIRS; ++i) ratios[i] = 1.08;
+        series.limit = 1.05;
+        TpRetirementResult regression = tp_retirement_assess(&plan, &series, NULL, 0);
+        CHECK(regression.valid && regression.outcome == TP_RETIREMENT_REGRESSION);
+        CHECK(regression.round[0].lower > series.limit && regression.round[1].lower > series.limit &&
+              regression.pooled.lower > series.limit);
+
+        for (unsigned round = 0; round < TP_RETIREMENT_ROUNDS; ++round)
+            for (unsigned pair = 0; pair < PAIRS; ++pair)
+                ratios[round * PAIRS + pair] = pair < PAIRS / 2 ? 0.92 : 1.20;
+        series.limit = 1.05;
+        TpRetirementResult broad = tp_retirement_assess(&plan, &series, NULL, 0);
+        CHECK(broad.valid && broad.outcome == TP_RETIREMENT_INCONCLUSIVE);
+        CHECK(broad.round[0].estimate > series.limit);
+        CHECK(broad.round[0].lower <= series.limit && broad.round[0].upper > series.limit);
+
+        for (unsigned pair = 0; pair < PAIRS; ++pair)
+        {
+            ratios[pair] = 1.0;
+            ratios[PAIRS + pair] = 1.10;
+        }
+        TpRetirementResult disagreement = tp_retirement_assess(&plan, &series, NULL, 0);
+        CHECK(disagreement.valid && disagreement.outcome == TP_RETIREMENT_INCONCLUSIVE);
+        CHECK(disagreement.round[0].upper <= series.limit && disagreement.round[1].lower > series.limit);
+        CHECK(disagreement.pooled.lower <= disagreement.round[0].lower &&
+              disagreement.pooled.upper >= disagreement.round[1].upper);
+
+        for (unsigned round = 0; round < TP_RETIREMENT_ROUNDS; ++round)
+            for (unsigned block = 0; block < PAIRS / 2; ++block)
+                for (unsigned within = 0; within < 2; ++within)
+                    ratios[round * PAIRS + block * 2 + within] = 1.0 + (double)block * 0.01;
+        plan.cell_members_per_scope = 1;
+        series.limit = 2.0;
+        TpRetirementResult cell_family_one = tp_retirement_assess(&plan, &series, NULL, 0);
+        plan.cell_members_per_scope = TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE;
+        TpRetirementResult cell_family_many = tp_retirement_assess(&plan, &series, NULL, 0);
+        CHECK(cell_family_one.valid && cell_family_many.valid &&
+              cell_family_one.tail_alpha == TP_RETIREMENT_FAMILY_ALPHA / 12.0);
+        CHECK(cell_family_many.tail_alpha == TP_RETIREMENT_FAMILY_ALPHA /
+              (12.0 * TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE));
+        CHECK(cell_family_many.round[0].lower < cell_family_one.round[0].lower &&
+              cell_family_many.round[0].upper > cell_family_one.round[0].upper);
+
+        plan.cell_members_per_scope = 1;
+        for (unsigned cell = 0; cell < 2; ++cell)
+            for (unsigned round = 0; round < TP_RETIREMENT_ROUNDS; ++round)
+                for (unsigned block = 0; block < PAIRS / 2; ++block)
+                    for (unsigned within = 0; within < 2; ++within)
+                        ratios[((cell * TP_RETIREMENT_ROUNDS + round) * PAIRS) +
+                               block * 2 + within] = 1.0 + (double)block * 0.01;
+        series.cell_count = 2;
+        series.ratio_count = 2 * TP_RETIREMENT_ROUNDS * PAIRS;
+        series.member_kind = TP_RETIREMENT_BOOTSTRAP_MEMBER;
+        series.limit = 2.0;
+        TpRetirementResult bootstrap_family_one =
+            tp_retirement_assess(&plan, &series, workspace, plan.resamples);
+        plan.bootstrap_members_per_scope = TP_RETIREMENT_MAX_BOOTSTRAP_MEMBERS_PER_SCOPE;
+        TpRetirementResult bootstrap_family_many =
+            tp_retirement_assess(&plan, &series, workspace, plan.resamples);
+        CHECK(bootstrap_family_one.valid && bootstrap_family_many.valid &&
+              bootstrap_family_one.tail_alpha == TP_RETIREMENT_FAMILY_ALPHA / 12.0);
+        CHECK(bootstrap_family_many.tail_alpha == TP_RETIREMENT_FAMILY_ALPHA /
+              (12.0 * TP_RETIREMENT_MAX_BOOTSTRAP_MEMBERS_PER_SCOPE));
+        CHECK(bootstrap_family_many.round[0].lower < bootstrap_family_one.round[0].lower &&
+              bootstrap_family_many.round[0].upper > bootstrap_family_one.round[0].upper);
+
+        plan.bootstrap_members_per_scope = 1;
+        for (unsigned round = 0; round < TP_RETIREMENT_ROUNDS; ++round)
+            for (unsigned pair = 0; pair < PAIRS; ++pair)
+            {
+                ratios[round * PAIRS + pair] = 1.0;
+                ratios[(TP_RETIREMENT_ROUNDS + round) * PAIRS + pair] = 1.21;
+            }
+        series.cell_count = 2;
+        series.ratio_count = 2 * TP_RETIREMENT_ROUNDS * PAIRS;
+        series.member_kind = TP_RETIREMENT_BOOTSTRAP_MEMBER;
+        series.limit = 1.11;
+        TpRetirementResult aggregate = tp_retirement_assess(&plan, &series, workspace, plan.resamples);
+        CHECK(aggregate.valid && aggregate.outcome == TP_RETIREMENT_PASS && aggregate.resampled &&
+              aggregate.resamples == plan.resamples);
+        CHECK(fabs(aggregate.pooled.estimate - 1.10) < 1e-12);
+
+        for (unsigned cell = 0; cell < 2; ++cell)
+            for (unsigned round = 0; round < TP_RETIREMENT_ROUNDS; ++round)
+                for (unsigned block = 0; block < PAIRS / 2; ++block)
+                    for (unsigned within = 0; within < 2; ++within)
+                    {
+                        int low = cell == 0 ? block < PAIRS / 4 : block >= PAIRS / 4;
+                        ratios[((cell * TP_RETIREMENT_ROUNDS + round) * PAIRS) +
+                               block * 2 + within] = low ? 1.0 : 9.0;
+                    }
+        series.limit = 10.0;
+        TpRetirementResult crossed = tp_retirement_assess(&plan, &series, workspace, plan.resamples);
+        double geometric_mean_of_cell_medians = sqrt(5.0 * 5.0);
+        CHECK(crossed.valid && fabs(crossed.round[0].estimate - 3.0) < 1e-12 &&
+              fabs(crossed.round[1].estimate - 3.0) < 1e-12 &&
+              fabs(crossed.pooled.estimate - 3.0) < 1e-12);
+        CHECK(geometric_mean_of_cell_medians == 5.0 &&
+              crossed.pooled.estimate != geometric_mean_of_cell_medians);
+
+        static unsigned char const round_two_is_one[PAIRS / 2] = {
+            0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0,
+            0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0,
+        };
+        for (unsigned round = 0; round < TP_RETIREMENT_ROUNDS; ++round)
+            for (unsigned block = 0; block < PAIRS / 2; ++block)
+            {
+                double value = round == 0 ? (block < 10 ? 1.0 : (block < 20 ? 2.0 : 4.0)) :
+                                               (round_two_is_one[block] ? 1.0 : 4.0);
+                for (unsigned cell = 0; cell < 2; ++cell)
+                    for (unsigned within = 0; within < 2; ++within)
+                        ratios[((cell * TP_RETIREMENT_ROUNDS + round) * PAIRS) + block * 2 + within] = value;
+            }
+        series.limit = 4.0;
+        TpRetirementResult known = tp_retirement_assess(&plan, &series, workspace, plan.resamples);
+        CHECK(known.valid && known.outcome == TP_RETIREMENT_PASS && known.resampled);
+        CHECK(fabs(known.round[0].estimate - 2.0) < 1e-12 && fabs(known.round[1].estimate - 2.5) < 1e-12 &&
+              fabs(known.pooled.estimate - 2.0) < 1e-12);
+        CHECK(fabs(known.round[0].lower - 1.0) < 1e-12 && fabs(known.round[0].upper - 4.0) < 1e-12 &&
+              fabs(known.round[1].lower - 1.0) < 1e-12 && fabs(known.round[1].upper - 4.0) < 1e-12 &&
+              fabs(known.pooled.lower - 1.0) < 1e-12 && fabs(known.pooled.upper - 4.0) < 1e-12);
+        TpRetirementResult replay = tp_retirement_assess(&plan, &series, workspace, plan.resamples);
+        CHECK(known.outcome == replay.outcome && known.tail_alpha == replay.tail_alpha &&
+              known.round[0].lower == replay.round[0].lower && known.round[0].upper == replay.round[0].upper &&
+              known.round[1].lower == replay.round[1].lower && known.round[1].upper == replay.round[1].upper &&
+              known.pooled.lower == replay.pooled.lower && known.pooled.upper == replay.pooled.upper);
+        CHECK(tp_retirement_quantile_rank(TP_RETIREMENT_MIN_RESAMPLES,
+                                          TP_RETIREMENT_FAMILY_ALPHA / 12.0) == 416);
+        CHECK(tp_retirement_quantile_rank(TP_RETIREMENT_MIN_RESAMPLES,
+                                          1.0 - TP_RETIREMENT_FAMILY_ALPHA / 12.0) == 99583);
+        /* Generated independently from the documented SplitMix64 protocol,
+         * without calling any retirement-statistics implementation helper.
+         */
+        static unsigned const expected_draws[] = {23, 0, 19, 3, 28, 20, 12, 12, 0, 21, 18, 18};
+        TpRetirementRandom bootstrap_random = {
+            tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP,
+                               TP_RETIREMENT_WALL_TIME, 0, TP_RETIREMENT_ROUNDS)};
+        for (unsigned i = 0; i < sizeof(expected_draws) / sizeof(expected_draws[0]); ++i)
+            CHECK(tp_retirement_random_bounded(&bootstrap_random, PAIRS / 2) == expected_draws[i]);
+        double known_blocks[PAIRS] = {0}, known_sample[PAIRS] = {0};
+        for (unsigned block = 0; block < PAIRS / 2; ++block)
+        {
+            known_blocks[block] = block < 10 ? 1.0 : (block < 20 ? 2.0 : 4.0);
+            known_blocks[PAIRS / 2 + block] = round_two_is_one[block] ? 1.0 : 4.0;
+        }
+        bootstrap_random.state = tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP,
+                                                     TP_RETIREMENT_WALL_TIME, 0,
+                                                     TP_RETIREMENT_ROUNDS);
+        CHECK(tp_retirement_bootstrap_sample(&bootstrap_random, known_blocks, PAIRS / 2,
+                                             TP_RETIREMENT_ROUNDS, known_sample) == 4.0);
+
+        unsigned orientations[7], first_cells[7], second_cells[7], replay_orientations[7],
+                 replay_first[7], replay_second[7], first_seen = 0, second_seen = 0;
+        CHECK(tp_retirement_block_schedule(plan.seed, 1, 9, 7, orientations, first_cells, second_cells, 7));
+        CHECK(tp_retirement_block_schedule(plan.seed, 1, 9, 7, replay_orientations, replay_first, replay_second, 7));
+        CHECK(!memcmp(orientations, replay_orientations, sizeof(orientations)) &&
+              !memcmp(first_cells, replay_first, sizeof(first_cells)) &&
+              !memcmp(second_cells, replay_second, sizeof(second_cells)));
+        CHECK(orientations[0] == TP_RETIREMENT_AB && orientations[1] == TP_RETIREMENT_BA &&
+              orientations[2] == TP_RETIREMENT_AB && orientations[3] == TP_RETIREMENT_BA &&
+              orientations[4] == TP_RETIREMENT_AB && orientations[5] == TP_RETIREMENT_AB &&
+              orientations[6] == TP_RETIREMENT_BA);
+        CHECK(first_cells[0] == 5 && first_cells[1] == 3 && first_cells[2] == 6 && first_cells[3] == 2 &&
+              first_cells[4] == 1 && first_cells[5] == 4 && first_cells[6] == 0);
+        CHECK(second_cells[0] == 6 && second_cells[1] == 3 && second_cells[2] == 5 && second_cells[3] == 1 &&
+              second_cells[4] == 4 && second_cells[5] == 2 && second_cells[6] == 0);
+        CHECK(tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP,
+                                 TP_RETIREMENT_WALL_TIME, 0, 0) ==
+              UINT64_C(0x7cf91efeea31f8fd));
+        for (unsigned i = 0; i < 7; ++i)
+        {
+            CHECK(orientations[i] <= TP_RETIREMENT_BA);
+            if (first_cells[i] < 7) first_seen |= 1u << first_cells[i];
+            if (second_cells[i] < 7) second_seen |= 1u << second_cells[i];
+        }
+        CHECK(first_seen == 0x7f && second_seen == 0x7f);
+        CHECK(!tp_retirement_block_schedule(plan.seed, 2, 9, 7, orientations, first_cells, second_cells, 7));
+
+        series.member_kind = TP_RETIREMENT_EXACT_CELL_MEMBER;
+        series.cell_count = 1;
+        series.ratio_count = TP_RETIREMENT_ROUNDS * PAIRS;
+        series.limit = 1.05;
+        ratios[0] = NAN;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        ratios[0] = INFINITY;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        ratios[0] = 0.0;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        ratios[0] = 1.0;
+        series.ratios = NULL;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        series.ratios = ratios;
+        --series.ratio_count;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        ++series.ratio_count;
+        --series.observed_pairs[1];
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        ++series.observed_pairs[1];
+        plan.frozen_before_samples = 0;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        plan.frozen_before_samples = 1;
+        series.family_index = 1;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        series.family_index = 0;
+        series.metric_index = TP_RETIREMENT_VARIABLE_METRICS;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        series.metric_index = 0;
+        plan.resamples = TP_RETIREMENT_MIN_RESAMPLES - 1;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        plan.resamples = TP_RETIREMENT_MIN_RESAMPLES + 1;
+        series.member_kind = TP_RETIREMENT_BOOTSTRAP_MEMBER;
+        series.cell_count = 2;
+        series.ratio_count = 2 * TP_RETIREMENT_ROUNDS * PAIRS;
+        CHECK(tp_retirement_assess(&plan, &series, workspace, TP_RETIREMENT_MIN_RESAMPLES).outcome == TP_RETIREMENT_INVALID);
+        plan.resamples = TP_RETIREMENT_MIN_RESAMPLES;
+        plan.bootstrap_members_per_scope = TP_RETIREMENT_MAX_BOOTSTRAP_MEMBERS_PER_SCOPE;
+        CHECK(tp_retirement_validate(&plan, &series, workspace, plan.resamples));
+        ++plan.bootstrap_members_per_scope;
+        CHECK(!tp_retirement_validate(&plan, &series, workspace, plan.resamples));
+        plan.bootstrap_members_per_scope = 1;
+        plan.resamples = TP_RETIREMENT_MAX_RESAMPLES + 1;
+        CHECK(tp_retirement_assess(&plan, &series, workspace, plan.resamples).outcome == TP_RETIREMENT_INVALID);
+        plan.resamples = TP_RETIREMENT_MIN_RESAMPLES;
+        series.member_kind = TP_RETIREMENT_EXACT_CELL_MEMBER;
+        series.cell_count = 1;
+        series.ratio_count = TP_RETIREMENT_ROUNDS * PAIRS;
+        CHECK(TP_RETIREMENT_MAX_PAIRS_PER_ROUND == TP_MAX_PAIRS);
+        series.cell_count = TP_RETIREMENT_MAX_CELLS + 1;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        series.cell_count = 1;
+        plan.cell_members_per_scope = TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE;
+        series.family_index = TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE - 1;
+        CHECK(tp_retirement_validate(&plan, &series, NULL, 0));
+        ++plan.cell_members_per_scope;
+        CHECK(!tp_retirement_validate(&plan, &series, NULL, 0));
+        plan.cell_members_per_scope = 1;
+        series.family_index = 0;
+        plan.pairs_per_round = TP_RETIREMENT_MAX_PAIRS_PER_ROUND;
+        series.ratio_count = (size_t)TP_RETIREMENT_ROUNDS * TP_RETIREMENT_MAX_PAIRS_PER_ROUND;
+        series.observed_pairs[0] = series.observed_pairs[1] = TP_RETIREMENT_MAX_PAIRS_PER_ROUND;
+        for (unsigned i = 0; i < TP_RETIREMENT_ROUNDS * TP_RETIREMENT_MAX_PAIRS_PER_ROUND; ++i) ratios[i] = 1.0;
+        CHECK(tp_retirement_validate(&plan, &series, NULL, 0));
+        plan.pairs_per_round = TP_RETIREMENT_MAX_PAIRS_PER_ROUND + 2;
+        CHECK(!tp_retirement_validate(&plan, &series, NULL, 0));
+        free(workspace);
+    }
+}
+
 #include "qualification_test.h"
 
 int main(int argc, char** argv)
@@ -1355,6 +1638,7 @@ int main(int argc, char** argv)
         test_inputs(root);
         test_maximum_jobs(root);
         test_processes(executable, root);
+        test_retirement_statistics();
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,
                TP_MAX_JOBS * (sizeof(TpJob) + 2 * sizeof(TpRow)),
