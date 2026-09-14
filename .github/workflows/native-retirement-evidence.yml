@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-evidence.yml
+      - docs/native-retirement-supported-gaps-v1.tsv
       - docs/performance-audits/evidence/2026-09-12-retirement/**
   workflow_dispatch:
 

@@ -1055,6 +1055,30 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("name: Native retirement acceptance complete", complete)
         self.assertIn('[[ "$CENSUS_RESULT" == success && "$STRICT_RESULT" == success ]]', complete)
 
+    def test_native_retirement_workflow_paths_cover_authoritative_census_inputs(self):
+        contract_text = (ROOT / ".github/workflows/native-retirement-contract.yml").read_text()
+        contract_paths = contract_text.split("    paths:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        expected_contract_inputs = (
+            ".github/workflows/native-retirement-contract.yml",
+            "build.c",
+            "docs/agents/build.md",
+            "docs/native-retirement-census.md",
+            "docs/native-retirement-support-v1.tsv",
+            "docs/native-retirement-supported-gaps-v1.tsv",
+            "tools/differential.c",
+            "tools/native_retirement_census.c",
+            "tools/native_retirement_contract.py",
+            "tools/native_retirement_contract_test.py",
+            "tests/**",
+        )
+        for path in expected_contract_inputs:
+            with self.subTest(workflow="contract", path=path):
+                self.assertIn(f"      - {path}\n", contract_paths)
+
+        evidence_text = (ROOT / ".github/workflows/native-retirement-evidence.yml").read_text()
+        evidence_paths = evidence_text.split("    paths:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        self.assertIn("      - docs/native-retirement-supported-gaps-v1.tsv\n", evidence_paths)
+
     def test_windows_oracle_keeps_the_full_corpus_with_required_link_shims(self):
         differential = (ROOT / "tools/differential.c").read_text()
         frontend = (ROOT / "src/buster/lib/compiler/frontend/c/c_gen.c").read_text()
