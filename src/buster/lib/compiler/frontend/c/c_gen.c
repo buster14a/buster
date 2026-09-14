@@ -5736,6 +5736,29 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 value_map[value] = value_count++;
             }
         }
+        // A promoted named local has no surviving LOCAL/LOAD/STORE row. When
+        // its sole entry initializer remains an instruction-defined value,
+        // retain the local identity on that definition before value IDs are
+        // compacted. Never overwrite another local's identity: two source
+        // locals may deliberately share one forwarded SSA value, and one
+        // instruction cannot truthfully name both. Parameters keep their
+        // independent ARGUMENT/CFG provenance.
+        for (u32 local_index = 0; local_index < ssa->local_count; local_index += 1)
+        {
+            CIrSsaLocal* local = ssa->locals + local_index;
+            u32 initializer = local->first_event < ssa->event_count ? ssa->events[local->first_event].next_local : UINT32_MAX;
+            bool eligible = !memory[local_index] && !local->temporary && local->single_entry_definition &&
+                            initializer < ssa->event_count && ssa->events[initializer].opcode == IR_OPCODE_STORE;
+            u32 initializer_value = eligible ? ssa->events[initializer].value.value : UINT32_MAX;
+            u32 root = initializer_value < count ? c_ir_ssa_root(replacements, initializer_value) : UINT32_MAX;
+            IrInstructionId definition = root < count ? function->values[root].definition : IR_INSTRUCTION_ID_INVALID;
+            IrInstruction* instruction = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+            if (instruction && instruction->opcode != IR_OPCODE_ARGUMENT && instruction->result.value == root &&
+                instruction->canonical_local.value == IR_ID_UNDERLYING_INVALID)
+            {
+                instruction->canonical_local = local->id;
+            }
+        }
         for (u32 value = 0; value < count; value += 1)
         {
             if (replacements[value] == value && value_map[value] != UINT32_MAX)

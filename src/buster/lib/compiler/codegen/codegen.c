@@ -3185,12 +3185,17 @@ BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValue
     };
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_canonical_location_append(CodegenModule* result, u32 capacity, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result, u32 capacity, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
                                                             DebugLocation location)
 {
-    if (!result || result->debug_location_count >= capacity || end <= start)
+    if (!result || end <= start)
     {
-        return;
+        return false;
+    }
+    if (result->debug_location_count >= capacity)
+    {
+        result->error = CODEGEN_ERROR_CAPACITY;
+        return false;
     }
     result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
         .function_symbol = symbol,
@@ -3199,6 +3204,27 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_location_append(CodegenModule* result
         .end = end,
         .location = location,
     };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(Arena* arena, CodegenModule* result, u32* capacity, u64 additional)
+{
+    u64 required = (u64)result->debug_location_count + additional;
+    if (required > UINT32_MAX)
+    {
+        result->error = CODEGEN_ERROR_CAPACITY;
+        return false;
+    }
+    if (required > *capacity)
+    {
+        u64 doubled = (u64)*capacity * 2u;
+        u32 new_capacity = (u32)BUSTER_MAX(required, BUSTER_MIN(doubled, (u64)UINT32_MAX));
+        DebugLocationSeed* grown = arena_allocate(arena, DebugLocationSeed, new_capacity);
+        memcpy(grown, result->debug_locations, (u64)result->debug_location_count * sizeof(*grown));
+        result->debug_locations = grown;
+        *capacity = new_capacity;
+    }
+    return true;
 }
 
 // Block IDs are graph identities, not an execution order. Keep the entry
@@ -8816,6 +8842,468 @@ BUSTER_GLOBAL_LOCAL void codegen_record_machine_line_marks(IrProgram* program, I
     }
 }
 
+typedef struct CodegenMachineDebugReference CodegenMachineDebugReference;
+struct CodegenMachineDebugReference
+{
+    s32 physical_register;
+    u32 epoch;
+    bool frame_valid;
+    bool prefer_frame;
+    u8 reserved[2];
+};
+
+BUSTER_GLOBAL_LOCAL DebugRegister codegen_machine_debug_register(MachineFunction const* function, u32 virtual_register, u32 physical_register,
+                                                                  u32 value_size, Target target)
+{
+    DebugRegister result = DEBUG_REGISTER_NONE;
+    MachineRegisterClass register_class = virtual_register < function->virtual_register_count
+                                              ? (MachineRegisterClass)function->virtual_registers[virtual_register].register_class
+                                              : MACHINE_REGISTER_CLASS_NONE;
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        if (register_class == MACHINE_REGISTER_CLASS_GENERAL && physical_register < 16)
+        {
+            result = (DebugRegister)((u32)DEBUG_REGISTER_X86_RAX + physical_register);
+        }
+        else if (register_class == MACHINE_REGISTER_CLASS_VECTOR && value_size && value_size <= 16 && physical_register >= MACHINE_X64_ZMM0 &&
+                 physical_register <= MACHINE_X64_ZMM15)
+        {
+            result = (DebugRegister)((u32)DEBUG_REGISTER_X86_XMM0 + physical_register - MACHINE_X64_ZMM0);
+        }
+    }
+    else if (target.cpu_arch == CPU_ARCH_AARCH64 && physical_register < 32)
+    {
+        if (register_class == MACHINE_REGISTER_CLASS_GENERAL)
+        {
+            result = (DebugRegister)((u32)DEBUG_REGISTER_AARCH64_X0 + physical_register);
+        }
+        else if (register_class == MACHINE_REGISTER_CLASS_VECTOR)
+        {
+            result = (DebugRegister)((u32)DEBUG_REGISTER_AARCH64_V0 + physical_register);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_edit_writes_register(MachineEdit const* edit)
+{
+    return edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_COPY || edit->kind == MACHINE_EDIT_TEMP_RELOAD ||
+           edit->kind == MACHINE_EDIT_REMATERIALIZE || edit->kind == MACHINE_EDIT_FRAME_RELOAD;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_frame_offset(u32 placement_offset, u32 frame_base_offset, Target target, s32* result)
+{
+    s64 offset = target.cpu_arch == CPU_ARCH_X86_64 ? (s64)frame_base_offset - placement_offset : (s64)placement_offset;
+    if (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))
+    {
+        offset += 16;
+    }
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        offset = -offset;
+    }
+    if (offset < INT32_MIN || offset > INT32_MAX)
+    {
+        return false;
+    }
+    *result = (s32)offset;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const* function, MachineStackPlacement const* placement,
+                                                           u32 virtual_register, MachineEdit const* edit,
+                                                           CodegenMachineDebugReference* state, bool selected_frame, s32 selected_register,
+                                                           bool* selected_invalid)
+{
+    bool own = edit->subject == virtual_register;
+    if (edit->kind == MACHINE_EDIT_SPILL)
+    {
+        u32 offset = edit->subject < function->virtual_register_count ? placement->virtual_register_offsets[edit->subject] : UINT32_MAX;
+        if (own)
+        {
+            state->frame_valid = true;
+            state->prefer_frame = true;
+            state->epoch += 1;
+        }
+        else if (state->frame_valid && virtual_register < function->virtual_register_count &&
+                 offset == placement->virtual_register_offsets[virtual_register])
+        {
+            state->frame_valid = false;
+            *selected_invalid |= selected_frame;
+        }
+    }
+    if (codegen_machine_debug_edit_writes_register(edit))
+    {
+        bool rematerializes_own = false;
+        if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
+        {
+            MachinePoint definition = function->virtual_registers[virtual_register].definition_point;
+            u32 row = definition == MACHINE_POINT_INVALID ? UINT32_MAX : machine_point_instruction(definition);
+            if (row < function->instruction_count)
+            {
+                MachineInstruction const* instruction = function->instructions + row;
+                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                rematerializes_own = info && info->operand_count >= 2 &&
+                    machine_ref_kind(instruction->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                    machine_ref_payload(instruction->operands[0]) == virtual_register &&
+                    machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE &&
+                    machine_ref_payload(instruction->operands[1]) == edit->subject;
+            }
+        }
+        bool writes_own = (edit->kind == MACHINE_EDIT_RELOAD && own) || rematerializes_own;
+        if (selected_register == (s32)edit->location && !writes_own)
+        {
+            *selected_invalid = true;
+        }
+        if (state->physical_register == (s32)edit->location && !writes_own)
+        {
+            state->physical_register = -1;
+        }
+        if (writes_own)
+        {
+            state->physical_register = (s32)edit->location;
+            state->prefer_frame = false;
+            state->epoch += 1;
+        }
+        else if (edit->kind == MACHINE_EDIT_COPY && state->physical_register == (s32)edit->subject)
+        {
+            state->physical_register = (s32)edit->location;
+            state->prefer_frame = false;
+            state->epoch += 1;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* function, MachineDebugValue const* value, u32* first_row, u32* end_row,
+                                                     bool* malformed)
+{
+    bool result = value->first_instruction == UINT32_MAX;
+    *first_row = 0;
+    *end_row = function->instruction_count;
+    if (!result)
+    {
+        if (value->first_instruction > UINT32_MAX - value->instruction_count)
+        {
+            *malformed = true;
+            return false;
+        }
+        u32 instruction_end = value->first_instruction + value->instruction_count;
+        u32 first_mark = UINT32_MAX;
+        u32 last_mark = UINT32_MAX;
+        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
+        {
+            MachineLineMark mark = function->line_marks[mark_index];
+            if (mark.row > function->instruction_count || (mark_index && mark.row < function->line_marks[mark_index - 1].row))
+            {
+                *malformed = true;
+                return false;
+            }
+            if (mark.instruction >= value->first_instruction && mark.instruction < instruction_end)
+            {
+                first_mark = BUSTER_MIN(first_mark, mark_index);
+                last_mark = mark_index;
+            }
+        }
+        if (first_mark != UINT32_MAX)
+        {
+            *first_row = function->line_marks[first_mark].row;
+            *end_row = last_mark + 1 < function->line_mark_count ? function->line_marks[last_mark + 1].row : function->instruction_count;
+            result = *first_row < *end_row;
+        }
+        else
+        {
+            *malformed = true;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction const* function,
+                                                               MachineStackPlacement const* placement, MachineRef reference, u32 value_size,
+                                                               u32 frame_base_offset, Target target, DebugLocationPiece* rows, bool* available)
+{
+    MachineRefKind kind = machine_ref_kind(reference);
+    u32 payload = machine_ref_payload(reference);
+    if (kind == MACHINE_REF_STACK_SLOT)
+    {
+        s32 frame_offset = 0;
+        if (payload >= function->stack_slot_count ||
+            !codegen_machine_debug_frame_offset(placement->stack_slot_offsets[payload], frame_base_offset, target, &frame_offset))
+        {
+            return false;
+        }
+        for (u32 row = 0; row < function->instruction_count; row += 1)
+        {
+            rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_FRAME, .frame_offset = frame_offset};
+            available[row] = true;
+        }
+        return true;
+    }
+    if (kind != MACHINE_REF_VIRTUAL_REGISTER || payload >= function->virtual_register_count)
+    {
+        return false;
+    }
+    s32 frame_offset = 0;
+    if (!codegen_machine_debug_frame_offset(placement->virtual_register_offsets[payload], frame_base_offset, target, &frame_offset))
+    {
+        return false;
+    }
+    CodegenMachineDebugReference state = {.physical_register = -1};
+    u32 edit_cursor = 0;
+    u32 block_cursor = 0;
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        if (block_cursor < function->block_count && function->blocks[block_cursor].first_instruction == row)
+        {
+            if (block_cursor)
+            {
+                // Physical ownership is edge-specific. A published home is
+                // path-independent: every executing definition spilled the
+                // same vreg there, and reuse writes invalidate it explicitly.
+                state.physical_register = -1;
+                state.prefer_frame = state.frame_valid;
+            }
+            block_cursor += 1;
+        }
+        bool selected_frame = state.frame_valid && (state.prefer_frame || state.physical_register < 0);
+        s32 selected_register = selected_frame ? -1 : state.physical_register;
+        bool selected_invalid = false;
+        MachinePoint before = machine_point_make(row, MACHINE_POINT_BEFORE);
+        while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
+        {
+            codegen_machine_debug_edit_state(function, placement, payload, placement->edits + edit_cursor, &state, selected_frame,
+                                             selected_register, &selected_invalid);
+            edit_cursor += 1;
+        }
+        MachineInstruction const* instruction = function->instructions + row;
+        MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
+        if (selected_register >= 0 && selected_register < 64 && (opcode_row.clobber_mask & (UINT64_C(1) << selected_register)))
+        {
+            selected_invalid = true;
+        }
+        if (state.physical_register >= 0 && state.physical_register < 64 &&
+            (opcode_row.clobber_mask & (UINT64_C(1) << state.physical_register)))
+        {
+            state.physical_register = -1;
+        }
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
+        {
+            u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            MachineRef operand = instruction->operands[operand_index];
+            bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
+            u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+            if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0)
+            {
+                // Entry/CFG parameters intentionally have no definition row.
+                // Their first allocated use is nevertheless a certified read
+                // of the incoming value; publish it only after that row.
+                state.physical_register = (s32)physical;
+                state.prefer_frame = false;
+                state.epoch += 1;
+            }
+            if (role != MACHINE_OPERAND_ROLE_DEFINE && role != MACHINE_OPERAND_ROLE_USE_DEFINE)
+            {
+                continue;
+            }
+            if (selected_register == (s32)physical)
+            {
+                selected_invalid = true;
+            }
+            if (state.physical_register == (s32)physical)
+            {
+                state.physical_register = -1;
+            }
+            if (own)
+            {
+                state.physical_register = (s32)physical;
+                state.prefer_frame = false;
+                state.epoch += 1;
+            }
+        }
+        MachinePoint after = machine_point_make(row, MACHINE_POINT_AFTER);
+        while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
+        {
+            codegen_machine_debug_edit_state(function, placement, payload, placement->edits + edit_cursor, &state, selected_frame,
+                                             selected_register, &selected_invalid);
+            edit_cursor += 1;
+        }
+        if (!selected_invalid && selected_frame)
+        {
+            rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_FRAME, .frame_offset = frame_offset};
+            available[row] = true;
+        }
+        else if (!selected_invalid && selected_register >= 0)
+        {
+            DebugRegister reg = codegen_machine_debug_register(function, payload, (u32)selected_register, value_size, target);
+            if (reg != DEBUG_REGISTER_NONE)
+            {
+                rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_REGISTER, .reg = reg};
+                available[row] = true;
+            }
+        }
+    }
+    return edit_cursor == placement->edit_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_locations_equal(DebugLocation const* left, DebugLocation const* right)
+{
+    if (left->kind != right->kind || left->piece_count != right->piece_count)
+    {
+        return false;
+    }
+    if (left->kind == DEBUG_LOCATION_REGISTER)
+        return left->reg == right->reg;
+    if (left->kind == DEBUG_LOCATION_FRAME)
+        return left->frame_offset == right->frame_offset;
+    if (left->kind == DEBUG_LOCATION_CONSTANT)
+        return left->constant == right->constant;
+    if (left->kind == DEBUG_LOCATION_PIECEWISE)
+    {
+        for (u32 index = 0; index < left->piece_count; index += 1)
+        {
+            DebugLocationPiece a = left->pieces[index];
+            DebugLocationPiece b = right->pieces[index];
+            if (a.kind != b.kind || a.reg != b.reg || a.frame_offset != b.frame_offset || a.value_offset != b.value_offset || a.size != b.size)
+                return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
+                                                           MachineFunction const* function, MachineStackPlacement const* placement,
+                                                           u32 const* row_offsets, u32 function_start, u32 function_end,
+                                                           u32 frame_base_offset, Target target)
+{
+    if (!result || !result->debug_locations || !function || !placement || !row_offsets || function_end < function_start)
+    {
+        return false;
+    }
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        if (row_offsets[row] > function_end - function_start || (row && row_offsets[row] < row_offsets[row - 1]))
+        {
+            result->error = CODEGEN_ERROR_INVALID_IR;
+            return false;
+        }
+    }
+    u32 row_capacity = function->instruction_count ? function->instruction_count : 1;
+    DebugLocationPiece* piece_rows[2] = {
+        arena_allocate(arena, DebugLocationPiece, row_capacity), arena_allocate(arena, DebugLocationPiece, row_capacity)};
+    bool* piece_available[2] = {arena_allocate(arena, bool, row_capacity), arena_allocate(arena, bool, row_capacity)};
+    for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + value_index;
+        u32 first_row = 0;
+        u32 end_row = 0;
+        bool malformed = false;
+        if (!codegen_machine_debug_span(function, value, &first_row, &end_row, &malformed))
+        {
+            if (malformed)
+            {
+                result->error = CODEGEN_ERROR_INVALID_IR;
+                return false;
+            }
+            if (function_end > function_start &&
+                !codegen_canonical_location_append(result, capacity, ir_function->symbol, value->local, function_start, function_end,
+                                                   (DebugLocation){.kind = DEBUG_LOCATION_UNAVAILABLE}))
+            {
+                return false;
+            }
+            continue;
+        }
+        memset(piece_available[0], 0, sizeof(**piece_available) * row_capacity);
+        memset(piece_available[1], 0, sizeof(**piece_available) * row_capacity);
+        if (value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
+        {
+            for (u32 piece_index = 0; piece_index < value->piece_count; piece_index += 1)
+            {
+                if (!codegen_machine_debug_reference_rows(function, placement, value->pieces[piece_index], value->piece_sizes[piece_index],
+                                                          frame_base_offset, target, piece_rows[piece_index], piece_available[piece_index]))
+                {
+                    result->error = CODEGEN_ERROR_INVALID_IR;
+                    return false;
+                }
+            }
+        }
+        DebugLocation pending = {.kind = DEBUG_LOCATION_UNAVAILABLE};
+        DebugLocationPiece pending_pieces[2] = {0};
+        u32 pending_start = first_row;
+        for (u32 row = first_row; row <= end_row; row += 1)
+        {
+            DebugLocation location = {.kind = DEBUG_LOCATION_UNAVAILABLE};
+            DebugLocationPiece pieces[2] = {0};
+            if (row < end_row && value->kind == MACHINE_DEBUG_VALUE_CONSTANT)
+            {
+                location.kind = DEBUG_LOCATION_CONSTANT;
+                location.constant = value->constant;
+            }
+            else if (row < end_row && value->kind == MACHINE_DEBUG_VALUE_REFERENCE && piece_available[0][row])
+            {
+                location.kind = piece_rows[0][row].kind;
+                location.reg = piece_rows[0][row].reg;
+                location.frame_offset = piece_rows[0][row].frame_offset;
+            }
+            else if (row < end_row && value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
+            {
+                bool all = value->piece_count == 2;
+                u32 piece_offset = 0;
+                for (u32 piece_index = 0; piece_index < value->piece_count; piece_index += 1)
+                {
+                    all = all && piece_available[piece_index][row];
+                    pieces[piece_index] = piece_rows[piece_index][row];
+                    pieces[piece_index].value_offset = piece_offset;
+                    pieces[piece_index].size = value->piece_sizes[piece_index];
+                    piece_offset += value->piece_sizes[piece_index];
+                }
+                if (all)
+                {
+                    location.kind = DEBUG_LOCATION_PIECEWISE;
+                    location.pieces = pieces;
+                    location.piece_count = value->piece_count;
+                }
+            }
+            if (row == end_row || !codegen_machine_debug_locations_equal(&pending, &location))
+            {
+                u32 start = pending_start < function->instruction_count ? function_start + row_offsets[pending_start] : function_end;
+                u32 end = row < function->instruction_count ? function_start + row_offsets[row] : function_end;
+                if (end > start)
+                {
+                    if (pending.kind == DEBUG_LOCATION_PIECEWISE)
+                    {
+                        DebugLocationPiece* stable = arena_allocate(arena, DebugLocationPiece, pending.piece_count);
+                        memcpy(stable, pending.pieces, sizeof(*stable) * pending.piece_count);
+                        pending.pieces = stable;
+                    }
+                    if (!codegen_canonical_location_append(result, capacity, ir_function->symbol, value->local, start, end, pending))
+                    {
+                        return false;
+                    }
+                }
+                pending = location;
+                if (location.kind == DEBUG_LOCATION_PIECEWISE)
+                {
+                    memcpy(pending_pieces, pieces, sizeof(*pieces) * location.piece_count);
+                    pending.pieces = pending_pieces;
+                }
+                pending_start = row;
+            }
+        }
+    }
+    return true;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
+                                            MachineFunction const* function, MachineStackPlacement const* placement,
+                                            u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset, Target target)
+{
+    return codegen_record_machine_locations(arena, result, capacity, ir_function, function, placement, row_offsets, function_start, function_end,
+                                            frame_base_offset, target);
+}
+#endif
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -9032,12 +9520,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
             }
         }
-        u64 local_capacity = function->debug_local_count ? function->debug_local_count : function->local_count;
-        debug_location_capacity_64 += local_capacity * ((u64)function->block_count + 1);
-        if (debug_location_capacity_64 > UINT32_MAX)
+        if (options.debug_info)
         {
-            result.error = CODEGEN_ERROR_CAPACITY;
-            return result;
+            u64 local_capacity = function->debug_local_count ? function->debug_local_count : function->local_count;
+            // Exact bound for the canonical producer. The machine producer
+            // reserves its stronger post-selection local-record x row bound
+            // once the scheduled MIR row count is known.
+            debug_location_capacity_64 += local_capacity * ((u64)function->block_count + 1);
+            if (debug_location_capacity_64 > UINT32_MAX)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
         }
         // The frame the function's canonical slots would take, walked from the
         // per-type slot table (CodegenSlotCost) rather than the type records.
@@ -9696,7 +10190,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
             selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent,
-                                                                   options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_MIR_STACK, machine_module);
+                                                                   options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                                                                   options.debug_info, machine_module);
             if (bootstrap_trace)
             {
                 bootstrap_trace_machine(bootstrap_trace, function, &selected);
@@ -10070,6 +10565,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (machine_inline_relocations_valid)
                             {
+                                // For one debug record, each MIR row can end
+                                // at most one pending segment. A zero-row or
+                                // unmapped span adds at most one UNAVAILABLE
+                                // segment. Edits only change the state sampled
+                                // at their row and cannot add another boundary,
+                                // so records * (rows + 1) is an exact bound.
+                                u64 machine_debug_bound = (u64)selected.function.debug_value_count *
+                                                          ((u64)selected.function.instruction_count + 1u);
+                                if (options.debug_info &&
+                                    (!codegen_debug_locations_reserve(arena, &result, &debug_location_capacity, machine_debug_bound) ||
+                                     !codegen_record_machine_locations(arena, &result, debug_location_capacity, function, &selected.function,
+                                                                      &placement, encoded.row_offsets, (u32)buffer.count,
+                                                                      (u32)buffer.count + encoded.byte_count, 0, target)))
+                                {
+                                    result.error = result.error == CODEGEN_ERROR_NONE ? CODEGEN_ERROR_INVALID_IR : result.error;
+                                    scratch_end(machine_scratch);
+                                    return result;
+                                }
                                 buffer.count += encoded.byte_count;
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
@@ -10252,6 +10765,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (machine_inline_relocations_valid)
                             {
+                                u32 machine_frame_base_offset = encoded.frame_pointer_offset ? placement.frame_size : 0;
+                                // Same per-record/per-row proof as the AArch64
+                                // path above; allocator edit count is irrelevant.
+                                u64 machine_debug_bound = (u64)selected.function.debug_value_count *
+                                                          ((u64)selected.function.instruction_count + 1u);
+                                if (options.debug_info &&
+                                    (!codegen_debug_locations_reserve(arena, &result, &debug_location_capacity, machine_debug_bound) ||
+                                     !codegen_record_machine_locations(arena, &result, debug_location_capacity, function, &selected.function,
+                                                                      &placement, encoded.row_offsets, (u32)buffer.count,
+                                                                      (u32)buffer.count + encoded.byte_count, machine_frame_base_offset, target)))
+                                {
+                                    result.error = result.error == CODEGEN_ERROR_NONE ? CODEGEN_ERROR_INVALID_IR : result.error;
+                                    scratch_end(machine_scratch);
+                                    return result;
+                                }
                                 buffer.count += encoded.byte_count;
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;

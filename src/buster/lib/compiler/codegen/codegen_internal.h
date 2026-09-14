@@ -3,6 +3,9 @@
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 
+typedef struct MachineFunction MachineFunction;
+typedef struct MachineStackPlacement MachineStackPlacement;
+
 typedef struct CodegenBuffer CodegenBuffer;
 struct CodegenBuffer
 {
@@ -219,4 +222,8 @@ BUSTER_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target,
 BUSTER_F_DECL void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);
+BUSTER_F_DECL bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
+                                                          MachineFunction const* function, MachineStackPlacement const* placement,
+                                                          u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset,
+                                                          Target target);
 #endif
