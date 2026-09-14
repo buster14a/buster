@@ -733,7 +733,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_configuration_transition_recovery(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_cancelled_failure_recovery(void)
 {
-    for (u32 attempted = 0; attempted < 2; attempted += 1)
+    for (u32 attempted = 0; attempted < 3; attempted += 1)
     {
         BqMaterialFixture fixture;
         if (bq_material_test_begin(&fixture, 0))
@@ -744,12 +744,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_cancelled_failure_recovery(void)
             BQ_CHECK(bq_reserve(&fixture.queue.queue, &id, &token) == BQ_OK);
             BqJob* job = bq_job(&fixture.queue.queue.state, id);
             int installed = -1, root = -1, workspace = -1;
+            struct stat installed_info = {0}, root_info = {0}, workspace_info = {0};
             char name[64] = {0}, path[512] = {0};
             if (attempted)
             {
                 installed = bq_open_absolute_directory(string_from_pointer(fixture.installed));
                 root = bq_open_absolute_directory(string_from_pointer(fixture.workspaces));
-                struct stat installed_info, root_info, workspace_info;
                 BQ_CHECK(installed >= 0 && root >= 0 && fstat(installed, &installed_info) == 0 &&
                          fstat(root, &root_info) == 0 && bq_workspace_name(name, id, token));
                 BQ_CHECK(bq_attempt_write(&fixture.queue.queue, job, string_from_pointer(fixture.installed),
@@ -762,6 +762,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_cancelled_failure_recovery(void)
             }
             BqError reason = attempted ? BQ_SOURCE_MISMATCH : BQ_CONFIGURATION_MISMATCH;
             BQ_CHECK(bq_failure_write(&fixture.queue.queue, job, reason) == BQ_OK);
+            if (attempted == 2)
+            {
+                BQ_CHECK(bq_cleanup_record(&fixture.queue.queue, job, &root_info, &workspace_info, true) == BQ_OK);
+                BQ_CHECK(bq_real_advance(&fixture.queue.queue, job, BQ_CLEANING, BQ_FAILED) == BQ_OK);
+            }
             if (workspace >= 0)
             {
                 close(workspace);

@@ -174,8 +174,9 @@ The worker is synchronous, in-process and bounded. It persists reservation
 before receiving a token and moves through the real journal transitions.
 Only one reserved/active/cleaning job exists. Cancellation of queued work is
 terminal; active cancellation is persisted as intent and does not free the
-slot until cleaning/finish is committed. Cancellation after execution has
-already finalized is an idempotent no-op, not a fabricated cancelled execution.
+slot until cleaning/finish is committed. Cancellation while failed cleanup is
+pending is also persisted; cancellation during finalizing or after finish is
+an idempotent no-op, not a fabricated cancelled execution.
 
 Reopening any nonterminal active job sets `needs_reconciliation`; dispatch and
 ordinary fake advancement stop. The explicit `fake-reconcile JOB TOKEN`

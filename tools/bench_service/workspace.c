@@ -1291,7 +1291,7 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     if (error == BQ_OK && job->phase == BQ_CLEANING)
     {
         error = job->outcome == BQ_FAILED && failure == BQ_NOT_FOUND ? BQ_CORRUPT :
-                bq_real_advance(queue, job, BQ_FINISHED, job->outcome);
+                bq_real_advance(queue, job, BQ_FINISHED, job->cancel_requested ? BQ_CANCELLED : job->outcome);
     }
     else if (error == BQ_OK)
     {

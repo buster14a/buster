@@ -270,7 +270,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
             }
             else if (kind == BQ_CANCEL)
             {
-                if (job->phase >= BQ_FINALIZING || job->cancel_requested)
+                bool cancellable = job->phase < BQ_FINALIZING ||
+                                   (job->phase == BQ_CLEANING && bq_recipe_real(&job->request));
+                if (!cancellable || job->cancel_requested)
                 {
                     error = BQ_INVALID_TRANSITION;
                 }
@@ -302,7 +304,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
                 bool failure_cleanup = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
-                                       job->phase < BQ_CLEANING && next == BQ_CLEANING && outcome == BQ_FAILED;
+                                       job->phase < BQ_CLEANING && next == BQ_CLEANING &&
+                                       outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED);
                 if (next == BQ_FINALIZING)
                 {
                     expected = string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
@@ -685,7 +688,9 @@ BqError bq_cancel(BqQueue* queue, u64 id)
 {
     BqJob* job = bq_job(&queue->state, id);
     BqError error = queue->poisoned ? BQ_IO : !job ? BQ_NOT_FOUND : BQ_OK;
-    if (error == BQ_OK && job->phase < BQ_FINALIZING && !job->cancel_requested)
+    bool cancellable = job && (job->phase < BQ_FINALIZING ||
+                       (job->phase == BQ_CLEANING && bq_recipe_real(&job->request)));
+    if (error == BQ_OK && cancellable && !job->cancel_requested)
     {
         u8 body[8];
         bq_put64(body, id);
