@@ -955,7 +955,7 @@ BqError bq_failure_evidence(BqQueue* queue, BqJob const* job)
     BqError result = bq_failure_record(queue, job, "cleanup-failure", BQ_CLEANUP_FAILED, BQ_CLEANUP_FAILED);
     if (result == BQ_NOT_FOUND)
     {
-        result = bq_failure_record(queue, job, "failure", BQ_RECIPE_MISMATCH, BQ_CONFIGURATION_MISMATCH);
+        result = bq_failure_record(queue, job, "failure", BQ_RECIPE_MISMATCH, BQ_BOOT_INTERRUPTED);
     }
     if (result == BQ_NOT_FOUND && job && bq_recipe_real(&job->request) && job->outcome == BQ_FAILED)
     {
@@ -1178,7 +1178,13 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     return error;
 }
 
-BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token)
+typedef BqError (*BqWorkspaceBeforeTerminal)(BqQueue*, BqJob*, void*);
+
+BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, String8 workspace_root,
+                                                               u64 id, u64 token,
+                                                               BqOutcome terminal_outcome,
+                                                               BqWorkspaceBeforeTerminal before_terminal,
+                                                               void* terminal_context)
 {
     BqJob* job = bq_job(&queue->state, id);
     bool was_reconciling = queue->needs_reconciliation;
@@ -1193,7 +1199,11 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     BqError failure = error == BQ_OK ? bq_failure_evidence(queue, job) : BQ_NOT_FOUND;
     if (error == BQ_OK && failure != BQ_NOT_FOUND && failure != BQ_RECIPE_MISMATCH &&
         failure != BQ_SOURCE_MISMATCH && failure != BQ_WORKSPACE_MISMATCH &&
-        failure != BQ_CLEANUP_FAILED && failure != BQ_CONFIGURATION_MISMATCH)
+        failure != BQ_CLEANUP_FAILED && failure != BQ_CONFIGURATION_MISMATCH &&
+        failure != BQ_WORKER_MISMATCH && failure != BQ_RESOURCE_MISMATCH &&
+        failure != BQ_WORKER_FAILED && failure != BQ_WORKER_OOM_FAILURE &&
+        failure != BQ_WORKER_TIMEOUT && failure != BQ_WORKER_INTERRUPTED &&
+        failure != BQ_BOOT_INTERRUPTED)
     {
         error = failure;
     }
@@ -1288,10 +1298,18 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     {
         close(workspace);
     }
+    if (error == BQ_OK && before_terminal)
+    {
+        error = before_terminal(queue, job, terminal_context);
+        job = bq_job(&queue->state, id);
+        if (!job) error = BQ_CORRUPT;
+    }
     if (error == BQ_OK && job->phase == BQ_CLEANING)
     {
+        BqOutcome final_outcome = job->cancel_requested ? BQ_CANCELLED :
+                                  terminal_outcome != BQ_NO_OUTCOME ? terminal_outcome : job->outcome;
         error = job->outcome == BQ_FAILED && failure == BQ_NOT_FOUND ? BQ_CORRUPT :
-                bq_real_advance(queue, job, BQ_FINISHED, job->cancel_requested ? BQ_CANCELLED : job->outcome);
+                bq_real_advance(queue, job, BQ_FINISHED, final_outcome);
     }
     else if (error == BQ_OK)
     {
@@ -1312,6 +1330,21 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     {
         close(workspaces);
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_outcome(BqQueue* queue, String8 workspace_root,
+                                                            u64 id, u64 token,
+                                                            BqOutcome terminal_outcome)
+{
+    BqError error = bq_workspace_reconcile_controlled(queue, workspace_root, id, token,
+                                                       terminal_outcome, NULL, NULL);
+    return error;
+}
+
+BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token)
+{
+    BqError error = bq_workspace_reconcile_outcome(queue, workspace_root, id, token, BQ_NO_OUTCOME);
     return error;
 }
 

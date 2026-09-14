@@ -9,8 +9,10 @@
 #endif
 #include "queue.c"
 #include "workspace.c"
+#include "worker_linux.c"
 #include "protocol.c"
 #include <inttypes.h>
+#include <limits.h>
 
 BUSTER_GLOBAL_LOCAL bool bq_decimal(char const* text, bool nonzero, u64* value)
 {
@@ -48,7 +50,17 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     bool valid = false;
     u64 id = 0;
     u64 argument = 0;
-    if (argc == 2 && !strcmp(argv[1], "capabilities"))
+    if (argc == 4 && !strcmp(argv[1], "worker-unit"))
+    {
+        valid = bq_decimal(argv[3], true, &argument) && argument <= INT_MAX;
+        error = valid ? bq_worker_unit(string_from_pointer(argv[2]), (int)argument) : BQ_BAD_REQUEST;
+        if (error != BQ_OK)
+        {
+            fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
+        }
+        return error == BQ_OK ? 0 : 1;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "capabilities"))
     {
         operation = BQ_OP_CAPABILITIES;
         valid = true;
@@ -121,6 +133,27 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                 bq_put32(body + 16, (u32)workspace.length);
                 memcpy(body + 20, workspace.pointer, (size_t)workspace.length);
                 body_size = 20 + (u32)workspace.length;
+            }
+        }
+        else if (argc == 7 && !strcmp(argv[1], "worker-run"))
+        {
+            String8 installed = string_from_pointer(argv[3]);
+            String8 workspace = string_from_pointer(argv[4]);
+            String8 lease = string_from_pointer(argv[5]);
+            operation = BQ_OP_WORKER_RUN;
+            valid = bq_decimal(argv[6], false, &argument) && argument <= UINT32_MAX &&
+                    installed.length <= BQ_PATH_CAP && workspace.length <= BQ_PATH_CAP && lease.length <= BQ_PATH_CAP &&
+                    installed.length + workspace.length + lease.length <= BQ_CONTROL_BODY - 16;
+            if (valid)
+            {
+                bq_put32(body, (u32)installed.length);
+                bq_put32(body + 4, (u32)workspace.length);
+                bq_put32(body + 8, (u32)lease.length);
+                bq_put32(body + 12, (u32)argument);
+                memcpy(body + 16, installed.pointer, (size_t)installed.length);
+                memcpy(body + 16 + installed.length, workspace.pointer, (size_t)workspace.length);
+                memcpy(body + 16 + installed.length + workspace.length, lease.pointer, (size_t)lease.length);
+                body_size = 16 + (u32)installed.length + (u32)workspace.length + (u32)lease.length;
             }
         }
         else if (argc == 3 && !strcmp(argv[1], "fake-run"))
@@ -207,7 +240,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             fprintf(diagnostics, "commands: capabilities | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
                     "status/result/cancel DIR JOB | logs DIR JOB [AFTER_SEQUENCE] | fake-run DIR | "
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
-                    "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | protocol DIR\n");
+                    "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
+                    "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR\n");
         }
     }
     bq_close(&queue);

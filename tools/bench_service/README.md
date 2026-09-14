@@ -1,11 +1,96 @@
 # Native queue and installed-input materializer for #437
 
 This is a local, one-shot control tool with a deterministic fake worker and a
-real installed-input materialization boundary. It is not yet the dedicated-host
-service. It does not execute source, spawn or contain workers, acquire the
-measurement host's inherited lease, change server configuration, listen on a
-socket, authenticate callers, measure performance or qualify a 9700X. Do not
-close #437 or accept compiler performance changes because these tests pass.
+real installed-input materialization boundary and a Linux containment
+supervisor. It is not yet the dedicated-host service: its fixed installed
+helper returns `unsupported`. It does not execute source, change server
+configuration, listen on a socket, authenticate callers, measure performance
+or qualify a 9700X. Do not close #437 or accept compiler performance changes
+because these tests pass.
+
+## Linux installed worker boundary
+
+`worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
+single-job supervisor. A request may name `validate-buster-v1`; it cannot
+supply a program, argument, unit name, resource property, cgroup path or
+timeout. The service constructs one fixed `/usr/bin/systemd-run --scope`
+invocation of `/usr/local/libexec/buster-bench-service worker-unit`.
+`worker-unit` currently exits unsupported after proving it inherited the exact
+stable lease open-file description. This cannot be interpreted as a successful
+performance result.
+
+For a fresh real job the server acquires the cooperative host lease before FIFO
+reservation and materialization. It keeps that descriptor while the scoped
+helper receives a duplicate, while result or failure evidence becomes durable,
+while TERM/KILL escalation runs, until `cgroup.events` is unpopulated and
+workspace reconciliation durably releases the queue job. No later queue job
+can reserve while any of those steps is uncertain.
+
+Cleanup sends TERM, polls descriptor-validated recursive population every
+100 ms for the configured 10-second grace, then sends KILL and polls for at
+most another 10 seconds. It reaps the scoped helper only after recursive
+emptiness. A start/observation failure that cannot prove physical ownership
+retains the active queue admission and the live helper's inherited host lock;
+it does not guess that a transient scope disappeared.
+
+All manager subprocess pipe reads and child waits use monotonic deadlines;
+signal interruption cannot restart an unbounded relative wait. Fixed manager
+commands have a five-second deadline, while the joined helper is bounded by
+its fixed RuntimeMax plus cleanup allowance. If the helper did not inherit the
+lease or already exited before ownership became observable, the live
+coordinator retains its own lease descriptor in quarantine across recovery
+calls. It releases that descriptor only after physical cleanup and durable
+workspace/job reconciliation. A cancellation observed before a job exists
+returns without dereferencing or reserving one.
+
+A successful result is not committed across an unchecked signal window.
+Cancellation is sampled after each durable success-phase transition and after
+physical workspace removal. TERM/INT are masked at a checked boundary
+immediately before the final journal append; that boundary is the completion
+linearization point. A cancellation ordered before it makes the terminal
+outcome `cancelled` on replay.
+
+If `systemd-run` starts but no trustworthy scope identity can be bound, the
+server cannot signal an unverified unit name. It instead kills and reaps the
+tracked launcher PID under the command deadline while retaining the active job
+and coordinator quarantine lease for the still-ambiguous scope state.
+
+Before CONT, the server verifies the exact boot ID, deterministic scope name,
+manager ControlGroup, AllowedCPUs, MemoryMax, MemorySwapMax, TasksMax and
+RuntimeMaxUSec. It opens every cgroup component without following a symlink and
+verifies the leaf plus every ancestor below the trusted cgroup-v2 mount. A
+tighter ancestor is a configuration mismatch, not a silently different
+experiment. `systemd-run` success alone never proves completion: exact unit
+identity and an empty recursive cgroup are required.
+
+Lease parents and the cgroup root are parsed as strict absolute paths and
+opened one component at a time from `/` with `O_NOFOLLOW`. Every ancestor must
+be root/service-owned and not group/world writable, except a root-owned sticky
+handoff directory such as `/tmp`; the final lease parent must be private to the
+service account. The configured cgroup root must remain root/service-owned and
+non-writable by other users. Dot components and symlink aliases fail closed.
+
+The durable `worker-JOB` intent binds `{job, token, request digest, boot_id,
+unit_name}` before launch. Before the helper is continued, an immutable
+`worker-instance-JOB` record additionally binds the manager invocation ID,
+validated cgroup path and descriptor-observed device/inode identities for the
+configured root, service slice and leaf. Every signal and final absence proof
+revalidates that instance; same-name or slice replacement is quarantined. On restart a
+different boot ID is interrupted only if no terminal outcome was durable. An
+already-durable success/failure/cancellation is preserved while cleanup is
+completed. On the same boot the exact instance is terminated, never adopted as
+successful work. A missing record, foreign unit/cgroup identity, or failed
+populated-descendant cleanup leaves the active job reconciliation-required.
+OOM, runtime timeout, ordinary execution failure and cancellation retain
+distinct evidence/outcomes.
+
+The production systemd path is Linux-only. Windows and macOS return
+`unsupported`; those builds still compile the bounded codec. Injected tests
+cover fixed argv/resource propagation, ancestor verification, lease ordering,
+restart identity, reboot interruption, distinct terminal causes and a live
+`setsid` descendant that forces TERM/KILL cleanup. They do not replace a
+privileged live-systemd qualification. Reference deployment files are under
+`deploy/`; nothing in the build installs, enables or mutates them.
 
 ## Build and registered tests
 
@@ -121,10 +206,12 @@ assumed durable local-storage contract and is not a supported repair path.
 Schema 1 is the exact fake-recipe format published by the queue-only slice.
 Schema 2 retains the same framing and event kinds but admits the pinned real
 recipe and its fail-to-cleaning transition. Replay accepts a schema-1 prefix
-followed by schema-2 records and rejects a 2-to-1 downgrade. Opening a legacy
-journal does not rewrite it; the first subsequent mutation appends a durably
-versioned schema-2 record. Old binaries cannot consume schema 2 and fail closed
-at its first header; they must not open a journal after it has been upgraded.
+followed by schema-2 records. Schema 3 adds only supervisor-owned real-job
+success and interrupted transitions. Replay accepts monotonic 1-to-2-to-3
+prefixes and rejects every downgrade. Opening an older journal does not rewrite
+it; the first subsequent mutation appends a durably versioned schema-3 record.
+Schema-1/2 binaries cannot consume schema 3 and fail closed at its first
+header; they must not open a journal after it has been upgraded.
 
 A complete unacknowledged write may survive a crash and is replayed. An
 incomplete unacknowledged write is discarded as above. Acknowledged writes are
@@ -300,7 +387,7 @@ network transport, timeout policy or authentication service. Human CLI commands
 use this same dispatcher.
 
 The 24-byte header is `BQP1` (four bytes), schema (u32), operation (u32), payload
-length (u32 <=512), correlation (u64). Control schema 2 adds operations 9/10 and the
+length (u32 <=512), correlation (u64). Control schema 2 adds operations 9..11 and the
 failure field while retaining schema 1 request/response behavior and its
 120-byte status body. Truncation, trailing bytes, unsupported versions or
 operations, malformed payloads, and oversized lengths fail. Response operation
@@ -308,12 +395,14 @@ is request operation OR `0x80000000`; schema and correlation are echoed for a
 valid envelope. Every response payload begins with a four-byte `BqError` code
 (see `queue.h`); nonzero codes must be handled before parsing a success payload.
 
-Operations 1..10 are capabilities (empty), submit (canonical request), status
+Operations 1..11 are capabilities (empty), submit (canonical request), status
 (job u64), result (job u64), cancel (job u64), logs (job u64, after-sequence u64),
 fake-run (empty), fake-reconcile (job u64, token u64), materialize (installed
 path length u32, workspace path length u32, then both paths), and
 workspace-reconcile (job u64, token u64, workspace path length u32, path).
-Both paths are absolute and at most 192 bytes.
+Operation 11 is worker-run (installed/workspace/lease path lengths and CPU u32,
+then the three paths). Paths are absolute and at most 192 bytes; their combined
+worker payload must also fit the fixed 512-byte body.
 
 Schema 2 status-like replies have 124-byte bodies: error at 0; job/token/journal-sequence
 u64 at 4/12/20; phase/outcome/validity/cancel-intent/reconciliation/pending/retained
@@ -339,6 +428,10 @@ status/result response at the top-level error field.
 | Recovery without exactly-once fiction | Poisoned I/O handles; partial/full reservation boundaries; reconciliation required before reuse; recorded outcome preserved |
 | Bounded CLI/control operations | Same dispatcher for CLI and binary frames; truncation/version/length/numeric validation; bounded journal-event pagination |
 | Separate execution outcome/validity | Successful, failed, cancelled and interrupted fake jobs remain not-evaluated |
+| Lease before installed inputs | `bq_worker_run`; busy inherited-lease fixture leaves the FIFO job queued with no attempt |
+| Durable scoped identity/recovery | intent plus immutable invocation/cgroup-inode binding; same-boot exact termination, same-name reuse quarantine, reboot interruption without contradicting a durable outcome |
+| Resource and process-tree containment | Fixed systemd argv; manager plus cgroup-v2 leaf/ancestor validation; live detached descendant TERM/KILL/recursive-empty fixture |
+| Distinct terminal causes | Durable worker failure, OOM and timeout evidence; cancellation outcome retained separately |
 | Installed recipe/source validation | Exact recipe bytes; requested revision, safe sorted paths and source SHA-256; durable failure reasons |
 | Per-attempt workspace isolation | Exclusive job/token identity; separate base/candidate source and build trees; read-only verified sources |
 | Cleanup/recovery | Seal-required removal, restart reconciliation, collision/tamper/cleanup failures retain active admission |
@@ -348,9 +441,12 @@ reproduced on main. Exact candidate SHAs, commands and observed CI results
 belong in the PR evidence; this document is not an assertion that unrun gates
 passed.
 
-Still outside this slice: build/validate/compare execution; systemd and process
-containment; inherited measurement lease integration; boot/unit reconciliation;
-transport/authentication; multi-client service loop; deployment and retention
-migration; qualification, A/A, physical 9700X acceptance and real result bundles.
+Still outside this slice: build/validate/compare execution and real measurement;
+live-systemd/polkit/deployment qualification; transport/authentication;
+multi-client service loop; retention migration; qualification, A/A, physical
+9700X acceptance and real result bundles. This slice contains repository-only
+systemd/cgroup supervision, inherited lease handling and boot/unit
+reconciliation with injected fixtures; those are not claims about a deployed
+host.
 No credentials, server settings, benchmark thresholds, production runner
 ownership or parent-issue closure are authorized by this implementation.
