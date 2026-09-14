@@ -708,27 +708,26 @@ jobs:
           fi
           rm -f "$expected_selection_path"
           trap - EXIT
-          baseline_arguments=()
           case "$expected_selection" in
             compare)
               if [[ ! -f build/analyzer-baseline || -L build/analyzer-baseline || ! -x build/analyzer-baseline ]]; then
                 echo '::error::Analyzer comparison requires a regular, non-symlink executable baseline driver.'
                 exit 1
               fi
-              baseline_arguments=(--baseline-driver build/analyzer-baseline)
+              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" --baseline-driver build/analyzer-baseline 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
               ;;
             skip)
               if [[ -e build/analyzer-baseline || -L build/analyzer-baseline ]]; then
                 echo '::error::Analyzer skip requires the baseline driver path to be absent.'
                 exit 1
               fi
+              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
               ;;
             *)
               echo '::error::Missing or invalid analyzer comparison selection.'
               exit 1
               ;;
           esac
-          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" "${baseline_arguments[@]}" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Retain analyzer inventory, results and measurements
         if: always()
