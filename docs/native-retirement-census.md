@@ -9,7 +9,7 @@ differential runner; it does not replace either or authorize backend retirement.
 The admitted input inventory is
 [`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 548
 explicit SHA-256 rows bind every tracked test byte at the approval point: 402
-subject inputs (397 supported-object subjects and 5 registered non-object
+subject inputs (396 supported-object subjects and 6 registered non-object
 controls), 12 registered rejection controls, 70 support files and 64 dormant
 custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
@@ -154,7 +154,7 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 548 input rows, 402 subject inputs (397 supported-object subjects and five
+the 548 input rows, 402 subject inputs (396 supported-object subjects and six
 non-object controls), 77,184 support-contract identities,
 or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
 generated data, or any other non-repo dependency remain visible diagnostic rows
@@ -162,13 +162,13 @@ until their owning gate supplies that setup.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1`, materializer
+`f45cd452eb02b56b06f91db70064c735ab55810ad8fdc690e2a6be7d3c92a562`, materializer
 receipt SHA-256
-`944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435`, project
+`9102b77674285f04e4d4fd781d80f273051674a9f911dab2c868adcf5922523c`, project
 closure SHA-256
-`d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be`, and
+`f370491368b6f7b013619f412640126454681043f27a2b9fb9f92f2465555a3d`, and
 materializer ledger SHA-256
-`b6e9e286de94f31af3c9da879e4809df65c3aff318d5fea51b3cb79da6e958a7`.
+`60953f97c4968a4888863ebd0ab72dc17be550cb2d7f70b94c71455d8d6d9344`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
@@ -197,9 +197,10 @@ The current 402-subject support contract therefore freezes exactly
 additional validator-owned projection; it never removes a row or changes the
 input-byte ledger.
 
-The five subject-level non-object controls are `basic_c_macro_options.c`,
-`ebpf_scalar_regression.c`, `runtime_boundary_regression.c`,
-`wasm_memory_alignment_regression.c` and `windows_unicode_regression.c`.
+The six subject-level non-object controls are `tests/basic_c_macro_options.c`,
+`tests/ebpf_scalar_regression.c`, `tests/gpu/metal_reader.c`,
+`tests/runtime_boundary_regression.c`, `tests/wasm_memory_alignment_regression.c`
+and `tests/windows_unicode_regression.c`.
 Their source registration is authenticated as
 `registered-non-object-control`: every matrix identity remains in `rows.tsv`,
 but the producer emits a retained-control record and does not invoke an object
