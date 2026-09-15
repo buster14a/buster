@@ -621,7 +621,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL String8 compiler_driver_test_dwarf_string
     String8 result = {0};
     if (offset < strings.length)
     {
-        result.pointer = strings.pointer + offset;
+        result.pointer = (char8*)strings.pointer + offset;
         while (offset < strings.length && strings.pointer[offset])
         {
             result.length += 1;
