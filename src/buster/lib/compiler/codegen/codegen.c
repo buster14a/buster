@@ -10310,6 +10310,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations_dense(Arena* arena, Co
     for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
     {
         MachineDebugValue const* value = function->debug_values + value_index;
+        // The row buffers hold one entry per piece the layout can describe, so
+        // a record claiming more pieces than that is clipped rather than read
+        // past them. The event-driven routine clips the same way.
+        u32 piece_count = BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces));
         u32 first_row = 0;
         u32 end_row = 0;
         bool malformed = false;
@@ -10332,7 +10336,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations_dense(Arena* arena, Co
         memset(piece_available[1], 0, sizeof(**piece_available) * row_capacity);
         if (value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
         {
-            for (u32 piece_index = 0; piece_index < value->piece_count; piece_index += 1)
+            for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
             {
                 if (!codegen_machine_debug_reference_rows_dense(function, placement, value->pieces[piece_index], value->piece_sizes[piece_index],
                                                           frame_base_offset, target, piece_rows[piece_index], piece_available[piece_index]))
@@ -10364,7 +10368,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations_dense(Arena* arena, Co
             {
                 bool all = value->piece_count == 2;
                 u32 piece_offset = 0;
-                for (u32 piece_index = 0; piece_index < value->piece_count; piece_index += 1)
+                for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
                 {
                     all = all && piece_available[piece_index][row];
                     pieces[piece_index] = piece_rows[piece_index][row];
