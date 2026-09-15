@@ -5345,13 +5345,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_assembly_identity(MachineA64Selector
     u32 values[MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS];
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
-        if ((plan.matching_inputs >> index) & 1u)
+        if (((u32)plan.matching_inputs >> index) & 1u)
         {
             continue;
         }
         IrValueId source = instruction->operands[plan.source_operands[index]];
         u32 source_register;
-        if ((plan.read_write >> index) & 1u)
+        if (((u32)plan.read_write >> index) & 1u)
         {
             MachineSelectionAddress address = machine_a64_address(selector, source);
             source_register = machine_a64_synthesize_register(selector);
@@ -5375,7 +5375,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_assembly_identity(MachineA64Selector
     }
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
-        if ((plan.outputs >> index) & 1u)
+        if (((u32)plan.outputs >> index) & 1u)
         {
             IrValueId place = instruction->operands[index];
             MachineSelectionAddress address = machine_a64_address(selector, place);
@@ -8660,7 +8660,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     u32 push_count = 0;
     for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
     {
-        push_count += (placement->callee_saved_mask >> saved_register) & 1u;
+        push_count += (u32)((placement->callee_saved_mask >> saved_register) & 1u);
     }
     // Stack layout: [sp .. sp+frame_area) holds the placement's slots with
     // the callee-saved save area at the top (the offsets the shared
