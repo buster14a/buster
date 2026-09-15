@@ -27,7 +27,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"
-FULL_SUPPORT_CONTRACT_SHA256 = "b8aa950cbf566f3a8057cd2a401bf71851f6ca8e5bca1d34e6b327e8899c98fb"
+FULL_SUPPORT_CONTRACT_SHA256 = "939752c41c4c442d41c7fceb9d45c668610c95454eb2fc8628b89b57e19b9fd2"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -41,8 +41,8 @@ MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
-FULL_APPLICABILITY_LEDGER_COUNT = 440
-FULL_APPLICABILITY_LEDGER_SHA256 = "49907ded17309ba2ae7a68c1acb5217a7465f343624717a20c9ce0dca8eae801"
+FULL_APPLICABILITY_LEDGER_COUNT = 416
+FULL_APPLICABILITY_LEDGER_SHA256 = "212727cb27536a77c72657b9a63a9b3f5d00ecf3b929fe1fc5a8c5fb5e3b2e82"
 FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1"
 FULL_DEPENDENCY_RECEIPT_SHA256 = "944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435"
 FULL_DEPENDENCY_PROJECT_SHA256 = "d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be"
@@ -106,6 +106,12 @@ FIXTURE_RECIPES = {
     "tests/basic_c_typeof.c": ("c23", ("-std=c23",)),
     "tests/basic_c_dialect.c": ("c23-dialect-assertions",
                                  ("-std=c23", "-DEXPECTED_STDC_VERSION=202311L", "-DEXPECTED_GNU=0")),
+    "tests/basic_c_predicate_bank.c": ("x86-avx512", ()),
+    "tests/basic_c_atomic_aggregate.c": ("x86-cx16", ()),
+}
+FIXTURE_X86_CPUS = {
+    "tests/basic_c_predicate_bank.c": "skylake-avx512",
+    "tests/basic_c_atomic_aggregate.c": "haswell",
 }
 
 
@@ -177,6 +183,12 @@ def manifest_identity_digest(manifest):
 
 def expected_fixture_recipe(path):
     return FIXTURE_RECIPES.get(path, ("compiler-default", ()))
+
+
+def expected_cpu(fixture, target, fallback):
+    if target.startswith("x86_64-") and fixture in FIXTURE_X86_CPUS:
+        return FIXTURE_X86_CPUS[fixture]
+    return fallback
 
 
 def unsigned_decimal(value, bits, field):
@@ -543,7 +555,7 @@ def validate_argv(directory, manifest, row, recipes):
     lowering = "-ffrontend-ssa" if row["frontend_lowering"] == "direct-ssa" else "-fno-frontend-ssa"
     expected = [str(recorded_root / executable), "cc", "-c", "-g0", "-v", "-fwrapv",
                 "-fno-strict-aliasing", "-funsigned-char", "-target", row["target"],
-                "-mcpu=" + manifest["cpu"], "-fPIC" if row["PIC"] == "1" else "-fno-pic",
+                "-mcpu=" + row["cpu"], "-fPIC" if row["PIC"] == "1" else "-fno-pic",
                 lowering, "-fregister-allocator=" + row["allocator"], "-fverify-codegen",
                 "-fmachine-fallback" if baseline else "-fno-machine-fallback", "-nostdinc",
                 "-isystem", str(recorded_root / "dependencies" / "resource-include"),
@@ -1017,7 +1029,7 @@ def validate(directory):
         assert row["compile_obligation"] == inputs[row["fixture"]]["compile_obligation"]
         assert row["compile_obligation"] in {SUPPORTED_OBJECT_OBLIGATION, NON_OBJECT_CONTROL_OBLIGATION}
         assert row["diagnostic_obligation"] == "none"
-        assert row["cpu"] == manifest["cpu"] and row["cpu_features"]
+        assert row["cpu"] == expected_cpu(row["fixture"], row["target"], manifest["cpu"]) and row["cpu_features"]
         assert row["frontend_lowering"] in {"direct-ssa", "local-backed-canonical"}
         assert row["PIC"] in {"0", "1"} and row["selected"] in {"0", "1"}
         assert tuple(row[field] for field in ("target_abi", "link_obligation", "execution_obligation")) == TARGETS[row["target"]]
