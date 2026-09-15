@@ -652,7 +652,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_object_debug_u3
         for (u32 relocation_index = 0; object->relocations && relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation relocation = object->relocations[relocation_index];
-            if (relocation.section == section && relocation.offset == offset && relocation.addend >= 0 && relocation.addend <= UINT32_MAX)
+            if (relocation.section == (u32)section && relocation.offset == offset && relocation.addend >= 0 && relocation.addend <= UINT32_MAX)
             {
                 *value = (u32)relocation.addend;
                 break;
