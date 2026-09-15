@@ -5247,6 +5247,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
     {
         IrFunction* function = builder->function;
         u32 block_count = function->block_count;
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_ROWS_BEFORE_FINISH, ssa->slot_count);
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_CAPACITY_BEFORE_FINISH, ssa->slot_capacity);
         u8* memory = arena_allocate(builder->scratch_arena, u8, builder->direct_ssa->local_count);
         memset(memory, 0, builder->direct_ssa->local_count);
         c_ir_ssa_classify_places(builder, memory);
@@ -5379,6 +5381,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 parameter->incoming_count += 1;
             }
         }
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_ROWS_AFTER_PROPAGATION, ssa->slot_count);
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_CAPACITY_AFTER_PROPAGATION, ssa->slot_capacity);
         u32 count = function->value_count;
         u32* replacements = arena_allocate(builder->scratch_arena, u32, count);
         u32* value_map = arena_allocate(builder->scratch_arena, u32, count);

@@ -33,6 +33,10 @@
     X(SSA_SLOT_GROWS, ssa_slot_grows) \
     X(SSA_SLOT_ROWS_CLEARED, ssa_slot_rows_cleared) \
     X(SSA_SLOT_ROWS_REHASHED, ssa_slot_rows_rehashed) \
+    X(SSA_SLOT_ROWS_BEFORE_FINISH, ssa_slot_rows_before_finish) \
+    X(SSA_SLOT_CAPACITY_BEFORE_FINISH, ssa_slot_capacity_before_finish) \
+    X(SSA_SLOT_ROWS_AFTER_PROPAGATION, ssa_slot_rows_after_propagation) \
+    X(SSA_SLOT_CAPACITY_AFTER_PROPAGATION, ssa_slot_capacity_after_propagation) \
     X(SSA_PREDECESSOR_TARGET_VISITS, ssa_predecessor_target_visits) \
     X(SSA_PREDECESSOR_EDGES, ssa_predecessor_edges) \
     X(SSA_PENDING_PARAMETER_VISITS, ssa_pending_parameter_visits) \
