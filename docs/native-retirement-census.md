@@ -153,7 +153,7 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 548 input rows, 402 subject inputs (397 supported-object subjects and five
+the 548 input rows, 402 subject inputs (396 supported-object subjects and six
 non-object controls), 77,184 support-contract identities,
 or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
 generated data, or any other non-repo dependency remain visible diagnostic rows
@@ -196,9 +196,10 @@ The current 402-subject support contract therefore freezes exactly
 additional validator-owned projection; it never removes a row or changes the
 input-byte ledger.
 
-The five subject-level non-object controls are `basic_c_macro_options.c`,
-`ebpf_scalar_regression.c`, `runtime_boundary_regression.c`,
-`wasm_memory_alignment_regression.c` and `windows_unicode_regression.c`.
+The six subject-level non-object controls are `tests/basic_c_macro_options.c`,
+`tests/ebpf_scalar_regression.c`, `tests/gpu/metal_reader.c`,
+`tests/runtime_boundary_regression.c`, `tests/wasm_memory_alignment_regression.c`
+and `tests/windows_unicode_regression.c`.
 Their source registration is authenticated as
 `registered-non-object-control`: every matrix identity remains in `rows.tsv`,
 but the producer emits a retained-control record and does not invoke an object
