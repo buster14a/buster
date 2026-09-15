@@ -80,6 +80,7 @@ GENERATED_METADATA_NAMES = frozenset({
     "fallback-counters.tsv",
     "fallback-functions.tsv",
     "applicability.tsv",
+    "applicability-skips.tsv",
     "residual.tsv",
     "common-row-transitions.json",
     "census-validation-v2.json",
@@ -116,7 +117,7 @@ ARCHIVED_TARGETS = (
 ARCHIVED_FRONTENDS = ("local-backed-canonical", "direct-ssa")
 ARCHIVED_PICS = ("0", "1")
 ARCHIVED_ALLOCATORS = ("mir-stack", "fast", "quality")
-SUPPORT_CONTRACT_SHA256 = "feea92fd08e8c513ee74ae976232e1e828bc7815b3759324d1384fc20344b985"
+SUPPORT_CONTRACT_SHA256 = "b8aa950cbf566f3a8057cd2a401bf71851f6ca8e5bca1d34e6b327e8899c98fb"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
