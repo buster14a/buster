@@ -531,18 +531,18 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             if (module->local_promotion.promoted_locals)
             {
-                validated = false;
                 // Mutation ends the input certificate's scope. The optimized
                 // production fast path trusts this pass's own contract, not
                 // the producer's certificate. Debug/test/sanitizer consumers
                 // check the transformed rows before publication instead.
-                if (!input_certified || BUSTER_IR_TRANSFORM_CHECKS)
+                bool checked = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
+                if (checked)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
                     result = ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
-                    validated = result.error == IR_VALIDATION_NONE;
                 }
+                validated = checked && result.error == IR_VALIDATION_NONE;
             }
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
         }
