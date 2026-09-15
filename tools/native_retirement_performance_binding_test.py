@@ -32,6 +32,11 @@ class BindingTests(unittest.TestCase):
     _full_record = None
     _full_contents = None
 
+    def test_support_declaration_digest_is_bound(self):
+        declaration = (ROOT / binding.SUPPORT_DECLARATION_PATH).read_bytes()
+        self.assertEqual(hashlib.sha256(declaration).hexdigest(),
+                         binding.SUPPORT_DECLARATION_SHA256)
+
     @staticmethod
     def _artifact(contents, path, data):
         if isinstance(data, str):
