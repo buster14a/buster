@@ -8953,7 +8953,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
             state->prefer_frame = true;
             state->epoch += 1;
         }
-        else if (state->frame_valid && virtual_register < function->virtual_register_count &&
+        else if (state->frame_valid && virtual_register < function->virtual_register_count && offset != MACHINE_VIRTUAL_REGISTER_NO_HOME &&
                  offset == placement->virtual_register_offsets[virtual_register])
         {
             state->frame_valid = false;
@@ -9490,14 +9490,18 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* funct
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(CodegenMachineDebugReference const* state, u32 row, s32 frame_offset)
+BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(CodegenMachineDebugReference const* state, u32 row,
+                                                                            s32 frame_offset, bool has_frame_home)
 {
     CodegenMachineDebugSelection result = {.row = row, .physical_register = -1, .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE};
     bool selected_frame = state->frame_valid && (state->prefer_frame || state->physical_register < 0);
     if (selected_frame)
     {
-        result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
-        result.frame_offset = frame_offset;
+        if (has_frame_home)
+        {
+            result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
+            result.frame_offset = frame_offset;
+        }
     }
     else if (state->physical_register >= 0)
     {
@@ -9616,8 +9620,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                                                    u32* entry_count)
 {
     s32 frame_offset = 0;
-    bool result = payload < function->virtual_register_count && index->edits_valid &&
-                  codegen_machine_debug_frame_offset(placement->virtual_register_offsets[payload], frame_base_offset, target, &frame_offset);
+    bool result = payload < function->virtual_register_count && index->edits_valid;
+    u32 home = result ? placement->virtual_register_offsets[payload] : MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    bool has_frame_home = home != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    result = result && (!has_frame_home || codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset));
     *entry_count = 0;
     if (result)
     {
@@ -9635,7 +9641,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                 remat_group = codegen_machine_debug_group_find(&index->remats, machine_ref_payload(instruction->operands[1]));
             }
         }
-        u32 home_group = codegen_machine_debug_group_find(&index->homes, placement->virtual_register_offsets[payload]);
+        u32 home_group = has_frame_home ? codegen_machine_debug_group_find(&index->homes, home) : UINT32_MAX;
         u32 home_cursor = home_group == UINT32_MAX ? 0 : index->homes.offsets[home_group];
         u32 remat_cursor = remat_group == UINT32_MAX ? 0 : index->remats.offsets[remat_group];
         u32 subject_cursor = index->subject_offsets[payload];
@@ -9646,7 +9652,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 unmapped_cursor = index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT];
         u32 block_cursor = 0;
         u32 row = 0;
-        codegen_machine_debug_selection_push(entries, entry_count, capacity, codegen_machine_debug_sample(&state, 0, frame_offset),
+        codegen_machine_debug_selection_push(entries, entry_count, capacity,
+                                             codegen_machine_debug_sample(&state, 0, frame_offset, has_frame_home),
                                              function->instruction_count);
         while (row < function->instruction_count)
         {
@@ -9793,7 +9800,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     }
                     CodegenMachineDebugSelection sampled = {.row = next, .physical_register = -1,
                                                             .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE};
-                    if (!selected_invalid && selected_frame)
+                    if (!selected_invalid && selected_frame && has_frame_home)
                     {
                         sampled.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
                         sampled.frame_offset = frame_offset;
@@ -9805,7 +9812,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     }
                     codegen_machine_debug_selection_push(entries, entry_count, capacity, sampled, function->instruction_count);
                     codegen_machine_debug_selection_push(entries, entry_count, capacity,
-                                                         codegen_machine_debug_sample(&state, next + 1u, frame_offset),
+                                                         codegen_machine_debug_sample(&state, next + 1u, frame_offset, has_frame_home),
                                                          function->instruction_count);
                     row = next + 1u;
                 }
@@ -10183,8 +10190,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
     {
         return false;
     }
+    // A homeless register is a value without a frame location, not invalid IR:
+    // rows that would select its frame copy stay unavailable.
+    u32 home = placement->virtual_register_offsets[payload];
     s32 frame_offset = 0;
-    if (!codegen_machine_debug_frame_offset(placement->virtual_register_offsets[payload], frame_base_offset, target, &frame_offset))
+    if (home != MACHINE_VIRTUAL_REGISTER_NO_HOME && !codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset))
     {
         return false;
     }
@@ -10268,7 +10278,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
                                              selected_register, &selected_invalid);
             edit_cursor += 1;
         }
-        if (!selected_invalid && selected_frame)
+        if (!selected_invalid && selected_frame && home != MACHINE_VIRTUAL_REGISTER_NO_HOME)
         {
             rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_FRAME, .frame_offset = frame_offset};
             available[row] = true;

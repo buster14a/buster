@@ -1560,6 +1560,11 @@ struct MachineScheduleResult
     u8 reserved[7];
 };
 
+// A virtual register offset naming no frame home. The predicate bank drops the
+// home of every MASK value no predicate SPILL or RELOAD names; such a value
+// lives only in a k register, so it has no frame location.
+#define MACHINE_VIRTUAL_REGISTER_NO_HOME UINT32_MAX
+
 // MIR_STACK placement: every virtual register owns one 8-byte frame slot and
 // every operand round-trips through a fixed scratch register. This is the
 // selector/encoder verification mode, not an allocator.
@@ -1568,7 +1573,8 @@ struct MachineStackPlacement
 {
     MachineEdit* edits;
     // Frame offsets (positive displacements below the frame base) per vreg
-    // slot and per selector stack slot.
+    // slot and per selector stack slot. A vreg offset may be
+    // MACHINE_VIRTUAL_REGISTER_NO_HOME.
     u32* virtual_register_offsets;
     u32* stack_slot_offsets;
     u32 edit_count;
