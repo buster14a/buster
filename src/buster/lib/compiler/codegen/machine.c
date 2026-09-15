@@ -641,6 +641,29 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
         .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
+    },
+    [MACHINE_X64_ATOMIC_STORE16] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
+    },
+    [MACHINE_X64_ATOMIC_LOAD16] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
+    },
+    [MACHINE_X64_ATOMIC_RMW16] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX) |
+                        (1ull << MACHINE_X64_R8) | (1ull << MACHINE_X64_R9),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
     },
     [MACHINE_X64_MFENCE] = {
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
@@ -1217,7 +1240,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
 // The registry is indexed by opcode offset from MOV_RI, so it has to span the
 // whole x86-64 range: this names the last opcode in it, and a new one added
 // past that has to be named here instead.
-BUSTER_CT_CHECK(MACHINE_X64_MULH64 - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
+BUSTER_CT_CHECK(MACHINE_X64_ATOMIC_RMW16 - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
 
 BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_registry[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
 #define MACHINE_X64_REGISTRY_ROW(opcode_value, category_value, index_value, status_value) \
@@ -1641,7 +1664,12 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
             encode_budget = 48;
             break;
         case MACHINE_X64_ATOMIC_CMPXCHG16:
+        case MACHINE_X64_ATOMIC_STORE16:
+        case MACHINE_X64_ATOMIC_LOAD16:
             encode_budget = 96;
+            break;
+        case MACHINE_X64_ATOMIC_RMW16:
+            encode_budget = 128;
             break;
         default:
             break;
@@ -1717,7 +1745,7 @@ MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordina
 MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode)
 {
     MachineX64EmitRegistryEntry const* result;
-    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_MULH64)
+    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_ATOMIC_RMW16)
     {
         result = 0;
     }
@@ -3118,6 +3146,42 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             u32 slot = machine_ref_payload(frame);
             valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
                     function->stack_slot_sizes[slot] >= 16 && instruction->payload == 0;
+        } break;
+        case MACHINE_X64_ATOMIC_STORE16:
+        {
+            MachineRef desired = instruction->operands[0];
+            u32 slot = machine_ref_payload(desired);
+            // The row always publishes one sixteen-byte desired image.  The
+            // three frame operands are deliberately repeated so the
+            // constrained allocator can keep the value live across the
+            // CMPXCHG16B retry loop without inventing an address-sized
+            // operand class.
+            valid = instruction->payload >= 9 && instruction->payload <= 16 && instruction->flags == 0 &&
+                    machine_ref_kind(desired) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[slot] >= 16 && instruction->operands[1] == desired &&
+                    instruction->operands[2] == desired;
+        } break;
+        case MACHINE_X64_ATOMIC_LOAD16:
+        {
+            MachineRef result = instruction->operands[0];
+            u32 slot = machine_ref_payload(result);
+            valid = instruction->payload >= 9 && instruction->payload <= 16 && instruction->flags == 0 &&
+                    machine_ref_kind(result) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[slot] >= 16 && instruction->operands[1] == result &&
+                    instruction->operands[2] == result;
+        } break;
+        case MACHINE_X64_ATOMIC_RMW16:
+        {
+            MachineRef result = instruction->operands[0];
+            MachineRef desired = instruction->operands[1];
+            u32 result_slot = machine_ref_payload(result);
+            u32 desired_slot = machine_ref_payload(desired);
+            u32 atomic_operation = instruction->payload >> 8;
+            valid = (instruction->payload & 0xffu) == 16 && atomic_operation < IR_ATOMIC_OPERATION_COUNT &&
+                    instruction->flags == 0 && machine_ref_kind(result) == MACHINE_REF_STACK_SLOT &&
+                    result_slot < function->stack_slot_count && function->stack_slot_sizes[result_slot] >= 16 &&
+                    machine_ref_kind(desired) == MACHINE_REF_STACK_SLOT && desired_slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[desired_slot] >= 16 && instruction->operands[2] == desired;
         } break;
         case MACHINE_X64_LOAD_XMM_FRAME128:
         case MACHINE_X64_STORE_XMM_FRAME128:

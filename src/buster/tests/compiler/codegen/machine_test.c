@@ -5802,6 +5802,49 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
     storage_function.outgoing_bytes = 0;
 
+    // Width-16 x86 stores publish one sixteen-byte desired frame image.  The
+    // payload carries the logical byte count (the upper seven bytes are
+    // padding for payloads 9..15), while all three frame operands must name
+    // that same image.  Keep malformed rows in this direct verifier fixture
+    // so placement and encoding cannot accidentally become the first guard.
+    MachineInstruction store16_rows[2] = {
+        {
+            .opcode = MACHINE_X64_ATOMIC_STORE16,
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 0), machine_ref_make(MACHINE_REF_STACK_SLOT, 0),
+                         machine_ref_make(MACHINE_REF_STACK_SLOT, 0), machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_R10)},
+            .payload = 16,
+        },
+        {.opcode = MACHINE_X64_RET},
+    };
+    MachineBlock store16_block = {.instruction_count = 2};
+    u32 store16_slot_sizes[2] = {16, 16};
+    MachineFunction store16_function = {
+        .instructions = store16_rows,
+        .instruction_count = BUSTER_ARRAY_LENGTH(store16_rows),
+        .virtual_registers = 0,
+        .virtual_register_count = 0,
+        .blocks = &store16_block,
+        .block_count = 1,
+        .stack_slot_sizes = store16_slot_sizes,
+        .stack_slot_count = 1,
+        .target = machine_target_x86_64(),
+    };
+    BUSTER_TEST(arguments, machine_verify_function(&store16_function).error == MACHINE_VERIFY_NONE);
+    store16_rows[0].payload = 8;
+    BUSTER_TEST(arguments, machine_verify_function(&store16_function).error == MACHINE_VERIFY_PAYLOAD);
+    store16_rows[0].payload = 17;
+    BUSTER_TEST(arguments, machine_verify_function(&store16_function).error == MACHINE_VERIFY_PAYLOAD);
+    store16_rows[0].payload = 16;
+    store16_slot_sizes[0] = 8;
+    BUSTER_TEST(arguments, machine_verify_function(&store16_function).error == MACHINE_VERIFY_PAYLOAD);
+    store16_slot_sizes[0] = 16;
+    store16_function.stack_slot_count = 2;
+    store16_rows[0].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 1);
+    BUSTER_TEST(arguments, machine_verify_function(&store16_function).error == MACHINE_VERIFY_PAYLOAD);
+    store16_rows[0].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    store16_rows[0].flags = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&store16_function).error == MACHINE_VERIFY_PAYLOAD);
+
     MachineSwitchCase switch_case = {.target_block = 0};
     storage_function.switch_cases = &switch_case;
     storage_function.switch_case_count = 1;
@@ -6011,7 +6054,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 299);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 302);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -6107,7 +6150,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_X64_ATOMIC_STORE_XCHG] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_ATOMIC_RMW] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_ATOMIC_CMPXCHG] = MACHINE_SCHEDULE_UNIT_BARRIER,
-        [MACHINE_X64_ATOMIC_CMPXCHG16] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_ATOMIC_CMPXCHG16] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_ATOMIC_STORE16] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_ATOMIC_LOAD16] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_ATOMIC_RMW16] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_MFENCE] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_INT3] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_UD2] = MACHINE_SCHEDULE_UNIT_BARRIER,
@@ -6335,6 +6381,19 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cmpxchg16_info && (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) &&
                                    (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) &&
                                    cmpxchg16_info->clobber_mask == cmpxchg16_fixed);
+    MachineOpcodeInfo const atomic_load16_info = *machine_opcode_info(MACHINE_X64_ATOMIC_LOAD16);
+    BUSTER_TEST(arguments, atomic_load16_info.operand_count == 4 &&
+                               (atomic_load16_info.attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) &&
+                               (atomic_load16_info.attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) &&
+                               atomic_load16_info.clobber_mask == cmpxchg16_fixed &&
+                               atomic_load16_info.memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC);
+    MachineOpcodeInfo const atomic_rmw16_info = *machine_opcode_info(MACHINE_X64_ATOMIC_RMW16);
+    u64 atomic_rmw16_fixed = cmpxchg16_fixed | (1ull << MACHINE_X64_R8) | (1ull << MACHINE_X64_R9);
+    BUSTER_TEST(arguments, atomic_rmw16_info.operand_count == 4 &&
+                               (atomic_rmw16_info.attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) &&
+                               (atomic_rmw16_info.attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) &&
+                               atomic_rmw16_info.clobber_mask == atomic_rmw16_fixed &&
+                               atomic_rmw16_info.memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC);
     BUSTER_TEST(arguments, machine_opcode_info(MACHINE_OPCODE_COUNT) == 0);
 
     for (u16 opcode = MACHINE_OPCODE_SKELETON_NOP; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
@@ -6349,8 +6408,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 
     // A metadata-only CMPXCHG16B clobber must preserve RBX in every
     // placement mode, even though this fixture has no virtual value bound to
-    // RBX. Its address is constrained to RSI and the encoder must retain the
-    // old value from RAX:RDX in the result slot after the instruction.
+    // RBX. Its address is constrained to the ABI scratch (RSI on SysV and
+    // R11 on Win64), and the encoder must retain the old value from RAX:RDX
+    // in the result slot after the instruction.
     MachineFunction cmpxchg16_function = machine_test_build_cmpxchg16_function(arguments->arena);
     BUSTER_TEST(arguments, machine_verify_function(&cmpxchg16_function).error == MACHINE_VERIFY_NONE);
     MachineStackPlacement cmpxchg16_mir = machine_stack_placement_build(arguments->arena, &cmpxchg16_function);
@@ -6375,6 +6435,63 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cmpxchg16_mir.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI &&
                                    cmpxchg16_fast.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI &&
                                    cmpxchg16_quality.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI);
+    MachineFunction windows_cmpxchg16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+    windows_cmpxchg16_function.target = machine_target_x86_64_windows();
+    MachineStackPlacement windows_cmpxchg16_placement = machine_stack_placement_build(arguments->arena, &windows_cmpxchg16_function);
+    BUSTER_TEST(arguments, windows_cmpxchg16_placement.valid &&
+                               windows_cmpxchg16_placement.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_R11);
+    MachineFunction windows_store16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+    windows_store16_function.target = machine_target_x86_64_windows();
+    windows_store16_function.instructions[cmpxchg16_row].opcode = MACHINE_X64_ATOMIC_STORE16;
+    windows_store16_function.instructions[cmpxchg16_row].payload = 16;
+    MachineStackPlacement windows_store16_placement = machine_stack_placement_build(arguments->arena, &windows_store16_function);
+    BUSTER_TEST(arguments, windows_store16_placement.valid &&
+                               windows_store16_placement.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_R11);
+    MachineFunction windows_load16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+    windows_load16_function.target = machine_target_x86_64_windows();
+    windows_load16_function.instructions[cmpxchg16_row].opcode = MACHINE_X64_ATOMIC_LOAD16;
+    windows_load16_function.instructions[cmpxchg16_row].payload = 16;
+    windows_load16_function.instructions[cmpxchg16_row].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    windows_load16_function.instructions[cmpxchg16_row].operands[2] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&windows_load16_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement windows_load16_placement = machine_stack_placement_build(arguments->arena, &windows_load16_function);
+    MachineEncodeResult windows_load16_encoded = windows_load16_placement.valid
+                                                     ? machine_encode_x86_64(arguments->arena, &windows_load16_function, &windows_load16_placement)
+                                                     : (MachineEncodeResult){0};
+    BUSTER_TEST(arguments, windows_load16_encoded.valid &&
+                               windows_load16_placement.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_R11);
+    MachineFunction windows_rmw16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+    windows_rmw16_function.target = machine_target_x86_64_windows();
+    windows_rmw16_function.instructions[cmpxchg16_row].opcode = MACHINE_X64_ATOMIC_RMW16;
+    windows_rmw16_function.instructions[cmpxchg16_row].payload = 16u | ((u32)IR_ATOMIC_EXCHANGE << 8);
+    windows_rmw16_function.instructions[cmpxchg16_row].operands[2] = machine_ref_make(MACHINE_REF_STACK_SLOT, 1);
+    BUSTER_TEST(arguments, machine_verify_function(&windows_rmw16_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement windows_rmw16_placement = machine_stack_placement_build(arguments->arena, &windows_rmw16_function);
+    MachineEncodeResult windows_rmw16_encoded = windows_rmw16_placement.valid
+                                                     ? machine_encode_x86_64(arguments->arena, &windows_rmw16_function, &windows_rmw16_placement)
+                                                     : (MachineEncodeResult){0};
+    BUSTER_TEST(arguments, windows_rmw16_encoded.valid &&
+                               windows_rmw16_placement.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_R11);
+    for (u32 atomic_operation = 0; atomic_operation < IR_ATOMIC_OPERATION_COUNT; atomic_operation += 1)
+    {
+        MachineFunction rmw16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+        rmw16_function.instructions[cmpxchg16_row].opcode = MACHINE_X64_ATOMIC_RMW16;
+        rmw16_function.instructions[cmpxchg16_row].payload = 16u | (atomic_operation << 8);
+        rmw16_function.instructions[cmpxchg16_row].operands[2] = machine_ref_make(MACHINE_REF_STACK_SLOT, 1);
+        MachineStackPlacement rmw16_placement = machine_fast_placement_build(arguments->arena, &rmw16_function);
+        MachineEncodeResult rmw16_encoded = rmw16_placement.valid
+                                                 ? machine_encode_x86_64(arguments->arena, &rmw16_function, &rmw16_placement)
+                                                 : (MachineEncodeResult){0};
+        BUSTER_TEST(arguments, machine_verify_function(&rmw16_function).error == MACHINE_VERIFY_NONE && rmw16_encoded.valid);
+    }
+    MachineFunction short_store16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+    short_store16_function.instructions[cmpxchg16_row].opcode = MACHINE_X64_ATOMIC_STORE16;
+    short_store16_function.instructions[cmpxchg16_row].payload = 9;
+    MachineStackPlacement short_store16_placement = machine_fast_placement_build(arguments->arena, &short_store16_function);
+    MachineEncodeResult short_store16_encoded = short_store16_placement.valid
+                                                    ? machine_encode_x86_64(arguments->arena, &short_store16_function, &short_store16_placement)
+                                                    : (MachineEncodeResult){0};
+    BUSTER_TEST(arguments, short_store16_encoded.valid);
     MachineEncodeResult cmpxchg16_encoded = machine_encode_x86_64(arguments->arena, &cmpxchg16_function, &cmpxchg16_fast);
     bool saw_cmpxchg16 = false;
     bool saw_result_store = false;
@@ -6422,7 +6539,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 126);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 129);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -6442,13 +6559,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_entry(machine_x86_64_emit_registry_count()) == 0);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
-    for (u16 opcode = MACHINE_X64_MOV_RI; opcode <= MACHINE_X64_MULH64; opcode += 1)
+    for (u16 opcode = MACHINE_X64_MOV_RI; opcode <= MACHINE_X64_ATOMIC_RMW16; opcode += 1)
     {
         x64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 47);
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 50);
-    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 29);
+    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 32);
 
     // The x86-64 producer registry is the Phase-0 census used to keep the
     // encoder switch and recipe projection from drifting independently.  It
@@ -6456,7 +6573,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // recipe category in the source registry for reviewability.
     u32 registry_count = machine_x86_64_emit_registry_count();
     BUSTER_TEST(arguments, registry_count == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
-    BUSTER_TEST(arguments, (u32)(MACHINE_X64_MULH64 - MACHINE_X64_MOV_RI + 1) == registry_count);
+    BUSTER_TEST(arguments, (u32)(MACHINE_X64_ATOMIC_RMW16 - MACHINE_X64_MOV_RI + 1) == registry_count);
     u32 registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
     u32 registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT] = {0};
     bool registry_entries_are_complete = true;
@@ -6637,7 +6754,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_entry(registry_count) == 0);
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_MOV_RI - 1) == 0);
-    BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_MULH64 + 1) == 0);
+    BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_ATOMIC_RMW16 + 1) == 0);
 
     // Serial exact prewarm publishes one immutable row map for all workers.
     // Audit every row after publication: exact forms and sequences must have
@@ -6668,7 +6785,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 254);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 263);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate
@@ -7692,6 +7809,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    int result = __c11_atomic_compare_exchange_strong(cell, &expected, desired, 5, 5);\n"
                                   "    return result;\n"
                                   "}\n"
+                                  "void atomic_store16(_Atomic unsigned __int128* cell, unsigned __int128 desired) {\n"
+                                  "    __c11_atomic_store(cell, desired, 5);\n"
+                                  "}\n"
+                                  "unsigned __int128 atomic_load16(_Atomic unsigned __int128* cell) {\n"
+                                  "    return __c11_atomic_load(cell, 5);\n"
+                                  "}\n"
+                                  "unsigned __int128 atomic_exchange16(_Atomic unsigned __int128* cell, unsigned __int128 desired) {\n"
+                                  "    return __c11_atomic_exchange(cell, desired, 5);\n"
+                                  "}\n"
                                   "int atomic_cmpxchg16_after_call(_Atomic unsigned __int128* cell, unsigned __int128 expected, unsigned __int128 desired) {\n"
                                   "    int result = __c11_atomic_compare_exchange_strong(cell, &expected, desired, 5, 5);\n"
                                   "    return result + variadic_named(0);\n"
@@ -8012,6 +8138,121 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_function, no_cx16_target);
             BUSTER_TEST(arguments, !no_cx16_selected.supported);
         }
+        IrFunction* atomic_store16_ir_function = machine_test_ir_function_find(machine_module, S8("atomic_store16"));
+        BUSTER_TEST(arguments, atomic_store16_ir_function != 0);
+        if (atomic_store16_ir_function)
+        {
+            MachineSelectResult atomic_store16_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_store16_ir_function, machine_target);
+            BUSTER_TEST_RAW(arguments, atomic_store16_selected.supported,
+                            string_format(arguments->arena, S8("select atomic_store16 failed at opcode {u32}"),
+                                          (u32)atomic_store16_selected.failed_opcode));
+            if (atomic_store16_selected.supported)
+            {
+                bool saw_store16_row = false;
+                for (u32 row_index = 0; row_index < atomic_store16_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = atomic_store16_selected.function.instructions + row_index;
+                    if (row->opcode == MACHINE_X64_ATOMIC_STORE16)
+                    {
+                        saw_store16_row = true;
+                        MachineOpcodeInfo const* info = machine_opcode_info(row->opcode);
+                        BUSTER_TEST(arguments, row->payload == 16 && info->operand_count == 4 &&
+                                                   info->memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC &&
+                                                   (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) &&
+                                                   info->clobber_mask == ((1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) |
+                                                                          (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX)));
+                    }
+                }
+                BUSTER_TEST(arguments, saw_store16_row);
+                BUSTER_TEST(arguments, machine_verify_function(&atomic_store16_selected.function).error == MACHINE_VERIFY_NONE);
+                MachineStackPlacement atomic_store16_placement =
+                    machine_stack_placement_build(arguments->arena, &atomic_store16_selected.function);
+                BUSTER_TEST(arguments, atomic_store16_placement.valid &&
+                                           (atomic_store16_placement.callee_saved_mask & (1ull << MACHINE_X64_RBX)));
+                if (atomic_store16_placement.valid)
+                {
+                    MachineEncodeResult atomic_store16_encoded =
+                        machine_encode_x86_64(arguments->arena, &atomic_store16_selected.function, &atomic_store16_placement);
+                    bool saw_cmpxchg16_bytes = false;
+                    for (u32 byte_index = 0; byte_index + 3 < atomic_store16_encoded.byte_count; byte_index += 1)
+                    {
+                        saw_cmpxchg16_bytes |= atomic_store16_encoded.bytes[byte_index] == 0xf0 &&
+                                               atomic_store16_encoded.bytes[byte_index + 1] == 0x48 &&
+                                               atomic_store16_encoded.bytes[byte_index + 2] == 0x0f &&
+                                               atomic_store16_encoded.bytes[byte_index + 3] == 0xc7;
+                    }
+                    BUSTER_TEST(arguments, atomic_store16_encoded.valid && saw_cmpxchg16_bytes);
+                }
+            }
+            Target no_cx16_store_target = machine_target;
+            no_cx16_store_target.cpu_features_explicit = true;
+            no_cx16_store_target.cpu_features =
+                target_cpu_features_remove(target_cpu_features_effective(machine_target), TARGET_CPU_FEATURE_X86_CX16);
+            MachineSelectResult no_cx16_store_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_store16_ir_function, no_cx16_store_target);
+            BUSTER_TEST(arguments, !no_cx16_store_selected.supported);
+        }
+        IrFunction* atomic_load16_ir_function = machine_test_ir_function_find(machine_module, S8("atomic_load16"));
+        BUSTER_TEST(arguments, atomic_load16_ir_function != 0);
+        if (atomic_load16_ir_function)
+        {
+            MachineSelectResult atomic_load16_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_load16_ir_function, machine_target);
+            BUSTER_TEST_RAW(arguments, atomic_load16_selected.supported,
+                            string_format(arguments->arena, S8("select atomic_load16 failed at opcode {u32}"),
+                                          (u32)atomic_load16_selected.failed_opcode));
+            bool saw_load16_row = false;
+            for (u32 row_index = 0; atomic_load16_selected.supported && row_index < atomic_load16_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = atomic_load16_selected.function.instructions + row_index;
+                if (row->opcode == MACHINE_X64_ATOMIC_LOAD16)
+                {
+                    saw_load16_row = true;
+                    BUSTER_TEST(arguments, row->payload == 16 && machine_opcode_info(row->opcode)->memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC);
+                }
+            }
+            BUSTER_TEST(arguments, saw_load16_row);
+            BUSTER_TEST(arguments, machine_verify_function(&atomic_load16_selected.function).error == MACHINE_VERIFY_NONE);
+            Target no_cx16_load_target = machine_target;
+            no_cx16_load_target.cpu_features_explicit = true;
+            no_cx16_load_target.cpu_features =
+                target_cpu_features_remove(target_cpu_features_effective(machine_target), TARGET_CPU_FEATURE_X86_CX16);
+            MachineSelectResult no_cx16_load_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_load16_ir_function, no_cx16_load_target);
+            BUSTER_TEST(arguments, !no_cx16_load_selected.supported);
+        }
+        IrFunction* atomic_exchange16_ir_function = machine_test_ir_function_find(machine_module, S8("atomic_exchange16"));
+        BUSTER_TEST(arguments, atomic_exchange16_ir_function != 0);
+        if (atomic_exchange16_ir_function)
+        {
+            MachineSelectResult atomic_exchange16_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_exchange16_ir_function, machine_target);
+            BUSTER_TEST_RAW(arguments, atomic_exchange16_selected.supported,
+                            string_format(arguments->arena, S8("select atomic_exchange16 failed at opcode {u32}"),
+                                          (u32)atomic_exchange16_selected.failed_opcode));
+            bool saw_exchange16_row = false;
+            for (u32 row_index = 0; atomic_exchange16_selected.supported && row_index < atomic_exchange16_selected.function.instruction_count;
+                 row_index += 1)
+            {
+                MachineInstruction* row = atomic_exchange16_selected.function.instructions + row_index;
+                if (row->opcode == MACHINE_X64_ATOMIC_RMW16)
+                {
+                    saw_exchange16_row = true;
+                    BUSTER_TEST(arguments, row->payload == (16u | ((u32)IR_ATOMIC_EXCHANGE << 8)) &&
+                                               machine_opcode_info(row->opcode)->memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC);
+                }
+            }
+            BUSTER_TEST(arguments, saw_exchange16_row);
+            BUSTER_TEST(arguments, machine_verify_function(&atomic_exchange16_selected.function).error == MACHINE_VERIFY_NONE);
+            Target no_cx16_exchange_target = machine_target;
+            no_cx16_exchange_target.cpu_features_explicit = true;
+            no_cx16_exchange_target.cpu_features =
+                target_cpu_features_remove(target_cpu_features_effective(machine_target), TARGET_CPU_FEATURE_X86_CX16);
+            MachineSelectResult no_cx16_exchange_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_exchange16_ir_function, no_cx16_exchange_target);
+            BUSTER_TEST(arguments, !no_cx16_exchange_selected.supported);
+        }
         IrFunction* atomic_cmpxchg16_call_function = machine_test_ir_function_find(machine_module, S8("atomic_cmpxchg16_after_call"));
         BUSTER_TEST(arguments, atomic_cmpxchg16_call_function != 0);
         if (atomic_cmpxchg16_call_function)
@@ -8075,6 +8316,208 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             }
             codegen_release_executable(atomic_machine_executable);
             codegen_release_executable(atomic_none_executable);
+        }
+        if (atomic_store16_ir_function)
+        {
+            typedef void MachineTestAtomicStore16(_Atomic unsigned __int128*, unsigned __int128);
+            u32 atomic_store16_none_offset = machine_test_module_offset(&none_module, machine_module, S8("atomic_store16"));
+            MachineSelectResult atomic_store16_machine_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_store16_ir_function, machine_target);
+            MachineStackPlacement atomic_store16_machine_placement =
+                atomic_store16_machine_selected.supported
+                    ? machine_stack_placement_build(arguments->arena, &atomic_store16_machine_selected.function)
+                    : (MachineStackPlacement){0};
+            MachineEncodeResult atomic_store16_machine_encoded =
+                atomic_store16_machine_selected.supported && atomic_store16_machine_placement.valid
+                    ? machine_encode_x86_64(arguments->arena, &atomic_store16_machine_selected.function, &atomic_store16_machine_placement)
+                    : (MachineEncodeResult){0};
+            CodegenExecutable atomic_store16_none_executable = codegen_make_executable((CodegenFunction){.code = none_module.code});
+            CodegenExecutable atomic_store16_machine_executable = codegen_make_executable((CodegenFunction){
+                .code = {.pointer = atomic_store16_machine_encoded.bytes, .length = atomic_store16_machine_encoded.byte_count}});
+            BUSTER_TEST(arguments, atomic_store16_none_offset != UINT32_MAX && atomic_store16_machine_encoded.valid &&
+                                       atomic_store16_none_executable.error == CODEGEN_ERROR_NONE &&
+                                       atomic_store16_machine_executable.error == CODEGEN_ERROR_NONE);
+            if (atomic_store16_none_offset != UINT32_MAX && atomic_store16_machine_executable.address && atomic_store16_none_executable.address)
+            {
+                MachineTestAtomicStore16* atomic_store16_none_call = 0;
+                MachineTestAtomicStore16* atomic_store16_machine_call = 0;
+                void* atomic_store16_none_address = (u8*)atomic_store16_none_executable.address + atomic_store16_none_offset;
+                void* atomic_store16_machine_address = atomic_store16_machine_executable.address;
+                memcpy(&atomic_store16_none_call, &atomic_store16_none_address, sizeof(atomic_store16_none_call));
+                memcpy(&atomic_store16_machine_call, &atomic_store16_machine_address, sizeof(atomic_store16_machine_call));
+                _Alignas(16) unsigned __int128 atomic_store16_cell_none = 0;
+                _Alignas(16) unsigned __int128 atomic_store16_cell_machine = 0;
+                unsigned __int128 atomic_store16_value = ((unsigned __int128)UINT64_C(0xaaaabbbbccccdddd) << 64) |
+                                                          UINT64_C(0xeeeeffff00001111);
+                atomic_store16_none_call((_Atomic unsigned __int128*)&atomic_store16_cell_none, atomic_store16_value);
+                atomic_store16_machine_call((_Atomic unsigned __int128*)&atomic_store16_cell_machine, atomic_store16_value);
+                BUSTER_TEST(arguments, atomic_store16_cell_none == atomic_store16_value && atomic_store16_cell_machine == atomic_store16_value &&
+                                           atomic_store16_cell_none == atomic_store16_cell_machine);
+
+                // A fresh invocation starts with a zero expected pair.  The
+                // second store therefore takes the CMPXCHG16B failure edge,
+                // imports the current pair into RAX:RDX, and succeeds on its
+                // retry rather than spinning on the stale zero expectation.
+                unsigned __int128 atomic_store16_second_value = ((unsigned __int128)UINT64_C(0x123456789abcdef0) << 64) |
+                                                                 UINT64_C(0x0fedcba987654321);
+                atomic_store16_none_call((_Atomic unsigned __int128*)&atomic_store16_cell_none, atomic_store16_second_value);
+                atomic_store16_machine_call((_Atomic unsigned __int128*)&atomic_store16_cell_machine, atomic_store16_second_value);
+                BUSTER_TEST(arguments, atomic_store16_cell_none == atomic_store16_second_value &&
+                                           atomic_store16_cell_machine == atomic_store16_second_value &&
+                                           atomic_store16_cell_none == atomic_store16_cell_machine);
+
+                // Exercise every short logical width accepted by the row.
+                // The source value deliberately has nonzero bytes throughout
+                // its high eightbyte, so the executed encoder must clear the
+                // padding bytes rather than merely report encoded.valid.
+                u32 atomic_store16_row_index = UINT32_MAX;
+                for (u32 row_index = 0; row_index < atomic_store16_machine_selected.function.instruction_count; row_index += 1)
+                {
+                    if (atomic_store16_machine_selected.function.instructions[row_index].opcode == MACHINE_X64_ATOMIC_STORE16)
+                    {
+                        atomic_store16_row_index = row_index;
+                        break;
+                    }
+                }
+                if (atomic_store16_row_index != UINT32_MAX)
+                {
+                    MachineInstruction* atomic_store16_row = atomic_store16_machine_selected.function.instructions + atomic_store16_row_index;
+                    for (u32 short_size = 9; short_size <= 15; short_size += 1)
+                    {
+                        atomic_store16_row->payload = short_size;
+                        MachineEncodeResult atomic_store16_short_encoded =
+                            machine_encode_x86_64(arguments->arena, &atomic_store16_machine_selected.function,
+                                                  &atomic_store16_machine_placement);
+                        CodegenExecutable atomic_store16_short_executable = codegen_make_executable((CodegenFunction){
+                            .code = {.pointer = atomic_store16_short_encoded.bytes, .length = atomic_store16_short_encoded.byte_count}});
+                        _Alignas(16) unsigned char atomic_store16_short_cell[16] = {0};
+                        bool atomic_store16_short_bytes_match = atomic_store16_short_encoded.valid &&
+                                                                atomic_store16_short_executable.error == CODEGEN_ERROR_NONE &&
+                                                                atomic_store16_short_executable.address;
+                        if (atomic_store16_short_bytes_match)
+                        {
+                            MachineTestAtomicStore16* atomic_store16_short_call = 0;
+                            void* atomic_store16_short_address = atomic_store16_short_executable.address;
+                            memcpy(&atomic_store16_short_call, &atomic_store16_short_address, sizeof(atomic_store16_short_call));
+                            atomic_store16_short_call((_Atomic unsigned __int128*)atomic_store16_short_cell, atomic_store16_value);
+                            for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
+                            {
+                                unsigned char expected_byte = byte_index < short_size
+                                    ? (unsigned char)(atomic_store16_value >> (byte_index * 8u))
+                                    : 0;
+                                atomic_store16_short_bytes_match &= atomic_store16_short_cell[byte_index] == expected_byte;
+                            }
+                        }
+                        BUSTER_TEST(arguments, atomic_store16_short_bytes_match);
+                        codegen_release_executable(atomic_store16_short_executable);
+                    }
+                    atomic_store16_row->payload = 16;
+                }
+            }
+            codegen_release_executable(atomic_store16_machine_executable);
+            codegen_release_executable(atomic_store16_none_executable);
+        }
+        if (atomic_load16_ir_function)
+        {
+            typedef unsigned __int128 MachineTestAtomicLoad16(_Atomic unsigned __int128*);
+            u32 atomic_load16_none_offset = machine_test_module_offset(&none_module, machine_module, S8("atomic_load16"));
+            MachineSelectResult atomic_load16_machine_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_load16_ir_function, machine_target);
+            MachineStackPlacement atomic_load16_machine_placement = atomic_load16_machine_selected.supported
+                                                                         ? machine_stack_placement_build(arguments->arena,
+                                                                                                         &atomic_load16_machine_selected.function)
+                                                                         : (MachineStackPlacement){0};
+            MachineEncodeResult atomic_load16_machine_encoded =
+                atomic_load16_machine_selected.supported && atomic_load16_machine_placement.valid
+                    ? machine_encode_x86_64(arguments->arena, &atomic_load16_machine_selected.function,
+                                             &atomic_load16_machine_placement)
+                    : (MachineEncodeResult){0};
+            CodegenExecutable atomic_load16_none_executable = codegen_make_executable((CodegenFunction){.code = none_module.code});
+            CodegenExecutable atomic_load16_machine_executable = codegen_make_executable((CodegenFunction){
+                .code = {.pointer = atomic_load16_machine_encoded.bytes, .length = atomic_load16_machine_encoded.byte_count}});
+            BUSTER_TEST(arguments, atomic_load16_none_offset != UINT32_MAX && atomic_load16_machine_encoded.valid &&
+                                       atomic_load16_none_executable.error == CODEGEN_ERROR_NONE &&
+                                       atomic_load16_machine_executable.error == CODEGEN_ERROR_NONE);
+            if (atomic_load16_none_offset != UINT32_MAX && atomic_load16_machine_executable.address && atomic_load16_none_executable.address)
+            {
+                MachineTestAtomicLoad16* atomic_load16_none_call = 0;
+                MachineTestAtomicLoad16* atomic_load16_machine_call = 0;
+                void* atomic_load16_none_address = (u8*)atomic_load16_none_executable.address + atomic_load16_none_offset;
+                void* atomic_load16_machine_address = atomic_load16_machine_executable.address;
+                memcpy(&atomic_load16_none_call, &atomic_load16_none_address, sizeof(atomic_load16_none_call));
+                memcpy(&atomic_load16_machine_call, &atomic_load16_machine_address, sizeof(atomic_load16_machine_call));
+                unsigned __int128 atomic_load16_value = ((unsigned __int128)UINT64_C(0x8899aabbccddeeff) << 64) |
+                                                         UINT64_C(0x0011223344556677);
+                _Alignas(16) unsigned __int128 atomic_load16_cell_none = atomic_load16_value;
+                _Alignas(16) unsigned __int128 atomic_load16_cell_machine = atomic_load16_value;
+                unsigned __int128 atomic_load16_none_result =
+                    atomic_load16_none_call((_Atomic unsigned __int128*)&atomic_load16_cell_none);
+                unsigned __int128 atomic_load16_machine_result =
+                    atomic_load16_machine_call((_Atomic unsigned __int128*)&atomic_load16_cell_machine);
+                BUSTER_TEST(arguments, atomic_load16_none_result == atomic_load16_machine_result &&
+                                           atomic_load16_machine_result == atomic_load16_value &&
+                                           atomic_load16_cell_none == atomic_load16_cell_machine &&
+                                           atomic_load16_cell_machine == atomic_load16_value);
+            }
+            codegen_release_executable(atomic_load16_machine_executable);
+            codegen_release_executable(atomic_load16_none_executable);
+        }
+        if (atomic_exchange16_ir_function)
+        {
+            typedef unsigned __int128 MachineTestAtomicExchange16(_Atomic unsigned __int128*, unsigned __int128);
+            u32 atomic_exchange16_none_offset = machine_test_module_offset(&none_module, machine_module, S8("atomic_exchange16"));
+            MachineSelectResult atomic_exchange16_machine_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_exchange16_ir_function, machine_target);
+            MachineStackPlacement atomic_exchange16_machine_placement = atomic_exchange16_machine_selected.supported
+                                                                           ? machine_stack_placement_build(arguments->arena,
+                                                                                                           &atomic_exchange16_machine_selected.function)
+                                                                           : (MachineStackPlacement){0};
+            MachineEncodeResult atomic_exchange16_machine_encoded =
+                atomic_exchange16_machine_selected.supported && atomic_exchange16_machine_placement.valid
+                    ? machine_encode_x86_64(arguments->arena, &atomic_exchange16_machine_selected.function,
+                                             &atomic_exchange16_machine_placement)
+                    : (MachineEncodeResult){0};
+            CodegenExecutable atomic_exchange16_none_executable = codegen_make_executable((CodegenFunction){.code = none_module.code});
+            CodegenExecutable atomic_exchange16_machine_executable = codegen_make_executable((CodegenFunction){
+                .code = {.pointer = atomic_exchange16_machine_encoded.bytes, .length = atomic_exchange16_machine_encoded.byte_count}});
+            BUSTER_TEST(arguments, atomic_exchange16_none_offset != UINT32_MAX && atomic_exchange16_machine_encoded.valid &&
+                                       atomic_exchange16_none_executable.error == CODEGEN_ERROR_NONE &&
+                                       atomic_exchange16_machine_executable.error == CODEGEN_ERROR_NONE);
+            if (atomic_exchange16_none_offset != UINT32_MAX && atomic_exchange16_machine_executable.address &&
+                atomic_exchange16_none_executable.address)
+            {
+                MachineTestAtomicExchange16* atomic_exchange16_none_call = 0;
+                MachineTestAtomicExchange16* atomic_exchange16_machine_call = 0;
+                void* atomic_exchange16_none_address = (u8*)atomic_exchange16_none_executable.address + atomic_exchange16_none_offset;
+                void* atomic_exchange16_machine_address = atomic_exchange16_machine_executable.address;
+                memcpy(&atomic_exchange16_none_call, &atomic_exchange16_none_address, sizeof(atomic_exchange16_none_call));
+                memcpy(&atomic_exchange16_machine_call, &atomic_exchange16_machine_address, sizeof(atomic_exchange16_machine_call));
+                unsigned __int128 atomic_exchange16_initial = ((unsigned __int128)UINT64_C(0x1111222233334444) << 64) |
+                                                               UINT64_C(0x5555666677778888);
+                unsigned __int128 atomic_exchange16_desired = ((unsigned __int128)UINT64_C(0xaaaabbbbccccdddd) << 64) |
+                                                               UINT64_C(0xeeeeffff00001111);
+                _Alignas(16) unsigned __int128 atomic_exchange16_cell_none = atomic_exchange16_initial;
+                _Alignas(16) unsigned __int128 atomic_exchange16_cell_machine = atomic_exchange16_initial;
+                unsigned __int128 atomic_exchange16_none_first =
+                    atomic_exchange16_none_call((_Atomic unsigned __int128*)&atomic_exchange16_cell_none, atomic_exchange16_desired);
+                unsigned __int128 atomic_exchange16_machine_first =
+                    atomic_exchange16_machine_call((_Atomic unsigned __int128*)&atomic_exchange16_cell_machine, atomic_exchange16_desired);
+                unsigned __int128 atomic_exchange16_second_desired = ((unsigned __int128)UINT64_C(0x123456789abcdef0) << 64) |
+                                                                       UINT64_C(0x0fedcba987654321);
+                unsigned __int128 atomic_exchange16_none_second =
+                    atomic_exchange16_none_call((_Atomic unsigned __int128*)&atomic_exchange16_cell_none, atomic_exchange16_second_desired);
+                unsigned __int128 atomic_exchange16_machine_second =
+                    atomic_exchange16_machine_call((_Atomic unsigned __int128*)&atomic_exchange16_cell_machine, atomic_exchange16_second_desired);
+                BUSTER_TEST(arguments, atomic_exchange16_none_first == atomic_exchange16_machine_first &&
+                                           atomic_exchange16_none_first == atomic_exchange16_initial &&
+                                           atomic_exchange16_none_second == atomic_exchange16_machine_second &&
+                                           atomic_exchange16_none_second == atomic_exchange16_desired &&
+                                           atomic_exchange16_cell_none == atomic_exchange16_second_desired &&
+                                           atomic_exchange16_cell_machine == atomic_exchange16_second_desired &&
+                                           atomic_exchange16_cell_none == atomic_exchange16_cell_machine);
+            }
+            codegen_release_executable(atomic_exchange16_machine_executable);
+            codegen_release_executable(atomic_exchange16_none_executable);
         }
 #endif
         IrFunction* goto_function = machine_test_ir_function_find(machine_module, S8("goto_probe"));
