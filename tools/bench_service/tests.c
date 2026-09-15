@@ -1789,6 +1789,19 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_RESULT | 0x80000000u, 19,
                      result_body, sizeof(result_body));
     BQ_CHECK(bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_packet(&bound_request, BQ_OP_CANCEL, 21, job_request, sizeof(job_request));
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_CANCEL | 0x80000000u, 21,
+                     result_body, sizeof(result_body));
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+    BqRequest submission = bq_test_request(91, false);
+    bq_packet(&bound_request, BQ_OP_SUBMIT, 22, submission.bytes, submission.size);
+    bq_digest(submission.bytes, submission.size, (char8*)result_body + 56);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_SUBMIT | 0x80000000u, 22,
+                     result_body, sizeof(result_body));
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_packet(&bound_request, BQ_OP_RESULT, 19, job_request, sizeof(job_request));
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_RESULT | 0x80000000u, 19,
+                     result_body, sizeof(result_body));
     bq_put32(bound_response.bytes + BQ_CONTROL_HEADER + 124, BQ_PATH_CAP + 1);
     BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
 

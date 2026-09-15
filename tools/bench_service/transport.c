@@ -297,8 +297,12 @@ BUSTER_GLOBAL_LOCAL bool bq_transport_typed_response_valid(BqPacket const* reque
         return false;
     }
     bool result_body = body_size == BQ_CONTROL_BODY;
-    if (body_size != 124 && !result_body) return false;
-    if (operation == BQ_OP_RESULT && !result_body) return false;
+    if (((operation == BQ_OP_SUBMIT || operation == BQ_OP_CANCEL) && body_size != 124) ||
+        (operation == BQ_OP_STATUS && body_size != 124 && !result_body) ||
+        (operation == BQ_OP_RESULT && !result_body))
+    {
+        return false;
+    }
     if ((operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL) &&
         bq_u64(body + 4) != bq_u64(request->bytes + BQ_CONTROL_HEADER))
     {
