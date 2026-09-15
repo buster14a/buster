@@ -5343,6 +5343,170 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_sparse_pins(UnitTestArgu
     return result;
 }
 
+// Deterministic pseudo-random source for the differential fixtures. A fixed
+// stream keeps a failure reproducible from the case index alone.
+BUSTER_GLOBAL_LOCAL u32 machine_test_debug_random(u32* state, u32 bound)
+{
+    *state = *state * 1664525u + 1013904223u;
+    return (*state >> 8) % bound;
+}
+
+// The indexed debug-value builder against the whole-array reference. The shapes
+// below cover what the lookups replaced: values in zero, one, two and more
+// virtual registers, promoted (mutable) places, parameters whose place is only
+// an IR_OPCODE_ARGUMENT result, canonical locals past the place array, and
+// place-less locals that emit one value per block.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        CASE_COUNT = 48,
+        VALUE_COUNT = 40,
+        BLOCK_COUNT = 5,
+        LOCAL_COUNT = 10,
+        DEBUG_COUNT = 14,
+        REGISTER_COUNT = 34,
+    };
+    IrField fields[] = {{.offset = 0}, {.offset = 8}};
+    IrType types[] = {
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 32, .layout = {.resolved = true, .size = 4, .alignment = 4}},
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 64, .layout = {.resolved = true, .size = 8, .alignment = 8}},
+        {.kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 2, .layout = {.resolved = true, .size = 16, .alignment = 8}},
+        {.kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 2, .layout = {.resolved = true, .size = 32, .alignment = 8}},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    u32 random_state = 0x9e3779b9u;
+    for (u32 case_index = 0; case_index < CASE_COUNT; case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        IrValue* values = arena_allocate(temporary.arena, IrValue, VALUE_COUNT);
+        IrInstruction* instructions = arena_allocate(temporary.arena, IrInstruction, VALUE_COUNT);
+        u64* immediates = arena_allocate(temporary.arena, u64, VALUE_COUNT);
+        for (u32 index = 0; index < VALUE_COUNT; index += 1)
+        {
+            u32 shape = machine_test_debug_random(&random_state, 5u);
+            u8 opcode = shape == 0 ? (u8)IR_OPCODE_LOCAL
+                                   : shape == 1 ? (u8)IR_OPCODE_ARGUMENT
+                                                : shape == 2 ? (u8)IR_OPCODE_CONSTANT_INTEGER : (u8)IR_OPCODE_ADDRESS_OF;
+            immediates[index] = machine_test_debug_random(&random_state, DEBUG_COUNT + 2u);
+            values[index] = (IrValue){.definition = {.value = index},
+                                      .canonical_type = {.value = machine_test_debug_random(&random_state, BUSTER_ARRAY_LENGTH(types))}};
+            instructions[index] = (IrInstruction){
+                .opcode = opcode,
+                .result = {.value = index},
+                .canonical_local = {.value = machine_test_debug_random(&random_state, LOCAL_COUNT + 3u)},
+                .immediates = immediates + index,
+                .immediate_count = 1,
+            };
+        }
+        IrCfgParameter* cfg_parameters = arena_allocate(temporary.arena, IrCfgParameter, BLOCK_COUNT * 2u);
+        IrCfgBlock* cfg_blocks = arena_allocate(temporary.arena, IrCfgBlock, BLOCK_COUNT);
+        IrBlock* blocks = arena_allocate(temporary.arena, IrBlock, BLOCK_COUNT);
+        memset(blocks, 0, sizeof(*blocks) * BLOCK_COUNT);
+        for (u32 block_index = 0; block_index < BLOCK_COUNT; block_index += 1)
+        {
+            IrValueId* local_values = arena_allocate(temporary.arena, IrValueId, LOCAL_COUNT);
+            for (u32 local_index = 0; local_index < LOCAL_COUNT; local_index += 1)
+            {
+                u32 choice = machine_test_debug_random(&random_state, VALUE_COUNT + LOCAL_COUNT);
+                local_values[local_index] = choice < VALUE_COUNT ? (IrValueId){.value = choice} : IR_VALUE_ID_INVALID;
+            }
+            blocks[block_index] = (IrBlock){
+                .local_values = local_values,
+                .first_instruction = {.value = block_index * (VALUE_COUNT / BLOCK_COUNT)},
+                .id = {.value = block_index},
+            };
+            cfg_parameters[block_index * 2u] = (IrCfgParameter){
+                .canonical_local = {.value = machine_test_debug_random(&random_state, LOCAL_COUNT + 3u)},
+                .value = {.value = machine_test_debug_random(&random_state, VALUE_COUNT)},
+            };
+            cfg_parameters[block_index * 2u + 1u] = (IrCfgParameter){
+                .canonical_local = {.value = machine_test_debug_random(&random_state, LOCAL_COUNT + 3u)},
+                .value = {.value = machine_test_debug_random(&random_state, VALUE_COUNT)},
+            };
+            cfg_blocks[block_index] = (IrCfgBlock){
+                .first_instruction = block_index * (VALUE_COUNT / BLOCK_COUNT),
+                // A zero-instruction block contributes no debug value even when
+                // it holds one for the local.
+                .instruction_count = machine_test_debug_random(&random_state, 4u) ? VALUE_COUNT / BLOCK_COUNT : 0,
+                .parameter_offset = block_index * 2u,
+                .parameter_count = machine_test_debug_random(&random_state, 3u),
+            };
+        }
+        IrPublishedCfg published = {
+            .blocks = cfg_blocks,
+            .parameters = cfg_parameters,
+            .block_count = BLOCK_COUNT,
+            .parameter_count = machine_test_debug_random(&random_state, BLOCK_COUNT * 2u + 1u),
+        };
+        IrDebugLocal* debug_locals = arena_allocate(temporary.arena, IrDebugLocal, DEBUG_COUNT);
+        memset(debug_locals, 0, sizeof(*debug_locals) * DEBUG_COUNT);
+        for (u32 debug_index = 0; debug_index < DEBUG_COUNT; debug_index += 1)
+        {
+            u32 identity = machine_test_debug_random(&random_state, LOCAL_COUNT + 4u);
+            debug_locals[debug_index].id = identity < LOCAL_COUNT + 3u ? (IrLocalId){.value = identity} : IR_LOCAL_ID_INVALID;
+            debug_locals[debug_index].is_parameter = machine_test_debug_random(&random_state, 2u) != 0;
+            debug_locals[debug_index].type = (IrTypeId){.value = 0};
+        }
+        IrFunction function = {
+            .instructions = instructions,
+            .values = values,
+            .blocks = blocks,
+            .debug_locals = debug_locals,
+            .published_cfg = &published,
+            .instruction_count = VALUE_COUNT,
+            .value_count = VALUE_COUNT,
+            .block_count = BLOCK_COUNT,
+            .local_count = LOCAL_COUNT,
+            .debug_local_count = DEBUG_COUNT,
+        };
+        MachineVirtualRegister* virtual_registers = arena_allocate(temporary.arena, MachineVirtualRegister, REGISTER_COUNT);
+        memset(virtual_registers, 0, sizeof(*virtual_registers) * REGISTER_COUNT);
+        for (u32 register_index = 0; register_index < REGISTER_COUNT; register_index += 1)
+        {
+            // Crowd the origins so some values land in one register, some in
+            // two, and some in more than the piece layout can describe.
+            virtual_registers[register_index] = (MachineVirtualRegister){
+                .definition_point = MACHINE_POINT_INVALID,
+                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                .flags = machine_test_debug_random(&random_state, 4u) ? 0 : MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE,
+                .typed_origin = machine_test_debug_random(&random_state, VALUE_COUNT / 2u),
+            };
+        }
+        u32* stack_slots = arena_allocate(temporary.arena, u32, VALUE_COUNT);
+        u32* indirect_slots = arena_allocate(temporary.arena, u32, VALUE_COUNT);
+        for (u32 index = 0; index < VALUE_COUNT; index += 1)
+        {
+            stack_slots[index] = machine_test_debug_random(&random_state, 3u) ? UINT32_MAX : index;
+            indirect_slots[index] = machine_test_debug_random(&random_state, 5u) ? UINT32_MAX : index;
+        }
+        MachineFunction indexed = {.virtual_registers = virtual_registers, .virtual_register_count = REGISTER_COUNT};
+        MachineFunction reference = indexed;
+        bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, stack_slots, indirect_slots);
+        bool reference_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &reference, stack_slots,
+                                                                     indirect_slots);
+        BUSTER_TEST(arguments, indexed_built == reference_built);
+        BUSTER_TEST(arguments, indexed.debug_value_count == reference.debug_value_count);
+        if (indexed_built && reference_built && indexed.debug_value_count == reference.debug_value_count)
+        {
+            bool same = true;
+            for (u32 value_index = 0; value_index < indexed.debug_value_count; value_index += 1)
+            {
+                MachineDebugValue a = indexed.debug_values[value_index];
+                MachineDebugValue b = reference.debug_values[value_index];
+                same = same && a.local.value == b.local.value && a.first_instruction == b.first_instruction &&
+                       a.instruction_count == b.instruction_count && a.kind == b.kind && a.piece_count == b.piece_count &&
+                       a.value_size == b.value_size && a.constant == b.constant && a.pieces[0] == b.pieces[0] &&
+                       a.pieces[1] == b.pieces[1] && a.piece_sizes[0] == b.piece_sizes[0] && a.piece_sizes[1] == b.piece_sizes[1];
+            }
+            BUSTER_TEST(arguments, same);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5375,7 +5539,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     MachineFunction machine_function = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     u64 position = temporary.arena->position;
-    bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function);
+    bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function, 0, 0);
     u64 retained = temporary.arena->position - position;
     BUSTER_TEST(arguments, built && machine_function.debug_value_count == LOCAL_COUNT && retained < BUSTER_KB(8));
     scratch_end(temporary);
@@ -5386,6 +5550,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
