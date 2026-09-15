@@ -106,20 +106,27 @@ copies that complete tree into `dependencies/resource-include`, records every
 file's SHA-256 in `dependencies.tsv`, and hashes the ordered closure. Both
 compiler legs then receive `-nostdinc -isystem <frozen-copy>`; the resource path
 compiled into either executable and host include search paths are not used.
-Object rows intentionally have no sysroot or additional system include path.
+Object rows intentionally have no host sysroot. Linux GNU rows receive only the
+target-matched, authenticated musl include roots from the project snapshot;
+Windows, Apple, Android and UEFI rows do not receive those Linux headers.
 
 Repo-owned project dependencies use the checked-in
 [`native-retirement-dependencies-v1.json`](native-retirement-dependencies-v1.json)
 descriptor. Before `evidence-candidate.txt` is created, the workflow runs the
-offline materializer against the exact candidate checkout. It admits only the
-listed repository paths after matching their authenticated byte count and
-SHA-256, rejects source symlinks, hard links, descriptor/output-parent symlinks,
-TOCTOU changes, and all network provenance (including SCP/SSH spellings), and
-publishes the tree atomically at `evidence/dependency-materialized`. Generated
-metadata names are reserved. Every destination is exactly its kind's compiler
-include root (`dependencies/resource-include` or `dependencies/project-include`)
-and the include-relative path is one global namespace: a `same.h` resource and
-project record cannot coexist. Normalized duplicate destinations or provenance,
+offline external-closure verifier against the exact candidate checkout first.
+That verifier proves pristine GitHub worktrees at the seven descriptor pins
+(cJSON, DoomGeneric, LZ4, yyjson, stb, zlib and musl), checks each admitted
+path as a tracked blob at that revision, and derives only musl's upstream
+`alltypes.h`/`syscall.h` outputs for x86-64 and AArch64. It performs no fetch and
+does not vendor upstream files into the repository. The materializer then admits
+only the listed paths after matching their authenticated byte count and SHA-256,
+rejects source symlinks, hard links, descriptor/output-parent symlinks, TOCTOU
+changes, and all network provenance (including SCP/SSH spellings), and publishes
+the tree atomically at `evidence/dependency-materialized`. Generated metadata
+names are reserved. Every destination is exactly its kind's compiler include
+root (`dependencies/resource-include` or `dependencies/project-include`) and the
+include-relative path is one global namespace: a `same.h` resource and project
+record cannot coexist. Normalized duplicate destinations or provenance,
 kind/root mismatches, arbitrary destinations, and metadata collisions fail
 closed; an exact repeated resource is emitted once in deterministic order. A
 full census must provide both the project include and the descriptor/receipt
@@ -127,6 +134,13 @@ paths shown above. The C producer replays the materializer's authenticated
 project closure and ledger digests and copies the exact descriptor, receipt, and
 materializer ledger into evidence; alternate self-consistent dependency trees
 are rejected by the independent validator.
+
+The materializer also requires a canonical descriptor-relative `source_root`
+spelling and rejects control characters in fixture labels before serializing
+its ledger. During census startup, each resource/project header copy is read
+back and SHA-256 checked before it is admitted to the compiler include closure;
+a truncated or otherwise altered snapshot therefore fails the dependency
+contract before any object row runs.
 
 The archived replay inventory is an authenticated row-level projection, not an
 arithmetic assertion. Its 28 fixture identities include source SHA-256 values
@@ -144,13 +158,13 @@ until their owning gate supplies that setup.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`0df1ff3ccc3d776a17143aa8b1336efcb6fc3dcd77f6defc7eb987711634771a`, materializer
+`356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1`, materializer
 receipt SHA-256
-`9cfbe0faa6d63990a011137bf5af61b4f3878eb5f460c56d7c8c91c044c47556`, project
+`944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435`, project
 closure SHA-256
-`00f987ac3dcaf2768f761bd118a7f607b24e83169246c24f03b12ee355e63c56`, and
+`d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be`, and
 materializer ledger SHA-256
-`7035bf416d79982bd83d58771dc96d06a29cc7058e41fc9d6016dd8311522340`.
+`b6e9e286de94f31af3c9da879e4809df65c3aff318d5fea51b3cb79da6e958a7`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
@@ -181,7 +195,9 @@ input-byte ledger.
 
 Every row supplies `-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char
 -fverify-codegen -nostdinc`, the frozen resource include, an explicit target,
-CPU model and allocator. The default CPU
+CPU model and allocator. Linux GNU rows additionally receive the frozen
+target-specific musl include followed by musl's common include; no host sysroot
+or ambient SDK path is admitted. The default CPU
 profile is `baseline`; `--cpu` selects another named profile for a separate
 manifest. MIR rows additionally require `-fno-machine-fallback`. Optimization and
 promotion defaults are those of the pinned compiler; there is no claim that one
