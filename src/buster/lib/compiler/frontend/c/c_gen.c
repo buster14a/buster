@@ -1591,10 +1591,31 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
                 // body has run correctly.
                 result.returns_zero_at_end = return_type->kind == C_TYPE_INT && string_equal(declaration.name, S8("main"));
                 result.is_variadic = function_type->is_variadic;
-                // The IR type carries the same marker, and it is the one the
-                // dialect was already applied to.
-                IrType* canonical_function = ir_type_from_id(&program->types, c_type_ir_map[declaration.type.value]);
-                result.is_unprototyped = canonical_function && canonical_function->kind == IR_TYPE_FUNCTION && canonical_function->is_unprototyped;
+                // The declaration's IR type carries the marker after the C
+                // dialect has been applied.  This must remain the selected
+                // declaration rather than the entity's first declaration: a
+                // later prototype supersedes an earlier `f()` at call sites.
+                IrType* declaration_function = ir_type_from_id(&program->types, c_type_ir_map[declaration.type.value]);
+                result.is_unprototyped = declaration_function && declaration_function->kind == IR_TYPE_FUNCTION &&
+                                          declaration_function->is_unprototyped;
+                // Redeclarations retain the entity's first compatible
+                // function type as the canonical identity, even when this
+                // declaration has an equivalent declarator-specific type
+                // node.  That identity supplies the parameter IR IDs below,
+                // but not the selected declaration's prototype marker.
+                CTypeId canonical_c_type = declaration.type;
+                if (declaration.entity.value < parse->entity_count)
+                {
+                    CTypeId entity_c_type = parse->entities[declaration.entity.value].type;
+                    CType* entity_function_type = c_type_from_id(parse, entity_c_type);
+                    if (entity_function_type && entity_function_type->kind == C_TYPE_FUNCTION)
+                    {
+                        canonical_c_type = entity_c_type;
+                    }
+                }
+                IrType* canonical_function = canonical_c_type.value < parse->type_count
+                                                  ? ir_type_from_id(&program->types, c_type_ir_map[canonical_c_type.value])
+                                                  : 0;
                 // A declarator with no parameter list of its own may still
                 // have a function type from its specifiers -- musl's
                 // `extern __typeof(dummy) alias;` -- and its parameters live
@@ -1650,6 +1671,24 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
                     if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
                     {
                         return (CIrSignature){0};
+                    }
+                }
+                // A compatible redeclaration can introduce a distinct C type
+                // node for an equivalent function-pointer parameter.  The
+                // function itself is keyed by the canonical function type
+                // selected during declaration merging, so its callable
+                // parameter values must use that type's IDs as well.  Keeping
+                // the declaration's parameter list above still preserves
+                // object-level details such as array bounds and qualifiers;
+                // this final copy only closes the identity gap at the IR
+                // function boundary.
+                if (canonical_function && canonical_function->kind == IR_TYPE_FUNCTION &&
+                    canonical_function->parameter_count == result.parameter_count &&
+                    (!result.parameter_count || canonical_function->parameter_types))
+                {
+                    for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
+                    {
+                        result.parameter_types[parameter_index] = canonical_function->parameter_types[parameter_index];
                     }
                 }
                 result.body_supported = c_ir_signature_body_supported(program, wide_float_cache, result.return_type, result.parameter_types,
@@ -24807,39 +24846,6 @@ BUSTER_C_INTERNAL u32 c_ir_sizeof_compound_literal_operand_end(CIntegerIrBuilder
     return result;
 }
 
-// Is this token range an inline struct/union/enum *definition* — the
-// keyword, an optional tag, and its brace body — rather than a reference to
-// a named tag? The sizeof fold has no path that resolves such a definition,
-// and the expression-type prediction it would otherwise fall through to
-// guesses int, so a definition operand must fail the fold instead of
-// silently misfolding (found by tools/differential_c_harness.py, family
-// sizeof_expr; the same shape in expression position is already rejected
-// with an unbound-identifier diagnostic).
-BUSTER_C_INTERNAL bool c_ir_tokens_start_aggregate_definition(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    bool result = false;
-    // The compound-literal spelling puts the definition one token in:
-    // `(struct { ... }){0}`. A parenthesized reference like `(struct S)` has
-    // no brace where the test below looks, so seeing through the parenthesis
-    // cannot claim one.
-    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        start += 1;
-    }
-    if (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
-        c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[start],
-                                  C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)))
-    {
-        u32 brace_probe = start + 1;
-        if (brace_probe < end && builder->preprocess.tokens[brace_probe].kind == C_TOKEN_IDENTIFIER)
-        {
-            brace_probe += 1;
-        }
-        result = brace_probe < end && c_token_is_punctuator(&builder->preprocess.tokens[brace_probe], C_PUNCTUATOR_LEFT_BRACE);
-    }
-    return result;
-}
-
 // GNU folds sizeof over a function designator to 1 — clang and gcc agree —
 // while the IR function type's layout carries pointer size for its other
 // consumers, so every sizeof exit reads the size through this instead of
@@ -24863,8 +24869,8 @@ BUSTER_C_INTERNAL u32 c_ir_sizeof_operand_alignment(IrType* value)
 // the unit are the two ways to get there, and neither has a knowable size.
 // The expression-type prediction below guesses int for both, so `sizeof v`
 // answers 4 — and unlike every other use of `v`, which fails to lower, that
-// wrong answer carries no diagnostic. Refused for the same reason an inline
-// aggregate definition operand is; clang rejects both shapes outright.
+// wrong answer carries no diagnostic. Refuse this unresolved shape rather
+// than guessing; clang rejects an incomplete array operand outright.
 // An `extern char v[];` some later declaration completes is not one of them:
 // the redeclaration merge adopts the completing type, so it maps and the
 // guard never sees it.
@@ -24952,10 +24958,6 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             }
         }
     }
-    if (c_ir_tokens_start_aggregate_definition(builder, start, end))
-    {
-        return false;
-    }
     bool whole_range_string = !dereference_count && start < end;
     for (u32 literal_index = start; whole_range_string && literal_index < end; literal_index += 1)
     {
@@ -24996,12 +24998,6 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                     *alignment_out = literal->layout.alignment;
                 }
                 return true;
-            }
-            // A compound literal whose type is an inline aggregate definition
-            // never resolves above, and no later path can size it either.
-            if (initializer_close == end - 1 && c_ir_tokens_start_aggregate_definition(builder, start + 1, type_close))
-            {
-                return false;
             }
         }
     }
@@ -26127,9 +26123,9 @@ c_ir_expression_core_loop:
                 // one whose declaration asked for no more.
                 //
                 // The prediction guesses int for an operand it cannot type; an
-                // inline aggregate definition is such an operand, and a guess
-                // for one silently misfolds the answer, so it fails here
-                // instead.  A member chain the resolver proved wrong -- a
+                // unmapped array object is such an operand, and a guess for one
+                // silently misfolds the answer, so it fails here instead.  A
+                // member chain the resolver proved wrong -- a
                 // resolved aggregate with no member of that name -- is not a
                 // shape to guess either: it is the diagnostic the walkers
                 // recorded, and predicting int for it is what made every
@@ -26149,8 +26145,7 @@ c_ir_expression_core_loop:
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                IrTypeId expression_type = c_ir_tokens_start_aggregate_definition(builder, operand_start, operand_end) ||
-                                                   c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
+                IrTypeId expression_type = c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
                                                ? IR_TYPE_ID_INVALID
                                                : c_ir_predict_expression_type(builder, operand_start, operand_end);
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);

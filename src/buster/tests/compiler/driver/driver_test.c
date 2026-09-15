@@ -7034,21 +7034,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_narrow_abi_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    // sizeof over an inline aggregate definition must be rejected, never
-    // folded from the expression-type prediction's int guess (see the
-    // fixture's header); the assertion is only that no object is produced.
+    // sizeof over inline aggregate definitions must resolve the expression
+    // scoped types and run the fixture's two sixteen-byte assertions.
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_sizeof_anonymous_path"), false);
     String8 c_sizeof_anonymous_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous"), S8(""));
     String8 c_sizeof_anonymous_command_line[] = {
+        S8("-fno-machine-fallback"),
+        S8("-fverify-codegen"),
         S8("-o"),
         c_sizeof_anonymous_path,
         S8("tests/basic_c_sizeof_anonymous_aggregate.c"),
     };
     CompilerDriverResult c_sizeof_anonymous = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_command_line)));
-    BUSTER_TEST(arguments, c_sizeof_anonymous.error != COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, !c_sizeof_anonymous.has_object);
+    BUSTER_TEST(arguments, c_sizeof_anonymous.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_sizeof_anonymous.codegen_statistics.fallback_function_count == 0);
+    if (c_sizeof_anonymous.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_sizeof_anonymous_run_arguments[] = {
+            c_sizeof_anonymous_path,
+        };
+        ProcessSpawnResult c_sizeof_anonymous_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_sizeof_anonymous_spawn.handle != 0);
+        if (c_sizeof_anonymous_spawn.handle)
+        {
+            ProcessWaitResult c_sizeof_anonymous_wait = os_process_wait_sync(arguments->arena, c_sizeof_anonymous_spawn);
+            BUSTER_TEST(arguments, c_sizeof_anonymous_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // 256-bit vector arguments, once through the default pipeline and once
     // through the canonical emitter, whose VMOVDQU move is the shape the
     // default pipeline only reaches through per-function fallback.
@@ -12981,6 +12999,29 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_conflict_command_line)));
     BUSTER_TEST(arguments, c_function_pointer_conflict.error != COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_function_pointer_conflict.diagnostic, S8("incompatible function pointer type")) != BUSTER_STRING_NO_MATCH);
+    // A later prototype is authoritative even when the entity's first
+    // declaration used an empty, unprototyped parameter list.  The callable
+    // signature may reuse the entity's canonical parameter IDs, but must not
+    // inherit that first declaration's relaxed arity rule.
+    String8 c_prototype_authority_path =
+        buster_test_temporary_path(arguments->arena, S8("buster-c-prototype-authority"), S8(".c"));
+    String8 c_prototype_authority_source =
+        S8("static int f();\n"
+           "static int f(int x);\n"
+           "static int f(int x) { return x; }\n"
+           "int main(void) { return f(1, 2); }\n");
+    BUSTER_TEST(arguments, file_write(c_prototype_authority_path,
+                                      BUSTER_SLICE_TO_BYTE_SLICE(c_prototype_authority_source)));
+    String8 c_prototype_authority_command_line[] = {
+        S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux-gnu"), c_prototype_authority_path,
+    };
+    CompilerDriverResult c_prototype_authority = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena,
+                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prototype_authority_command_line)));
+    BUSTER_TEST(arguments, c_prototype_authority.error != COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+                string_first_sequence(c_prototype_authority.diagnostic, S8("too many arguments")) != BUSTER_STRING_NO_MATCH);
     // An inline-assembly template the emitter refuses must name the rule that
     // refused it and the register it named, not leak an opcode number (#831).
     // The refusal itself is by design, so the assertion is on the wording; the
@@ -13194,6 +13235,40 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ProcessWaitResult c_runtime_fixture_wait = os_process_wait_sync(arguments->arena, c_runtime_fixture_spawn);
                 BUSTER_TEST(arguments, c_runtime_fixture_wait.result == PROCESS_RESULT_SUCCESS);
             }
+        }
+    }
+    // The adjusted array and function-pointer parameters in the declarations
+    // fixture use equivalent type nodes across a redeclaration.  Validate the
+    // canonical boundary with the non-SSA frontend and reject native fallback
+    // so the test exercises the merged function type itself.
+    String8 c_sbase_canonical_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sbase-declarations-canonical"), S8(""));
+    String8 c_sbase_canonical_command_line[] = {
+        S8("-fno-frontend-ssa"),
+        S8("-fno-machine-fallback"),
+        S8("-fverify-codegen"),
+        S8("-o"),
+        c_sbase_canonical_path,
+        S8("tests/basic_c_sbase_declarations.c"),
+    };
+    CompilerDriverResult c_sbase_canonical = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sbase_canonical_command_line)));
+    BUSTER_TEST(arguments, c_sbase_canonical.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_sbase_canonical.codegen_statistics.fallback_function_count == 0);
+    if (c_sbase_canonical.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_sbase_canonical_run_arguments[] = {
+            c_sbase_canonical_path,
+        };
+        ProcessSpawnResult c_sbase_canonical_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sbase_canonical_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_sbase_canonical_spawn.handle != 0);
+        if (c_sbase_canonical_spawn.handle)
+        {
+            ProcessWaitResult c_sbase_canonical_wait = os_process_wait_sync(arguments->arena, c_sbase_canonical_spawn);
+            BUSTER_TEST(arguments, c_sbase_canonical_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
     // The musl singleton fixtures. Each one is a shape musl uses that the
