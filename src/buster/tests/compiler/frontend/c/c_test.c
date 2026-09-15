@@ -15535,6 +15535,198 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* argume
     return result;
 }
 
+// The exact-literal bignum defines only the limbs below `count`.  Every value
+// here starts with a sentinel in every other limb: a helper that reads a limb
+// it did not write folds the sentinel into its answer, and one that writes
+// past the limbs its work occupies leaves a sentinel missing.
+#define C_TEST_EXT80_STALE_LIMB UINT32_C(0xa5a5a5a5)
+
+BUSTER_GLOBAL_LOCAL void c_test_ext80_big_fill(CIrExt80Big* value, u32 const* limbs, u32 count)
+{
+    for (u32 index = 0; index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        value->limbs[index] = index < count ? limbs[index] : C_TEST_EXT80_STALE_LIMB;
+    }
+    value->count = count;
+}
+
+// Whether `value` holds exactly `limbs` below its count and the untouched
+// sentinel from `stale_from` up.  Limbs in between are ones the helper was
+// allowed to write while working.
+BUSTER_GLOBAL_LOCAL bool c_test_ext80_big_is(CIrExt80Big const* value, u32 const* limbs, u32 count, u32 stale_from)
+{
+    bool result = value->count == count;
+    for (u32 index = 0; result && index < count; index += 1)
+    {
+        result = value->limbs[index] == limbs[index];
+    }
+    for (u32 index = stale_from; result && index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        result = value->limbs[index] == C_TEST_EXT80_STALE_LIMB;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ext80_big_live_limbs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CIrExt80Big* value = arena_allocate(temporary.arena, CIrExt80Big, 1);
+    CIrExt80Big* other = arena_allocate(temporary.arena, CIrExt80Big, 1);
+    CIrExt80Big* product = arena_allocate(temporary.arena, CIrExt80Big, 1);
+    u32* limbs = arena_allocate(temporary.arena, u32, C_IR_EXT80_BIG_LIMBS);
+    u32* expected = arena_allocate(temporary.arena, u32, C_IR_EXT80_BIG_LIMBS);
+    u32 const top_limb_shift = (C_IR_EXT80_BIG_LIMBS - 1) * 32;
+
+    // Zero: nothing is read, written or refused.
+    c_test_ext80_big_fill(value, 0, 0);
+    c_test_ext80_big_fill(other, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 37));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, 0, 0, 0));
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, 5) == 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, -5) == 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_subtract_shifted(value, other, 9));
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, 0, 0, 0));
+
+    // One limb.  Four bits stay inside it, so the count must not grow from
+    // the sentinel above it; one more bit carries into a new limb.
+    c_test_ext80_big_fill(value, (u32[]){0x0000000f}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 4));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x000000f0}, 1, 1));
+    c_test_ext80_big_fill(value, (u32[]){0x80000001}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000002, 0x00000001}, 2, 2));
+
+    // Whole limbs and bits together raise the count past limbs that held only
+    // the sentinel: each is assigned, the vacated low limbs become zero, and
+    // the top limb's high bits carry into a fifth.
+    c_test_ext80_big_fill(value, (u32[]){0x00000001, 0xf0000002}, 2);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 2 * 32 + 4));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000000, 0x00000010, 0x00000020, 0x0000000f}, 5, 5));
+
+    // The largest counts the refusals admit, then each refusal, which leaves
+    // the value as it was.
+    for (u32 index = 0; index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        limbs[index] = index + 1;
+        expected[index] = index * 2;
+    }
+    c_test_ext80_big_fill(value, limbs, C_IR_EXT80_BIG_LIMBS - 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 33));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, expected, C_IR_EXT80_BIG_LIMBS, C_IR_EXT80_BIG_LIMBS));
+    memset(expected, 0, C_IR_EXT80_BIG_LIMBS * sizeof(expected[0]));
+    expected[C_IR_EXT80_BIG_LIMBS - 1] = 0x80000000;
+    c_test_ext80_big_fill(value, (u32[]){0x40000000}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, top_limb_shift + 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, expected, C_IR_EXT80_BIG_LIMBS, C_IR_EXT80_BIG_LIMBS));
+    c_test_ext80_big_fill(value, (u32[]){0x80000000}, 1);
+    BUSTER_TEST(arguments, !c_test_ext80_big_shift_left(value, top_limb_shift + 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x80000000}, 1, 1));
+    BUSTER_TEST(arguments, !c_test_ext80_big_shift_left(value, top_limb_shift + 32));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x80000000}, 1, 1));
+    c_test_ext80_big_fill(value, (u32[]){0x00000001, 0x00000001}, 2);
+    BUSTER_TEST(arguments, !c_test_ext80_big_shift_left(value, top_limb_shift));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000001, 0x00000001}, 2, 2));
+
+    // A shifted compare and subtraction read each operand only below its
+    // count, leave the shifted operand alone, and keep their refusal answers.
+    c_test_ext80_big_fill(value, (u32[]){0x00000005, 0x00000001}, 2);
+    c_test_ext80_big_fill(other, (u32[]){0x00000003}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, 1) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, 31) < 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, -30) < 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, -31) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, INT32_MIN) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, (s32)(top_limb_shift + 32)) < 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, -(s32)(top_limb_shift + 32)) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000005, 0x00000001}, 2, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000003}, 1, 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_subtract_shifted(value, other, 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0xffffffff}, 1, 2));
+    BUSTER_TEST(arguments, !c_test_ext80_big_subtract_shifted(other, value, 0));
+    BUSTER_TEST(arguments, !c_test_ext80_big_subtract_shifted(value, other, top_limb_shift + 32));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0xffffffff}, 1, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000003}, 1, 1));
+
+    // Addends of different lengths: the shorter contributes nothing past its
+    // own count on either side, and a carry opens a new limb.
+    c_test_ext80_big_fill(value, (u32[]){0xffffffff}, 1);
+    c_test_ext80_big_fill(other, (u32[]){0x00000001, 0x00000001}, 2);
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000002}, 2, 2));
+    c_test_ext80_big_fill(value, (u32[]){0x00000001, 0x00000001}, 2);
+    c_test_ext80_big_fill(other, (u32[]){0xffffffff}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000002}, 2, 2));
+    c_test_ext80_big_fill(value, (u32[]){0xffffffff}, 1);
+    c_test_ext80_big_fill(other, (u32[]){0x00000001}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000001}, 2, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    for (u32 index = 0; index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        limbs[index] = 0xffffffff;
+    }
+    c_test_ext80_big_fill(value, limbs, C_IR_EXT80_BIG_LIMBS);
+    BUSTER_TEST(arguments, !c_test_ext80_big_add(value, other));
+
+    // The product clears only the limbs it accumulates into, including at the
+    // largest count its refusal admits.
+    c_test_ext80_big_fill(value, (u32[]){0xffffffff, 0x00000001}, 2);
+    c_test_ext80_big_fill(other, (u32[]){0xffffffff}, 1);
+    c_test_ext80_big_fill(product, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, (u32[]){0x00000001, 0xfffffffd, 0x00000001}, 3, 3));
+    c_test_ext80_big_fill(product, (u32[]){0x00000007}, 1);
+    c_test_ext80_big_fill(other, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, 0, 0, 1));
+    c_test_ext80_big_fill(value, limbs, C_IR_EXT80_BIG_LIMBS - 1);
+    c_test_ext80_big_fill(other, (u32[]){0x00000002}, 1);
+    c_test_ext80_big_fill(product, 0, 0);
+    memcpy(expected, limbs, C_IR_EXT80_BIG_LIMBS * sizeof(expected[0]));
+    expected[0] = 0xfffffffe;
+    expected[C_IR_EXT80_BIG_LIMBS - 1] = 0x00000001;
+    BUSTER_TEST(arguments, c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, expected, C_IR_EXT80_BIG_LIMBS, C_IR_EXT80_BIG_LIMBS));
+    c_test_ext80_big_fill(other, (u32[]){0xffffffff, 0xffffffff}, 2);
+    c_test_ext80_big_fill(product, (u32[]){0x00000007}, 1);
+    BUSTER_TEST(arguments, !c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, 0, 0, 1));
+
+    // A literal's rational writes only the live limbs of either output, and a
+    // refused spelling writes neither.
+    s32 binary_exponent = 7;
+    c_test_ext80_big_fill(value, 0, 0);
+    c_test_ext80_big_fill(other, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("0.0"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, 0, 0, 0));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == 0);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("4294967296.25"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000019, 0x00000064}, 2, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000019}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == -2);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("18446744073709551616e5"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000000, 0x00000c35}, 3, 3));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == 5);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("0x1.8p-3L"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000018}, 1, 3));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == -7);
+    BUSTER_TEST(arguments, !c_test_ext80_parse_rational_literal(S8("0x1.8"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, !c_test_ext80_parse_rational_literal(S8("1e20001"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000018}, 1, 3));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == -7);
+
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16942,6 +17134,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
     BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
