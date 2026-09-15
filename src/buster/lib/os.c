@@ -3,8 +3,10 @@
 // rather than in per-platform files, so the contract stays in one place:
 // virtual memory (os_reserve/os_commit/os_decommit and protection flags),
 // threads, mutexes, and TLS, checked file IO (os_file_write_checked,
-// os_file_close_checked, os_file_flush), process spawn/wait with deadlines,
-// executable lookup, dynamic libraries, and the crash/failure printers.
+// os_file_close_checked, os_file_flush), replacement publication
+// (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
+// process spawn/wait with deadlines, executable lookup, dynamic libraries, and
+// the crash/failure printers. Replacement publication follows os_file_close.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -16,6 +18,11 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
+
+#if defined(__linux__) || defined(__APPLE__)
+// rename(2) is declared only by <stdio.h>.
+#include <stdio.h>
+#endif
 
 #if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && defined(MAP_JIT)
 extern void pthread_jit_write_protect_np(int enabled);
@@ -127,6 +134,28 @@ BUSTER_GLOBAL_LOCAL void w32_file_stats_from_file_information(FileStats* stats, 
             u64 unix_time_100ns = file_time_100ns - unix_epoch_100ns;
             stats->modified_time_s = unix_time_100ns / (u64)10000000;
             stats->modified_time_ns = (unix_time_100ns % (u64)10000000) * (u64)100;
+        }
+    }
+
+    if (options.identity)
+    {
+        DWORD attributes = file_information.dwFileAttributes;
+        stats->device = file_information.dwVolumeSerialNumber;
+        stats->index = ((u64)file_information.nFileIndexHigh << 32) | (u64)file_information.nFileIndexLow;
+        stats->permissions = (attributes & FILE_ATTRIBUTE_READONLY) ? 0444u : 0666u;
+        // Only a handle opened with FILE_FLAG_OPEN_REPARSE_POINT can report
+        // the reparse point itself rather than its target.
+        if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        {
+            stats->kind = OS_FILE_KIND_LINK;
+        }
+        else if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            stats->kind = OS_FILE_KIND_DIRECTORY;
+        }
+        else
+        {
+            stats->kind = OS_FILE_KIND_REGULAR;
         }
     }
 }
@@ -962,24 +991,7 @@ void os_make_directory(String8 path)
 
 bool os_file_delete(String8 path)
 {
-#if defined(__linux__) || defined(__APPLE__)
-    BUSTER_VALIDATE(!path.pointer[path.length]);
-    return unlink((const char*)path.pointer) == 0 || errno == ENOENT;
-#elif defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 path_w = string16_from_string8(temp.arena, path, true);
-    bool result = DeleteFileW(path_w.pointer);
-    if (!result)
-    {
-        DWORD error = GetLastError();
-        result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-    }
-    scratch_end(temp);
-    return result;
-#else
-    BUSTER_UNUSED(path);
-    return false;
-#endif
+    return !os_file_delete_checked(path).v;
 }
 
 #if defined(_WIN32)
@@ -1220,6 +1232,8 @@ typedef struct OsFileTestState OsFileTestState;
 struct OsFileTestState
 {
     String8 path;
+    // The staging file most recently created for `path` as its destination.
+    String8 staging;
     OsFileDescriptor* file;
     const OsFileTestStep* steps;
     u32 count;
@@ -1249,6 +1263,14 @@ BUSTER_GLOBAL_LOCAL const OsFileTestStep* os_file_test_take(OsFileTestOperation 
         os_file_test_state.next += 1;
     }
     return result;
+}
+
+// Replacement steps name both the staging file and its destination, so either
+// spelling selects them.
+BUSTER_GLOBAL_LOCAL bool os_file_test_selects(String8 path)
+{
+    bool staging = os_file_test_state.staging.length && string_equal(path, os_file_test_state.staging);
+    return os_file_test_state.path.length && (string_equal(path, os_file_test_state.path) || staging);
 }
 
 bool os_file_test_map_unavailable(String8 path)
@@ -1566,6 +1588,28 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
         {
             if (options.size) result.size = (u64)stats.st_size;
             if (options.modified_time) result.modified_time_s = (u64)stats.st_mtime;
+            if (options.identity)
+            {
+                result.device = (u64)stats.st_dev;
+                result.index = (u64)stats.st_ino;
+                result.permissions = (u32)(stats.st_mode & 0777);
+                if (S_ISREG(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_REGULAR;
+                }
+                else if (S_ISDIR(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_DIRECTORY;
+                }
+                else if (S_ISLNK(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_LINK;
+                }
+                else
+                {
+                    result.kind = OS_FILE_KIND_OTHER;
+                }
+            }
             result.valid = true;
         }
 #elif defined(_WIN32)
@@ -1639,6 +1683,302 @@ bool os_file_close(OsFileDescriptor* file_descriptor)
 {
     return !os_file_close_checked(file_descriptor).v;
 }
+
+OsError os_file_delete_checked(String8 path)
+{
+    OsError result = {0};
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = os_file_test_selects(path) ? os_file_test_take(OS_FILE_TEST_DELETE) : 0;
+    if (step) result.v = (u32)step->value;
+#endif
+    if (!result.v)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_VALIDATE(!path.pointer[path.length]);
+        if (unlink((const char*)path.pointer) != 0 && errno != ENOENT)
+        {
+            result = os_get_last_error();
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        if (!DeleteFileW(path_w.pointer))
+        {
+            OsError error = os_get_last_error();
+            if (error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
+            {
+                result = error;
+            }
+        }
+        scratch_end(scratch);
+#else
+        BUSTER_UNUSED(path);
+        result = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+
+FileStats os_file_replacement_target_stats(String8 path)
+{
+    FileStats result = {0};
+    if (!path.pointer || !path.length)
+    {
+        result.error = os_file_invalid_error();
+    }
+    else
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_VALIDATE(!path.pointer[path.length]);
+        // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
+        // keeps a terminal from becoming the controlling terminal.
+        int fd;
+        do
+        {
+            fd = open((char*)path.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+        } while (fd < 0 && errno == EINTR);
+        if (fd >= 0)
+        {
+            OsFileDescriptor* file = posix_fd_to_generic_fd(fd);
+            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+            OsError close_error = os_file_close_checked(file);
+            if (result.valid && close_error.v)
+            {
+                result = (FileStats){.error = close_error};
+            }
+        }
+        else
+        {
+            OsError error = os_get_last_error();
+            result.valid = true;
+            if (error.v == (u32)ENOENT)
+            {
+                result.kind = OS_FILE_KIND_MISSING;
+            }
+            else if (error.v == (u32)ELOOP)
+            {
+                result.kind = OS_FILE_KIND_LINK;
+            }
+            else if (error.v == (u32)EISDIR)
+            {
+                result.kind = OS_FILE_KIND_DIRECTORY;
+            }
+            else if (error.v == (u32)ENXIO)
+            {
+                result.kind = OS_FILE_KIND_OTHER;
+            }
+            else
+            {
+                result.valid = false;
+                result.error = error;
+            }
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        // Attribute-only access never conflicts with other handles' share
+        // modes; the reparse flag inspects a link rather than its target.
+        HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            OsFileDescriptor* file = (OsFileDescriptor*)handle;
+            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+            OsError close_error = os_file_close_checked(file);
+            if (result.valid && close_error.v)
+            {
+                result = (FileStats){.error = close_error};
+            }
+        }
+        else
+        {
+            OsError error = os_get_last_error();
+            result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
+            if (!result.valid)
+            {
+                result.error = error;
+            }
+        }
+        scratch_end(scratch);
+#else
+        result.error = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+
+// Collisions come only from leftovers of an earlier process with the same id
+// or from foreign files, so a short bounded search suffices.
+#define OS_FILE_STAGING_ATTEMPTS 64
+BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
+
+OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
+{
+    OsFileStagingResult result = {0};
+    // The staging name replaces only the final component, keeping the rename
+    // within one directory without lengthening the destination's name.
+    u64 directory_length = destination.pointer ? destination.length : 0;
+    bool separator = false;
+    while (directory_length && !separator)
+    {
+        char8 character = destination.pointer[directory_length - 1];
+#if defined(_WIN32)
+        separator = character == '/' || character == '\\' || character == ':';
+#else
+        separator = character == '/';
+#endif
+        if (!separator)
+        {
+            directory_length -= 1;
+        }
+    }
+#if BUSTER_INCLUDE_TESTS
+    bool selected = os_file_test_state.path.length && string_equal(destination, os_file_test_state.path);
+    const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
+    if (step) result.error.v = (u32)step->value;
+#endif
+    if (!result.error.v && (!destination.pointer || destination.length == directory_length))
+    {
+        result.error = os_file_invalid_error();
+    }
+
+    String8 directory = {.pointer = destination.pointer, .length = directory_length};
+    u64 mark = arena->position;
+    for (u32 attempt = 0; attempt < OS_FILE_STAGING_ATTEMPTS && !result.file && !result.error.v; attempt += 1)
+    {
+        arena_set_position(arena, mark);
+        u64 serial = atomic_u64_increment(&os_file_staging_counter);
+        String8 path = string_format_z(arena, S8("{S8}{S8}{u64}-{u64}{S8}"), directory, OS_FILE_STAGING_PREFIX, os_get_current_process_id(), serial,
+                                       OS_FILE_STAGING_SUFFIX);
+        OsError error;
+#if defined(__linux__) || defined(__APPLE__)
+        mode_t mode = permissions.execute ? 0755 : 0644;
+        int fd;
+        do
+        {
+            fd = open((char*)path.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
+        } while (fd < 0 && errno == EINTR);
+        error = fd >= 0 ? (OsError){0} : os_get_last_error();
+        if (fd >= 0)
+        {
+            result.file = posix_fd_to_generic_fd(fd);
+        }
+        bool collision = error.v == (u32)EEXIST;
+#elif defined(_WIN32)
+        String16 path_w = string16_from_string8(arena, path, true);
+        DWORD shared_mode = 0;
+        if (permissions.read)
+        {
+            shared_mode |= FILE_SHARE_READ;
+        }
+        if (permissions.write)
+        {
+            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        }
+        SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
+        HANDLE handle = CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+        error = handle != INVALID_HANDLE_VALUE ? (OsError){0} : os_get_last_error();
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            result.file = (OsFileDescriptor*)handle;
+        }
+        bool collision = error.v == (u32)ERROR_FILE_EXISTS || error.v == (u32)ERROR_ALREADY_EXISTS;
+#else
+        BUSTER_UNUSED(permissions);
+        error = os_file_invalid_error();
+        bool collision = false;
+#endif
+        if (result.file)
+        {
+            result.path = path;
+        }
+        else if (!collision || attempt + 1 == OS_FILE_STAGING_ATTEMPTS)
+        {
+            result.error = error;
+        }
+    }
+    if (!result.file)
+    {
+        arena_set_position(arena, mark);
+    }
+#if BUSTER_INCLUDE_TESTS
+    if (selected)
+    {
+        os_file_test_state.file = result.file;
+        os_file_test_state.staging = result.path;
+    }
+#endif
+    return result;
+}
+
+OsError os_file_replace(String8 path, String8 destination)
+{
+    OsError result = {0};
+    if (!path.pointer || !path.length || !destination.pointer || !destination.length)
+    {
+        result = os_file_invalid_error();
+    }
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = !result.v && (os_file_test_selects(path) || os_file_test_selects(destination)) ? os_file_test_take(OS_FILE_TEST_REPLACE) : 0;
+    if (step) result.v = (u32)step->value;
+#endif
+    if (!result.v)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_VALIDATE(!path.pointer[path.length] && !destination.pointer[destination.length]);
+        if (rename((const char*)path.pointer, (const char*)destination.pointer) != 0)
+        {
+            result = os_get_last_error();
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        String16 destination_w = string16_from_string8(scratch.arena, destination, true);
+        // No MOVEFILE_COPY_ALLOWED: a cross-volume copy and delete is neither
+        // atomic nor a rename.
+        if (!MoveFileExW(path_w.pointer, destination_w.pointer, MOVEFILE_REPLACE_EXISTING))
+        {
+            result = os_get_last_error();
+        }
+        scratch_end(scratch);
+#else
+        result = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+
+#if !defined(_WIN32)
+OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions)
+{
+    OsError result = {0};
+    if (!file_descriptor || (permissions & ~(u32)0777))
+    {
+        result = os_file_invalid_error();
+    }
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = !result.v && file_descriptor == os_file_test_state.file ? os_file_test_take(OS_FILE_TEST_PERMISSIONS) : 0;
+    if (step) result.v = (u32)step->value;
+#endif
+    if (!result.v)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        int status;
+        do
+        {
+            status = fchmod(generic_fd_to_posix(file_descriptor), (mode_t)permissions);
+        } while (status < 0 && errno == EINTR);
+        if (status < 0)
+        {
+            result = os_get_last_error();
+        }
+#else
+        result = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+#endif
 
 u64 string8_code_point_count(String8 s, u8 code_point)
 {

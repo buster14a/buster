@@ -64,13 +64,33 @@ struct OsError
     u32 v;
 };
 
+typedef enum OsFileKind
+{
+    OS_FILE_KIND_MISSING,
+    OS_FILE_KIND_REGULAR,
+    OS_FILE_KIND_DIRECTORY,
+    // A POSIX symbolic link or Windows reparse point that was not followed.
+    OS_FILE_KIND_LINK,
+    OS_FILE_KIND_OTHER,
+} OsFileKind;
+
 typedef struct FileStats FileStats;
 struct FileStats
 {
     u64 modified_time_s;
     u64 modified_time_ns;
     u64 size;
+    // The identity option fills device, index, permissions and kind. POSIX
+    // reports st_dev/st_ino; Windows reports the volume serial number and the
+    // 64-bit file index (ReFS 128-bit ids are not read). Equal pairs taken from
+    // handles that are open at the same time name one file.
+    u64 device;
+    u64 index;
     OsError error;
+    // POSIX permission bits (0777). Windows maps the read-only attribute as the
+    // C runtime's stat does: 0444 when set, otherwise 0666.
+    u32 permissions;
+    OsFileKind kind;
     bool valid;
 };
 
@@ -84,7 +104,8 @@ struct FileStatsOptions
         {
             u64 size : 1;
             u64 modified_time : 1;
-            u64 reserved : 62;
+            u64 identity : 1;
+            u64 reserved : 61;
         };
     };
 };
@@ -203,10 +224,52 @@ BUSTER_F_DECL void os_make_directory(String8 path);
 // Unlike os_make_directory, reports failure and accepts bounded path slices.
 BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 BUSTER_F_DECL bool os_file_delete(String8 path);
+// The native error behind os_file_delete; a missing path is still success.
+BUSTER_F_DECL OsError os_file_delete_checked(String8 path);
 // Deletes `path` and everything under it. Symbolic links are removed as links
 // rather than followed, so the walk cannot escape the tree it was given.
 // Returns whether the tree is gone; a missing `path` counts as success.
 BUSTER_F_DECL bool os_directory_delete(String8 path);
+
+// Replacement publication: inspect the destination, stage beside it, rename
+// the staging file over it.
+//
+// Inspects `path` as a replacement target without creating, truncating,
+// writing, following a final link or waiting for a FIFO reader. POSIX has no
+// metadata-only open, so it opens write-only and the kernel applies the
+// caller's write access (for example EACCES, EROFS or Linux ETXTBSY) as an
+// in-place writer would; ELOOP, EISDIR and ENXIO become the link, directory
+// and other kinds. Windows opens attributes only. A missing target is valid
+// with OS_FILE_KIND_MISSING; otherwise the result carries identity stats.
+BUSTER_F_DECL FileStats os_file_replacement_target_stats(String8 path);
+
+typedef struct OsFileStagingResult OsFileStagingResult;
+struct OsFileStagingResult
+{
+    OsFileDescriptor* file;
+    // Zero-terminated, in the caller's arena; empty on failure.
+    String8 path;
+    OsError error;
+};
+// Staging names are OS_FILE_STAGING_PREFIX, the process id, '-', a counter and
+// OS_FILE_STAGING_SUFFIX, so files left by interrupted publications are
+// recognizable.
+#define OS_FILE_STAGING_PREFIX S8(".buster-staging-")
+#define OS_FILE_STAGING_SUFFIX S8(".tmp")
+// Exclusively creates a new, empty, write-only file in `destination`'s
+// directory. Only name collisions are retried. Permissions map as for
+// os_file_open.
+BUSTER_F_DECL OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions);
+// Renames `path` over `destination` on one filesystem: rename(2), or
+// MoveFileExW(MOVEFILE_REPLACE_EXISTING) without a copy fallback. An existing
+// destination entry, including a link, is replaced, never followed or deleted
+// first. The namespace change is atomic where the filesystem provides it;
+// nothing is flushed, so it is not a crash-durability promise.
+BUSTER_F_DECL OsError os_file_replace(String8 path, String8 destination);
+#if !defined(_WIN32)
+// fchmod restricted to the 0777 permission bits.
+BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions);
+#endif
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions);
 BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_descriptor, ByteSlice buffer);
