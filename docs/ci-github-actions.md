@@ -243,7 +243,7 @@ network it does not need.
 ## Local verification
 
 ```sh
-go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml
 ```
 
 Without `.github/actionlint.yaml` every `runs-on` above is reported as an

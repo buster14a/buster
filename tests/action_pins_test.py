@@ -14,6 +14,7 @@ SPEC = importlib.util.spec_from_file_location("action_pins", SCRIPT)
 PINS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PINS)
 PIN = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+ACTIONLINT_PIN = "github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106"
 
 
 class ActionPinsTest(unittest.TestCase):
@@ -84,6 +85,11 @@ class ActionPinsTest(unittest.TestCase):
         self.assertIn("python3 tools/check_action_pins.py", github)
         self.assertIn("python3 tests/action_pins_test.py", github)
         self.assertNotIn(".forgejo/", github)
+
+    def test_actionlint_is_pinned(self):
+        github = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn(ACTIONLINT_PIN, github)
+        self.assertNotIn("actionlint@v", github)
 
     def test_default_discovery_outside_repository(self):
         with tempfile.TemporaryDirectory() as temporary:
