@@ -233,6 +233,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_workspace_root_group_policy(void)
 {
     char root[BQ_PATH_CAP + 1] = "/tmp/buster-workspace-group-XXXXXX";
     bool root_ok = bq_test_mkdtemp_physical(root, sizeof(root));
+#ifdef __APPLE__
+    /* /tmp is owned by wheel on Darwin and new directories inherit that
+     * group. Model the provisioned service root by assigning the service's
+     * effective group before validating the production policy. */
+    root_ok = root_ok && chown(root, (uid_t)-1, getegid()) == 0;
+#endif
     int directory = root_ok && chmod(root, 0710) == 0 ?
                     open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     BQ_CHECK(directory >= 0);
@@ -358,8 +364,13 @@ BUSTER_GLOBAL_LOCAL bool bq_material_test_begin(BqMaterialFixture* fixture, u32 
     snprintf(fixture->workspaces, sizeof(fixture->workspaces), "/tmp/buster-workspaces-XXXXXX");
     bool ok = bq_test_begin(&fixture->queue) &&
               bq_test_mkdtemp_physical(fixture->installed, sizeof(fixture->installed)) &&
-              bq_test_mkdtemp_physical(fixture->workspaces, sizeof(fixture->workspaces)) &&
-              chmod(fixture->workspaces, 02710) == 0;
+              bq_test_mkdtemp_physical(fixture->workspaces, sizeof(fixture->workspaces));
+#ifdef __APPLE__
+    /* Production provisioning pins this root to the service group. Darwin's
+     * /tmp group inheritance does not, so make the fixture faithful first. */
+    ok = ok && chown(fixture->workspaces, (uid_t)-1, getegid()) == 0;
+#endif
+    ok = ok && chmod(fixture->workspaces, 02710) == 0;
     if (ok)
     {
         char recipes[512], recipe[1024];
