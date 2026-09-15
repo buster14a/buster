@@ -504,11 +504,18 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
     }
     else
     {
+        // True while the strict canonical validator has passed over the
+        // module in exactly its current state. Every scan that succeeds sets
+        // it and every mutation clears it, so the FAST input guard below --
+        // which asks precisely this predicate -- pays for a scan only when
+        // nothing has already performed it on the unchanged rows.
+        bool validated = false;
         if (!input_certified)
         {
             IR_CONSTRUCTION_RECORD(PREPARATION_INPUT_VALIDATIONS, 1);
             result = ir_validate_canonical_module(program, module);
             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
+            validated = result.error == IR_VALIDATION_NONE;
         }
         if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
         {
@@ -524,6 +531,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             if (module->local_promotion.promoted_locals)
             {
+                validated = false;
                 // Mutation ends the input certificate's scope. The optimized
                 // production fast path trusts this pass's own contract, not
                 // the producer's certificate. Debug/test/sanitizer consumers
@@ -533,6 +541,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
                     result = ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
+                    validated = result.error == IR_VALIDATION_NONE;
                 }
             }
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
@@ -546,7 +555,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             // a unit: this keeps explicit/default FAST safe without turning an
             // existing accepted source into a diagnostic.
             bool fast_input_valid = true;
-            if (input_certified)
+            if (!validated)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
                 IrValidationResult fast_input = ir_validate_canonical_module(program, module);
