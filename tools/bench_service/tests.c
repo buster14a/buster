@@ -1749,6 +1749,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_CAPABILITIES | 0x80000000u,
                      UINT64_C(0x123456789abcdef0), bound_body, sizeof(bound_body));
     BQ_CHECK(bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
     bq_put64(bound_response.bytes + 16, UINT64_C(0x123456789abcdef1));
     BQ_CHECK(!bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
     bq_put64(bound_response.bytes + 16, UINT64_C(0x123456789abcdef0));
@@ -1756,6 +1757,64 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(!bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
     memcpy(bound_request.bytes, "BAD!", 4);
     BQ_CHECK(bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
+
+    u8 capabilities_body[4 + sizeof(bq_capabilities_v2) - 1] = {0};
+    memcpy(capabilities_body + 4, bq_capabilities_v2, sizeof(bq_capabilities_v2) - 1);
+    bq_packet(&bound_request, BQ_OP_CAPABILITIES, 17, NULL, 0);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_CAPABILITIES | 0x80000000u, 17,
+                     capabilities_body, sizeof(capabilities_body));
+    BQ_CHECK(bq_transport_typed_response_valid(&bound_request, &bound_response));
+
+    u8 job_request[8] = {0};
+    u8 status_body[124] = {0};
+    bq_put64(job_request, 9);
+    bq_put64(status_body + 4, 9);
+    bq_packet(&bound_request, BQ_OP_STATUS, 18, job_request, sizeof(job_request));
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_STATUS | 0x80000000u, 18,
+                     status_body, sizeof(status_body));
+    BQ_CHECK(bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_packet(&bound_request, BQ_OP_RESULT, 19, job_request, sizeof(job_request));
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_RESULT | 0x80000000u, 19,
+                     status_body, sizeof(status_body));
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+
+    u8 result_body[BQ_CONTROL_BODY] = {0};
+    char const result_path[] = "/private/results/9";
+    bq_put64(result_body + 4, 9);
+    bq_put32(result_body + 124, sizeof(result_path) - 1);
+    memcpy(result_body + 128, result_path, sizeof(result_path) - 1);
+    memset(result_body + 320, 'a', 64);
+    memset(result_body + 384, 'b', 64);
+    memset(result_body + 448, 'c', 64);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_RESULT | 0x80000000u, 19,
+                     result_body, sizeof(result_body));
+    BQ_CHECK(bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_put32(bound_response.bytes + BQ_CONTROL_HEADER + 124, BQ_PATH_CAP + 1);
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+
+    u8 logs_request[16] = {0};
+    u8 logs_body[20 + BQ_LOG_PAGE * 32] = {0};
+    bq_put64(logs_request, 9);
+    bq_packet(&bound_request, BQ_OP_LOGS, 20, logs_request, sizeof(logs_request));
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_LOGS | 0x80000000u, 20,
+                     logs_body, 20);
+    BQ_CHECK(bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_put32(logs_body + 4, BQ_LOG_PAGE + 1);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_LOGS | 0x80000000u, 20,
+                     logs_body, 20);
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_put32(logs_body + 4, 1);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_LOGS | 0x80000000u, 20,
+                     logs_body, 20);
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_put64(logs_body + 20 + 8, 8);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_LOGS | 0x80000000u, 20,
+                     logs_body, 52);
+    BQ_CHECK(!bq_transport_typed_response_valid(&bound_request, &bound_response));
+    bq_put64(logs_body + 20 + 8, 9);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_LOGS | 0x80000000u, 20,
+                     logs_body, 52);
+    BQ_CHECK(bq_transport_typed_response_valid(&bound_request, &bound_response));
 #endif
 }
 

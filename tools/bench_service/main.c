@@ -239,6 +239,11 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             {
                 bq_packet(&request, operation, 1, body, body_size);
                 error = bq_transport_exchange(argv[2], &request, &response);
+                if (response.size && !bq_transport_typed_response_valid(&request, &response))
+                {
+                    response.size = 0;
+                    error = BQ_BAD_REQUEST;
+                }
             }
             else if (raw)
             {

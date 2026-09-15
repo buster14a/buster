@@ -261,6 +261,68 @@ BUSTER_GLOBAL_LOCAL bool bq_transport_response_valid(BqPacket const* request, Bq
                        bq_u64(response->bytes + 16) == bq_u64(request->bytes + 16)));
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_transport_typed_response_valid(BqPacket const* request, BqPacket const* response)
+{
+    if (!request || !response || !bq_transport_response_valid(request, response, response->size))
+    {
+        return false;
+    }
+    u32 operation = bq_u32(request->bytes + 8);
+    u32 body_size = response->size - BQ_CONTROL_HEADER;
+    u8 const* body = response->bytes + BQ_CONTROL_HEADER;
+    BqError error = (BqError)bq_u32(body);
+    if (error != BQ_OK)
+    {
+        return body_size == 124;
+    }
+    if (operation == BQ_OP_CAPABILITIES)
+    {
+        u32 capabilities_size = (u32)sizeof(bq_capabilities_v2) - 1;
+        return body_size == 4 + capabilities_size && !memcmp(body + 4, bq_capabilities_v2, capabilities_size);
+    }
+    if (operation == BQ_OP_LOGS)
+    {
+        if (body_size < 20) return false;
+        u32 count = bq_u32(body + 4);
+        if (count > BQ_LOG_PAGE || body_size != 20 + count * 32) return false;
+        u64 requested_job = bq_u64(request->bytes + BQ_CONTROL_HEADER);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            if (bq_u64(body + 20 + index * 32 + 8) != requested_job) return false;
+        }
+        return true;
+    }
+    if (operation != BQ_OP_SUBMIT && operation != BQ_OP_STATUS && operation != BQ_OP_RESULT && operation != BQ_OP_CANCEL)
+    {
+        return false;
+    }
+    bool result_body = body_size == BQ_CONTROL_BODY;
+    if (body_size != 124 && !result_body) return false;
+    if (operation == BQ_OP_RESULT && !result_body) return false;
+    if ((operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL) &&
+        bq_u64(body + 4) != bq_u64(request->bytes + BQ_CONTROL_HEADER))
+    {
+        return false;
+    }
+    if (operation == BQ_OP_SUBMIT)
+    {
+        char8 request_digest[SHA256_HEX_CAPACITY];
+        bq_digest(request->bytes + BQ_CONTROL_HEADER, request->size - BQ_CONTROL_HEADER, request_digest);
+        if (!bq_u64(body + 4) || memcmp(body + 56, request_digest, SHA256_HEX_CAPACITY - 1)) return false;
+    }
+    if (result_body)
+    {
+        u32 path_length = bq_u32(body + 124);
+        if (!bq_result_path_valid(body + 128, path_length) ||
+            !bq_result_digest_valid(body + 320) || !bq_result_digest_valid(body + 384) ||
+            !bq_result_digest_valid(body + 448))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_transport_peer_error(u8 const* input, u32 size, BqPacket* response, BqError error)
 {
     u32 operation = size >= BQ_CONTROL_HEADER && !memcmp(input, "BQP1", 4) ? bq_u32(input + 8) : 0;
