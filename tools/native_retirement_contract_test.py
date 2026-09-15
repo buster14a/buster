@@ -440,6 +440,8 @@ class ContractTests(unittest.TestCase):
         row = next(item for item in applicability_rows if item["target"] == target and item["allocator"] == "none")
         self.assertEqual(row["applicability"], "unavailable")
         self.assertNotEqual(row["candidate_failure"], "1")
+        self.assertEqual(row["acceptance_failure"], "1")
+        self.assertFalse(report["clean_acceptance"])
 
         shard = self.shards[0]
         result_fields, results = read_table(shard / "results.tsv")
