@@ -17,6 +17,7 @@ on:
       - docs/native-retirement-census.md
       - docs/native-retirement-support-v1.tsv
       - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-applicability-v1.tsv
       - docs/native-retirement-dependencies-v1.json
       - tools/differential.c
       - tools/native_retirement_census.c

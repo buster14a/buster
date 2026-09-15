@@ -13640,6 +13640,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_test_target_uses_x86_f80_abi(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    return target.cpu_arch == CPU_ARCH_X86_64 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13662,6 +13670,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                         " F64Struct f64_round_trip(F64Struct value) { return value; }");
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-pc-windows-msvc"),
         S8("x86_64-apple-macos"),
         S8("aarch64-unknown-linux-gnu"),
@@ -13690,10 +13699,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         }
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
-        bool f80_sysv = target.cpu_arch == CPU_ARCH_X86_64 &&
-                        (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS ||
-                         target.os == OPERATING_SYSTEM_IOS) &&
-                        wide_long_double;
+        bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                                                     (CPreprocessOptions){
@@ -13809,6 +13815,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                         " int main(void) { return 0; }");
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-pc-windows-msvc"),
         S8("x86_64-apple-macos"),
         S8("aarch64-unknown-linux-gnu"),
@@ -13851,10 +13858,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         }
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
-        bool f80_sysv = target.cpu_arch == CPU_ARCH_X86_64 &&
-                        (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS ||
-                         target.os == OPERATING_SYSTEM_IOS) &&
-                        wide_long_double;
+        bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -13924,6 +13928,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
                         " int main(void) { return 0; }");
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-pc-windows-msvc"),
         S8("x86_64-apple-macos"),
         S8("aarch64-unknown-linux-gnu"),
@@ -13940,10 +13945,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
         }
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
-        bool f80_sysv = target.cpu_arch == CPU_ARCH_X86_64 &&
-                        (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS ||
-                         target.os == OPERATING_SYSTEM_IOS) &&
-                        wide_long_double;
+        bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -14168,7 +14170,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
         {S8("unsigned_wide"), BUSTER_ARRAY_TO_SLICE(expected_unsigned)},
     };
     String8 targets[] = {
-        S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-unknown-linux-gnu"), S8("x86_64-linux-android"), S8("aarch64-unknown-linux-gnu"),
         S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc"),
         S8("x86_64-apple-macos"), S8("aarch64-apple-macos"),
     };
@@ -14229,6 +14231,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
                         " int main(void) { return 0; }");
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-apple-macos"),
         S8("x86_64-apple-ios"),
         S8("x86_64-pc-windows-msvc"),
@@ -14296,8 +14299,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
             IrGlobal* mutable_zero = c_test_find_ir_global(module, lowered.program, S8("mutable_zero"));
             IrGlobal* negative_zero = c_test_find_ir_global(module, lowered.program, S8("negative_zero"));
             IrGlobal* const_zero = c_test_find_ir_global(module, lowered.program, S8("const_zero"));
-            bool ext80 = target.cpu_arch == CPU_ARCH_X86_64 &&
-                         (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
+            bool ext80 = c_test_target_uses_x86_f80_abi(target);
             if (ext80)
             {
                 BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, l_hex, expected_l_hex, sizeof(expected_l_hex)));
@@ -14481,24 +14483,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_android_rejection(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_android_boundaries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
-    String8 target_triple = S8("x86_64-unknown-android");
-    TargetParseResult parsed_target = target_parse_triple(target_triple);
-    BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
-    if (parsed_target.error == TARGET_PARSE_ERROR_NONE)
+    String8 source = S8("long double android_value = 1.0L;"
+                        " long double android_round_trip(long double value) { return value + android_value; }"
+                        " int main(void) { return android_round_trip(android_value) != 1.0L; }");
+    String8 target_triples[] = {
+        S8("x86_64-linux-android"),
+        S8("aarch64-linux-android"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
     {
+        String8 target_triple = target_triples[target_index];
+        TargetParseResult parsed_target = target_parse_triple(target_triple);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
-        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("long double android_value = 1.0L; int main(void) { return 0; }"),
-                                                     target_triple, parsed_target.target, &preprocess, &parse);
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triple, target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
-        if (lowered.diagnostic_count == 1)
+        bool x86_f80 = c_test_target_uses_x86_f80_abi(target);
+        BUSTER_TEST(arguments, x86_f80 ? lowered.diagnostic_count == 0 : lowered.diagnostic_count > 0);
+        if (x86_f80)
+        {
+            BUSTER_TEST(arguments, lowered.program != 0);
+            if (lowered.program)
+            {
+                TargetDataLayout layout = target_data_layout(target);
+                BUSTER_TEST(arguments, layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16 &&
+                                       layout.long_double_type.bit_width == 80 &&
+                                       ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64);
+                IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("android_value"));
+                u8 expected[] = {0, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x3f, 0, 0, 0, 0, 0, 0};
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected, sizeof(expected)));
+                BUSTER_TEST(arguments, lowered.program->modules->rejected_function_count == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+        }
+        else if (lowered.diagnostic_count > 0)
         {
             BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
         }
@@ -14549,6 +14579,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestA
     };
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-apple-macos"),
         S8("x86_64-apple-ios"),
     };
@@ -14591,6 +14622,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArgum
     u8 expected[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-apple-macos"),
         S8("x86_64-apple-ios"),
     };
@@ -14699,6 +14731,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     };
     String8 target_triples[] = {
         S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
         S8("x86_64-apple-macos"),
         S8("x86_64-apple-ios"),
     };
@@ -17697,7 +17730,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
-    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_android_rejection);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);

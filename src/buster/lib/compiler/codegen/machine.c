@@ -3145,20 +3145,20 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* functi
                                                          IrValueId const* local_places, IrDebugLocal const* local,
                                                          u32 parameter_ordinal)
 {
-    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
-    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID && function->published_cfg)
+    IrValueId parameter_place = IR_VALUE_ID_INVALID;
+    if (local->is_parameter && function->published_cfg)
     {
         for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
         {
             IrCfgParameter const* parameter = function->published_cfg->parameters + parameter_index;
             if (parameter->canonical_local.value == local->id.value)
             {
-                place = parameter->value;
+                parameter_place = parameter->value;
                 break;
             }
         }
     }
-    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+    if (local->is_parameter && parameter_place.value == IR_ID_UNDERLYING_INVALID)
     {
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
@@ -3166,10 +3166,15 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* functi
             if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < function->value_count &&
                 instruction->immediate_count && instruction->immediates && instruction->immediates[0] == parameter_ordinal)
             {
-                place = instruction->result;
+                parameter_place = instruction->result;
                 break;
             }
         }
+    }
+    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+    {
+        place = parameter_place;
     }
     if (place.value != IR_ID_UNDERLYING_INVALID)
     {
@@ -3180,10 +3185,14 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* functi
             {
                 // A promoted place is only an implementation cell. Canonical
                 // block-local SSA values carry the source variable's value.
-                place = IR_VALUE_ID_INVALID;
+                place = parameter_place;
                 break;
             }
         }
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->is_parameter)
+    {
+        place = parameter_place;
     }
     if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
     {

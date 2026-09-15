@@ -589,6 +589,178 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ObjectSymbol const* compiler_driver_test_
     return result;
 }
 
+enum
+{
+    COMPILER_DRIVER_DWARF_ABBREV_FUNCTION = 13,
+    COMPILER_DRIVER_DWARF_ABBREV_VARIABLE = 15,
+    COMPILER_DRIVER_DWARF_ABBREV_PARAMETER = 16,
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_read_uleb(ByteSlice bytes, u64* offset, u64* value)
+{
+    bool result = false;
+    u64 decoded = 0;
+    u64 shift = 0;
+    while (*offset < bytes.length && shift < 64)
+    {
+        u8 byte = bytes.pointer[(*offset)++];
+        decoded |= (u64)(byte & 0x7f) << shift;
+        if (!(byte & 0x80))
+        {
+            *value = decoded;
+            result = true;
+            break;
+        }
+        shift += 7;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL String8 compiler_driver_test_dwarf_string(ByteSlice strings, u32 offset)
+{
+    String8 result = {0};
+    if (offset < strings.length)
+    {
+        result.pointer = strings.pointer + offset;
+        while (offset < strings.length && strings.pointer[offset])
+        {
+            result.length += 1;
+            offset += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_advance(ByteSlice bytes, u64* offset, u64 size)
+{
+    bool result = *offset <= bytes.length && size <= bytes.length - *offset;
+    if (result)
+    {
+        *offset += size;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_object_debug_u32(ObjectFile* object, ObjectSectionKind section,
+                                                                                   u64 offset, u32* value)
+{
+    bool result = object && object->sections && section < OBJECT_SECTION_COUNT && offset <= object->sections[section].data.length &&
+                  sizeof(*value) <= object->sections[section].data.length - offset;
+    if (result)
+    {
+        memcpy(value, object->sections[section].data.pointer + offset, sizeof(*value));
+        for (u32 relocation_index = 0; object->relocations && relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[relocation_index];
+            if (relocation.section == section && relocation.offset == offset && relocation.addend >= 0 && relocation.addend <= UINT32_MAX)
+            {
+                *value = (u32)relocation.addend;
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_location_list(ByteSlice debug_loc, u32 location_offset,
+                                                                                      u64 function_start, u64 function_end)
+{
+    bool result = false;
+    u64 offset = location_offset;
+    while (!result && offset <= debug_loc.length && debug_loc.length - offset >= 16)
+    {
+        u64 begin = 0;
+        u64 end = 0;
+        memcpy(&begin, debug_loc.pointer + offset, sizeof(begin));
+        memcpy(&end, debug_loc.pointer + offset + sizeof(begin), sizeof(end));
+        offset += 16;
+        if (!begin && !end)
+        {
+            break;
+        }
+        u64 expression_length = 0;
+        bool expression_valid = compiler_driver_test_dwarf_read_uleb(debug_loc, &offset, &expression_length) &&
+                                expression_length != 0 && expression_length <= debug_loc.length - offset;
+        if (!expression_valid)
+        {
+            break;
+        }
+        result = begin < end && begin >= function_start && end <= function_end;
+        offset += expression_length;
+    }
+    return result;
+}
+
+// The compact parser below follows the Buster DWARF4 abbreviations for a
+// subprogram with children and a variable/formal parameter child. It resolves
+// the object's debug-section relocations so the assertion reaches the exact
+// value DIE's DW_AT_location list, not an unrelated location range.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_location(ObjectFile* object, String8 function_name,
+                                                                                       u64 function_start, u64 function_end)
+{
+    bool result = false;
+    ByteSlice info = object ? object->sections[OBJECT_SECTION_DEBUG_INFO].data : (ByteSlice){0};
+    ByteSlice strings = object ? object->sections[OBJECT_SECTION_DEBUG_STR].data : (ByteSlice){0};
+    ByteSlice locations = object ? object->sections[OBJECT_SECTION_DEBUG_LOC].data : (ByteSlice){0};
+    for (u32 relocation_index = 0; object && object->relocations && !result && relocation_index < object->relocation_count;
+         relocation_index += 1)
+    {
+        ObjectRelocation relocation = object->relocations[relocation_index];
+        bool string_relocation = relocation.section == OBJECT_SECTION_DEBUG_INFO && relocation.symbol < object->symbol_count &&
+                                 object->symbols[relocation.symbol].section == OBJECT_SECTION_DEBUG_STR && relocation.addend >= 0 &&
+                                 relocation.addend <= UINT32_MAX;
+        if (!string_relocation || relocation.offset == 0)
+        {
+            continue;
+        }
+        String8 name = compiler_driver_test_dwarf_string(strings, (u32)relocation.addend);
+        if (!string_equal(name, function_name) || relocation.offset > info.length)
+        {
+            continue;
+        }
+        u64 cursor = relocation.offset - 1;
+        if (cursor >= info.length || info.pointer[cursor++] != COMPILER_DRIVER_DWARF_ABBREV_FUNCTION ||
+            !compiler_driver_test_dwarf_advance(info, &cursor, 4))
+        {
+            continue;
+        }
+        u64 ignored = 0;
+        if (!compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
+            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
+            !compiler_driver_test_dwarf_advance(info, &cursor, 8))
+        {
+            continue;
+        }
+        u64 expression_length = 0;
+        if (!compiler_driver_test_dwarf_read_uleb(info, &cursor, &expression_length) ||
+            !compiler_driver_test_dwarf_advance(info, &cursor, expression_length) || cursor >= info.length)
+        {
+            continue;
+        }
+        u8 child_abbrev = info.pointer[cursor++];
+        if (child_abbrev != COMPILER_DRIVER_DWARF_ABBREV_VARIABLE && child_abbrev != COMPILER_DRIVER_DWARF_ABBREV_PARAMETER)
+        {
+            continue;
+        }
+        u32 child_name_offset = 0;
+        if (!compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &child_name_offset) ||
+            !compiler_driver_test_dwarf_advance(info, &cursor, 4) ||
+            !string_equal(compiler_driver_test_dwarf_string(strings, child_name_offset), S8("value")) ||
+            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
+            !compiler_driver_test_dwarf_read_uleb(info, &cursor, &ignored) ||
+            !compiler_driver_test_dwarf_advance(info, &cursor, 4))
+        {
+            continue;
+        }
+        u32 location_offset = 0;
+        if (compiler_driver_test_object_debug_u32(object, OBJECT_SECTION_DEBUG_INFO, cursor, &location_offset))
+        {
+            result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end);
+        }
+    }
+    return result;
+}
+
 // True when the object relocates `kind` against `name` somewhere in its text.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_object_relocates(ObjectFile* object, String8 name, ObjectRelocationKind kind)
 {
@@ -2402,6 +2574,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
         BUSTER_TEST(arguments, host_compiled[direction]);
     }
 #endif
+    // Keep the host AArch64 FPSR/FPCR oracle on the strict MIR path.  This
+    // is deliberately a driver regression rather than only an assembler
+    // encoding check: the four GNU asm helpers must select closed MIR inline
+    // transactions, leave fallback at zero, and retain their source rows.
+    typedef struct Aarch64F128SystemRegisterCase Aarch64F128SystemRegisterCase;
+    struct Aarch64F128SystemRegisterCase
+    {
+        String8 symbol;
+        u32 encoding;
+        u32 first_line;
+        u32 last_line;
+    };
+    static Aarch64F128SystemRegisterCase const aarch64_f128_system_register_cases[] = {
+        {S8_INITIALIZER("f128_read_status"), UINT32_C(0xd53b4420), 11, 15},
+        {S8_INITIALIZER("f128_write_status"), UINT32_C(0xd51b4420), 18, 20},
+        {S8_INITIALIZER("f128_read_control"), UINT32_C(0xd53b4400), 23, 27},
+        {S8_INITIALIZER("f128_write_control"), UINT32_C(0xd51b4400), 30, 32},
+    };
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("buster-f128-host-strict"), S8(".o"));
+            String8 command[] = {
+                S8("-c"), S8("-g"), S8("-target"), S8("aarch64-linux"), modes[mode], frontends[frontend], S8("-fno-pic"),
+                S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, S8("tests/host_aarch64_float_to_f128.c"),
+            };
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            String8 description = string_format(temporary.arena, S8("f128 host strict {S8} {S8}: {S8}"), modes[mode], frontends[frontend], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+            BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 5 &&
+                compiled.codegen_statistics.fallback_function_count == 0, description);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                ByteSlice text = compiled.object.sections[OBJECT_SECTION_TEXT].data;
+                ByteSlice debug_line = compiled.object.sections[OBJECT_SECTION_DEBUG_LINE].data;
+                ByteSlice debug_loc = compiled.object.sections[OBJECT_SECTION_DEBUG_LOC].data;
+                BUSTER_TEST(arguments, text.length != 0 && debug_line.length != 0 && debug_loc.length != 0);
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(aarch64_f128_system_register_cases); case_index += 1)
+                {
+                    Aarch64F128SystemRegisterCase const* test_case = aarch64_f128_system_register_cases + case_index;
+                    ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&compiled.object, test_case->symbol);
+                    bool found = false;
+                    u64 instruction_offset = 0;
+                    if (symbol && symbol->section == OBJECT_SECTION_TEXT && symbol->value <= text.length &&
+                        symbol->size <= text.length - symbol->value)
+                    {
+                        u64 function_end = symbol->value + symbol->size;
+                        for (u64 offset = symbol->value; offset + sizeof(u32) <= function_end; offset += sizeof(u32))
+                        {
+                            u32 word = 0;
+                            memcpy(&word, text.pointer + offset, sizeof(word));
+                            if ((word & ~UINT32_C(0x1f)) == test_case->encoding)
+                            {
+                                found = true;
+                                instruction_offset = offset;
+                                break;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, found);
+                    bool local_location = symbol && compiler_driver_test_debug_local_location(&compiled.object, test_case->symbol,
+                                                                                                symbol->value, symbol->value + symbol->size);
+                    BUSTER_TEST(arguments, local_location);
+                    if (found)
+                    {
+                        DwarfLineRow row = {0};
+                        bool location_preserved = dwarf_line_lookup(debug_line, instruction_offset, &row) && row.file == 1 &&
+                                                   row.line >= test_case->first_line && row.line <= test_case->last_line && row.column != 0;
+                        BUSTER_TEST(arguments, location_preserved);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -7586,21 +7838,52 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_narrow_abi_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    // sizeof over an inline aggregate definition must be rejected, never
-    // folded from the expression-type prediction's int guess (see the
-    // fixture's header); the assertion is only that no object is produced.
+    // Keep the census fixture bytes immutable while executing an equivalent
+    // source whose result distinguishes both correct sixteen-byte layouts
+    // from the old silent int guess.
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_sizeof_anonymous_path"), false);
+    String8 c_sizeof_anonymous_source =
+        S8("int main(void)\n"
+           "{\n"
+           "    int type_name_form = (int)sizeof(struct { char a; long long b; });\n"
+           "    int literal_form = (int)sizeof((union { char a[9]; long long b; }){0});\n"
+           "    int result = type_name_form == 16 ? 0 : 1;\n"
+           "    return !result && literal_form != 16 ? 2 : result;\n"
+           "}\n");
+    String8 c_sizeof_anonymous_source_path =
+        buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous-source"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(c_sizeof_anonymous_source_path,
+                                      BUSTER_SLICE_TO_BYTE_SLICE(c_sizeof_anonymous_source)));
     String8 c_sizeof_anonymous_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous"), S8(""));
     String8 c_sizeof_anonymous_command_line[] = {
+        S8("-fno-machine-fallback"),
+        S8("-fverify-codegen"),
         S8("-o"),
         c_sizeof_anonymous_path,
-        S8("tests/basic_c_sizeof_anonymous_aggregate.c"),
+        c_sizeof_anonymous_source_path,
     };
     CompilerDriverResult c_sizeof_anonymous = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_command_line)));
-    BUSTER_TEST(arguments, c_sizeof_anonymous.error != COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, !c_sizeof_anonymous.has_object);
+    BUSTER_TEST(arguments, c_sizeof_anonymous.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_sizeof_anonymous.codegen_statistics.fallback_function_count == 0);
+    if (c_sizeof_anonymous.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_sizeof_anonymous_run_arguments[] = {
+            c_sizeof_anonymous_path,
+        };
+        ProcessSpawnResult c_sizeof_anonymous_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_sizeof_anonymous_spawn.handle != 0);
+        if (c_sizeof_anonymous_spawn.handle)
+        {
+            ProcessWaitResult c_sizeof_anonymous_wait = os_process_wait_sync(arguments->arena, c_sizeof_anonymous_spawn);
+            BUSTER_TEST(arguments, c_sizeof_anonymous_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // 256-bit vector arguments, once through the default pipeline and once
     // through the canonical emitter, whose VMOVDQU move is the shape the
     // default pipeline only reaches through per-function fallback.
@@ -13600,6 +13883,29 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_conflict_command_line)));
     BUSTER_TEST(arguments, c_function_pointer_conflict.error != COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_function_pointer_conflict.diagnostic, S8("incompatible function pointer type")) != BUSTER_STRING_NO_MATCH);
+    // A later prototype is authoritative even when the entity's first
+    // declaration used an empty, unprototyped parameter list.  The callable
+    // signature may reuse the entity's canonical parameter IDs, but must not
+    // inherit that first declaration's relaxed arity rule.
+    String8 c_prototype_authority_path =
+        buster_test_temporary_path(arguments->arena, S8("buster-c-prototype-authority"), S8(".c"));
+    String8 c_prototype_authority_source =
+        S8("static int f();\n"
+           "static int f(int x);\n"
+           "static int f(int x) { return x; }\n"
+           "int main(void) { return f(1, 2); }\n");
+    BUSTER_TEST(arguments, file_write(c_prototype_authority_path,
+                                      BUSTER_SLICE_TO_BYTE_SLICE(c_prototype_authority_source)));
+    String8 c_prototype_authority_command_line[] = {
+        S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux-gnu"), c_prototype_authority_path,
+    };
+    CompilerDriverResult c_prototype_authority = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena,
+                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prototype_authority_command_line)));
+    BUSTER_TEST(arguments, c_prototype_authority.error != COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments,
+                string_first_sequence(c_prototype_authority.diagnostic, S8("too many arguments")) != BUSTER_STRING_NO_MATCH);
     // An inline-assembly template the emitter refuses must name the rule that
     // refused it and the register it named, not leak an opcode number (#831).
     // The refusal itself is by design, so the assertion is on the wording; the
@@ -13813,6 +14119,40 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ProcessWaitResult c_runtime_fixture_wait = os_process_wait_sync(arguments->arena, c_runtime_fixture_spawn);
                 BUSTER_TEST(arguments, c_runtime_fixture_wait.result == PROCESS_RESULT_SUCCESS);
             }
+        }
+    }
+    // The adjusted array and function-pointer parameters in the declarations
+    // fixture use equivalent type nodes across a redeclaration.  Validate the
+    // canonical boundary with the non-SSA frontend and reject native fallback
+    // so the test exercises the merged function type itself.
+    String8 c_sbase_canonical_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sbase-declarations-canonical"), S8(""));
+    String8 c_sbase_canonical_command_line[] = {
+        S8("-fno-frontend-ssa"),
+        S8("-fno-machine-fallback"),
+        S8("-fverify-codegen"),
+        S8("-o"),
+        c_sbase_canonical_path,
+        S8("tests/basic_c_sbase_declarations.c"),
+    };
+    CompilerDriverResult c_sbase_canonical = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sbase_canonical_command_line)));
+    BUSTER_TEST(arguments, c_sbase_canonical.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_sbase_canonical.codegen_statistics.fallback_function_count == 0);
+    if (c_sbase_canonical.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_sbase_canonical_run_arguments[] = {
+            c_sbase_canonical_path,
+        };
+        ProcessSpawnResult c_sbase_canonical_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sbase_canonical_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_sbase_canonical_spawn.handle != 0);
+        if (c_sbase_canonical_spawn.handle)
+        {
+            ProcessWaitResult c_sbase_canonical_wait = os_process_wait_sync(arguments->arena, c_sbase_canonical_spawn);
+            BUSTER_TEST(arguments, c_sbase_canonical_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
     // The musl singleton fixtures. Each one is a shape musl uses that the
