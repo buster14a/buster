@@ -38,15 +38,15 @@ BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER(
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
-BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("49907ded17309ba2ae7a68c1acb5217a7465f343624717a20c9ce0dca8eae801");
-BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 440;
+BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("212727cb27536a77c72657b9a63a9b3f5d00ecf3b929fe1fc5a8c5fb5e3b2e82");
+BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 416;
 
 typedef struct NrcInput NrcInput;
 struct NrcInput { String8 path; String8 role; String8 compile_obligation; String8 sha256; u64 hash; u64 bytes; };
 typedef struct NrcApplicability NrcApplicability;
 struct NrcApplicability { String8 fixture; String8 target; String8 fixture_sha256; String8 applicability; String8 reason; };
 typedef struct NrcFixtureRecipe NrcFixtureRecipe;
-struct NrcFixtureRecipe { String8 name; String8 flags[3]; u32 count; };
+struct NrcFixtureRecipe { String8 name; String8 flags[3]; u32 count; String8 x86_cpu; };
 typedef struct NrcStatistics NrcStatistics;
 struct NrcStatistics { String8 cpu; String8 features; u32 functions; u32 fallbacks; bool valid; };
 typedef struct NrcDependency NrcDependency;
@@ -358,7 +358,7 @@ BUSTER_GLOBAL_LOCAL String8 nrc_compile_obligation(String8 path, String8 role)
         String8 non_object_controls[] = {
             S8("tests/basic_c_macro_options.c"), S8("tests/ebpf_scalar_regression.c"),
             S8("tests/runtime_boundary_regression.c"), S8("tests/wasm_memory_alignment_regression.c"),
-            S8("tests/windows_unicode_regression.c"),
+            S8("tests/windows_unicode_regression.c"), S8("tests/gpu/metal_reader.c"),
         };
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_object_controls); index += 1)
         {
@@ -389,7 +389,27 @@ BUSTER_GLOBAL_LOCAL NrcFixtureRecipe nrc_fixture_recipe(String8 path)
         recipe = (NrcFixtureRecipe){.name = S8("c23-dialect-assertions"),
             .flags = {S8("-std=c23"), S8("-DEXPECTED_STDC_VERSION=202311L"), S8("-DEXPECTED_GNU=0")}, .count = 3};
     }
+    else if (string_equal(path, S8("tests/basic_c_predicate_bank.c")))
+    {
+        recipe.name = S8("x86-avx512");
+        recipe.x86_cpu = S8("skylake-avx512");
+    }
+    else if (string_equal(path, S8("tests/basic_c_atomic_aggregate.c")))
+    {
+        recipe.name = S8("x86-cx16");
+        recipe.x86_cpu = S8("haswell");
+    }
     return recipe;
+}
+
+BUSTER_GLOBAL_LOCAL String8 nrc_recipe_cpu(NrcFixtureRecipe recipe, NrcTarget target, String8 fallback)
+{
+    String8 result = fallback;
+    if (recipe.x86_cpu.length && string_starts_with_sequence(target.triple, S8("x86_64-")))
+    {
+        result = recipe.x86_cpu;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL FILE* nrc_open(NrcSettings* settings, String8 name)
@@ -1079,9 +1099,10 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         String8 object = string_format_z(temporary.arena, S8("{S8}.o"), prefix);
         String8 source = path_join(temporary.arena, settings->snapshot, input.path);
         String8 allocator = string_format(temporary.arena, S8("-fregister-allocator={S8}"), nrc_allocators[mode]);
-        String8 cpu = string_format(temporary.arena, S8("-mcpu={S8}"), settings->cpu);
         String8 include = string_format(temporary.arena, S8("-I{S8}/tests"), settings->snapshot);
         NrcFixtureRecipe recipe = nrc_fixture_recipe(input.path);
+        String8 recipe_cpu = nrc_recipe_cpu(recipe, nrc_targets[target], settings->cpu);
+        String8 cpu = string_format(temporary.arena, S8("-mcpu={S8}"), recipe_cpu);
         String8 command[36] = {0};
         u64 command_count = 0;
         command[command_count++] = mode ? settings->child.ide : settings->baseline;
@@ -1134,14 +1155,14 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             String8 disposition = non_object_control ? S8("retained-control") : applicability->applicability;
             String8 reason = non_object_control ? S8("registered-non-object-control") : applicability->reason;
             u64 row = group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode;
-            String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], settings->cpu);
+            String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], recipe_cpu);
             nrc_write_argv(settings, prefix, command, command_count);
             d_write(&settings->child, string_format(temporary.arena, S8("{S8}.stdout"), prefix), S8(""));
             d_write(&settings->child, string_format(temporary.arena, S8("{S8}.stderr"), prefix), S8(""));
             fprintf(settings->rows, "%llu\t%llu\t%.*s\t0\t0\t1\t1\t1\t0\t0\t0\t%.*s\t%.*s\t0\t0\t\n",
                     (unsigned long long)row, (unsigned long long)group,
                     (int)disposition.length, disposition.pointer,
-                    (int)settings->cpu.length, settings->cpu.pointer,
+                    (int)recipe_cpu.length, recipe_cpu.pointer,
                     (int)expected_features.length, expected_features.pointer);
             fprintf(settings->skips, "%llu\t%llu\t%.*s\t%.*s\t%.*s\t%.*s\t%.*s\n",
                     (unsigned long long)row, (unsigned long long)group,
@@ -1158,8 +1179,8 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         DObservation observed = d_observe(&child, argv, prefix);
         NrcStatistics statistics = nrc_statistics(observed.output, nrc_allocators[mode]);
         u64 row = group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode;
-        String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], settings->cpu);
-        bool target_valid = expected_features.length && string_equal(statistics.cpu, settings->cpu) &&
+        String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], recipe_cpu);
+        bool target_valid = expected_features.length && string_equal(statistics.cpu, recipe_cpu) &&
                             string_equal(statistics.features, expected_features);
         bool records_valid = !mode || nrc_function_records(settings, row, observed.output, nrc_allocators[mode], statistics.fallbacks);
         TargetParseResult target_parse = target_parse_triple(nrc_targets[target].triple);
@@ -1255,7 +1276,8 @@ BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u6
                         {
                             for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(nrc_allocators); mode += 1)
                             {
-                                String8 features = nrc_target_features(settings->child.arena, nrc_targets[target], settings->cpu);
+                                String8 recipe_cpu = nrc_recipe_cpu(recipe, nrc_targets[target], settings->cpu);
+                                String8 features = nrc_target_features(settings->child.arena, nrc_targets[target], recipe_cpu);
                                 String8 lowering = frontend ? S8("direct-ssa") : S8("local-backed-canonical");
                                 String8 diagnostic = string_equal(inputs[input].role, S8("negative-diagnostic-fixture"))
                                                          ? S8("registered-rejection-control") : S8("none");
@@ -1266,7 +1288,7 @@ BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u6
                                     (unsigned long long)(group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode), (unsigned long long)group,
                                     (int)inputs[input].path.length, inputs[input].path.pointer, (int)nrc_targets[target].triple.length,
                                     nrc_targets[target].triple.pointer, (int)nrc_targets[target].abi.length, nrc_targets[target].abi.pointer,
-                                    (int)settings->cpu.length, settings->cpu.pointer, (int)features.length, features.pointer,
+                                    (int)recipe_cpu.length, recipe_cpu.pointer, (int)features.length, features.pointer,
                                     (int)nrc_allocators[mode].length, nrc_allocators[mode].pointer, (int)lowering.length, lowering.pointer,
                                     pic, (unsigned)selected, (int)recipe.name.length, recipe.name.pointer,
                                     (int)inputs[input].compile_obligation.length, inputs[input].compile_obligation.pointer,
@@ -1312,6 +1334,14 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
         !string_equal(dialect.flags[1], S8("-DEXPECTED_STDC_VERSION=202311L")) || !string_equal(dialect.flags[2], S8("-DEXPECTED_GNU=0"));
     failures += nrc_fixture_recipe(S8("tests/basic_c_typeof_declaration.c")).count != 0;
     failures += nrc_fixture_recipe(S8("tests/differential/basic_c_constexpr.c")).count != 0;
+    NrcFixtureRecipe predicate = nrc_fixture_recipe(S8("tests/basic_c_predicate_bank.c"));
+    failures += !string_equal(predicate.name, S8("x86-avx512")) ||
+                !string_equal(nrc_recipe_cpu(predicate, nrc_targets[0], S8("baseline")), S8("skylake-avx512")) ||
+                !string_equal(nrc_recipe_cpu(predicate, nrc_targets[1], S8("baseline")), S8("baseline"));
+    NrcFixtureRecipe atomic = nrc_fixture_recipe(S8("tests/basic_c_atomic_aggregate.c"));
+    failures += !string_equal(atomic.name, S8("x86-cx16")) ||
+                !string_equal(nrc_recipe_cpu(atomic, nrc_targets[0], S8("baseline")), S8("haswell")) ||
+                !string_equal(nrc_recipe_cpu(atomic, nrc_targets[1], S8("baseline")), S8("baseline"));
     failures += nrc_field_safe(S8("bad\tpath")) || nrc_revision_valid(S8("main"));
     failures += !nrc_revision_valid(S8("641cd88d33decfd56fa2da9a960c6ac075935a71"));
     String8 applicability_text = S8("tests/a.c\tx86_64-unknown-linux-gnu\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tadmitted-supported\tsource-reviewed-residual\n");

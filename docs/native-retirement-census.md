@@ -92,6 +92,8 @@ Known language requirements use these exact-path recipes on both compiler legs:
 | `tests/basic_c_nullptr.c` | `-std=c23` |
 | `tests/basic_c_typeof.c` | `-std=c23` |
 | `tests/basic_c_dialect.c` | `-std=c23 -DEXPECTED_STDC_VERSION=202311L -DEXPECTED_GNU=0` |
+| `tests/basic_c_predicate_bank.c` | x86-64 uses `-mcpu=skylake-avx512`; other architectures retain the manifest CPU |
+| `tests/basic_c_atomic_aggregate.c` | x86-64 uses `-mcpu=haswell` for the required `cx16`; other architectures retain the manifest CPU |
 
 The first three settings match their registered driver tests. The `typeof`
 fixture uses `typeof_unqual`, whose C23 keyword gate is covered by the C frontend
@@ -362,13 +364,13 @@ reclassify a declared gap. Smaller fixtures must explicitly use
 `profile=self-test` and can never satisfy production profile acceptance.
 The producer also copies the immutable
 `docs/native-retirement-applicability-v1.tsv` projection and binds its SHA-256.
-For the full profile it must contain the exact authenticated 440 fixture/target
+For the full profile it must contain the exact authenticated 416 fixture/target
 entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
 Only this projection can classify a target-specific residual as
 `platform-inapplicable` or `unavailable`; a result disposition, row count,
 fallback counter or diagnostic cannot forge applicability. Every 77,184 row
 identity and input byte remains in the manifest and validation partition.
-The five whole-fixture non-object controls are authenticated by the support
+The six whole-fixture non-object controls are authenticated by the support
 contract instead of receiving row outcome classes in this fixture/target
 ledger. The aggregate report also records the skip evidence path alongside
 `applicability.tsv` and `residual.tsv`.
