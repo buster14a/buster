@@ -964,6 +964,16 @@ BUSTER_GLOBAL_LOCAL void d_self_test_child(Arena* arena, String8 mode, String8 p
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
         RaiseException(0xC0000409U, 0, 0, 0);
 #else
+        // The application entry point installs a diagnostic SIGABRT handler.
+        // A self-test crash must exercise the observer's real signal path, not
+        // inherit a handler whose re-raise can remain pending while SIGABRT is
+        // masked. Restore the platform default before raising so the child
+        // terminates as a signal and the observer can still classify a genuine
+        // deadline as D_TIMEOUT.
+        struct sigaction default_action = {0};
+        sigemptyset(&default_action.sa_mask);
+        default_action.sa_handler = SIG_DFL;
+        sigaction(SIGABRT, &default_action, 0);
         struct rlimit limit = {0};
         setrlimit(RLIMIT_CORE, &limit);
         raise(SIGABRT);
@@ -1774,7 +1784,13 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         {
             u32 before_child = errors;
             String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"), S8("--self-test-child"), modes[index]};
-            DObservation child = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), path_join(arena, directory, modes[index]));
+            DSettings observation_settings = settings;
+            // A loaded CI host can delay even an immediately fatal child past
+            // the one-second timeout control. Keep the real crash path, but do
+            // not let scheduling latency misclassify it as the timeout case.
+            if (index == 3) { observation_settings.timeout_seconds = 5; }
+            DObservation child = d_observe(&observation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
+                                           path_join(arena, directory, modes[index]));
             if (index == 0) { errors += child.kind != D_EXIT || child.status != 7 || !string_equal(child.output, S8("a\0b")) || !string_equal(child.error, S8("child stderr\n")); }
             if (index == 1) { errors += child.kind != D_EXIT || child.status != 0 || !child.sanitizer || d_success(child); }
             if (index == 2) { errors += child.kind != D_TIMEOUT; }

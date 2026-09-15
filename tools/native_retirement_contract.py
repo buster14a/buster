@@ -37,10 +37,23 @@ APPLICABILITY_CLASSES = ("admitted-supported", "retained-control", "retained-ref
 MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "0df1ff3ccc3d776a17143aa8b1336efcb6fc3dcd77f6defc7eb987711634771a"
-FULL_DEPENDENCY_RECEIPT_SHA256 = "9cfbe0faa6d63990a011137bf5af61b4f3878eb5f460c56d7c8c91c044c47556"
-FULL_DEPENDENCY_PROJECT_SHA256 = "00f987ac3dcaf2768f761bd118a7f607b24e83169246c24f03b12ee355e63c56"
-FULL_DEPENDENCY_LEDGER_SHA256 = "7035bf416d79982bd83d58771dc96d06a29cc7058e41fc9d6016dd8311522340"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435"
+FULL_DEPENDENCY_PROJECT_SHA256 = "d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be"
+FULL_DEPENDENCY_LEDGER_SHA256 = "b6e9e286de94f31af3c9da879e4809df65c3aff318d5fea51b3cb79da6e958a7"
+FULL_EXTERNAL_CHECKOUTS = (
+    {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
+    {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
+    {"name": "lz4", "repository": "lz4/lz4", "revision": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0", "path": "external/lz4"},
+    {"name": "yyjson", "repository": "ibireme/yyjson", "revision": "8b4a38dc994a110abaec8a400615567bd996105f", "path": "external/yyjson"},
+    {"name": "stb", "repository": "nothings/stb", "revision": "2c980bb59875b0d32144a71867fbdebb2f77cd20", "path": "external/stb"},
+    {"name": "zlib", "repository": "madler/zlib", "revision": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf", "path": "external/zlib"},
+    {"name": "musl", "repository": "ifduyue/musl", "revision": "9fa28ece75d8a2191de7c5bb53bed224c5947417", "path": "external/musl"},
+)
+FULL_EXTERNAL_GENERATED = (
+    {"name": "musl-x86_64", "checkout": "musl", "revision": "9fa28ece75d8a2191de7c5bb53bed224c5947417", "path": "external/musl-generated/x86_64", "generator": "sed:tools/mkalltypes.sed+arch/x86_64/bits/alltypes.h.in+include/alltypes.h.in;syscall-sed"},
+    {"name": "musl-aarch64", "checkout": "musl", "revision": "9fa28ece75d8a2191de7c5bb53bed224c5947417", "path": "external/musl-generated/aarch64", "generator": "sed:tools/mkalltypes.sed+arch/aarch64/bits/alltypes.h.in+include/alltypes.h.in;syscall-sed"},
+)
 FULL_ARCHIVED_INPUT_SHA256 = "bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500"
 FULL_ARCHIVED_FIXTURE_MAP_SHA256 = "8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f"
 FULL_ARCHIVED_ROW_SHA256 = "9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6"
@@ -255,12 +268,21 @@ def validate_dependency_binding(directory, manifest, profile, inputs):
     assert sha256(descriptor) == manifest.get("dependency_manifest_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
     assert sha256(receipt_path) == manifest.get("dependency_receipt_sha256") == FULL_DEPENDENCY_RECEIPT_SHA256
     assert sha256(ledger) == manifest.get("dependency_ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    descriptor_value = json.loads(descriptor.read_text(encoding="utf-8"))
+    assert descriptor_value.get("external_checkouts") == list(FULL_EXTERNAL_CHECKOUTS)
+    assert descriptor_value.get("external_generated") == list(FULL_EXTERNAL_GENERATED)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt.get("schema") == "buster-native-retirement-dependencies-v1" and receipt.get("version") == 1
     assert receipt.get("descriptor_path") == "docs/native-retirement-dependencies-v1.json"
     assert receipt.get("descriptor_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
     assert receipt.get("project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
     assert receipt.get("ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    assert receipt.get("external_checkouts") == list(FULL_EXTERNAL_CHECKOUTS)
+    assert receipt.get("external_generated") == list(FULL_EXTERNAL_GENERATED)
+    assert receipt.get("external_closure_sha256") == canonical_digest({
+        "external_checkouts": list(FULL_EXTERNAL_CHECKOUTS),
+        "external_generated": list(FULL_EXTERNAL_GENERATED),
+    })
     assert manifest.get("dependency_project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
     assert manifest.get("archived_input_identity_sha256") == FULL_ARCHIVED_INPUT_SHA256
     assert manifest.get("archived_fixture_map_sha256") == FULL_ARCHIVED_FIXTURE_MAP_SHA256
@@ -426,10 +448,16 @@ def validate_argv(directory, manifest, row, recipes):
                 lowering, "-fregister-allocator=" + row["allocator"], "-fverify-codegen",
                 "-fmachine-fallback" if baseline else "-fno-machine-fallback", "-nostdinc",
                 "-isystem", str(recorded_root / "dependencies" / "resource-include"),
-                "-I" + str(recorded_root / "inputs" / "tests"),
                 ]
     if manifest.get("project_include_sha256", ""):
+        if row["target"] in {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}:
+            arch = "x86_64" if row["target"].startswith("x86_64-") else "aarch64"
+            expected.extend(["-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / arch / "include"),
+                             "-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / "include")])
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
         expected.append("-I" + str(recorded_root / "dependencies" / "project-include"))
+    else:
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
     expected.extend([str(recorded_root / "inputs" / row["fixture"]), "-o",
                 str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))])
     expected.extend(recipes[row["fixture"]])
@@ -466,7 +494,14 @@ def classify_result(row, result, expected_baseline_functions, baseline_unresolve
     execution_defect = result["kind"] != "0" or result["status"] != "0"
     fallback_defect = fallbacks != 0
     artifact_defect = object_bytes == 0
-    function_shape_defect = functions != expected_baseline_functions
+    # A successful direct reference is the function-count oracle for MIR.
+    # When that reference is unresolved, its partial/zero count is not an
+    # authenticated shape for the candidate: the candidate's own object and
+    # telemetry remain checked, but a different authenticated function count
+    # is reference-only evidence.  Keep the baseline-count copy check above
+    # row-bound, so a producer cannot silently substitute another reference.
+    function_shape_defect = (not baseline_unresolved and
+                             functions != expected_baseline_functions)
     # The direct allocator is the immutable reference side.  A bad direct
     # object is an acceptance/reference failure, not a candidate failure.  MIR
     # rows are candidate-owned regardless of the producer's disposition text.
@@ -821,7 +856,13 @@ def validate(directory):
     assert manifest["identity_hash"] == "sha256"
     assert manifest["environment"] == "explicit-replacement-in-environment.tsv"
     assert manifest["unfrozen_dependencies"] == "none-for-object-census"
-    assert manifest["sysroot"] == manifest["system_include"] == "none"
+    if manifest.get("project_include_sha256", ""):
+        assert manifest["sysroot"] == "target-correct-musl-linux-gnu-only"
+        assert manifest["system_include"] == "target-correct-musl-project-include"
+        assert manifest["source_dependencies"] == (
+            "tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include-plus-pinned-github-closure")
+    else:
+        assert manifest["sysroot"] == manifest["system_include"] == "none"
     for revision in (manifest["compiler_revision_claim"], manifest["baseline_revision_claim"]):
         assert len(revision) == 40 and all(byte in "0123456789abcdef" for byte in revision)
     for name, prefix in (("candidate-ide.exe", "compiler"), ("baseline-ide.exe", "baseline")):

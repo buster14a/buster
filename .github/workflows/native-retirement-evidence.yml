@@ -11,6 +11,8 @@ on:
       - docs/performance-audits/evidence/2026-09-12-retirement/**
       - tools/native_retirement_materializer.py
       - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_external.py
+      - tools/native_retirement_external_test.py
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
   workflow_dispatch:
@@ -47,6 +49,62 @@ jobs:
           ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
           path: candidate
           persist-credentials: false
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: candidate/external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: candidate/external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: candidate/external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: candidate/external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: candidate/external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: candidate/external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: candidate/external/musl
+          fetch-depth: 1
+          persist-credentials: false
       - name: Check out archived direct source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -57,6 +115,9 @@ jobs:
         working-directory: candidate
         run: |
           test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer.py materialize \
             --manifest docs/native-retirement-dependencies-v1.json \
