@@ -350,13 +350,24 @@ per-child evidence.
 Each admitted case launches at most one compiler, linker or program at once;
 the compiler's own default remains one worker. `--jobs` is a CPU admission
 limit, not a RAM estimator. Budget up to N simultaneous child peaks and N
-case arenas when selecting it. Default hosted policy stays at one pending the
-matched platform timing/RSS acceptance in #408. For local comparison, use new
-output directories for each of `--jobs 1`, `--jobs 2` and `--jobs 4`, with the
-same compiler, corpus, sanitizer policy and quota. Normalize only the output
-root and `elapsed_us` when comparing process records; argv paths also contain
-the output root. Source, observations, configuration sets and case order must
-match exactly.
+case arenas when selecting it. The four hosted Unix native lanes explicitly
+request four workers. The runner still clamps that request to the logical CPU
+count, `BUSTER_TEST_JOBS`, and single-threaded policy; for example, the screened
+three-CPU macOS AArch64 image recorded four requested and three effective
+workers. Local and other invocations retain the one-worker default, and
+`--jobs 1` is the direct CI reproduction path.
+
+The hosted budget was selected from three position-balanced, full-corpus
+samples of `--jobs 1`, `--jobs 2` and `--jobs 4` on each native Unix runner,
+using one Release producer and fresh output directories. Exact canonical
+case/configuration/observation mappings matched across all 36 corpora after
+normalizing only output-root path fields, the exact output-root byte prefix in
+text diagnostics, and elapsed process fields. See the [current #408 performance
+audit](performance-audits/2026-09-15T072154Z.md) for source, workflow, runner,
+timing, sampled process-tree RSS and retained evidence identities. Requested
+four reduced the sum of per-platform median corpus wall times by 56.4% from
+requested one and by 19.5% from requested two; this is a corpus-invocation
+result, not a measured complete-job or workflow speedup.
 
 ### Registered admission controls
 
@@ -390,5 +401,6 @@ the runner to retain the original `SIGTERM` status. This exercises the productio
 signal, wait and process-group path rather than only worker counters.
 
 These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
-policy remains one worker, and #408's matched full-CI latency, aggregate runner
-time and concurrent peak-memory acceptance remain separate requirements.
+policy requests four workers only after the separate #408 full-corpus
+qualification. Complete native-job, workflow latency, aggregate runner work and
+concurrent peak-memory acceptance remain separate measurements.
