@@ -16411,6 +16411,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 specifiers[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
+        S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("_Complex int"), S8("_Complex char")};
+    String8 contexts[] = {
+        S8("{S8} v;\nint following;\n"),
+        S8("int f(void) {{ {S8} v; return 1; }}\nint following;\n"),
+        S8("int f({S8} v);\nint following;\n"),
+        S8("typedef {S8} T;\nint following;\n"),
+        S8("int f(void) {{ return sizeof({S8}); }}\nint following;\n"),
+        S8("int f(void) {{ return (int)({S8})0; }}\nint following;\n")
+    };
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(specifiers); specifier += 1)
+    {
+        for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(contexts); context += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, contexts[context], specifiers[specifier]);
+            CPreprocessResult tokens = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("invalid-specifiers.c"), target_native, &tokens, &parse);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count != 0 || lowered.diagnostic_count != 0, source);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16494,6 +16524,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);

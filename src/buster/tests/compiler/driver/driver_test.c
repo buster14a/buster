@@ -4478,6 +4478,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 specifiers[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
+        S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("_Complex int"), S8("_Complex char")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(specifiers); specifier += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-type-specifiers-{u32}-{u32}"), specifier, frontend);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), specifiers[specifier]);
+            String8 sentinel = S8("existing output must survive invalid type specifiers");
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))) &&
+                BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+            {
+                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"),
+                    frontends[frontend], S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE, source);
+                BUSTER_TEST_RAW(arguments, !refused.has_object, source);
+                BUSTER_TEST_RAW(arguments, refused.diagnostic.length != 0, source);
+                ByteSlice retained = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), sentinel);
+            }
+            scratch_end(temporary);
+        }
+    }
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 name = string_format(arena, S8("buster-type-specifiers-control-{u32}"), frontend);
+        String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+        String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+        String8 source = S8("long long int v = 7;\nint take(void) { return 1; }\n");
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"),
+                frontends[frontend], S8("-o"), output, input};
+            CompilerDriverResult built = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, built.diagnostic);
+            if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
+            {
+                ObjectSymbol* v = compiler_driver_test_symbol_by_name(&built.object, S8("v"));
+                BUSTER_TEST(arguments, v && v->section != OBJECT_SECTION_UNDEFINED && v->kind == OBJECT_SYMBOL_DATA && v->size == 8);
+                ObjectSymbol* take = compiler_driver_test_symbol_by_name(&built.object, S8("take"));
+                BUSTER_TEST(arguments, take && take->section != OBJECT_SECTION_UNDEFINED && take->kind == OBJECT_SYMBOL_FUNCTION);
+                FileMapRead object_map = file_map_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, object_map.bytes.length != 0);
+                ObjectFile round_trip = object_read(arena, object_map.bytes, built.object.target);
+                BUSTER_TEST(arguments, round_trip.error == OBJECT_ERROR_NONE);
+                if (round_trip.error == OBJECT_ERROR_NONE)
+                {
+                    ObjectSymbol* serialized_v = compiler_driver_test_symbol_by_name(&round_trip, S8("v"));
+                    BUSTER_TEST(arguments, serialized_v && serialized_v->section != OBJECT_SECTION_UNDEFINED &&
+                                           serialized_v->kind == OBJECT_SYMBOL_DATA && serialized_v->size == 8);
+                    ObjectSymbol* serialized_take = compiler_driver_test_symbol_by_name(&round_trip, S8("take"));
+                    BUSTER_TEST(arguments, serialized_take && serialized_take->section != OBJECT_SECTION_UNDEFINED &&
+                                             serialized_take->kind == OBJECT_SYMBOL_FUNCTION);
+                }
+                file_map_unmap(object_map);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4487,6 +4562,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
