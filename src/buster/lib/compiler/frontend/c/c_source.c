@@ -5273,9 +5273,79 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
     return result;
 }
 
+// `__has_attribute` answers for the GNU attributes whose semantics this
+// frontend actually implements, by asking the parser's own spelling
+// predicates rather than keeping a second list beside them: `packed` and
+// `aligned` are collected by c_parse_layout_attributes and change the record
+// layout, `vector_size` builds the vector types. An attribute whose spelling
+// is merely accepted and stepped over is not supported and answers 0, so
+// source that selects a layout on this query cannot silently lose it (#639).
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)
 {
-    return string_equal(name, S8("vector_size")) || string_equal(name, S8("__vector_size")) || string_equal(name, S8("__vector_size__"));
+    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name);
+}
+
+// `__has_c_attribute` is a different operator over a different namespace, and
+// is deliberately not the query above. It asks about C's bracketed attributes,
+// answering the standard attribute's version number -- clang 18 answers
+// 202003L for `nodiscard` and 201910L for `fallthrough` -- 1 for a supported
+// vendor attribute written with its namespace (`gnu::packed`), and 0
+// otherwise, including for every GNU attribute named without one: clang
+// answers 0 for a bare `packed`, `aligned` and `vector_size`.
+//
+// This frontend recognizes `[[ ... ]]` in c_parse_c23_attribute_at and steps
+// over it; no bracketed attribute changes layout, diagnostics or code
+// generation here, and c_parse_layout_attributes only ever reads
+// `__attribute__` groups. Nothing is implemented, so the truthful answer is 0
+// for every spelling, and a bare GNU name answers 0 here even though the GNU
+// query above answers 1 for it. Implementing one of these attributes means
+// returning its version number from here, not 1.
+BUSTER_C_INTERNAL bool c_conditional_c_attribute_supported(void)
+{
+    return false;
+}
+
+// `__is_target_os` asks about the selected compilation target, and answers the
+// spellings clang accepts for it rather than this compiler's internal enum
+// names. The alias sets were read back out of clang 18 with `-target` and
+// `-E`, which parses the spelling as a triple's OS component and compares it
+// with the target's own: a Windows target answers `windows` and `win32`; a
+// Darwin target answers `darwin` as well as its own `macos`/`macosx` or `ios`;
+// UEFI answers `uefi`.
+//
+// Android is the case that cannot be answered from the enum name. Its triple
+// carries Linux as the OS and Android as the environment, so clang answers
+// `linux` for an Android target and never answers `android` at all -- the
+// spelling is not an OS. A freestanding target has no triple OS and answers
+// nothing (#640).
+BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, String8 spelling)
+{
+    bool result;
+    switch (os)
+    {
+    case OPERATING_SYSTEM_LINUX:
+    case OPERATING_SYSTEM_ANDROID:
+        result = string_equal(spelling, S8("linux"));
+        break;
+    case OPERATING_SYSTEM_MACOS:
+        result = string_equal(spelling, S8("macos")) || string_equal(spelling, S8("macosx")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_IOS:
+        result = string_equal(spelling, S8("ios")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_WINDOWS:
+        result = string_equal(spelling, S8("windows")) || string_equal(spelling, S8("win32"));
+        break;
+    case OPERATING_SYSTEM_UEFI:
+        result = string_equal(spelling, S8("uefi"));
+        break;
+    case OPERATING_SYSTEM_FREESTANDING:
+    case OPERATING_SYSTEM_COUNT:
+    default:
+        result = false;
+        break;
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
@@ -5316,8 +5386,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool has_include = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include"));
         bool has_include_next = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include_next"));
         bool has_builtin = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_builtin"));
-        bool has_attribute =
-            token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_attribute")) || c_token_spelling_equal(base, token, S8("__has_c_attribute")));
+        bool has_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_attribute"));
+        bool has_c_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_c_attribute"));
         bool has_feature =
             token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_feature")) || c_token_spelling_equal(base, token, S8("__has_extension")) ||
                                                  c_token_spelling_equal(base, token, S8("__building_module")));
@@ -5325,8 +5395,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool is_target_environment = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_environment"));
         bool is_target_os = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_os"));
         bool is_target_vendor = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_vendor"));
-        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_feature && !is_target_arch && !is_target_environment && !is_target_os &&
-            !is_target_vendor)
+        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_c_attribute && !has_feature && !is_target_arch &&
+            !is_target_environment && !is_target_os && !is_target_vendor)
         {
             continue;
         }
@@ -5383,6 +5453,15 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]))
                                     : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
         }
+        else if (has_c_attribute && argument_count)
+        {
+            // Any non-empty argument shape the balanced scan above accepted,
+            // so that the namespaced spelling this operator's own contract
+            // admits -- `__has_c_attribute(gnu::packed)` -- answers 0 instead
+            // of failing the directive, however the `::` is tokenized. An
+            // empty argument list is still malformed and still fails below.
+            supported = c_conditional_c_attribute_supported();
+        }
         else if ((is_target_arch || is_target_environment || is_target_os || is_target_vendor) && argument_count == 1 &&
                  arguments[0].kind == C_TOKEN_IDENTIFIER && options)
         {
@@ -5394,13 +5473,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
                                                             string_equal(argument, S8("ebpf"))
                                                       : string_equal(argument, S8("x86_64")))
-                        : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
-                                                       ? string_equal(argument, S8("macos"))
-                                                   : options->target.os == OPERATING_SYSTEM_IOS
-                                                       ? string_equal(argument, S8("ios"))
-                                                   : options->target.os == OPERATING_SYSTEM_LINUX
-                                                       ? string_equal(argument, S8("linux"))
-                                                       : false)
+                        : is_target_os          ? c_conditional_target_os_supported(options->target.os, argument)
                         : is_target_vendor      ? (options->target.os == OPERATING_SYSTEM_MACOS || options->target.os == OPERATING_SYSTEM_IOS) &&
                                                       string_equal(argument, S8("apple"))
                         : is_target_environment ? false
