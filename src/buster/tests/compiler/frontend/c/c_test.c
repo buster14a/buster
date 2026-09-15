@@ -16528,6 +16528,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
     CTypeKind control_kinds[] = {C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_UNSIGNED_LONG_LONG,
         C_TYPE_SIGNED_CHAR, C_TYPE_UNSIGNED_SHORT, C_TYPE_LONG_DOUBLE, C_TYPE_FLOAT_COMPLEX, C_TYPE_DOUBLE_COMPLEX,
         C_TYPE_LONG_DOUBLE_COMPLEX, C_TYPE_DOUBLE_COMPLEX, C_TYPE_DOUBLE_COMPLEX};
+    TargetDataLayout control_layout = target_data_layout(target_native);
+    u64 control_sizes[] = {
+        control_layout.long_long_integer.size, control_layout.long_long_integer.size,
+        control_layout.unsigned_long_long_integer.size, control_layout.unsigned_long_long_integer.size,
+        control_layout.signed_char.size, control_layout.unsigned_short_integer.size, control_layout.long_double_type.size,
+        2 * control_layout.float_type.size, 2 * control_layout.double_type.size, 2 * control_layout.long_double_type.size,
+        2 * control_layout.double_type.size, 2 * control_layout.double_type.size,
+    };
     for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(control_specifiers); control += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -16545,9 +16553,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
             parsed_v |= string_equal(row->name, S8("v")) && row->type.value < parse.type_count &&
                         parse.types[row->type.value].kind == control_kinds[control];
         }
-        u64 expected_size = 0;
-        u32 expected_alignment = 0;
-        bool layout_known = c_parse_builtin_type_layout(target_native, control_kinds[control], &expected_size, &expected_alignment);
+        u64 expected_size = control_sizes[control];
         bool lowered_v = false;
         if (lowered.program && lowered.program->module_count)
         {
@@ -16562,7 +16568,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
                 }
             }
         }
-        BUSTER_TEST_RAW(arguments, layout_known && parsed_v && lowered_v, source);
+        BUSTER_TEST_RAW(arguments, parsed_v && lowered_v, source);
         scratch_end(temporary);
     }
     String8 qualified_controls[] = {
