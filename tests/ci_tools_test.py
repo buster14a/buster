@@ -829,6 +829,11 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
             "supported-object-zero-fallback": 396,
             "registered-non-object-control": 6,
         })
+        non_object_controls = [
+            row["path"] for row in rows
+            if row["role"] == "subject" and
+            row["compile_obligation"] == "registered-non-object-control"
+        ]
         prose = " ".join((ROOT / "docs/native-retirement-census.md").read_text().split())
         sentence = (f"Its {len(rows)} explicit SHA-256 rows bind every tracked test byte at the approval point: "
                     f"{expected['subject']} subject inputs "
@@ -838,6 +843,12 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
                     f"registered rejection controls, {expected['support-file']} support files and "
                     f"{expected['dormant-custom-language']} dormant custom-language files.")
         self.assertIn(sentence, prose)
+        self.assertIn("The six subject-level non-object controls are", prose)
+        for path in non_object_controls:
+            self.assertIn(f"`{path}`", prose)
+        self.assertNotIn("397 supported-object subjects", prose)
+        self.assertNotIn("five non-object controls", prose)
+        self.assertNotIn("five subject-level non-object controls", prose)
 
 
 class WorkflowPolicyTests(unittest.TestCase):
