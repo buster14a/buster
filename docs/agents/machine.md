@@ -196,8 +196,10 @@
   predicates and escaping block values reach eight-byte homes. Predicate edge
   copies capture all outgoing sources before publishing any destination, with
   fixed physical sources captured before reload scratch can overwrite them.
-  Unused predicate homes are removed, and zero/all-ones integer bridge values
-  rematerialize without a memory reload. Explicit MASK MIR is supported in
+  Unused predicate homes are removed, leaving `MACHINE_VIRTUAL_REGISTER_NO_HOME`
+  as the value's offset; debug-location recording reports such a value as
+  having no frame location rather than rejecting the function. Zero/all-ones
+  integer bridge values rematerialize without a memory reload. Explicit MASK MIR is supported in
   MIR_STACK, where it flushes after each row. Source MIR_STACK selection keeps
   its existing integer bridges because it cannot retain K values between rows;
   the selector's `predicate_residency` argument records that allocator policy.

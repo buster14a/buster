@@ -8925,7 +8925,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
             state->prefer_frame = true;
             state->epoch += 1;
         }
-        else if (state->frame_valid && virtual_register < function->virtual_register_count &&
+        else if (state->frame_valid && virtual_register < function->virtual_register_count && offset != MACHINE_VIRTUAL_REGISTER_NO_HOME &&
                  offset == placement->virtual_register_offsets[virtual_register])
         {
             state->frame_valid = false;
@@ -9043,8 +9043,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction co
     {
         return false;
     }
+    // A homeless register is a value without a frame location, not invalid IR:
+    // rows that would select its frame copy stay unavailable.
+    u32 home = placement->virtual_register_offsets[payload];
     s32 frame_offset = 0;
-    if (!codegen_machine_debug_frame_offset(placement->virtual_register_offsets[payload], frame_base_offset, target, &frame_offset))
+    if (home != MACHINE_VIRTUAL_REGISTER_NO_HOME && !codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset))
     {
         return false;
     }
@@ -9128,7 +9131,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction co
                                              selected_register, &selected_invalid);
             edit_cursor += 1;
         }
-        if (!selected_invalid && selected_frame)
+        if (!selected_invalid && selected_frame && home != MACHINE_VIRTUAL_REGISTER_NO_HOME)
         {
             rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_FRAME, .frame_offset = frame_offset};
             available[row] = true;
