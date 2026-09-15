@@ -247,6 +247,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_send(int client, u8 const* bytes, u32 s
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_transport_response_valid(BqPacket const* request, BqPacket const* response, u32 received)
+{
+    bool shaped = request && response && received >= BQ_CONTROL_HEADER + 4 && received <= BQ_CONTROL_CAP &&
+                  !memcmp(response->bytes, "BQP1", 4) &&
+                  bq_u32(response->bytes + 12) == received - BQ_CONTROL_HEADER;
+    bool request_bindable = request && request->size >= BQ_CONTROL_HEADER &&
+                            !memcmp(request->bytes, "BQP1", 4) &&
+                            (bq_u32(request->bytes + 4) == 1 || bq_u32(request->bytes + 4) == BQ_CONTROL_SCHEMA);
+    return shaped && (!request_bindable ||
+                      (bq_u32(response->bytes + 4) == bq_u32(request->bytes + 4) &&
+                       bq_u32(response->bytes + 8) == (bq_u32(request->bytes + 8) | 0x80000000u) &&
+                       bq_u64(response->bytes + 16) == bq_u64(request->bytes + 16)));
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_transport_peer_error(u8 const* input, u32 size, BqPacket* response, BqError error)
 {
     u32 operation = size >= BQ_CONTROL_HEADER && !memcmp(input, "BQP1", 4) ? bq_u32(input + 8) : 0;
@@ -312,65 +326,74 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_worker_once(BqQueue* queue, BqWorkerCon
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_transport_client(char const* socket_path, FILE* input, FILE* output)
+BUSTER_GLOBAL_LOCAL BqError bq_transport_exchange(char const* socket_path, BqPacket const* request,
+                                                   BqPacket* response)
 {
     BqError error = BQ_UNSUPPORTED;
     int client = -1;
-    u8 request[BQ_CONTROL_CAP + 1];
-    u8 response[BQ_CONTROL_CAP + 1];
-    if (bq_transport_socket_path(socket_path, (char[BQ_PATH_CAP + 1]){0}))
+    if (request && response && request->size >= BQ_CONTROL_HEADER && request->size <= BQ_CONTROL_CAP &&
+        bq_transport_socket_path(socket_path, (char[BQ_PATH_CAP + 1]){0}))
     {
-        size_t count = fread(request, 1, sizeof(request), input);
-        if (!ferror(input) && count >= BQ_CONTROL_HEADER && count <= BQ_CONTROL_CAP)
+        client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        if (client >= 0)
         {
-            client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-            if (client >= 0)
+            char path[BQ_PATH_CAP + 1];
+            bq_transport_socket_path(socket_path, path);
+            struct sockaddr_un address = {0};
+            size_t length = strlen(path);
+            address.sun_family = AF_UNIX;
+            memcpy(address.sun_path, path, length + 1);
+            socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
+            if (connect(client, (struct sockaddr*)&address, address_size) == 0 &&
+                bq_transport_send(client, request->bytes, request->size) == BQ_OK)
             {
-                char path[BQ_PATH_CAP + 1];
-                bq_transport_socket_path(socket_path, path);
-                struct sockaddr_un address = {0};
-                size_t length = strlen(path);
-                address.sun_family = AF_UNIX;
-                memcpy(address.sun_path, path, length + 1);
-                socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
-                if (connect(client, (struct sockaddr*)&address, address_size) == 0 &&
-                    bq_transport_send(client, request, (u32)count) == BQ_OK)
+                u32 received = 0;
+                BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
+                                                                      BQ_TRANSPORT_CLIENT_MILLISECONDS);
+                bool response_valid = receive_error == BQ_OK &&
+                                      bq_transport_response_valid(request, response, received);
+                if (response_valid)
                 {
-                    u32 received = 0;
-                    BqError receive_error = bq_transport_receive_timeout(client, response, &received,
-                                                                          BQ_TRANSPORT_CLIENT_MILLISECONDS);
-                    bool response_valid = receive_error == BQ_OK && received >= BQ_CONTROL_HEADER + 4 &&
-                                          !memcmp(response, "BQP1", 4) && bq_u32(response + 12) == received - BQ_CONTROL_HEADER;
-                    if (response_valid)
-                    {
-                        bool wrote = fwrite(response, 1, received, output) == received;
-                        error = wrote ? (BqError)bq_u32(response + BQ_CONTROL_HEADER) : BQ_IO;
-                    }
-                    else
-                    {
-                        error = receive_error == BQ_OK ? BQ_BAD_REQUEST : receive_error;
-                    }
+                    response->size = received;
+                    error = (BqError)bq_u32(response->bytes + BQ_CONTROL_HEADER);
                 }
                 else
                 {
-                    error = BQ_IO;
+                    response->size = 0;
+                    error = receive_error == BQ_OK ? BQ_BAD_REQUEST : receive_error;
                 }
-                close(client);
-                client = -1;
             }
             else
             {
                 error = BQ_IO;
             }
+            close(client);
+            client = -1;
         }
         else
         {
-            error = BQ_BAD_REQUEST;
+            error = BQ_IO;
         }
     }
     if (client >= 0)
     {
         close(client);
+    }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_transport_client(char const* socket_path, FILE* input, FILE* output)
+{
+    BqPacket request = {0}, response = {0};
+    u8 bytes[BQ_CONTROL_CAP + 1];
+    size_t count = fread(bytes, 1, sizeof(bytes), input);
+    BqError error = ferror(input) || count < BQ_CONTROL_HEADER || count > BQ_CONTROL_CAP ? BQ_BAD_REQUEST : BQ_OK;
+    if (error == BQ_OK)
+    {
+        request.size = (u32)count;
+        memcpy(request.bytes, bytes, count);
+        error = bq_transport_exchange(socket_path, &request, &response);
+        if (response.size && fwrite(response.bytes, 1, response.size, output) != response.size) error = BQ_IO;
     }
     return error;
 }

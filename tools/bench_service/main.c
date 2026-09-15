@@ -49,6 +49,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u32 body_size = 0;
     bool raw = false;
     bool remote = false;
+    bool typed_remote = false;
     bool serve = false;
     bool valid = false;
     bool handled = false;
@@ -76,6 +77,12 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         remote = true;
         valid = true;
     }
+    else if (argc == 3 && !strcmp(argv[1], "capabilities-remote"))
+    {
+        operation = BQ_OP_CAPABILITIES;
+        typed_remote = true;
+        valid = true;
+    }
     else if (argc == 8 && !strcmp(argv[1], "serve"))
     {
         u64 cpu = 0;
@@ -88,7 +95,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     }
     else if (argc >= 3)
     {
-        if (argc == 8 && !strcmp(argv[1], "submit"))
+        if (argc == 8 && (!strcmp(argv[1], "submit") || !strcmp(argv[1], "submit-remote")))
         {
             BqRequest submission;
             String8 fields[BQ_FIELD_COUNT];
@@ -98,22 +105,28 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             }
             valid = bq_request_make(fields, &submission) == BQ_OK;
             operation = BQ_OP_SUBMIT;
+            typed_remote = !strcmp(argv[1], "submit-remote");
             if (valid)
             {
                 body_size = submission.size;
                 memcpy(body, submission.bytes, body_size);
             }
         }
-        else if (argc == 4 && (!strcmp(argv[1], "status") || !strcmp(argv[1], "result") || !strcmp(argv[1], "cancel")))
+        else if (argc == 4 && (!strcmp(argv[1], "status") || !strcmp(argv[1], "result") || !strcmp(argv[1], "cancel") ||
+                              !strcmp(argv[1], "status-remote") || !strcmp(argv[1], "result-remote") ||
+                              !strcmp(argv[1], "cancel-remote")))
         {
-            operation = !strcmp(argv[1], "status") ? BQ_OP_STATUS : !strcmp(argv[1], "result") ? BQ_OP_RESULT : BQ_OP_CANCEL;
+            typed_remote = strstr(argv[1], "-remote") != NULL;
+            operation = !strncmp(argv[1], "status", 6) ? BQ_OP_STATUS :
+                        !strncmp(argv[1], "result", 6) ? BQ_OP_RESULT : BQ_OP_CANCEL;
             valid = bq_decimal(argv[3], true, &id);
             bq_put64(body, id);
             body_size = 8;
         }
-        else if ((argc == 4 || argc == 5) && !strcmp(argv[1], "logs"))
+        else if ((argc == 4 || argc == 5) && (!strcmp(argv[1], "logs") || !strcmp(argv[1], "logs-remote")))
         {
             operation = BQ_OP_LOGS;
+            typed_remote = !strcmp(argv[1], "logs-remote");
             valid = bq_decimal(argv[3], true, &id) && (argc == 4 || bq_decimal(argv[4], false, &argument));
             bq_put64(body, id);
             bq_put64(body + 8, argument);
@@ -219,10 +232,15 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     }
     if (!handled && valid)
     {
-        error = operation == BQ_OP_CAPABILITIES ? BQ_OK : bq_open(&queue, argv[2]);
+        error = typed_remote || operation == BQ_OP_CAPABILITIES ? BQ_OK : bq_open(&queue, argv[2]);
         if (error == BQ_OK)
         {
-            if (raw)
+            if (typed_remote)
+            {
+                bq_packet(&request, operation, 1, body, body_size);
+                error = bq_transport_exchange(argv[2], &request, &response);
+            }
+            else if (raw)
             {
                 /* One frame plus EOF. One extra byte detects oversize/trailing
                  * input without an allocation based on untrusted lengths. */
@@ -272,6 +290,14 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                               bq_phase_name(bq_u32(data + 28)), bq_outcome_name(bq_u32(data + 32)), bq_u32(data + 40),
                               bq_u32(data + 44), bq_u32(data + 48), bq_u32(data + 52), (char const*)data + 56,
                               bq_error_name((BqError)bq_u32(data + 120))) >= 0;
+            if (written && operation == BQ_OP_RESULT && response.size == BQ_CONTROL_HEADER + BQ_CONTROL_BODY)
+            {
+                u32 path_length = bq_u32(data + 124);
+                written = path_length <= BQ_PATH_CAP &&
+                          fprintf(output, "result-root=%.*s manifest-sha256=%.64s bundle-sha256=%.64s full-sha256=%.64s\n",
+                                  (int)path_length, (char const*)data + 128, (char const*)data + 320,
+                                  (char const*)data + 384, (char const*)data + 448) >= 0;
+            }
         }
     }
     if (fflush(output) != 0)
@@ -291,11 +317,14 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         fprintf(diagnostics, "bench_service: %s; io-uncertain requires retry/reopen, never rollback\n", bq_error_name(error));
         if (!valid)
         {
-            fprintf(diagnostics, "commands: capabilities | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
+            fprintf(diagnostics, "commands: capabilities | capabilities-remote SOCKET | "
+                    "submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
+                    "submit-remote SOCKET PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
                     "status/result/cancel DIR JOB | logs DIR JOB [AFTER_SEQUENCE] | fake-run DIR | "
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
+                    "status-remote/result-remote/cancel-remote SOCKET JOB | logs-remote SOCKET JOB [AFTER_SEQUENCE] | "
                     "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
         }
     }

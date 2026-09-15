@@ -1743,6 +1743,19 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     {
         BQ_CHECK(errno == EPERM || errno == EAFNOSUPPORT || errno == ENOSYS);
     }
+    BqPacket bound_request = {0}, bound_response = {0};
+    u8 bound_body[4] = {0};
+    bq_packet(&bound_request, BQ_OP_CAPABILITIES, UINT64_C(0x123456789abcdef0), NULL, 0);
+    bq_packet_schema(&bound_response, BQ_CONTROL_SCHEMA, BQ_OP_CAPABILITIES | 0x80000000u,
+                     UINT64_C(0x123456789abcdef0), bound_body, sizeof(bound_body));
+    BQ_CHECK(bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
+    bq_put64(bound_response.bytes + 16, UINT64_C(0x123456789abcdef1));
+    BQ_CHECK(!bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
+    bq_put64(bound_response.bytes + 16, UINT64_C(0x123456789abcdef0));
+    bq_put32(bound_response.bytes + 8, BQ_OP_STATUS | 0x80000000u);
+    BQ_CHECK(!bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
+    memcpy(bound_request.bytes, "BAD!", 4);
+    BQ_CHECK(bq_transport_response_valid(&bound_request, &bound_response, bound_response.size));
 #endif
 }
 

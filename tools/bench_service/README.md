@@ -470,8 +470,24 @@ cannot produce a performance qualification or #512 acceptance result.
 
 ```sh
 ./build.sh bench_service serve STATE SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU
+./build.sh bench_service capabilities-remote SOCKET
+./build.sh bench_service submit-remote SOCKET PRINCIPAL KEY validate-buster-v1 BASE_SHA CANDIDATE_SHA
+./build.sh bench_service status-remote SOCKET JOB
+./build.sh bench_service result-remote SOCKET JOB
+./build.sh bench_service logs-remote SOCKET JOB [AFTER_SEQUENCE]
+./build.sh bench_service cancel-remote SOCKET JOB
 ./build.sh bench_service rpc SOCKET <request-frame >response-frame
 ```
+
+The `*-remote` commands are the typed operator client for the authenticated
+socket. They construct the same bounded schema-2 requests as the local CLI,
+then require the reply to match the request's schema, operation and correlation
+identity before decoding it. `result-remote` reports the server-bound result
+root plus the manifest, bundle and full-evidence digests; callers must still
+retrieve and independently replay that immutable evidence before accepting a
+verdict. `rpc` remains available for protocol regression and low-level tooling,
+but a protected workflow should use the typed commands rather than construct
+binary frames in workflow-controlled code.
 
 `SOCKET`'s parent must already be a private, operator-provisioned directory;
 the service refuses an existing socket, final symlink, non-private parent or
