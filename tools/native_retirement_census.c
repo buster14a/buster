@@ -1,10 +1,12 @@
 // Included by build.c after differential.c: this is build-driver orchestration,
 // not a second executable. nrc_inventory freezes tracked test inputs and records
 // exclusions; nrc_manifest freezes the complete cross product before execution;
-// nrc_group compares a direct baseline with strict MIR using bounded d_observe
-// children. Opt-in CODEGEN_FALLBACK_FUNCTION rows attribute every observed
-// fallback; fatal diagnostics and aggregate counters are retained too. This is
-// object coverage with a reviewed input/dependency/environment contract, never
+// nrc_load_applicability authenticates the immutable fixture/target source
+// projection; nrc_group compares a direct baseline with strict MIR using
+// bounded d_observe children or emits ledger-bound non-executed control rows.
+// Opt-in CODEGEN_FALLBACK_FUNCTION rows attribute every observed fallback;
+// fatal diagnostics and aggregate counters are retained too. This is object
+// coverage with a reviewed input/dependency/environment contract, never
 // execution or final retirement acceptance.
 
 #define NRC_ALLOCATOR(name, value) S8_INITIALIZER(name),
@@ -28,10 +30,23 @@ BUSTER_GLOBAL_LOCAL NrcTarget const nrc_targets[] = {
     {S8_INITIALIZER("aarch64-unknown-uefi"), S8_INITIALIZER("aapcs64"), S8_INITIALIZER("semantic-gate-509"), S8_INITIALIZER("semantic-gate-509")},
 };
 
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_manifest_name = S8_INITIALIZER("docs/native-retirement-dependencies-v1.json");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("f45cd452eb02b56b06f91db70064c735ab55810ad8fdc690e2a6be7d3c92a562");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("9102b77674285f04e4d4fd781d80f273051674a9f911dab2c868adcf5922523c");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("f370491368b6f7b013619f412640126454681043f27a2b9fb9f92f2465555a3d");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("60953f97c4968a4888863ebd0ab72dc17be550cb2d7f70b94c71455d8d6d9344");
+BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
+BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
+BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
+BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("6edc25e9b09884bf7c1f2e4711909120667503e22e84025316d9cd94eb77b4ad");
+BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 341;
+
 typedef struct NrcInput NrcInput;
 struct NrcInput { String8 path; String8 role; String8 compile_obligation; String8 sha256; u64 hash; u64 bytes; };
+typedef struct NrcApplicability NrcApplicability;
+struct NrcApplicability { String8 fixture; String8 target; String8 fixture_sha256; String8 applicability; String8 reason; };
 typedef struct NrcFixtureRecipe NrcFixtureRecipe;
-struct NrcFixtureRecipe { String8 name; String8 flags[3]; u32 count; };
+struct NrcFixtureRecipe { String8 name; String8 flags[3]; u32 count; String8 x86_cpu; };
 typedef struct NrcStatistics NrcStatistics;
 struct NrcStatistics { String8 cpu; String8 features; u32 functions; u32 fallbacks; bool valid; };
 typedef struct NrcDependency NrcDependency;
@@ -49,12 +64,28 @@ struct NrcSettings
     String8 snapshot;
     String8 resource_include;
     String8 resource_snapshot;
+    String8 project_include;
+    String8 project_snapshot;
+    String8 dependency_manifest;
+    String8 dependency_receipt;
+    String8 dependency_manifest_sha256;
+    String8 dependency_receipt_sha256;
+    String8 dependency_project_sha256;
+    String8 dependency_ledger_sha256;
     String8 contract_path;
+    String8 supported_gap_ledger_path;
     String8 contract_sha256;
+    String8 supported_gap_ledger_sha256;
+    String8 applicability_ledger_path;
+    String8 applicability_ledger_sha256;
+    NrcApplicability* applicability;
+    u64 applicability_count;
     String8 resource_sha256;
+    String8 project_sha256;
     FILE* rows;
     FILE* counters;
     FILE* functions;
+    FILE* skips;
     u32 shard_index;
     u32 shard_count;
     u64 selected_groups;
@@ -63,6 +94,7 @@ struct NrcSettings
     u64 failures;
     u64 strict_successes;
     u64 strict_empty;
+    u64 skipped_rows;
     bool manifest_only;
 };
 
@@ -110,6 +142,30 @@ BUSTER_GLOBAL_LOCAL bool nrc_file_identity(Arena* arena, String8 path, u64* byte
     }
     file_map_unmap(map);
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_receipt_field(Arena* arena, ByteSlice bytes, String8 key, String8* value)
+{
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 prefix = string_format(arena, S8("  \"{S8}\": \""), key);
+    String8 line = {0};
+    bool found = false;
+    while (text_next_line(&text, &line))
+    {
+        if (!found && line.length >= prefix.length && memory_compare(line.pointer, prefix.pointer, prefix.length))
+        {
+            u64 end = line.length;
+            bool comma = end && line.pointer[end - 1] == ',';
+            u64 quote = comma ? end - 2 : end - 1;
+            bool quoted = end >= prefix.length + 2 && line.pointer[quote] == '"';
+            if (quoted)
+            {
+                *value = string_slice(line, prefix.length, quote);
+                found = true;
+            }
+        }
+    }
+    return found;
 }
 
 BUSTER_GLOBAL_LOCAL bool nrc_sha256_valid(String8 value)
@@ -162,6 +218,115 @@ BUSTER_GLOBAL_LOCAL bool nrc_contract_row(String8* text, NrcInput* input)
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool nrc_applicability_class_valid(String8 value)
+{
+    return string_equal(value, S8("admitted-supported")) ||
+           string_equal(value, S8("platform-inapplicable")) ||
+           string_equal(value, S8("unavailable"));
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_reason_valid(String8 value)
+{
+    bool valid = value.length != 0;
+    for (u64 index = 0; index < value.length; index += 1)
+    {
+        char8 byte = value.pointer[index];
+        valid &= (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+                 (byte >= '0' && byte <= '9') || byte == '-' || byte == '_' || byte == '.';
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_applicability_row(String8* text, NrcApplicability* record)
+{
+    String8 line = {0};
+    bool valid = text_next_line(text, &line) && line.length != 0;
+    String8 fields[5] = {0};
+    u32 field = 0;
+    u64 start = 0;
+    for (u64 index = 0; valid && index <= line.length; index += 1)
+    {
+        if (index == line.length || line.pointer[index] == '\t')
+        {
+            valid = field < BUSTER_ARRAY_LENGTH(fields) && index > start;
+            if (valid) { fields[field++] = string_slice(line, start, index); }
+            start = index + 1;
+        }
+    }
+    valid &= field == BUSTER_ARRAY_LENGTH(fields) && nrc_sha256_valid(fields[2]) &&
+             nrc_applicability_class_valid(fields[3]) && nrc_reason_valid(fields[4]);
+    if (valid)
+    {
+        *record = (NrcApplicability){.fixture = fields[0], .target = fields[1], .fixture_sha256 = fields[2],
+                                     .applicability = fields[3], .reason = fields[4]};
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_load_applicability(NrcSettings* settings, ByteSlice bytes,
+                                                NrcInput* inputs, u64 input_count)
+{
+    Arena* arena = settings->child.arena;
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 header = {0};
+    bool valid = bytes.pointer && text_next_line(&text, &header) &&
+                 string_equal(header, S8("fixture\ttarget\tfixture_sha256\tapplicability\treason"));
+    valid &= string_equal(nrc_sha256(arena, bytes.pointer, bytes.length), nrc_applicability_ledger_sha256);
+    NrcApplicability* records = arena_allocate(arena, NrcApplicability, nrc_applicability_ledger_count);
+    u64 count = 0;
+    while (valid && text.length)
+    {
+        valid &= count < nrc_applicability_ledger_count;
+        NrcApplicability record = {0};
+        valid &= nrc_applicability_row(&text, &record);
+        if (valid)
+        {
+            bool fixture_found = false;
+            for (u64 index = 0; index < input_count; index += 1)
+            {
+                if (string_equal(inputs[index].path, record.fixture))
+                {
+                    fixture_found = true;
+                    valid &= string_equal(inputs[index].role, S8("subject")) &&
+                             string_equal(inputs[index].sha256, record.fixture_sha256);
+                }
+            }
+            bool target_found = false;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(nrc_targets); index += 1)
+            {
+                target_found |= string_equal(nrc_targets[index].triple, record.target);
+            }
+            valid &= fixture_found && target_found;
+            if (valid && count)
+            {
+                NrcApplicability* previous = records + count - 1;
+                valid &= assembly_import_string_compare(&previous->fixture, &record.fixture) < 0 ||
+                         (string_equal(previous->fixture, record.fixture) &&
+                          assembly_import_string_compare(&previous->target, &record.target) < 0);
+            }
+            if (valid) { records[count++] = record; }
+        }
+    }
+    valid &= count == nrc_applicability_ledger_count && !text.length;
+    if (valid)
+    {
+        settings->applicability = records;
+        settings->applicability_count = count;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL NrcApplicability* nrc_applicability_lookup(NrcSettings* settings, String8 fixture, String8 target)
+{
+    NrcApplicability* result = 0;
+    for (u64 index = 0; index < settings->applicability_count; index += 1)
+    {
+        NrcApplicability* record = settings->applicability + index;
+        if (string_equal(record->fixture, fixture) && string_equal(record->target, target)) { result = record; break; }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 nrc_role(String8 path)
 {
     // Exact rejection-fixture identities, not keyword matching: for example,
@@ -184,10 +349,22 @@ BUSTER_GLOBAL_LOCAL String8 nrc_role(String8 path)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 nrc_compile_obligation(String8 role)
+BUSTER_GLOBAL_LOCAL String8 nrc_compile_obligation(String8 path, String8 role)
 {
     String8 result = S8("dependency-only");
-    if (string_equal(role, S8("subject"))) { result = S8("supported-object-zero-fallback"); }
+    if (string_equal(role, S8("subject")))
+    {
+        result = S8("supported-object-zero-fallback");
+        String8 non_object_controls[] = {
+            S8("tests/basic_c_macro_options.c"), S8("tests/ebpf_scalar_regression.c"),
+            S8("tests/runtime_boundary_regression.c"), S8("tests/wasm_memory_alignment_regression.c"),
+            S8("tests/windows_unicode_regression.c"), S8("tests/gpu/metal_reader.c"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_object_controls); index += 1)
+        {
+            if (string_equal(path, non_object_controls[index])) { result = S8("registered-non-object-control"); }
+        }
+    }
     else if (string_equal(role, S8("negative-diagnostic-fixture"))) { result = S8("registered-rejection-control"); }
     else if (string_equal(role, S8("dormant-custom-language"))) { result = S8("preserved-not-active"); }
     return result;
@@ -212,7 +389,27 @@ BUSTER_GLOBAL_LOCAL NrcFixtureRecipe nrc_fixture_recipe(String8 path)
         recipe = (NrcFixtureRecipe){.name = S8("c23-dialect-assertions"),
             .flags = {S8("-std=c23"), S8("-DEXPECTED_STDC_VERSION=202311L"), S8("-DEXPECTED_GNU=0")}, .count = 3};
     }
+    else if (string_equal(path, S8("tests/basic_c_predicate_bank.c")))
+    {
+        recipe.name = S8("x86-avx512");
+        recipe.x86_cpu = S8("skylake-avx512");
+    }
+    else if (string_equal(path, S8("tests/basic_c_atomic_aggregate.c")))
+    {
+        recipe.name = S8("x86-cx16");
+        recipe.x86_cpu = S8("haswell");
+    }
     return recipe;
+}
+
+BUSTER_GLOBAL_LOCAL String8 nrc_recipe_cpu(NrcFixtureRecipe recipe, NrcTarget target, String8 fallback)
+{
+    String8 result = fallback;
+    if (recipe.x86_cpu.length && string_starts_with_sequence(target.triple, S8("x86_64-")))
+    {
+        result = recipe.x86_cpu;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL FILE* nrc_open(NrcSettings* settings, String8 name)
@@ -243,6 +440,134 @@ BUSTER_GLOBAL_LOCAL void nrc_dependency_append(Arena* arena, NrcDependency** dep
         *capacity = grown_capacity;
     }
     (*dependencies)[(*count)++] = value;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_snapshot_copy(NrcSettings* settings, String8 source, String8 destination,
+                                           NrcDependency* dependency, Sha256* closure)
+{
+    Arena* arena = settings->child.arena;
+    ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
+    OsFileDescriptor* descriptor = os_file_open(source, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    bool valid = descriptor && bytes.pointer;
+    if (descriptor)
+    {
+        valid &= os_file_get_size(descriptor) == bytes.length;
+        valid &= os_file_close(descriptor);
+    }
+    if (valid)
+    {
+        dependency->bytes = bytes.length;
+        dependency->sha256 = nrc_sha256(arena, bytes.pointer, bytes.length);
+        // ``file_read`` and the size probe above intentionally use separate
+        // interfaces for the portable driver. Re-check the source identity
+        // before publishing non-empty files so a same-size replacement cannot
+        // enter the frozen include tree between those probes.
+        if (bytes.length)
+        {
+            u64 source_bytes = 0, source_hash = 0;
+            String8 source_sha256 = {0};
+            valid = nrc_file_identity(arena, source, &source_bytes, &source_hash, &source_sha256) &&
+                    source_bytes == dependency->bytes && source_hash == buster_hash_64(bytes.pointer, bytes.length) &&
+                    string_equal(source_sha256, dependency->sha256);
+        }
+    }
+    if (valid)
+    {
+        make_directory_recursive(arena, path_parent(arena, destination));
+        d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes));
+
+        // The materializer publishes immutable source bytes, but the census
+        // still verifies the copy it is about to put on the compiler's include
+        // path. This catches truncation, a failed parent creation, and any
+        // output-side race before the closure is admitted to the ledger.
+        ByteSlice copied = file_read(arena, destination, (FileReadOptions){0});
+        valid &= copied.pointer && copied.length == bytes.length;
+        if (valid)
+        {
+            String8 copied_sha256 = nrc_sha256(arena, copied.pointer, copied.length);
+            valid &= string_equal(copied_sha256, dependency->sha256);
+        }
+        if (valid)
+        {
+            sha256_add(closure, dependency->relative.pointer, dependency->relative.length);
+            sha256_add(closure, "\0", 1);
+            u8 encoded_bytes[8];
+            for (u32 byte = 0; byte < BUSTER_ARRAY_LENGTH(encoded_bytes); byte += 1)
+            {
+                encoded_bytes[byte] = (u8)(dependency->bytes >> (byte * 8));
+            }
+            sha256_add(closure, encoded_bytes, sizeof(encoded_bytes));
+            sha256_add(closure, bytes.pointer, bytes.length);
+        }
+    }
+    return valid && !settings->child.io_failed;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_snapshot_project(NrcSettings* settings, FILE* ledger, Sha256* closure)
+{
+    Arena* arena = settings->child.arena;
+    String8* directories = arena_allocate(arena, String8, 64);
+    u64 directory_count = 1, directory_capacity = 64;
+    directories[0] = S8("");
+    NrcDependency* dependencies = 0;
+    u64 dependency_count = 0, dependency_capacity = 0;
+    bool valid = settings->project_include.length != 0;
+    for (u64 directory_index = 0; valid && directory_index < directory_count; directory_index += 1)
+    {
+        String8 relative = directories[directory_index];
+        String8 source = relative.length ? path_join(arena, settings->project_include, relative) : settings->project_include;
+        MuslDirectoryEntry* entries = 0;
+        u64 entry_count = 0;
+        valid = musl_list_directory(arena, source, &entries, &entry_count);
+        for (u64 index = 0; valid && index < entry_count; index += 1)
+        {
+            String8 child = relative.length ? path_join(arena, relative, entries[index].name) : entries[index].name;
+            valid = nrc_field_safe(child);
+            if (entries[index].is_directory)
+            {
+                if (directory_count == directory_capacity)
+                {
+                    u64 grown_capacity = directory_capacity * 2;
+                    String8* grown = arena_allocate(arena, String8, grown_capacity);
+                    memcpy(grown, directories, directory_count * sizeof(*grown));
+                    directories = grown;
+                    directory_capacity = grown_capacity;
+                }
+                directories[directory_count++] = child;
+            }
+            else
+            {
+                nrc_dependency_append(arena, &dependencies, &dependency_count, &dependency_capacity,
+                                      (NrcDependency){.relative = child});
+            }
+        }
+    }
+    for (u64 index = 1; valid && index < dependency_count; index += 1)
+    {
+        NrcDependency value = dependencies[index];
+        u64 slot = index;
+        while (slot && assembly_import_string_compare(&dependencies[slot - 1].relative, &value.relative) > 0)
+        {
+            dependencies[slot] = dependencies[slot - 1];
+            slot -= 1;
+        }
+        dependencies[slot] = value;
+    }
+    for (u64 index = 0; valid && index < dependency_count; index += 1)
+    {
+        NrcDependency* dependency = dependencies + index;
+        String8 source = path_join(arena, settings->project_include, dependency->relative);
+        String8 destination = path_join(arena, settings->project_snapshot, dependency->relative);
+        valid = nrc_snapshot_copy(settings, source, destination, dependency, closure);
+        if (valid)
+        {
+            fprintf(ledger, "project-header\t%.*s\t%llu\t%.*s\n", (int)dependency->relative.length,
+                    dependency->relative.pointer, (unsigned long long)dependency->bytes,
+                    (int)dependency->sha256.length, dependency->sha256.pointer);
+        }
+    }
+    valid &= dependency_count != 0 && !settings->child.io_failed;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool nrc_snapshot_resource(NrcSettings* settings)
@@ -303,39 +628,96 @@ BUSTER_GLOBAL_LOCAL bool nrc_snapshot_resource(NrcSettings* settings)
     {
         NrcDependency* dependency = dependencies + index;
         String8 source = path_join(arena, settings->resource_include, dependency->relative);
-        ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
-        OsFileDescriptor* descriptor = os_file_open(source, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-        valid = descriptor && bytes.pointer;
-        if (descriptor)
-        {
-            valid &= os_file_get_size(descriptor) == bytes.length && os_file_close(descriptor);
-        }
+        String8 destination = path_join(arena, settings->resource_snapshot, dependency->relative);
+        valid = nrc_snapshot_copy(settings, source, destination, dependency, &closure);
         if (valid)
         {
-            dependency->bytes = bytes.length;
-            dependency->sha256 = nrc_sha256(arena, bytes.pointer, bytes.length);
-            String8 destination = path_join(arena, settings->resource_snapshot, dependency->relative);
-            make_directory_recursive(arena, path_parent(arena, destination));
-            d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes));
-            sha256_add(&closure, dependency->relative.pointer, dependency->relative.length);
-            sha256_add(&closure, "\0", 1);
-            u8 encoded_bytes[8];
-            for (u32 byte = 0; byte < BUSTER_ARRAY_LENGTH(encoded_bytes); byte += 1)
-            {
-                encoded_bytes[byte] = (u8)(dependency->bytes >> (byte * 8));
-            }
-            sha256_add(&closure, encoded_bytes, sizeof(encoded_bytes));
-            sha256_add(&closure, bytes.pointer, bytes.length);
             fprintf(ledger, "resource-header\t%.*s\t%llu\t%.*s\n", (int)dependency->relative.length,
                     dependency->relative.pointer, (unsigned long long)dependency->bytes,
                     (int)dependency->sha256.length, dependency->sha256.pointer);
         }
     }
+    Sha256 project_closure;
+    sha256_init(&project_closure);
+    bool project_valid = !settings->project_include.length;
+    if (valid && ledger && settings->project_include.length)
+    {
+        project_valid = nrc_snapshot_project(settings, ledger, &project_closure);
+    }
     nrc_close(settings, ledger);
     char8* closure_hex = arena_allocate(arena, char8, SHA256_HEX_CAPACITY);
     sha256_finish_hex(&closure, closure_hex);
     settings->resource_sha256 = (String8){.pointer = closure_hex, .length = SHA256_HEX_CAPACITY - 1};
-    valid &= dependency_count != 0 && !settings->child.io_failed;
+    if (settings->project_include.length)
+    {
+        char8* project_hex = arena_allocate(arena, char8, SHA256_HEX_CAPACITY);
+        sha256_finish_hex(&project_closure, project_hex);
+        settings->project_sha256 = (String8){.pointer = project_hex, .length = SHA256_HEX_CAPACITY - 1};
+    }
+    valid &= dependency_count != 0 && project_valid && !settings->child.io_failed;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool nrc_dependency_binding(NrcSettings* settings, bool required)
+{
+    Arena* arena = settings->child.arena;
+    bool valid = !required;
+    if (required && (!settings->dependency_manifest.length || !settings->dependency_receipt.length))
+    {
+        valid = false;
+    }
+    else if (required)
+    {
+        String8 expected_project_root = path_join(arena, path_parent(arena, settings->dependency_receipt),
+                                                  S8("dependencies/project-include"));
+        bool project_path_valid = string_equal(settings->project_include, expected_project_root);
+        String8 expected_manifest_path = os_path_absolute(arena, nrc_dependency_manifest_name, true);
+        bool manifest_path_valid = string_equal(settings->dependency_manifest, expected_manifest_path);
+        ByteSlice descriptor = file_read(arena, settings->dependency_manifest, (FileReadOptions){0});
+        ByteSlice receipt = file_read(arena, settings->dependency_receipt, (FileReadOptions){0});
+        u64 descriptor_bytes = 0, descriptor_hash = 0, receipt_bytes = 0, receipt_hash = 0;
+        String8 descriptor_sha256 = {0}, receipt_sha256 = {0};
+        valid = project_path_valid && manifest_path_valid && descriptor.pointer && receipt.pointer &&
+                nrc_file_identity(arena, settings->dependency_manifest, &descriptor_bytes, &descriptor_hash, &descriptor_sha256) &&
+                nrc_file_identity(arena, settings->dependency_receipt, &receipt_bytes, &receipt_hash, &receipt_sha256);
+        valid &= string_equal(descriptor_sha256, nrc_dependency_descriptor_sha256) &&
+                 string_equal(receipt_sha256, nrc_dependency_receipt_sha256);
+        String8 receipt_descriptor_sha256 = {0}, receipt_project_sha256 = {0}, receipt_ledger_sha256 = {0}, receipt_path = {0};
+        valid &= nrc_receipt_field(arena, receipt, S8("descriptor_sha256"), &receipt_descriptor_sha256) &&
+                 nrc_receipt_field(arena, receipt, S8("project_include_sha256"), &receipt_project_sha256) &&
+                 nrc_receipt_field(arena, receipt, S8("ledger_sha256"), &receipt_ledger_sha256) &&
+                 nrc_receipt_field(arena, receipt, S8("descriptor_path"), &receipt_path);
+        valid &= string_equal(receipt_descriptor_sha256, descriptor_sha256) &&
+                 string_equal(receipt_path, nrc_dependency_manifest_name) &&
+                 string_equal(receipt_project_sha256, settings->project_sha256) &&
+                 string_equal(settings->project_sha256, nrc_dependency_project_sha256);
+        String8 dependency_ledger_path = path_join(arena, path_parent(arena, settings->dependency_receipt), S8("dependencies.tsv"));
+        u64 ledger_bytes = 0, ledger_hash = 0;
+        String8 ledger_sha256 = {0};
+        valid &= nrc_file_identity(arena, dependency_ledger_path, &ledger_bytes, &ledger_hash, &ledger_sha256);
+        valid &= string_equal(receipt_ledger_sha256, ledger_sha256) &&
+                 string_equal(ledger_sha256, nrc_dependency_ledger_sha256);
+        settings->dependency_manifest_sha256 = descriptor_sha256;
+        settings->dependency_receipt_sha256 = receipt_sha256;
+        settings->dependency_project_sha256 = receipt_project_sha256;
+        settings->dependency_ledger_sha256 = ledger_sha256;
+        if (descriptor.pointer)
+        {
+            d_write(&settings->child, path_join(arena, settings->child.out, S8("dependency-descriptor.json")),
+                    BYTE_SLICE_TO_STRING(8, descriptor));
+        }
+        if (receipt.pointer)
+        {
+            d_write(&settings->child, path_join(arena, settings->child.out, S8("dependency-receipt.json")),
+                    BYTE_SLICE_TO_STRING(8, receipt));
+        }
+        ByteSlice ledger = file_read(arena, dependency_ledger_path, (FileReadOptions){0});
+        if (ledger.pointer)
+        {
+            d_write(&settings->child, path_join(arena, settings->child.out, S8("dependency-materializer.tsv")),
+                    BYTE_SLICE_TO_STRING(8, ledger));
+        }
+    }
     return valid;
 }
 
@@ -403,7 +785,7 @@ BUSTER_GLOBAL_LOCAL NrcInput* nrc_inventory(NrcSettings* settings, u64* count_ou
             {
                 String8 role = nrc_role(path);
                 inputs[at++] = (NrcInput){.path = string_duplicate_arena(arena, path, true), .role = role,
-                                         .compile_obligation = nrc_compile_obligation(role)};
+                                         .compile_obligation = nrc_compile_obligation(path, role)};
             }
             from = index + 1;
         }
@@ -545,7 +927,7 @@ BUSTER_GLOBAL_LOCAL NrcStatistics nrc_statistics(String8 output, String8 allocat
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void nrc_counters(NrcSettings* settings, u64 row, String8 output)
+BUSTER_GLOBAL_LOCAL void nrc_counters(NrcSettings* settings, u64 row, String8 output, String8 target, String8 allocator)
 {
     String8 line = {0};
     while (text_next_line(&output, &line))
@@ -554,7 +936,23 @@ BUSTER_GLOBAL_LOCAL void nrc_counters(NrcSettings* settings, u64 row, String8 ou
             !string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_FUNCTION ")) &&
             !string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_CENSUS ")))
         {
-            fprintf(settings->counters, "%llu\t%.*s\n", (unsigned long long)row, (int)line.length, line.pointer);
+            if (string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_REASON ")))
+            {
+                fprintf(settings->counters, "%llu\tCODEGEN_FALLBACK_REASON %.*s version=1 row=%llu\n",
+                        (unsigned long long)row, (int)(line.length - 24), line.pointer + 24, (unsigned long long)row);
+            }
+            else if (string_starts_with_sequence(line, S8("CODEGEN_FALLBACK opcode=")))
+            {
+                fprintf(settings->counters, "%llu\t%.*s version=1 row=%llu target=%.*s allocator=%.*s\n",
+                        (unsigned long long)row, (int)line.length, line.pointer, (unsigned long long)row,
+                        (int)target.length, target.pointer, (int)allocator.length, allocator.pointer);
+            }
+            else if (string_starts_with_sequence(line, S8("CODEGEN_FALLBACK_STAGES ")))
+            {
+                fprintf(settings->counters, "%llu\t%.*s version=1 row=%llu target=%.*s allocator=%.*s\n",
+                        (unsigned long long)row, (int)line.length, line.pointer, (unsigned long long)row,
+                        (int)target.length, target.pointer, (int)allocator.length, allocator.pointer);
+            }
         }
     }
 }
@@ -627,6 +1025,8 @@ BUSTER_GLOBAL_LOCAL bool nrc_function_records(NrcSettings* settings, u64 row, St
                     record_valid &= string_equal(stage, index >= 1 && index <= 3 ? S8("selection") : reason);
                 }
             }
+            record_valid &= source.length && !string_equal(source, S8("-")) &&
+                name.length && !string_equal(name, S8("-"));
             // A census row compiles one TU, so function IDs strictly increase.
             // They need not be dense: declarations need not have lowered bodies.
             record_valid &= reason_found && (records == 0 || function > previous_function);
@@ -635,7 +1035,8 @@ BUSTER_GLOBAL_LOCAL bool nrc_function_records(NrcSettings* settings, u64 row, St
             records += 1;
             if (settings->functions)
             {
-                fprintf(settings->functions, "%llu\t%u\t%.*s\n", (unsigned long long)row, (unsigned)record_valid, (int)line.length, line.pointer);
+                fprintf(settings->functions, "%llu\t%u\t%.*s row=%llu\n", (unsigned long long)row,
+                        (unsigned)record_valid, (int)line.length, line.pointer, (unsigned long long)row);
             }
         }
     }
@@ -657,6 +1058,31 @@ BUSTER_GLOBAL_LOCAL String8 nrc_target_features(Arena* arena, NrcTarget target, 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 nrc_linux_musl_arch(u32 target)
+{
+    String8 result = {0};
+    if (target == 0) { result = S8("x86_64"); }
+    else if (target == 1) { result = S8("aarch64"); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void nrc_write_argv(NrcSettings* settings, String8 prefix, String8* command, u64 command_count)
+{
+    Arena* arena = settings->child.arena;
+    u64 bytes = command_count;
+    for (u64 index = 0; index < command_count; index += 1) { bytes += command[index].length; }
+    u8* serialized = arena_allocate(arena, u8, bytes);
+    u64 at = 0;
+    for (u64 index = 0; index < command_count; index += 1)
+    {
+        memcpy(serialized + at, command[index].pointer, command[index].length);
+        at += command[index].length;
+        serialized[at++] = 0;
+    }
+    String8 path = string_format(arena, S8("{S8}.argv"), prefix);
+    d_write(&settings->child, path, (String8){.pointer = (char8*)serialized, .length = bytes});
+}
+
 BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 target, u32 frontend, u32 pic, u64 group)
 {
     Arena* arena = settings->child.arena;
@@ -673,10 +1099,11 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         String8 object = string_format_z(temporary.arena, S8("{S8}.o"), prefix);
         String8 source = path_join(temporary.arena, settings->snapshot, input.path);
         String8 allocator = string_format(temporary.arena, S8("-fregister-allocator={S8}"), nrc_allocators[mode]);
-        String8 cpu = string_format(temporary.arena, S8("-mcpu={S8}"), settings->cpu);
         String8 include = string_format(temporary.arena, S8("-I{S8}/tests"), settings->snapshot);
         NrcFixtureRecipe recipe = nrc_fixture_recipe(input.path);
-        String8 command[32] = {0};
+        String8 recipe_cpu = nrc_recipe_cpu(recipe, nrc_targets[target], settings->cpu);
+        String8 cpu = string_format(temporary.arena, S8("-mcpu={S8}"), recipe_cpu);
+        String8 command[36] = {0};
         u64 command_count = 0;
         command[command_count++] = mode ? settings->child.ide : settings->baseline;
         command[command_count++] = S8("cc");
@@ -697,21 +1124,70 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         command[command_count++] = S8("-nostdinc");
         command[command_count++] = S8("-isystem");
         command[command_count++] = settings->resource_snapshot;
+        String8 musl_arch = nrc_linux_musl_arch(target);
+        if (musl_arch.length && settings->project_snapshot.length)
+        {
+            command[command_count++] = S8("-isystem");
+            command[command_count++] = string_format(temporary.arena, S8("{S8}/musl/{S8}/include"),
+                                                     settings->project_snapshot, musl_arch);
+            command[command_count++] = S8("-isystem");
+            command[command_count++] = string_format(temporary.arena, S8("{S8}/musl/include"), settings->project_snapshot);
+        }
         command[command_count++] = include;
+        if (settings->project_snapshot.length)
+        {
+            String8 project_include = string_format(temporary.arena, S8("-I{S8}"), settings->project_snapshot);
+            command[command_count++] = project_include;
+        }
         command[command_count++] = source;
         command[command_count++] = S8("-o");
         command[command_count++] = object;
         for (u32 flag = 0; flag < recipe.count; flag += 1) { command[command_count++] = recipe.flags[flag]; }
         if (mode) { command[command_count++] = S8("-fcodegen-fallback-census"); }
         SliceString8 argv = {.pointer = command, .length = command_count};
+        NrcApplicability* applicability = nrc_applicability_lookup(settings, input.path, nrc_targets[target].triple);
+        bool non_object_control = string_equal(input.compile_obligation, S8("registered-non-object-control"));
+        bool authenticated_skip = applicability &&
+            (string_equal(applicability->applicability, S8("platform-inapplicable")) ||
+             string_equal(applicability->applicability, S8("unavailable")));
+        if (non_object_control || authenticated_skip)
+        {
+            String8 disposition = non_object_control ? S8("retained-control") : applicability->applicability;
+            String8 reason = non_object_control ? S8("registered-non-object-control") : applicability->reason;
+            u64 row = group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode;
+            String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], recipe_cpu);
+            nrc_write_argv(settings, prefix, command, command_count);
+            d_write(&settings->child, string_format(temporary.arena, S8("{S8}.stdout"), prefix), S8(""));
+            d_write(&settings->child, string_format(temporary.arena, S8("{S8}.stderr"), prefix), S8(""));
+            fprintf(settings->rows, "%llu\t%llu\t%.*s\t0\t0\t1\t1\t1\t0\t0\t0\t%.*s\t%.*s\t0\t0\t\n",
+                    (unsigned long long)row, (unsigned long long)group,
+                    (int)disposition.length, disposition.pointer,
+                    (int)recipe_cpu.length, recipe_cpu.pointer,
+                    (int)expected_features.length, expected_features.pointer);
+            fprintf(settings->skips, "%llu\t%llu\t%.*s\t%.*s\t%.*s\t%.*s\t%.*s\n",
+                    (unsigned long long)row, (unsigned long long)group,
+                    (int)input.path.length, input.path.pointer,
+                    (int)nrc_targets[target].triple.length, nrc_targets[target].triple.pointer,
+                    (int)nrc_allocators[mode].length, nrc_allocators[mode].pointer,
+                    (int)disposition.length, disposition.pointer,
+                    (int)reason.length, reason.pointer);
+            settings->skipped_rows += 1;
+            settings->child.io_failed |= child.io_failed || fflush(settings->rows) != 0 || fflush(settings->skips) != 0;
+            scratch_end(temporary);
+            continue;
+        }
         DObservation observed = d_observe(&child, argv, prefix);
         NrcStatistics statistics = nrc_statistics(observed.output, nrc_allocators[mode]);
-        String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], settings->cpu);
-        bool target_valid = expected_features.length && string_equal(statistics.cpu, settings->cpu) &&
+        u64 row = group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode;
+        String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], recipe_cpu);
+        bool target_valid = expected_features.length && string_equal(statistics.cpu, recipe_cpu) &&
                             string_equal(statistics.features, expected_features);
-        bool records_valid = !mode || nrc_function_records(settings, group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode,
-                                                          observed.output, nrc_allocators[mode], statistics.fallbacks);
-        nrc_counters(settings, group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode, observed.output);
+        bool records_valid = !mode || nrc_function_records(settings, row, observed.output, nrc_allocators[mode], statistics.fallbacks);
+        TargetParseResult target_parse = target_parse_triple(nrc_targets[target].triple);
+        String8 diagnostic_target = string_format(temporary.arena, S8("{S8}-{S8}"),
+                                                  cpu_arch_to_string_os(target_parse.target.cpu_arch),
+                                                  operating_system_to_string_os(target_parse.target.os));
+        nrc_counters(settings, row, observed.output, diagnostic_target, nrc_allocators[mode]);
         u64 object_hash = 0, object_bytes = 0;
         String8 object_sha256 = {0};
         bool artifact = build_artifact_fanout_hash_file(temporary.arena, object, &object_hash, &object_bytes);
@@ -759,7 +1235,7 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             settings->failures += baseline_supported && (!statistics.valid || !records_valid);
         }
         fprintf(settings->rows, "%llu\t%llu\t%.*s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.*s\t%.*s\t%llu\t%llu\t%.*s\n",
-            (unsigned long long)(group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode), (unsigned long long)group,
+            (unsigned long long)row, (unsigned long long)group,
             (int)disposition.length, disposition.pointer, (unsigned)observed.kind, observed.status,
             (unsigned)statistics.valid, (unsigned)target_valid, (unsigned)records_valid, statistics.functions, statistics.fallbacks,
             baseline.functions, (int)statistics.cpu.length, statistics.cpu.pointer, (int)statistics.features.length, statistics.features.pointer,
@@ -800,7 +1276,8 @@ BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u6
                         {
                             for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(nrc_allocators); mode += 1)
                             {
-                                String8 features = nrc_target_features(settings->child.arena, nrc_targets[target], settings->cpu);
+                                String8 recipe_cpu = nrc_recipe_cpu(recipe, nrc_targets[target], settings->cpu);
+                                String8 features = nrc_target_features(settings->child.arena, nrc_targets[target], recipe_cpu);
                                 String8 lowering = frontend ? S8("direct-ssa") : S8("local-backed-canonical");
                                 String8 diagnostic = string_equal(inputs[input].role, S8("negative-diagnostic-fixture"))
                                                          ? S8("registered-rejection-control") : S8("none");
@@ -811,7 +1288,7 @@ BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u6
                                     (unsigned long long)(group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode), (unsigned long long)group,
                                     (int)inputs[input].path.length, inputs[input].path.pointer, (int)nrc_targets[target].triple.length,
                                     nrc_targets[target].triple.pointer, (int)nrc_targets[target].abi.length, nrc_targets[target].abi.pointer,
-                                    (int)settings->cpu.length, settings->cpu.pointer, (int)features.length, features.pointer,
+                                    (int)recipe_cpu.length, recipe_cpu.pointer, (int)features.length, features.pointer,
                                     (int)nrc_allocators[mode].length, nrc_allocators[mode].pointer, (int)lowering.length, lowering.pointer,
                                     pic, (unsigned)selected, (int)recipe.name.length, recipe.name.pointer,
                                     (int)inputs[input].compile_obligation.length, inputs[input].compile_obligation.pointer,
@@ -857,10 +1334,31 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
         !string_equal(dialect.flags[1], S8("-DEXPECTED_STDC_VERSION=202311L")) || !string_equal(dialect.flags[2], S8("-DEXPECTED_GNU=0"));
     failures += nrc_fixture_recipe(S8("tests/basic_c_typeof_declaration.c")).count != 0;
     failures += nrc_fixture_recipe(S8("tests/differential/basic_c_constexpr.c")).count != 0;
+    NrcFixtureRecipe predicate = nrc_fixture_recipe(S8("tests/basic_c_predicate_bank.c"));
+    failures += !string_equal(predicate.name, S8("x86-avx512")) ||
+                !string_equal(nrc_recipe_cpu(predicate, nrc_targets[0], S8("baseline")), S8("skylake-avx512")) ||
+                !string_equal(nrc_recipe_cpu(predicate, nrc_targets[1], S8("baseline")), S8("baseline"));
+    NrcFixtureRecipe atomic = nrc_fixture_recipe(S8("tests/basic_c_atomic_aggregate.c"));
+    failures += !string_equal(atomic.name, S8("x86-cx16")) ||
+                !string_equal(nrc_recipe_cpu(atomic, nrc_targets[0], S8("baseline")), S8("haswell")) ||
+                !string_equal(nrc_recipe_cpu(atomic, nrc_targets[1], S8("baseline")), S8("baseline"));
     failures += nrc_field_safe(S8("bad\tpath")) || nrc_revision_valid(S8("main"));
     failures += !nrc_revision_valid(S8("641cd88d33decfd56fa2da9a960c6ac075935a71"));
-    failures += !string_equal(nrc_compile_obligation(S8("subject")), S8("supported-object-zero-fallback"));
-    failures += !string_equal(nrc_compile_obligation(S8("negative-diagnostic-fixture")), S8("registered-rejection-control"));
+    String8 applicability_text = S8("tests/a.c\tx86_64-unknown-linux-gnu\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tadmitted-supported\tsource-reviewed-residual\n");
+    NrcApplicability parsed_applicability = {0};
+    failures += !nrc_applicability_row(&applicability_text, &parsed_applicability) || applicability_text.length != 0;
+    NrcApplicability applicability_records[] = {parsed_applicability};
+    NrcSettings applicability_settings = {.applicability = applicability_records, .applicability_count = 1};
+    failures += nrc_applicability_lookup(&applicability_settings, S8("tests/missing.c"), nrc_targets[0].triple) != 0;
+    failures += nrc_applicability_lookup(&applicability_settings, S8("tests/a.c"), nrc_targets[0].triple) != applicability_records;
+    failures += !string_equal(nrc_linux_musl_arch(0), S8("x86_64"));
+    failures += !string_equal(nrc_linux_musl_arch(1), S8("aarch64"));
+    failures += nrc_linux_musl_arch(2).length != 0 || nrc_linux_musl_arch(6).length != 0;
+    failures += !string_equal(nrc_compile_obligation(S8("tests/basic_c_operations.c"), S8("subject")), S8("supported-object-zero-fallback"));
+    failures += !string_equal(nrc_compile_obligation(S8("tests/basic_c_macro_options.c"), S8("subject")), S8("registered-non-object-control"));
+    failures += !string_equal(nrc_compile_obligation(S8("tests/ebpf_scalar_regression.c"), S8("subject")), S8("registered-non-object-control"));
+    failures += !string_equal(nrc_compile_obligation(S8("tests/basic_c_sizeof_anonymous_aggregate.c"), S8("subject")), S8("supported-object-zero-fallback"));
+    failures += !string_equal(nrc_compile_obligation(S8("tests/basic_c_invalid_labels.c"), S8("negative-diagnostic-fixture")), S8("registered-rejection-control"));
     NrcStatistics valid = nrc_statistics(S8("TARGET cpu=baseline features=sse,sse2\n"
                                              "CODEGEN functions=4 allocator=fast fallback_functions=2\n"), S8("fast"));
     failures += !valid.valid || valid.functions != 4 || valid.fallbacks != 2 || !string_equal(valid.cpu, S8("baseline")) ||
@@ -888,6 +1386,14 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
     failures += nrc_function_records(&records_settings, 0,
         string_format(arena, S8("CODEGEN_FALLBACK_CENSUS version=2 records=2\n{S8}{S8}"), first_record, second_record), S8("fast"), 2);
     failures += !nrc_function_records(&records_settings, 0, S8("CODEGEN_FALLBACK_CENSUS version=1 records=0\n"), S8("fast"), 0);
+    String8 blank_source_record = S8("CODEGEN_FALLBACK_CENSUS version=1 records=1\n"
+                                     "CODEGEN_FALLBACK_FUNCTION version=1 target=x86_64-linux allocator=fast function_id=7 "
+                                     "reason=signature stage=selection opcode_id=4294967295 line=3 column=1 source_hex=- function_hex=66\n");
+    String8 blank_function_record = S8("CODEGEN_FALLBACK_CENSUS version=1 records=1\n"
+                                       "CODEGEN_FALLBACK_FUNCTION version=1 target=x86_64-linux allocator=fast function_id=7 "
+                                       "reason=signature stage=selection opcode_id=4294967295 line=3 column=1 source_hex=612063 function_hex=-\n");
+    failures += nrc_function_records(&records_settings, 0, blank_source_record, S8("fast"), 1);
+    failures += nrc_function_records(&records_settings, 0, blank_function_record, S8("fast"), 1);
     failures += nrc_hex_field(S8("a")) || nrc_hex_field(S8("0g")) || !nrc_hex_field(S8("-"));
     for (u64 group = 0; group < 101; group += 1)
     {
@@ -917,7 +1423,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
 {
     NrcSettings settings = {.child = {.arena = arena, .ide = S8("build/Release/ide"),
         .out = S8("build/native-retirement-census"), .timeout_seconds = 30, .verify = true},
-        .shard_count = 1, .cpu = S8("baseline"), .contract_path = S8("docs/native-retirement-support-v1.tsv")};
+        .shard_count = 1, .cpu = S8("baseline"), .contract_path = S8("docs/native-retirement-support-v1.tsv"),
+        .supported_gap_ledger_path = S8("docs/native-retirement-supported-gaps-v1.tsv"),
+        .applicability_ledger_path = S8("docs/native-retirement-applicability-v1.tsv"),
+        .dependency_manifest = S8_INITIALIZER("docs/native-retirement-dependencies-v1.json")};
     bool valid = true, self_test = false;
     for (u64 index = 0; valid && index < arguments.length; index += 1)
     {
@@ -938,6 +1447,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             else if (string_equal(option, S8("--target"))) { settings.target_filter = value; }
             else if (string_equal(option, S8("--cpu"))) { settings.cpu = value; }
             else if (string_equal(option, S8("--resource-include"))) { settings.resource_include = value; }
+            else if (string_equal(option, S8("--project-include"))) { settings.project_include = value; }
+            else if (string_equal(option, S8("--dependency-manifest"))) { settings.dependency_manifest = value; }
+            else if (string_equal(option, S8("--dependency-receipt"))) { settings.dependency_receipt = value; }
             else if (string_equal(option, S8("--shard-index"))) { valid &= d_number(value, &settings.shard_index); }
             else if (string_equal(option, S8("--shard-count"))) { valid &= d_number(value, &settings.shard_count) && settings.shard_count > 0; }
             else if (string_equal(option, S8("--timeout")))
@@ -969,6 +1481,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
     {
         string_print(S8("usage: native_retirement_census --compiler-revision <40-hex> [--ide path] [--baseline-ide path --baseline-revision <40-hex>] "
                         "[--out new-directory] [--fixture substring] [--target triple] [--cpu model] [--resource-include directory] "
+                        "[--project-include directory] [--dependency-manifest path --dependency-receipt path] "
                         "[--shard-index N --shard-count N] "
                         "[--timeout seconds] [--manifest-only] [--self-test]\n"));
         result = PROCESS_RESULT_FAILED;
@@ -984,6 +1497,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         settings.child.out = os_path_absolute(arena, settings.child.out, true);
         settings.snapshot = path_join(arena, settings.child.out, S8("inputs"));
         settings.resource_snapshot = path_join(arena, settings.child.out, S8("dependencies/resource-include"));
+        settings.dependency_manifest = os_path_absolute(arena, settings.dependency_manifest, true);
+        if (settings.project_include.length)
+        {
+            settings.project_snapshot = path_join(arena, settings.child.out, S8("dependencies/project-include"));
+        }
+        if (settings.dependency_receipt.length)
+        {
+            settings.dependency_receipt = os_path_absolute(arena, settings.dependency_receipt, true);
+        }
         settings.child.report = nrc_open(&settings, S8("processes.tsv"));
         if (settings.child.report)
         {
@@ -998,6 +1520,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         u64 input_count = 0;
         NrcInput* inputs = nrc_inventory(&settings, &input_count);
         u64 groups = nrc_manifest(&settings, inputs, input_count, false);
+        u64 subject_count = 0;
+        for (u64 index = 0; index < input_count; index += 1)
+        {
+            subject_count += string_equal(inputs[index].role, S8("subject"));
+        }
+        bool full_profile = !settings.fixture_filter.length && !settings.target_filter.length && settings.shard_count == 4 &&
+                            input_count == 548 && subject_count == 402 && groups == 19296 &&
+                            groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77184;
+        bool dependency_required = !settings.manifest_only && (full_profile || settings.project_include.length != 0);
+        if (dependency_required && (!settings.project_include.length || !settings.dependency_receipt.length))
+        {
+            settings.child.io_failed = true;
+        }
+        String8 profile = full_profile ? S8("full-census") : S8("self-test");
         u64 compiler_hash = 0, compiler_bytes = 0, baseline_hash = 0, baseline_bytes = 0;
         String8 compiler_sha256 = {0}, baseline_sha256 = {0};
         if (!settings.manifest_only && !settings.child.io_failed)
@@ -1005,9 +1541,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             settings.child.ide = os_path_absolute(arena, settings.child.ide, true);
             settings.baseline = os_path_absolute(arena, settings.baseline, true);
             settings.resource_include = os_path_absolute(arena, settings.resource_include, true);
-            settings.child.io_failed |= !nrc_file_identity(arena, settings.child.ide, &compiler_bytes, &compiler_hash, &compiler_sha256) ||
-                                       !nrc_file_identity(arena, settings.baseline, &baseline_bytes, &baseline_hash, &baseline_sha256) ||
-                                       !nrc_snapshot_resource(&settings);
+            if (settings.project_include.length) { settings.project_include = os_path_absolute(arena, settings.project_include, true); }
+            bool dependency_valid = nrc_file_identity(arena, settings.child.ide, &compiler_bytes, &compiler_hash, &compiler_sha256) &&
+                                    nrc_file_identity(arena, settings.baseline, &baseline_bytes, &baseline_hash, &baseline_sha256) &&
+                                    nrc_snapshot_resource(&settings);
+            dependency_valid &= nrc_dependency_binding(&settings, dependency_required);
+            settings.child.io_failed |= !dependency_valid;
             // The existing fanout helper preserves executable permissions and
             // verifies both bytes and fingerprint before admitting the copy.
             String8 candidate_copy = path_join(arena, settings.child.out, S8("candidate-ide.exe"));
@@ -1027,47 +1566,93 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             d_write(&settings.child, path_join(arena, settings.child.out, S8("support-contract.tsv")), BYTE_SLICE_TO_STRING(8, contract));
         }
         else { settings.child.io_failed = true; }
+        ByteSlice supported_gap_ledger = file_read(arena, settings.supported_gap_ledger_path, (FileReadOptions){0});
+        if (supported_gap_ledger.pointer)
+        {
+            settings.supported_gap_ledger_sha256 = nrc_sha256(arena, supported_gap_ledger.pointer, supported_gap_ledger.length);
+            d_write(&settings.child, path_join(arena, settings.child.out, S8("supported-gap-ledger.tsv")),
+                    BYTE_SLICE_TO_STRING(8, supported_gap_ledger));
+        }
+        else { settings.child.io_failed = true; }
+        ByteSlice applicability_ledger = file_read(arena, settings.applicability_ledger_path, (FileReadOptions){0});
+        if (applicability_ledger.pointer)
+        {
+            settings.applicability_ledger_sha256 = nrc_sha256(arena, applicability_ledger.pointer, applicability_ledger.length);
+            d_write(&settings.child, path_join(arena, settings.child.out, S8("applicability-ledger.tsv")),
+                    BYTE_SLICE_TO_STRING(8, applicability_ledger));
+            settings.child.io_failed |= !nrc_load_applicability(&settings, applicability_ledger, inputs, input_count);
+        }
+        else { settings.child.io_failed = true; }
         String8 dependency_state = settings.manifest_only ? S8("not-executed-manifest-only") : S8("none-for-object-census");
         String8 environment_state = settings.manifest_only ? S8("not-executed-manifest-only") : S8("explicit-replacement-in-environment.tsv");
+        String8 project_include_sha256 = settings.project_include.length ? settings.project_sha256 : S8("");
+        String8 dependency_receipt_name = dependency_required ? S8("dependency-receipt.json") : S8("");
+        String8 source_dependencies = settings.project_include.length
+                                          ? S8("tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include-plus-pinned-github-closure")
+                                          : S8("tracked-tests-plus-snapshotted-resource-include");
+        String8 sysroot = settings.project_include.length ? S8("target-correct-musl-linux-gnu-only") : S8("none");
+        String8 system_include = settings.project_include.length ? S8("target-correct-musl-project-include") : S8("none");
+        String8 flags = settings.project_include.length
+                            ? S8("-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem RESOURCE_SNAPSHOT -isystem TARGET_MUSL_INCLUDE -isystem MUSL_INCLUDE")
+                            : S8("-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem RESOURCE_SNAPSHOT");
         String8 metadata = string_format(arena, S8("version=2\nkind=object-coverage\nidentity_hash=sha256\nrow_artifact_hash=buster_hash_64-noncryptographic\n"
             "support_contract=docs/native-retirement-support-v1.tsv\nsupport_contract_sha256={S8}\n"
+            "supported_gap_ledger=docs/native-retirement-supported-gaps-v1.tsv\nsupported_gap_ledger_sha256={S8}\n"
+            "applicability_ledger=docs/native-retirement-applicability-v1.tsv\napplicability_ledger_sha256={S8}\n"
+            "applicability_ledger_entries={u64}\nnon_object_control_obligation=registered-non-object-control\n"
             "compiler_revision_claim={S8}\nbaseline_revision_claim={S8}\ncompiler_hash={u64}\ncompiler_bytes={u64}\n"
             "compiler_sha256={S8}\nbaseline_hash={u64}\nbaseline_bytes={u64}\nbaseline_sha256={S8}\n"
-            "cpu={S8}\nresource_include_sha256={S8}\nsysroot=none\nsystem_include=none\ninputs={u64}\nrows={u64}\n"
+            "cpu={S8}\nresource_include_sha256={S8}\nproject_include_sha256={S8}\n"
+            "dependency_manifest=docs/native-retirement-dependencies-v1.json\ndependency_manifest_sha256={S8}\n"
+            "dependency_receipt={S8}\ndependency_receipt_sha256={S8}\n"
+            "dependency_project_include_sha256={S8}\ndependency_ledger_sha256={S8}\n"
+            "archived_input_identity_sha256={S8}\narchived_fixture_map_sha256={S8}\narchived_row_identity_sha256={S8}\n"
+            "sysroot={S8}\nsystem_include={S8}\ninputs={u64}\nsubjects={u64}\nrows={u64}\n"
+            "profile={S8}\nsupported_gap_count={u64}\nsupported_gap_sha256={S8}\n"
             "fixture_filter={S8}\ntarget_filter={S8}\nshard_index={u32}\nshard_count={u32}\nmanifest_only={u32}\ntimeout_seconds={u32}\n"
             "function_evidence=all-observed-fallbacks-plus-first-fatal-diagnostic\n"
-            "fixture_flags=exact-path-recipes-in-inputs.tsv\nsource_dependencies=tracked-tests-plus-snapshotted-resource-include\n"
+            "fixture_flags=exact-path-recipes-in-inputs.tsv\nsource_dependencies={S8}\n"
             "environment={S8}\nunfrozen_dependencies={S8}\n"
-            "flags=-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem SNAPSHOT\n"),
-            settings.contract_sha256, settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
-            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, input_count,
-            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), settings.fixture_filter, settings.target_filter,
+            "flags={S8}\n"),
+            settings.contract_sha256, settings.supported_gap_ledger_sha256, settings.applicability_ledger_sha256,
+            settings.applicability_count,
+            settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
+            baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, project_include_sha256,
+            settings.dependency_manifest_sha256, dependency_receipt_name, settings.dependency_receipt_sha256,
+            settings.dependency_project_sha256, settings.dependency_ledger_sha256, nrc_archived_input_sha256,
+            nrc_archived_fixture_map_sha256, nrc_archived_row_sha256, sysroot, system_include, input_count, subject_count,
+            groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, 192,
+            S8("a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"),
+            settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds,
-            environment_state, dependency_state);
+            source_dependencies, environment_state, dependency_state, flags);
         d_write(&settings.child, path_join(arena, settings.child.out, S8("manifest.txt")), metadata);
         settings.rows = nrc_open(&settings, S8("results.tsv"));
         settings.counters = nrc_open(&settings, S8("fallback-counters.tsv"));
         settings.functions = nrc_open(&settings, S8("fallback-functions.tsv"));
-        if (settings.rows && settings.counters && settings.functions)
+        settings.skips = nrc_open(&settings, S8("applicability-skips.tsv"));
+        if (settings.rows && settings.counters && settings.functions && settings.skips)
         {
             fprintf(settings.rows, "row\tgroup\tdisposition\tkind\tstatus\tcounters_valid\ttarget_identity_valid\tfunction_records_valid\t"
                                    "functions\tfallbacks\tbaseline_functions\tcpu\tcpu_features\tobject_bytes\tobject_hash\tobject_sha256\n");
             fprintf(settings.counters, "row\ttelemetry\n");
             fprintf(settings.functions, "row\trecord_valid\ttelemetry\n");
+            fprintf(settings.skips, "row\tgroup\tfixture\ttarget\tallocator\tapplicability\treason\n");
             if (!settings.manifest_only && !settings.child.io_failed) { nrc_manifest(&settings, inputs, input_count, true); }
         }
         nrc_close(&settings, settings.rows);
         nrc_close(&settings, settings.counters);
         nrc_close(&settings, settings.functions);
+        nrc_close(&settings, settings.skips);
         nrc_close(&settings, settings.child.report);
         bool complete = !settings.manifest_only && settings.selected_groups == groups && !settings.child.io_failed;
         String8 summary = string_format(arena, S8("version=1\ngroups={u64}\nexecuted_groups={u64}\ncomplete_cross_product={u32}\n"
-            "baseline_unresolved={u64}\nsupported_native_gaps={u64}\nstrict_successes={u64}\nstrict_empty_units={u64}\nprotocol_failures={u64}\nio_failed={u32}\nretirement_accepted=0\n"),
-            groups, settings.selected_groups, (u32)complete, settings.baseline_failures, settings.gaps, settings.strict_successes, settings.strict_empty,
+            "nonexecuted_rows={u64}\nbaseline_unresolved={u64}\nsupported_native_gaps={u64}\nstrict_successes={u64}\nstrict_empty_units={u64}\nprotocol_failures={u64}\nio_failed={u32}\nretirement_accepted=0\n"),
+            groups, settings.selected_groups, (u32)complete, settings.skipped_rows, settings.baseline_failures, settings.gaps, settings.strict_successes, settings.strict_empty,
             settings.failures, (u32)settings.child.io_failed);
         d_write(&settings.child, path_join(arena, settings.child.out, S8("summary.txt")), summary);
-        string_print(S8("NATIVE_RETIREMENT_CENSUS groups={u64}/{u64} baseline_unresolved={u64} gaps={u64} strict_successes={u64} failures={u64} io_failed={u32}\n"),
-            settings.selected_groups, groups, settings.baseline_failures, settings.gaps, settings.strict_successes, settings.failures, (u32)settings.child.io_failed);
+        string_print(S8("NATIVE_RETIREMENT_CENSUS groups={u64}/{u64} nonexecuted_rows={u64} baseline_unresolved={u64} gaps={u64} strict_successes={u64} failures={u64} io_failed={u32}\n"),
+            settings.selected_groups, groups, settings.skipped_rows, settings.baseline_failures, settings.gaps, settings.strict_successes, settings.failures, (u32)settings.child.io_failed);
         result = settings.child.io_failed || settings.baseline_failures || settings.gaps || settings.failures ||
                  (!settings.manifest_only && !settings.selected_groups) ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
     }

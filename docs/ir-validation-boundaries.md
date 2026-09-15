@@ -29,6 +29,9 @@ checks. An optimized, non-test, non-sanitized production build retains the
 existing pass-contract fast path; it trusts the transformation's implementation,
 not an assertion that the producer validated its output. Disabled, unchanged
 and already prepared certified modules do not gain a redundant output scan.
+The FAST input guard consumes the same fact: when the promotion-output scan
+or the uncertified input scan has passed over the module and nothing has
+mutated it since, FAST starts from that scan rather than repeating it.
 The existing `-fverify-codegen` option still forces independent input validation
 and native MIR/placement checks, including in optimized production builds.
 
