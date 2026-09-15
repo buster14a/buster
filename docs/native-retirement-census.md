@@ -161,13 +161,13 @@ until their owning gate supplies that setup.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1`, materializer
+`f45cd452eb02b56b06f91db70064c735ab55810ad8fdc690e2a6be7d3c92a562`, materializer
 receipt SHA-256
-`944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435`, project
+`9102b77674285f04e4d4fd781d80f273051674a9f911dab2c868adcf5922523c`, project
 closure SHA-256
-`d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be`, and
+`f370491368b6f7b013619f412640126454681043f27a2b9fb9f92f2465555a3d`, and
 materializer ledger SHA-256
-`b6e9e286de94f31af3c9da879e4809df65c3aff318d5fea51b3cb79da6e958a7`.
+`60953f97c4968a4888863ebd0ab72dc17be550cb2d7f70b94c71455d8d6d9344`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
