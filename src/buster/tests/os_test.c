@@ -1,6 +1,7 @@
 #include <buster/tests/os_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 
 // Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
@@ -574,7 +575,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #if BUSTER_LINUX || BUSTER_MACOS
     // A private group with only its exited leader is a normal successful wait.
     // Darwin reports EPERM when group signalling filters out that zombie; the
-    // waiter must verify disappearance after reaping without losing helpers.
+    // waiter must verify that exact state before reaping without losing helpers.
     {
         String8 spawn_arguments[] = {S8("/bin/sh"), S8("-c"), S8("exit 0")};
         ProcessSpawnOptions options = {.use_process_environment = 1, .new_process_group = 1};
@@ -586,7 +587,120 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             ProcessWaitResult wait_result = os_process_wait_sync(arguments->arena, spawn);
             BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
             BUSTER_TEST(arguments, wait_result.platform_status == 0);
+            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
+            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
         }
+    }
+
+    // Every process-group operation uses the same ownership gate. Releasing a
+    // leader must deterministically refuse both signal and query operations,
+    // without testing a reusable PID/PGID in the kernel.
+    BUSTER_TEST(arguments, os_process_group_reservation_release_self_test());
+    // Exhausting all owner-lane recovery campaigns publishes exactly one
+    // cleanup-failure event and ends in an explicit retained reservation.
+    BUSTER_TEST(arguments, os_process_group_recovery_self_test());
+    // Losing the exact child publishes the admission stop exactly once and
+    // prevents every later signal, group query, and numeric-ID operation.
+    BUSTER_TEST(arguments, os_process_group_ownership_loss_self_test());
+    // An inherited writer outside the owned group cannot extend a natural
+    // successful exit or turn it into a false deadline failure. Bytes already
+    // buffered by the owned group are retained before the foreign FD closes.
+    BUSTER_TEST(arguments, os_process_group_escaped_capture_self_test(arguments->arena));
+#if BUSTER_LINUX
+    // /proc stat parsing must use the final command-name parenthesis and fail
+    // closed on mismatched identities or malformed group fields.
+    BUSTER_TEST(arguments, os_linux_process_stat_parse_self_test());
+    // An unrelated PID disappearing between readdir and stat is ordinary
+    // host churn and cannot invalidate a stable target-group proof.
+    BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
+#endif
+
+    // A background helper proves it started before the leader exits, then
+    // writes a second sentinel only if it survives process-group cleanup.
+    // This exercises Darwin's kernel snapshot and Linux's stable /proc census.
+    // Inspect files rather than probing a released PID/PGID.
+    {
+        String8 ready_sentinel = buster_test_temporary_path(arguments->arena, S8("buster-process-group-ready"), S8(".txt"));
+        String8 release_sentinel = buster_test_temporary_path(arguments->arena, S8("buster-process-group-release"), S8(".txt"));
+        String8 escaped_sentinel = buster_test_temporary_path(arguments->arena, S8("buster-process-group-escaped"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(ready_sentinel));
+        BUSTER_TEST(arguments, os_file_delete(release_sentinel));
+        BUSTER_TEST(arguments, os_file_delete(escaped_sentinel));
+        String8 spawn_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("(printf ready > \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.001; done; printf escaped > \"$3\") & "
+               "i=0; while [ ! -f \"$1\" ] && [ \"$i\" -lt 1000 ]; do sleep 0.001; i=$((i + 1)); done; [ -f \"$1\" ]"),
+            S8("process-group-helper"),
+            ready_sentinel,
+            release_sentinel,
+            escaped_sentinel,
+        };
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+            (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 3000000);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, wait_result.platform_status == 0);
+            BUSTER_TEST(arguments, !wait_result.timed_out);
+            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
+            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+        }
+
+        OsFileOpenResult ready_open = os_file_open_checked(ready_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        bool helper_ready = ready_open.file != 0;
+        if (ready_open.file) { BUSTER_TEST(arguments, os_file_close(ready_open.file)); }
+        BUSTER_TEST(arguments, helper_ready);
+
+        OsFileDescriptor* release_file = os_file_open(release_sentinel, (OpenFlags){.create = 1, .write = 1, .truncate = 1},
+            (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, release_file != 0);
+        if (release_file) { BUSTER_TEST(arguments, os_file_close(release_file)); }
+        poll(0, 0, 300);
+        OsFileOpenResult escaped_open = os_file_open_checked(escaped_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        bool helper_escaped = escaped_open.file != 0;
+        if (escaped_open.file) { BUSTER_TEST(arguments, os_file_close(escaped_open.file)); }
+        BUSTER_TEST(arguments, !helper_escaped);
+        if (helper_ready) { BUSTER_TEST(arguments, os_file_delete(ready_sentinel)); }
+        if (release_file) { BUSTER_TEST(arguments, os_file_delete(release_sentinel)); }
+        if (helper_escaped) { BUSTER_TEST(arguments, os_file_delete(escaped_sentinel)); }
+    }
+
+    // A hot inherited writer keeps poll continuously readable. Deadline
+    // enforcement is independent of readability: the owner kills the group,
+    // proves every member quiescent, and drains the captured pipe to EOF.
+    {
+        u64 position = arguments->arena->position;
+        String8 spawn_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("while :; do printf 0123456789abcdef0123456789abcdef; done"),
+        };
+        ProcessSpawnOptions options = {
+            .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+            .use_process_environment = 1,
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+            (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 100000);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
+            BUSTER_TEST(arguments, wait_result.timed_out);
+            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length > 0);
+            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
+            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+        }
+        arena_set_position(arguments->arena, position);
     }
 
     // realpath may write a resolved prefix even on failure. Discarding its
@@ -729,11 +843,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             u64 timeout_microseconds;
             bool expected_timeout;
             u64 expected_output_length;
+            bool expire_after_ready;
         } deadline_cases[] = {
-            {S8("sleep 30"), false, 100000, true, 0},
-            {S8("printf ok; sleep 30"), true, 100000, true, 2},
-            {S8("printf ok"), true, 30000000, false, 2},
-            {S8("printf ok"), false, 0, false, 0},
+            {S8("sleep 30"), false, 100000, true, 0, false},
+            {S8("printf ok; sleep 30"), true, 100000, true, 2, false},
+            {S8("printf ok"), true, 30000000, false, 2, false},
+            {S8("printf ok"), false, 0, false, 0, false},
+            {S8("printf ok; sleep 30"), true, 30000000, true, 2, true},
         };
 
         for (EACH_ARRAY_INDEX(i, deadline_cases))
@@ -756,6 +872,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
             {
+                if (deadline_cases[i].expire_after_ready) { os_process_wait_test_expire_deadline_after_ready_once(); }
                 ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, deadline_cases[i].timeout_microseconds);
                 BUSTER_TEST(arguments, (wait_result.timed_out != 0) == deadline_cases[i].expected_timeout);
                 BUSTER_TEST(arguments, wait_result.result == (deadline_cases[i].expected_timeout ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
