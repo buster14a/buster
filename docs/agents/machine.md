@@ -389,8 +389,9 @@
   arguments, mixed floating parameters and caller-value preservation. The
   `win64_aligned.c` regression exercises 32/64/128-byte argument alignments
   across host/MIR boundaries, including raw variadic argument pointers and
-  every sixteen-byte dynamic-stack residue modulo 128. Fixed calls also execute
-  through the direct backend; wide variadic reads use all three MIR allocators.
+  every sixteen-byte dynamic-stack residue modulo 128. Fixed calls are also
+  compared by the external archived direct oracle used by retirement evidence;
+  wide variadic reads use all three MIR allocators.
 - Windows/UEFI x86-64 128-bit integer arguments use the same one-pointer
   placement and sixteen-aligned private copies as indirect aggregates. A
   128-bit integer result travels whole in XMM0, without a hidden result
@@ -401,8 +402,9 @@
   calls cross the host/MIR boundary in both directions without a PE loader;
   they cover register and stack arguments, indirect calls, copied lists,
   high limbs, private parameter writes, and forty-byte variadic aggregates.
-  The direct backend still lacks wide variadic reads, so this fixture's
-  complete module is a MIR gate rather than a NONE differential gate.
+  The archived direct oracle lacks wide variadic reads, so this fixture's
+  complete module is a MIR semantic gate rather than an archived-oracle
+  differential gate.
 - Windows/UEFI x86-64 sixty-four-byte vector signatures use the existing ZMM
   vocabulary on AVX-512 targets. Arguments occupy one pointer slot with an
   aligned private copy; callers stage register values through a frame slot,

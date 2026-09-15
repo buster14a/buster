@@ -82,12 +82,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
             u8 original_code[4096] = {0};
             u64 original_code_length = 0;
             u32 original_location_count = 0;
-            // The historical direct emitter walked mutable instruction chains
-            // in arbitrary block order. MIR selection consumes the published
-            // dense row order, so the native cutover keeps the canonical entry
-            // order here; eBPF still exercises all three CFG permutations.
-            u32 permutation_count = target.cpu_arch == CPU_ARCH_BPFEL ? 3 : 1;
-            for (u32 permutation = 0; permutation < permutation_count; permutation += 1)
+            // Every backend must honor the published entry identity rather
+            // than assuming block zero. Native MIR lays the entry first and
+            // remaps canonical CFG edges without changing the source IR.
+            for (u32 permutation = 0; permutation < 3; permutation += 1)
             {
                 TemporalArena temporary = arena_begin_temporal(arguments->arena);
                 CPreprocessResult tokens = c_preprocess(arguments->arena, sources[fixture],
@@ -108,8 +106,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                         u32 rotation = permutation == 2 ? function->block_count - 1 : permutation;
                         codegen_test_rotate_blocks(arguments->arena, function, rotation);
                         BUSTER_TEST(arguments, function->entry.value == rotation);
-                        // MIR selection consumes the published CFG. Re-prepare
-                        // after the BPF-only permutation above invalidates it.
+                        // Rotation invalidates the published CFG consumed by
+                        // MIR selection and eBPF emission; rebuild it from the
+                        // renumbered canonical graph before either backend.
                         IrValidationResult rotated_prepared = ir_prepare_canonical_module(program, module, false);
                         BUSTER_TEST(arguments, rotated_prepared.error == IR_VALIDATION_NONE);
                         if (target.cpu_arch == CPU_ARCH_BPFEL)
@@ -160,6 +159,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                                         }
                                         else
                                         {
+                                            if (code.debug_location_count != original_location_count)
+                                            {
+                                                arguments->show(arguments,
+                                                    S8("native entry debug count fixture {u32}, target {u32}, entry {u32}: actual={u32}, expected={u32}\n"),
+                                                    fixture, target_index, rotation, code.debug_location_count, original_location_count);
+                                            }
                                             BUSTER_TEST(arguments, code.debug_location_count == original_location_count);
                                             // Moving ID zero to the last ID preserves every
                                             // other block's relative order. Entry-first layout
