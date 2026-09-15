@@ -506,7 +506,7 @@ tests/fuzz/return_without_value.bbb	dormant-custom-language	preserved-not-active
 tests/fuzz/valid_buster.bbb	dormant-custom-language	preserved-not-active	40	7888a0c41d7efc760e2e2955e0641f99e6af1545cbfda07231dd0b4e4df57002
 tests/fuzz/valid_c.c	subject	supported-object-zero-fallback	95	a6bcbd42de62c26dee776b786cd36432ade5ca065884e2ab4acbf1c0f2901f6f
 tests/github_runner_bridge_test.py	support-file	dependency-only	23321	564fbf34f3362a4b47e48f3379e5af2a6fcee2d10984fc1c7ecde443bf692387
-tests/gpu/metal_reader.c	subject	supported-object-zero-fallback	2348	a9013aae35ebfed695f4a4cca4dcb3ee6a78e4cee86091efafd5ea6cfe87ef0b
+tests/gpu/metal_reader.c	subject	registered-non-object-control	2348	a9013aae35ebfed695f4a4cca4dcb3ee6a78e4cee86091efafd5ea6cfe87ef0b
 tests/gpu/ptxas-requirements.txt	support-file	dependency-only	266	1c16528c3597e768e4d9b57205ae9e1d845f81c6247695c56f12bd8a0b571f9d
 tests/gpu/smoke.cl	support-file	dependency-only	185	4af41171a25c6b0a93e405910ac2f2f9035414fb74f91c262c7350d67d8f75ac
 tests/gpu/smoke.hlsl	support-file	dependency-only	236	510fa503ae77a5fb29dfbad113e4e24c6c556377bf80bf36ccae66fa3add0dd8
