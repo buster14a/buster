@@ -465,10 +465,8 @@ class BindingTests(unittest.TestCase):
             "manifest_count": 1,
             "manifests": [{
                 "identity": "result-input-manifest-000",
-                "path": input_manifest["path"], "bytes": input_manifest["bytes"],
-                "sha256": input_manifest["sha256"], "start_record": 0,
+                "path": input_manifest["path"], "start_record": 0,
                 "records": required_records,
-                "input_bytes": input_shard["bytes"] + input_manifest["bytes"],
             }],
             "predeclared": True,
         })
@@ -508,6 +506,13 @@ class BindingTests(unittest.TestCase):
             "source_rows_sha256": rows_artifact["sha256"],
             "result_input_plan_sha256": result_input_plan["sha256"],
             "family_sha256": family["sha256"],
+            "result_manifests": [{
+                "identity": "result-input-manifest-000",
+                "path": input_manifest["path"], "bytes": input_manifest["bytes"],
+                "sha256": input_manifest["sha256"], "start_record": 0,
+                "records": required_records,
+                "input_bytes": input_shard["bytes"] + input_manifest["bytes"],
+            }],
             "raw_measurements_sha256": raw_measurements_sha256,
             "member_invocations_sha256": invocation_sha256,
             "member_count": len(family["members"]),
@@ -1203,9 +1208,8 @@ class BindingTests(unittest.TestCase):
             "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
             "manifest_count": 1,
             "manifests": [{"identity": "result-input-manifest-000",
-                           **manifest_descriptor, "start_record": 0,
-                           "records": 120,
-                           "input_bytes": len(shard_data) + len(manifest_data)}],
+                           "path": manifest_descriptor["path"], "start_record": 0,
+                           "records": 120}],
             "predeclared": True,
         }
         plan_descriptor = record["workflow"]["records"]["result_input_plan"]
@@ -1273,6 +1277,11 @@ class BindingTests(unittest.TestCase):
                 binding.SUPPORT_FILE_ROLES.index("rows")]["sha256"],
             "result_input_plan_sha256": plan_descriptor["sha256"],
             "family_sha256": family["sha256"],
+            "result_manifests": [{
+                "identity": "result-input-manifest-000", **manifest_descriptor,
+                "start_record": 0, "records": 120,
+                "input_bytes": len(shard_data) + len(manifest_data),
+            }],
             "raw_measurements_sha256": raw_measurements_digest,
             "member_invocations_sha256": binding._family_invocation_digest(family),
             "member_count": len(family["members"]),
@@ -1561,6 +1570,7 @@ class BindingTests(unittest.TestCase):
         required = 77184 * 2 * 256
         cap = binding.RESULT_INPUT_MAX_RECORDS
         self.assertEqual(required, 39518208)
+        self.assertEqual(required, binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
         self.assertEqual((required + cap - 1) // cap, 3)
         self.assertGreater(required, cap)
         # The validator's join is ordinal arithmetic; this assertion keeps
@@ -1569,21 +1579,79 @@ class BindingTests(unittest.TestCase):
         row_ordinal, round_number, pair = 77183, 1, 255
         self.assertEqual(((row_ordinal * 2 + round_number) * 256 + pair), required - 1)
 
-    def test_maximum_result_plan_requires_exact_three_cap_partitions(self):
-        required = 77184 * 2 * 256
+    def test_presample_partition_rejects_postmeasurement_descriptors(self):
+        with tempfile.TemporaryDirectory(prefix="retirement-plan-cycle-") as directory:
+            root = Path(directory)
+            rules = self._rules()
+            plan = {
+                "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
+                "source_manifest_sha256": "a" * 64, "source_rows_sha256": "b" * 64,
+                "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
+                "sample_population": "canonical-performance-rows-with-required-metrics",
+                "eligible_population": "canonical-performance-rows",
+                "object_row_count": 1, "sample_row_count": 1,
+                "rounds": 2, "pairs_per_round": 60, "records_per_row": 120,
+                "required_records": 120,
+                "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
+                "manifest_count": 1,
+                "manifests": [{"identity": "manifest-0", "path": "results/manifest-0.json",
+                               "start_record": 0, "records": 120}],
+                "predeclared": True,
+            }
+
+            def check(candidate):
+                data = (json.dumps(candidate, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                target = root / "plan.json"
+                target.write_bytes(data)
+                descriptor = {"path": target.name, "bytes": len(data),
+                              "sha256": hashlib.sha256(data).hexdigest()}
+                return binding._result_input_plan(
+                    root, descriptor,
+                    {"manifest_sha256": "a" * 64, "rows_sha256": "b" * 64,
+                     "object_row_count": 1}, {}, rules)
+
+            accepted = check(plan)
+            self.assertEqual(accepted["manifests"], plan["manifests"])
+            for field, value in (("bytes", 1), ("sha256", "c" * 64), ("input_bytes", 1)):
+                candidate = copy.deepcopy(plan)
+                candidate["manifests"][0][field] = value
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    check(candidate)
+
+    def test_sealed_manifest_must_match_frozen_partition(self):
+        plan = {"manifests": [{"identity": "manifest-0",
+                                "path": "results/manifest-0.json",
+                                "start_record": 0, "records": 120}]}
+        descriptor = {"identity": "manifest-0", "path": "results/manifest-0.json",
+                      "bytes": 1, "sha256": "a" * 64,
+                      "start_record": 0, "records": 120, "input_bytes": 1}
+        self.assertEqual(binding._result_manifest_descriptors([descriptor], plan),
+                         [descriptor])
+        for field, value in (("identity", "manifest-1"), ("path", "results/other.json"),
+                             ("start_record", 1), ("records", 119)):
+            candidate = copy.deepcopy(descriptor)
+            candidate[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                binding._result_manifest_descriptors([candidate], plan)
+
+    def test_full_population_plan_fits_ceiling_without_dropping_stage_rows(self):
+        sample_rows = 77184 + 2
+        required = sample_rows * 2 * 254
         cap = binding.RESULT_INPUT_MAX_RECORDS
         tail = required - 2 * cap
+        self.assertLessEqual(required, binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
+        self.assertGreater(sample_rows * 2 * 256,
+                           binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
         with tempfile.TemporaryDirectory(prefix="retirement-cap-plan-") as directory:
             root = Path(directory)
             rules = self._rules()
-            rules["sampling"]["pairs_per_round"] = 256
+            rules["sampling"]["pairs_per_round"] = 254
             support_output = {"manifest_sha256": "a" * 64,
                               "rows_sha256": "b" * 64,
                               "object_row_count": 77184}
             manifests = [{
                 "identity": f"manifest-{index}", "path": f"results/manifest-{index}.json",
-                "bytes": 1, "sha256": str(index) * 64, "start_record": start,
-                "records": records, "input_bytes": 1,
+                "start_record": start, "records": records,
             } for index, (start, records) in enumerate(
                 ((0, cap), (cap, cap), (2 * cap, tail)))]
 
@@ -1603,8 +1671,8 @@ class BindingTests(unittest.TestCase):
                 "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
                 "sample_population": "canonical-performance-rows-with-required-metrics",
                 "eligible_population": "canonical-performance-rows",
-                "object_row_count": 77184, "sample_row_count": 77184,
-                "rounds": 2, "pairs_per_round": 256, "records_per_row": 512,
+                "object_row_count": 77184, "sample_row_count": sample_rows,
+                "rounds": 2, "pairs_per_round": 254, "records_per_row": 508,
                 "required_records": required, "max_records_per_manifest": cap,
                 "manifest_count": 3, "manifests": manifests, "predeclared": True,
             }
@@ -1625,9 +1693,10 @@ class BindingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check(candidate)
             candidate = copy.deepcopy(plan)
-            candidate["manifests"][0]["input_bytes"] = binding.RESULT_INPUT_MAX_TOTAL_BYTES
-            candidate["manifests"][1]["input_bytes"] = binding.RESULT_INPUT_MAX_TOTAL_BYTES
-            candidate["manifests"][2]["input_bytes"] = binding.RESULT_INPUT_MAX_TOTAL_BYTES + 1
+            candidate["pairs_per_round"] = 256
+            candidate["records_per_row"] = 512
+            candidate["required_records"] = sample_rows * 2 * 256
+            rules["sampling"]["pairs_per_round"] = 256
             with self.assertRaises(ValueError):
                 check(candidate)
 
@@ -1761,6 +1830,32 @@ class BindingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 binding._compile_trusted_retirement_adapter(
                     directory, ROOT, commit, "f" * 40)
+
+    def test_trusted_adapter_allows_untracked_evidence_but_rejects_tracked_drift(self):
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                check=True, capture_output=True,
+                                text=True).stdout.strip()
+        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT,
+                              check=True, capture_output=True,
+                              text=True).stdout.strip()
+        source = ROOT / "tools" / "throughput" / "throughput.c"
+        original = source.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="retirement-untracked-evidence-",
+                                         dir=ROOT) as evidence:
+            Path(evidence, "result.json").write_text("{}\n", encoding="utf-8")
+            with tempfile.TemporaryDirectory(prefix="retirement-adapter-clean-") as directory:
+                executable, _binary, _source, _toolchain, _command = \
+                    binding._compile_trusted_retirement_adapter(
+                        directory, ROOT, commit, tree)
+                self.assertTrue(executable.is_file())
+            try:
+                source.write_bytes(original + b"\n#error tracked drift must fail\n")
+                with tempfile.TemporaryDirectory(prefix="retirement-adapter-dirty-") as directory:
+                    with self.assertRaises(ValueError):
+                        binding._compile_trusted_retirement_adapter(
+                            directory, ROOT, commit, tree)
+            finally:
+                source.write_bytes(original)
 
     def test_trusted_adapter_materializes_verified_commit_after_checkout_race(self):
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,

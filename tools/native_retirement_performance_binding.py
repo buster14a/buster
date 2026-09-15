@@ -151,6 +151,7 @@ STATISTICAL_DIMENSIONS = ["target", "cpu", "allocator", "frontend_lowering", "PI
                           "artifact_stage"]
 RESULT_INPUT_MAX_RECORDS = RESULT_INPUT_HARD_CAPS["max_records"]
 RESULT_INPUT_MAX_TOTAL_BYTES = RESULT_INPUT_HARD_CAPS.get("max_total_bytes", 16 * 1024 * 1024 * 1024)
+RESULT_INPUT_MAX_TOTAL_RECORDS = 39_518_208
 WORKFLOW_SCHEMA = "buster-native-retirement-performance-workflow-v1"
 WORKFLOW_VERSION = 1
 WORKFLOW_PHASES = ("pre_sample_plan", "post_aa_binding", "sealed_result",
@@ -1688,6 +1689,8 @@ def _result_input_plan(root, artifact, support_output, population, rules):
         _fail("result-input plan does not bind the frozen sample dimensions")
     if value["required_records"] != expected_records:
         _fail("result-input plan record count does not cover every object row")
+    if expected_records > RESULT_INPUT_MAX_TOTAL_RECORDS:
+        _fail("result-input plan exceeds the immutable total-record ceiling")
     if value["max_records_per_manifest"] != RESULT_INPUT_MAX_RECORDS:
         _fail("result-input plan does not use #615's immutable record cap")
     if value["predeclared"] is not True:
@@ -1702,19 +1705,14 @@ def _result_input_plan(root, artifact, support_output, population, rules):
     identities = set()
     paths = set()
     total = 0
-    total_bytes = 0
     for index, item in enumerate(manifests):
-        item = _keys(item, ("identity", "path", "bytes", "sha256", "start_record",
-                            "records", "input_bytes"),
+        item = _keys(item, ("identity", "path", "start_record", "records"),
                      f"result_input_plan.manifests[{index}]")
         _token(item["identity"], f"result_input_plan.manifests[{index}].identity")
-        _artifact({"path": item["path"], "bytes": item["bytes"],
-                   "sha256": item["sha256"]}, f"result_input_plan.manifests[{index}]")
+        _relative_path(item["path"], f"result_input_plan.manifests[{index}].path")
         _nonnegative_int(item["start_record"],
                          f"result_input_plan.manifests[{index}].start_record")
         _positive_int(item["records"], f"result_input_plan.manifests[{index}].records")
-        _positive_int(item["input_bytes"],
-                      f"result_input_plan.manifests[{index}].input_bytes")
         if item["records"] > RESULT_INPUT_MAX_RECORDS:
             _fail("result-input manifest exceeds #615's immutable record cap")
         expected_partition_records = (RESULT_INPUT_MAX_RECORDS
@@ -1729,12 +1727,37 @@ def _result_input_plan(root, artifact, support_output, population, rules):
         identities.add(item["identity"])
         paths.add(item["path"])
         total += item["records"]
-        total_bytes += item["input_bytes"]
     if total != expected_records:
         _fail("result-input manifests do not cover every required record")
-    if total_bytes > RESULT_INPUT_MAX_TOTAL_BYTES * expected_manifest_count:
-        _fail("result-input plan aggregate bytes exceed the bounded shard policy")
     return value
+
+
+def _result_manifest_descriptors(value, result_plan):
+    manifests = _list(value, "sealed_result_bundle.result_manifests")
+    planned = result_plan["manifests"]
+    if len(manifests) != len(planned):
+        _fail("sealed result manifest count differs from the pre-sample partition plan")
+    total_bytes = 0
+    validated = []
+    for index, (item, partition) in enumerate(zip(manifests, planned)):
+        item = _keys(item, ("identity", "path", "bytes", "sha256", "start_record",
+                            "records", "input_bytes"),
+                     f"sealed_result_bundle.result_manifests[{index}]")
+        _token(item["identity"],
+               f"sealed_result_bundle.result_manifests[{index}].identity")
+        _artifact({"path": item["path"], "bytes": item["bytes"],
+                   "sha256": item["sha256"]},
+                  f"sealed_result_bundle.result_manifests[{index}]")
+        _positive_int(item["input_bytes"],
+                      f"sealed_result_bundle.result_manifests[{index}].input_bytes")
+        for field in ("identity", "path", "start_record", "records"):
+            if item[field] != partition[field]:
+                _fail("sealed result manifest differs from the pre-sample partition plan")
+        total_bytes += item["input_bytes"]
+        validated.append(item)
+    if total_bytes > RESULT_INPUT_MAX_TOTAL_BYTES * len(validated):
+        _fail("sealed result aggregate input bytes exceed the bounded shard policy")
+    return validated
 
 
 def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
@@ -1999,8 +2022,12 @@ def _compile_trusted_retirement_adapter(temp_root, repository_root=None,
     if expected_commit is not None:
         _commit(expected_commit, "trusted #619 adapter source commit")
         _commit(expected_tree, "trusted #619 adapter source tree")
+        # Evidence is deliberately materialized beside the checkout before
+        # replay.  Untracked evidence cannot affect this build because every
+        # source byte is read from the verified commit with ``git cat-file``;
+        # tracked index/worktree drift still fails closed.
         status = _git_run(source_root, ["status", "--porcelain",
-                                        "--untracked-files=all"],
+                                        "--untracked-files=no"],
                           "trusted #619 adapter checkout status")
         if status:
             _fail("trusted #619 adapter checkout must be clean")
@@ -2174,7 +2201,7 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
     add("workflow.result_bundle", result_bundle_descriptor)
     add("workflow.adapter_input", result_bundle["adapter_input"])
     add("workflow.adapter_result", adapter_result)
-    for index, item in enumerate(result_plan["manifests"]):
+    for index, item in enumerate(result_bundle["result_manifests"]):
         add(f"result_input.manifest.{item['identity']}",
             {key: item[key] for key in ("path", "bytes", "sha256")})
         manifest = _read_json_evidence(
@@ -2440,8 +2467,44 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
         _fail("result-input plan population is not the complete eligible row set")
     if RESULT_INPUT is None:
         _fail("#615 result-input verifier is unavailable")
+
+    # The pre-sample plan fixes only the partition identities and coordinate
+    # ranges.  Manifest/shard bytes do not exist until measurements finish,
+    # so their authenticated descriptors belong to the sealed result.
+    sealed = _workflow_phase(root, phases["sealed_result"], SEALED_RESULT_SCHEMA,
+                             "sealed_result")
+    sealed = _keys(sealed, ("schema", "version", "status",
+                            "post_aa_binding_sha256", "result_input_plan_sha256",
+                            "family_sha256", "result_bundle", "seal"),
+                   "workflow.sealed_result")
+    if sealed["status"] != "sealed-for-independent-replay":
+        _fail("workflow.sealed_result must be sealed for independent replay")
+    if sealed["post_aa_binding_sha256"] != phases["post_aa_binding"]["sha256"]:
+        _fail("workflow.sealed_result does not bind post-AA planning")
+    if sealed["result_input_plan_sha256"] != records["result_input_plan"]["sha256"]:
+        _fail("workflow.sealed_result does not bind the result-input plan")
+    if sealed["family_sha256"] != family["sha256"]:
+        _fail("workflow.sealed_result does not bind the statistical family")
+    _artifact(sealed["result_bundle"], "workflow.sealed_result.result_bundle")
+    _check_evidence(root, sealed["result_bundle"], "workflow.sealed_result.result_bundle")
+    result_bundle = _read_json_evidence(root, sealed["result_bundle"],
+                                        "workflow.sealed_result.result_bundle")
+    result_bundle = _keys(result_bundle, (
+        "schema", "version", "source_rows_sha256", "result_input_plan_sha256",
+        "family_sha256", "result_manifests", "raw_measurements_sha256",
+        "member_invocations_sha256", "member_count", "scopes_per_member",
+        "adapter_input", "code_bytes_summary"), "sealed_result_bundle")
+    if result_bundle["schema"] != RESULT_BUNDLE_SCHEMA or result_bundle["version"] != 1:
+        _fail("sealed result bundle schema/version is not approved")
+    if result_bundle["source_rows_sha256"] != support_output["rows_sha256"] \
+            or result_bundle["result_input_plan_sha256"] != records["result_input_plan"]["sha256"] \
+            or result_bundle["family_sha256"] != family["sha256"]:
+        _fail("sealed result bundle does not bind the frozen inputs")
+    result_manifests = _result_manifest_descriptors(
+        result_bundle["result_manifests"], result_plan)
+
     measurement_digest = hashlib.sha256()
-    for index, item in enumerate(result_plan["manifests"]):
+    for index, item in enumerate(result_manifests):
         manifest_descriptor = {"path": item["path"], "bytes": item["bytes"],
                                "sha256": item["sha256"]}
         _check_evidence(root, manifest_descriptor,
@@ -2466,7 +2529,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                 or receipt["records"] != item["records"] \
                 or receipt["input_bytes"] != item["input_bytes"] \
                 or seen[0] != item["records"]:
-            _fail("result-input plan count/digest differs from #615's streamed receipt")
+            _fail("sealed result manifest count/digest differs from #615's streamed receipt")
     if sum(item["records"] for item in result_plan["manifests"]) != expected_records:
         _fail("result-input manifests omit required row/round/pair coordinates")
     sample_db.commit()
@@ -2517,35 +2580,6 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
     if post["aa_admission_sha256"] != aa_artifact["sha256"]:
         _fail("workflow.post_aa_binding does not bind the admitted AA receipt")
 
-    sealed = _workflow_phase(root, phases["sealed_result"], SEALED_RESULT_SCHEMA,
-                             "sealed_result")
-    sealed = _keys(sealed, ("schema", "version", "status",
-                            "post_aa_binding_sha256", "result_input_plan_sha256",
-                            "family_sha256", "result_bundle", "seal"),
-                   "workflow.sealed_result")
-    if sealed["status"] != "sealed-for-independent-replay":
-        _fail("workflow.sealed_result must be sealed for independent replay")
-    if sealed["post_aa_binding_sha256"] != phases["post_aa_binding"]["sha256"]:
-        _fail("workflow.sealed_result does not bind post-AA planning")
-    if sealed["result_input_plan_sha256"] != records["result_input_plan"]["sha256"]:
-        _fail("workflow.sealed_result does not bind the result-input plan")
-    if sealed["family_sha256"] != family["sha256"]:
-        _fail("workflow.sealed_result does not bind the statistical family")
-    _artifact(sealed["result_bundle"], "workflow.sealed_result.result_bundle")
-    _check_evidence(root, sealed["result_bundle"], "workflow.sealed_result.result_bundle")
-    result_bundle = _read_json_evidence(root, sealed["result_bundle"],
-                                        "workflow.sealed_result.result_bundle")
-    result_bundle = _keys(result_bundle, (
-        "schema", "version", "source_rows_sha256", "result_input_plan_sha256",
-        "family_sha256", "raw_measurements_sha256", "member_invocations_sha256",
-        "member_count", "scopes_per_member", "adapter_input", "code_bytes_summary"),
-        "sealed_result_bundle")
-    if result_bundle["schema"] != RESULT_BUNDLE_SCHEMA or result_bundle["version"] != 1:
-        _fail("sealed result bundle schema/version is not approved")
-    if result_bundle["source_rows_sha256"] != support_output["rows_sha256"] \
-            or result_bundle["result_input_plan_sha256"] != records["result_input_plan"]["sha256"] \
-            or result_bundle["family_sha256"] != family["sha256"]:
-        _fail("sealed result bundle does not bind the frozen inputs")
     if result_bundle["raw_measurements_sha256"] != measurement_digest.hexdigest():
         _fail("sealed result bundle does not bind streamed measurement bytes")
     if result_bundle["member_invocations_sha256"] != _family_invocation_digest(family):

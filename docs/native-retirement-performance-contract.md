@@ -302,12 +302,17 @@ Typed result records are joined to the canonical performance population by the
 frozen `row-round-pair` ordinal. Each manifest is a contiguous partition and
 each record is streamed through the existing #615 schema-2 verifier. The
 canonical partition count is the minimum needed at the immutable 16,777,216
-record cap, with full-cap partitions before the final partition; all manifests,
-shards and input bytes are predeclared. This bounds memory while proving global
+record cap, with full-cap partitions before the final partition. Before samples,
+the immutable plan declares only each partition's identity, path, start and record
+count. After measurement, the sealed result binds the manifest and shard byte
+digests and input-byte counts. This avoids a digest cycle while bounding memory and proving global
 disjointness and completeness, including stage rows and every metric that is
 eligible for a given row. Ineligible metrics are explicitly absent/NA, never
-filled with fabricated positive observations. The maximum experiment therefore
-retains all 39,518,208 records as bounded shards rather than lowering samples.
+filled with fabricated positive observations. The immutable experiment-wide
+ceiling remains 39,518,208 records in at most three partitions. Because the full
+population also includes the required link and self-host stage rows, 254 is the
+maximum fitting even pair count (rather than 256); a lower predeclared count in
+the approved 60--254 range remains valid and no supported row is dropped.
 
 The sealed closure enumerates the complete support/requested-work, subject,
 producer, measurement, host/service, provenance, admission/oracle,
