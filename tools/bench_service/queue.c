@@ -183,6 +183,40 @@ BUSTER_GLOBAL_LOCAL bool bq_same_key(BqRequest const* a, BqRequest const* b)
     return equal;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_result_path_valid(u8 const* bytes, u32 length)
+{
+    bool ok = length > 1 && length <= BQ_PATH_CAP && bytes[0] == '/';
+    u32 component = 1;
+    for (u32 index = 1; ok && index <= length; index += 1)
+    {
+        bool end = index == length || bytes[index] == '/';
+        if (end)
+        {
+            u32 component_length = index - component;
+            ok = component_length && !(component_length == 1 && bytes[component] == '.') &&
+                 !(component_length == 2 && bytes[component] == '.' && bytes[component + 1] == '.');
+            component = index + 1;
+        }
+        else
+        {
+            u8 value = bytes[index];
+            ok = value >= 0x21 && value <= 0x7e && value != '\\';
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_result_digest_valid(u8 const* bytes)
+{
+    bool ok = true;
+    for (u32 index = 0; ok && index < SHA256_HEX_CAPACITY - 1; index += 1)
+    {
+        u8 value = bytes[index];
+        ok = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+    }
+    return ok;
+}
+
 /* Event validation is shared by tentative append and replay. No in-memory
  * mutation becomes visible to a caller until the corresponding fsync succeeds. */
 BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
@@ -190,7 +224,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
     BqError error = BQ_OK;
     BqJob* job = NULL;
     if ((schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA) || (state->journal_schema && schema < state->journal_schema) ||
-        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE)
+        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RESULT_BIND)
     {
         error = BQ_INVALID_TRANSITION;
     }
@@ -235,8 +269,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
     }
     else
     {
-        u32 expected_size = kind == BQ_CANCEL ? 8 : kind == BQ_ADVANCE ? 24 : 16;
-        if (size != expected_size)
+        u32 expected_size = kind == BQ_CANCEL ? 8 : kind == BQ_ADVANCE ? 24 :
+                            kind == BQ_RESULT_BIND ? 8 + 8 + 4 + BQ_PATH_CAP + 64 * 3 : 16;
+        bool size_valid = kind == BQ_RESULT_BIND ? size >= 8 + 8 + 4 + 64 * 3 && size <= expected_size : size == expected_size;
+        if (!size_valid)
         {
             error = BQ_BAD_REQUEST;
         }
@@ -298,6 +334,33 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 job->outcome = job->cancel_requested ? BQ_CANCELLED : job->outcome != BQ_NO_OUTCOME ? job->outcome : BQ_INTERRUPTED;
                 job->phase = BQ_FINISHED;
                 state->active_id = 0;
+            }
+            else if (kind == BQ_RESULT_BIND)
+            {
+                u32 path_length = bq_u32(body + 16);
+                u32 digest_offset = 20 + path_length;
+                bool valid = !job->result_bound && job->phase >= BQ_FINALIZING && job->phase <= BQ_CLEANING &&
+                             path_length <= BQ_PATH_CAP && digest_offset + 64 * 3 == size &&
+                             bq_result_path_valid(body + 20, path_length) &&
+                             bq_result_digest_valid(body + digest_offset) &&
+                             bq_result_digest_valid(body + digest_offset + 64) &&
+                             bq_result_digest_valid(body + digest_offset + 128);
+                if (!valid)
+                {
+                    error = BQ_INVALID_TRANSITION;
+                }
+                else
+                {
+                    memcpy(job->result_root, body + 20, path_length);
+                    job->result_root[path_length] = 0;
+                    memcpy(job->result_manifest_digest, body + digest_offset, 64);
+                    job->result_manifest_digest[64] = 0;
+                    memcpy(job->result_bundle_digest, body + digest_offset + 64, 64);
+                    job->result_bundle_digest[64] = 0;
+                    memcpy(job->result_full_digest, body + digest_offset + 128, 64);
+                    job->result_full_digest[64] = 0;
+                    job->result_bound = true;
+                }
             }
             else
             {
@@ -493,7 +556,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 schema = bq_u32(frame + 8);
             if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA ||
                 (queue->state.journal_schema && schema < queue->state.journal_schema) || bq_u32(frame + 20) ||
-                length > BQ_REQUEST_CAP || kind < BQ_SUBMIT || kind > BQ_RECONCILE ||
+                length > BQ_JOURNAL_BODY_CAP || kind < BQ_SUBMIT || kind > BQ_RESULT_BIND ||
+                (kind != BQ_RESULT_BIND && length > BQ_REQUEST_CAP) ||
                 sequence != queue->state.sequence + 1 || memcmp(frame + 32, digest, 64))
             {
                 error = BQ_CORRUPT;
@@ -571,8 +635,13 @@ BqError bq_open(BqQueue* queue, char const* existing_private_directory)
     *queue = (BqQueue){.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqError error = BQ_UNSUPPORTED;
 #ifndef _WIN32
-    error = BQ_IO;
-    queue->directory_fd = open(existing_private_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool path_valid = existing_private_directory && strlen(existing_private_directory) < sizeof(queue->directory_path);
+    error = path_valid ? BQ_IO : BQ_BAD_REQUEST;
+    if (path_valid)
+    {
+        memcpy(queue->directory_path, existing_private_directory, strlen(existing_private_directory) + 1);
+        queue->directory_fd = open(existing_private_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
     struct stat info;
     if (queue->directory_fd >= 0 && fstat(queue->directory_fd, &info) == 0 && S_ISDIR(info.st_mode) &&
         info.st_uid == geteuid() && (info.st_mode & 077) == 0)
@@ -710,6 +779,33 @@ BqError bq_cancel(BqQueue* queue, u64 id)
         u8 body[8];
         bq_put64(body, id);
         error = bq_append(queue, BQ_CANCEL, body, sizeof(body));
+    }
+    return error;
+}
+
+BqError bq_result_bind(BqQueue* queue, BqJob const* job, String8 result_root,
+                       char const manifest_digest[SHA256_HEX_CAPACITY],
+                       char const bundle_digest[SHA256_HEX_CAPACITY],
+                       char const full_digest[SHA256_HEX_CAPACITY])
+{
+    u8 body[BQ_JOURNAL_BODY_CAP] = {0};
+    bool valid = queue && job && result_root.length <= BQ_PATH_CAP && result_root.length > 1 &&
+                 bq_result_path_valid((u8 const*)result_root.pointer, (u32)result_root.length) &&
+                 manifest_digest && bundle_digest && full_digest &&
+                 bq_result_digest_valid((u8 const*)manifest_digest) &&
+                 bq_result_digest_valid((u8 const*)bundle_digest) && bq_result_digest_valid((u8 const*)full_digest);
+    u32 size = valid ? 20 + (u32)result_root.length + 64 * 3 : 0;
+    BqError error = valid ? BQ_OK : BQ_BAD_REQUEST;
+    if (error == BQ_OK)
+    {
+        bq_put64(body, job->id);
+        bq_put64(body + 8, job->token);
+        bq_put32(body + 16, (u32)result_root.length);
+        memcpy(body + 20, result_root.pointer, (size_t)result_root.length);
+        memcpy(body + 20 + result_root.length, manifest_digest, 64);
+        memcpy(body + 84 + result_root.length, bundle_digest, 64);
+        memcpy(body + 148 + result_root.length, full_digest, 64);
+        error = bq_append(queue, BQ_RESULT_BIND, body, size);
     }
     return error;
 }
