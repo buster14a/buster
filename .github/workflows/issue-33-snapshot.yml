@@ -1,13 +1,8 @@
-name: Issue 33 snapshot
+name: Issue 674 baseline probes
 
 on:
   push:
-    branches:
-      - compiler/issue-33-canonical-local-promotion
-
-concurrency:
-  group: issue-33-source-${{ github.ref }}
-  cancel-in-progress: true
+    branches: [devin/674-baseline-validation-20260915]
 
 permissions:
   contents: read
@@ -16,24 +11,57 @@ jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Pack tracked source
-        id: pack
+          fetch-depth: 2
+      - name: Build frozen baseline and retain independent controls
         shell: bash
         run: |
           set -euo pipefail
-          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
+          mkdir -p "$RUNNER_TEMP/674-evidence"
+          git rev-parse HEAD HEAD^{tree}
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Issue 33 source snapshot\n\nCommit: `%s`\n\nSource only, tracked files only, excluding Git metadata; retained for one day. This is not a compiler validation result.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Issue 674 baseline probes\n\nTransport commit: `%s`. Compiler source pinned to `e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf`.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          git diff --exit-code e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf -- src build.c CMakeLists.txt
+          uname -a
+          clang --version
+          gcc --version
+          sha256sum "$(readlink -f "$(command -v clang)")" "$(readlink -f "$(command -v gcc)")"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+          printf '%s\n' '_Static_assert(_Generic((float)0, float: 1, default: 0), "g");' > "$RUNNER_TEMP/674-evidence/assert.c"
+          printf '%s\n' 'int v = _Generic((float)0, float: 1, default: 0);' > "$RUNNER_TEMP/674-evidence/global.c"
+          printf '%s\n' '_Static_assert(_Generic(0, int: 1, default: 1 / 0), "g");' > "$RUNNER_TEMP/674-evidence/unselected_divzero.c"
+          printf '%s\n' '_Static_assert(_Generic(0, int: 1, default: undeclared), "g");' > "$RUNNER_TEMP/674-evidence/unselected_name.c"
+          printf '%s\n' 'int effect(void); int counter; _Static_assert(_Generic(counter++, int: 1, default: effect()), "g"); int v = _Generic(effect(), int: 1, default: counter++);' > "$RUNNER_TEMP/674-evidence/unevaluated.c"
+          printf '%s\n' 'int fn(void); const char c = 0; char a[2]; _Static_assert(_Generic(c, char: 1, default: 0), "q"); _Static_assert(_Generic(a, char*: 1, default: 0), "a"); _Static_assert(_Generic(fn, int (*)(void): 1, default: 0), "f");' > "$RUNNER_TEMP/674-evidence/conversions.c"
+          for compiler in clang gcc build/Release/ide; do
+            for dialect in c11 c17 gnu17; do
+              for source in "$RUNNER_TEMP/674-evidence/"*.c; do
+                name="$(basename "$compiler")-$dialect-$(basename "$source" .c)"
+                flags=()
+                if [ "$compiler" = build/Release/ide ]; then flags=(cc); fi
+                set +e
+                "$compiler" "${flags[@]}" -std="$dialect" -c "$source" -o "$RUNNER_TEMP/674-evidence/$name.o" > "$RUNNER_TEMP/674-evidence/$name.log" 2>&1
+                status=$?
+                set -e
+                printf 'PROBE compiler=%s dialect=%s source=%s exit=%s\n' "$compiler" "$dialect" "$source" "$status"
+                cat "$RUNNER_TEMP/674-evidence/$name.log"
+              done
+            done
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
         with:
-          name: issue-33-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/buster-source.tar.gz
+          name: issue-674-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/674-evidence/
           if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          retention-days: 7
