@@ -340,7 +340,11 @@ The candidate gate applies candidate cleanliness to admitted-supported cells;
 reference-only retained rows do not become candidate failures merely because
 their direct reference is unresolved. A retained row whose candidate side has
 an unexpected defect is still fatal. The acceptance gate additionally requires
-every retained reference/control to resolve. This class distinction does not
+every retained reference/control to resolve. An authenticated `unavailable`
+row preserves the exact missing-resource or CPU-profile provenance, but always
+fails clean acceptance until exact supplemental evidence closes that same
+fixture/target obligation. It is not a waiver and is not charged as a compiler
+defect. This class distinction does not
 waive unexpected compile, object, process, fallback or telemetry defects: those
 remain fatal for any applicable cell, including platform-inapplicable controls.
 Authenticated platform-inapplicable and unavailable cells are instead

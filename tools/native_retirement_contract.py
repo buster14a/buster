@@ -1113,6 +1113,13 @@ def validate(directory):
                                                                                declared_supported_gap,
                                                                                authenticated_class,
                                                                                authenticated_reason)
+        if applicability == "unavailable":
+            # An authenticated missing-resource/profile row may be retained as
+            # provenance, but it is not retirement acceptance.  Keep it
+            # separate from a candidate compiler defect while making the final
+            # acceptance gate fail until exact supplemental evidence closes the
+            # obligation.
+            outcome["acceptance_failure"] = True
         if authenticated_class == "platform-inapplicable":
             # Preserve the authenticated applicability class while retaining
             # every compiler/process/object/fallback/telemetry defect.  The
