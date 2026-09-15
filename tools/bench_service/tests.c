@@ -2124,29 +2124,33 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_observe(BqWorkerBackend* backend, cha
                                                     BqWorkerObserved* observed, u64 deadline)
 {
     BqWorkerFake* fake = backend->context;
+    BqError error = BQ_OK;
     BQ_CHECK(fake->elapsed <= deadline);
     fake->observes += 1;
     if (fake->observe_failures)
     {
         if (fake->observe_failures != UINT32_MAX) fake->observe_failures -= 1;
-        return BQ_IO;
+        error = BQ_IO;
     }
-    if (fake->terms && !fake->kills && fake->observed.populated)
+    else
     {
-        fake->term_polls += 1;
-        if (fake->term_clear_after && fake->term_polls >= fake->term_clear_after) bq_test_worker_reap(fake);
+        if (fake->terms && !fake->kills && fake->observed.populated)
+        {
+            fake->term_polls += 1;
+            if (fake->term_clear_after && fake->term_polls >= fake->term_clear_after) bq_test_worker_reap(fake);
+        }
+        *observed = fake->observed;
+        if (fake->hide_unit) observed->unit_found = false;
+        if (fake->mismatch_unit) snprintf(observed->unit, sizeof(observed->unit), "%s", "foreign.scope");
+        if (fake->mismatch_resources) observed->memory_max -= 1;
+        if (fake->reuse_after_observe && fake->observes >= fake->reuse_after_observe)
+            snprintf(observed->invocation_id, sizeof(observed->invocation_id), "%s",
+                     "ffffffffffffffffffffffffffffffff");
+        if (fake->cancel_after_observe && fake->observes >= fake->cancel_after_observe)
+            BQ_CHECK(raise(SIGTERM) == 0);
     }
-    *observed = fake->observed;
-    if (fake->hide_unit) observed->unit_found = false;
-    if (fake->mismatch_unit) snprintf(observed->unit, sizeof(observed->unit), "%s", "foreign.scope");
-    if (fake->mismatch_resources) observed->memory_max -= 1;
-    if (fake->reuse_after_observe && fake->observes >= fake->reuse_after_observe)
-        snprintf(observed->invocation_id, sizeof(observed->invocation_id), "%s",
-                 "ffffffffffffffffffffffffffffffff");
-    if (fake->cancel_after_observe && fake->observes >= fake->cancel_after_observe)
-        BQ_CHECK(raise(SIGTERM) == 0);
     (void)unit;
-    return BQ_OK;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_reap(BqWorkerFake* fake)

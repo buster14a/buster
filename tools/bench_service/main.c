@@ -51,6 +51,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     bool remote = false;
     bool serve = false;
     bool valid = false;
+    bool handled = false;
+    bool simple_diagnostic = false;
     u64 id = 0;
     u64 argument = 0;
     u64 attempt = 0;
@@ -61,11 +63,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                                         string_from_pointer(argv[4]), string_from_pointer(argv[5]),
                                         string_from_pointer(argv[6]), string_from_pointer(argv[7]),
                                         string_from_pointer(argv[8])) : BQ_BAD_REQUEST;
-        if (error != BQ_OK)
-        {
-            fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
-        }
-        return error == BQ_OK ? 0 : 1;
+        handled = true;
+        simple_diagnostic = true;
     }
     else if (argc == 2 && !strcmp(argv[1], "capabilities"))
     {
@@ -189,21 +188,17 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             valid = true;
         }
     }
-    if (remote && valid)
+    if (!handled && remote && valid)
     {
         error = bq_transport_client(argv[2], input, output);
-        if (error != BQ_OK)
-        {
-            fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
-        }
         if (fflush(output) != 0)
         {
             error = BQ_IO;
         }
-        bq_close(&queue);
-        return error == BQ_OK ? 0 : 1;
+        handled = true;
+        simple_diagnostic = true;
     }
-    if (serve && valid)
+    if (!handled && serve && valid)
     {
         u64 cpu = 0;
         bq_decimal(argv[7], false, &cpu);
@@ -219,14 +214,10 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             .production_path = true,
         };
         error = bq_transport_serve(argv[2], argv[3], &config);
-        if (error != BQ_OK)
-        {
-            fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
-        }
-        bq_close(&queue);
-        return error == BQ_OK ? 0 : 1;
+        handled = true;
+        simple_diagnostic = true;
     }
-    if (valid)
+    if (!handled && valid)
     {
         error = operation == BQ_OP_CAPABILITIES ? BQ_OK : bq_open(&queue, argv[2]);
         if (error == BQ_OK)
@@ -291,7 +282,11 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     {
         error = BQ_IO;
     }
-    if (error != BQ_OK)
+    if (simple_diagnostic && error != BQ_OK)
+    {
+        fprintf(diagnostics, "bench_service: %s\n", bq_error_name(error));
+    }
+    else if (!simple_diagnostic && error != BQ_OK)
     {
         fprintf(diagnostics, "bench_service: %s; io-uncertain requires retry/reopen, never rollback\n", bq_error_name(error));
         if (!valid)
