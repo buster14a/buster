@@ -506,6 +506,22 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+- Every primitive type-specifier scan validates the collected word set through
+  `c_parse_primitive_specifiers_valid`, and `c_parse_ast`'s token walk calls
+  `c_parser_validate_type_specifiers` on each contiguous type-word run so
+  unused bodies, `_Static_assert`/`sizeof` operands, and other machineless
+  type queries diagnose before semantic analysis. A contradictory or
+  unsupported set
+  (`signed unsigned`, `long float`, `_Complex int`, any `_Imaginary`, repeated
+  type words, more than two `long`s) is a `C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS`
+  error at the first specifier word, never a silent drop that lets an
+  implicit-int or guessed-int answer continue. Complex-integer and imaginary
+  types are deliberately unsupported, not partially accepted; `_Complex` alone
+  and its `__complex`/`__complex__` aliases on the three real floating kinds
+  remain valid. A type name refused this way pins `sizeof`/`_Alignof` to the
+  recorded constraint instead of falling back to a guessed `int`. Regressions:
+  `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
+  which also verify a refused compilation preserves or never creates the output.
 
 ## Immutable aggregate and complex construction
 
