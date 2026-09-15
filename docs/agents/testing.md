@@ -103,6 +103,19 @@
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
   compilation and device/simulator execution remain separate CI gates.
+- Android CI reports per-phase status lines that must be read together before
+  treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
+  per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
+  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses and the
+  monitor deadline), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
+  configuration, `not-run` when a configuration never reached execution), and
+  `ANDROID_BATCH_RESULT` (test_ci.sh batch phase, first failed configuration,
+  preserved overall status, and emulator cleanup status). The workflow step
+  itself ends with `ANDROID_CI_RESULT` separating `payload_status` from
+  `cleanup_status`. A later Release success never clears an earlier Debug
+  failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
+  Release — plus the batch line's `status=` field; a missing per-config line or
+  `status=not-run` is itself evidence of an incomplete run.
 
 ## Throughput runner integration
 

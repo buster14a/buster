@@ -49,7 +49,10 @@ if [[ ${BUSTER_ANDROID_FAKE_ADB:-0} == 1 ]]; then
                             ;;
                     esac
                     ;;
-                'am start '*) exit "${BUSTER_ANDROID_FAKE_LAUNCH_STATUS:-0}" ;;
+                'am start '*)
+                    : >"$state/am-start.ready"
+                    exit "${BUSTER_ANDROID_FAKE_LAUNCH_STATUS:-0}"
+                    ;;
                 'am force-stop '*) ;;
                 *)
                     printf 'fake adb: unsupported shell command %s\n' "$shell_command" >&2
@@ -85,6 +88,10 @@ if [[ ${BUSTER_ANDROID_FAKE_ADB:-0} == 1 ]]; then
                     printf 'BUSTER_ANDROID_TEST_RESULT:0x\n'
                     printf 'unrelated Android log line\n'
                     ;;
+                missing_marker)
+                    printf 'unrelated Android log line\n'
+                    exit 0
+                    ;;
                 timeout)
                     printf 'test still running\n'
                     ;;
@@ -119,6 +126,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+assert_log_contains() {
+    local needle=$1
+    local state=$2
+    if ! grep -qF "$needle" "$state/run.log"; then
+        echo "assertion failed: '$needle' not found in $state/run.log" >&2
+        cat "$state/run.log" >&2
+        return 1
+    fi
+}
 
 assert_no_owned_producer() {
     local state=$1
@@ -175,7 +192,7 @@ run_case() {
             "$apk" \
             dev.buster.ide \
             dev.buster.ide/android.app.NativeActivity \
-            'test --verbose=1 --ci=1'
+            'test --verbose=1 --ci=1' >"$state/run.log" 2>&1
     status=$?
     set -e
     end_ns=$(date +%s%N)
@@ -192,6 +209,32 @@ run_case() {
     fi
     assert_no_owned_producer "$state"
 
+    case "$scenario" in
+        success)
+            assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=10' "$state"
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=0' "$state"
+            ;;
+        failure)
+            assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=11' "$state"
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=1' "$state"
+            ;;
+        timeout|malformed)
+            assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=0 producer_status=124 timeout_seconds=3' "$state"
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=1' "$state"
+            ;;
+        missing_marker)
+            assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=0 producer_status=0 timeout_seconds=3' "$state"
+            assert_log_contains 'ended without a terminal result' "$state"
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=1' "$state"
+            ;;
+        launch_failure)
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=launch status=23' "$state"
+            ;;
+        install_failure)
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=install status=24' "$state"
+            ;;
+    esac
+
     if [[ $scenario == success ]]; then
         marker_ns=$(<"$state/marker.ns")
         marker_tail_ms=$(( (end_ns - marker_ns) / 1000000 ))
@@ -207,6 +250,54 @@ run_case success 0 2000
 run_case failure 1 2000
 run_case timeout 1 6000
 run_case malformed 1 6000
+run_case missing_marker 1 2000
 run_case launch_failure 23 2000
 run_case install_failure 24 2000
+
+state=$test_root/interrupt
+mkdir -p "$state"
+cat >"$state/wrapper.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$BUSTER_ANDROID_TEST_WRAPPER_PID_FILE"
+exec bash "$@"
+EOF
+BUSTER_ANDROID_TEST_WRAPPER_PID_FILE="$state/wrapper.pid" \
+    BUSTER_ANDROID_FAKE_ADB=1 \
+    BUSTER_ANDROID_FAKE_STATE="$state" \
+    BUSTER_ANDROID_FAKE_SCENARIO=timeout \
+    BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=30 \
+    BUSTER_ANDROID_ADB_WAIT_TIMEOUT_SECONDS=2 \
+    BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS=2 \
+    BUSTER_ANDROID_ADB_INSTALL_TIMEOUT_SECONDS=2 \
+    timeout --kill-after=1s 15s bash "$state/wrapper.sh" \
+        "$run_tests_script" \
+        "$BASH_SOURCE" \
+        "$apk" \
+        dev.buster.ide \
+        dev.buster.ide/android.app.NativeActivity \
+        'test --verbose=1 --ci=1' >"$state/run.log" 2>&1 &
+timeout_pid=$!
+deadline=$((SECONDS + 5))
+while (( SECONDS < deadline )) && [[ ! -f $state/wrapper.pid || ! -f $state/producer.pid || ! -f $state/am-start.ready ]]; do
+    sleep 1
+done
+if [[ ! -f $state/wrapper.pid || ! -f $state/producer.pid || ! -f $state/am-start.ready ]]; then
+    echo "assertion failed: interrupt wrapper did not reach the monitor phase" >&2
+    kill "$timeout_pid" >/dev/null 2>&1 || true
+    exit 1
+fi
+kill -TERM "$(<"$state/wrapper.pid")"
+set +e
+wait "$timeout_pid"
+interrupt_status=$?
+set -e
+printf 'CASE interrupt status=%s\n' "$interrupt_status"
+if [[ $interrupt_status -ne 143 ]]; then
+    echo "assertion failed: interrupt returned $interrupt_status, expected 143" >&2
+    cat "$state/run.log" >&2
+    exit 1
+fi
+assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=143' "$state"
+assert_no_owned_producer "$state"
+
 echo "Android run_tests harness passed"

@@ -493,21 +493,31 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/android.log") 2>&1
+          android_phase=start
           cleanup_android_emulator() {
             status=$?
+            payload_status=$status
+            cleanup_status=not-run
             trap - EXIT INT TERM
             if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
+              printf 'Android emulator log follows an already-failed phase=%s status=%s\n' "$android_phase" "$payload_status" >&2
               tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
             fi
             if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
               cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
               if BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$cleanup_timeout_seconds" bash ./android/start_emulator_ci.sh stop; then
-                :
+                cleanup_status=0
               else
                 cleanup_status=$?
                 echo "warning: Android emulator cleanup failed with exit status $cleanup_status" >&2
                 if [[ $status -eq 0 ]]; then status=1; fi
               fi
+            fi
+            printf 'ANDROID_CI_RESULT phase=%s payload_status=%s cleanup_status=%s status=%s\n' "$android_phase" "$payload_status" "$cleanup_status" "$status"
+            if [[ $payload_status -ne 0 ]]; then
+              printf 'error: Android CI failed before final emulator cleanup (phase=%s status=%s)\n' "$android_phase" "$payload_status" >&2
+            elif [[ $status -ne 0 ]]; then
+              printf 'error: Android CI required emulator cleanup failed (status=%s)\n' "$cleanup_status" >&2
             fi
             exit "$status"
           }
@@ -516,6 +526,7 @@ jobs:
           trap 'exit 130' INT
           trap 'exit 143' TERM
           bash ./android/start_emulator_ci.sh start
+          android_phase=tests
           ./android/test_ci.sh --all
 
       - name: Test (iOS simulator)

@@ -87,15 +87,31 @@ android_run_tests_script=${BUSTER_ANDROID_RUN_TESTS_SCRIPT:-android/run_tests.sh
 android_emulator_started_marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/buster-android-emulator.started}
 android_cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
 
+android_phase=configure
+android_config=none
+config_statuses=()
+
 cleanup_on_failure() {
     local status=$?
+    local cleanup_status=not-run
+    local result_index
     trap - EXIT INT TERM
     if [[ $status -ne 0 && -f $android_emulator_started_marker ]]; then
-        if ! BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$android_emulator_started_marker" \
+        if BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$android_emulator_started_marker" \
             BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$android_cleanup_timeout_seconds" \
             bash "$android_start_script" stop; then
-            echo "warning: Android emulator cleanup failed after test status $status" >&2
+            cleanup_status=0
+        else
+            cleanup_status=$?
+            echo "warning: Android emulator cleanup failed after test status $status (cleanup status $cleanup_status)" >&2
         fi
+    fi
+    for result_index in "${!build_configs[@]}"; do
+        printf 'ANDROID_CONFIG_RESULT config=%s status=%s\n' "${build_configs[$result_index]}" "${config_statuses[$result_index]:-not-run}"
+    done
+    printf 'ANDROID_BATCH_RESULT phase=%s config=%s status=%s cleanup_status=%s\n' "$android_phase" "$android_config" "$status" "$cleanup_status"
+    if [[ $status -ne 0 ]]; then
+        printf 'error: Android batch failed in phase %s (config=%s status=%s); a later configuration success does not clear an earlier failure\n' "$android_phase" "$android_config" "$status" >&2
     fi
     exit "$status"
 }
@@ -131,7 +147,9 @@ cmake --warn-uninitialized -Werror=dev -Wno-error=deprecated \
 echo "TIMING_ANDROID configure_seconds=$((SECONDS - configure_started))"
 
 apk_paths=()
+android_phase=build
 for build_config in "${build_configs[@]}"; do
+    android_config=$build_config
     echo "Building and packaging Android ${build_config} while the emulator boots"
     build_started=$SECONDS
     cmake --build "$build_directory" --config "$build_config" --target apk --verbose
@@ -147,6 +165,8 @@ for build_config in "${build_configs[@]}"; do
     echo "TIMING_ANDROID build_seconds config=$build_config value=$((SECONDS - build_started))"
 done
 
+android_phase=boot-wait
+android_config=none
 wait_started=$SECONDS
 echo "Android artifacts are ready; waiting for the emulator before install/run"
 bash "$android_start_script" wait
@@ -169,26 +189,35 @@ android_activity=${BUSTER_ANDROID_ACTIVITY:-${android_package}/android.app.Nativ
 android_test_args=${BUSTER_ANDROID_TEST_ARGUMENT_STRING:-"test --verbose=1 --ci=1"}
 
 overall_status=0
+first_failed_config=none
+android_phase=tests
 for index in "${!build_configs[@]}"; do
     build_config=${build_configs[$index]}
+    android_config=$build_config
     apk_path=${apk_paths[$index]}
     echo "Running Android ${build_config} tests"
     test_started=$SECONDS
     if BUSTER_ANDROID_EXPECTED_ABI="$android_abi" \
+        BUSTER_ANDROID_TEST_CONFIG="$build_config" \
         bash "$android_run_tests_script" \
             "$adb_path" \
             "$apk_path" \
             "$android_package" \
             "$android_activity" \
             "$android_test_args"; then
+        config_statuses[$index]=0
         echo "TIMING_ANDROID install_test_seconds config=$build_config value=$((SECONDS - test_started))"
     else
         test_status=$?
+        config_statuses[$index]=$test_status
         echo "error: Android ${build_config} tests failed with status $test_status" >&2
         overall_status=1
+        if [[ $first_failed_config == none ]]; then
+            first_failed_config=$build_config
+        fi
     fi
 done
 
-if [[ $overall_status -ne 0 ]]; then
-    exit "$overall_status"
-fi
+android_config=$first_failed_config
+android_phase=tests
+exit "$overall_status"

@@ -6,6 +6,7 @@ tool=${FAKE_TOOL_NAME:-${0##*/}}
 case "$tool" in
     adb)
         state=${FAKE_ANDROID_STATE_DIR:?FAKE_ANDROID_STATE_DIR is required}
+        printf '%s\n' "$*" >>"$state/adb.log"
         if [[ ${1:-} == -s ]]; then
             shift 2
         fi
@@ -14,7 +15,7 @@ case "$tool" in
         case "$command" in
             start-server|uninstall|install)
                 if [[ $command == install ]]; then
-                    printf '%s\n' "${1:-}" >"$state/installed_apk"
+                    printf '%s\n' "${!#}" >"$state/installed_apk"
                 fi
                 exit 0
                 ;;
@@ -60,6 +61,46 @@ case "$tool" in
             logcat)
                 if [[ ${1:-} == -d ]]; then
                     printf 'fake Android logcat diagnostics\n'
+                    exit 0
+                fi
+                if [[ ${1:-} == -c ]]; then
+                    exit 0
+                fi
+                installed_config=
+                if [[ -f $state/installed_apk ]]; then
+                    installed_path=$(<"$state/installed_apk")
+                    installed_config=${installed_path%/*}
+                    installed_config=${installed_config##*/}
+                fi
+                printf '%s\n' "$$" >"$state/monitor-$installed_config.pid"
+                if [[ -n ${FAKE_ANDROID_TIMEOUT_CONFIG:-} && $installed_config == "$FAKE_ANDROID_TIMEOUT_CONFIG" ]]; then
+                    printf 'test still running\n'
+                    while :; do
+                        sleep 1
+                    done
+                elif [[ -n ${FAKE_ANDROID_MISSING_MARKER_CONFIG:-} && $installed_config == "$FAKE_ANDROID_MISSING_MARKER_CONFIG" ]]; then
+                    exit 0
+                elif [[ -n ${FAKE_ANDROID_FAIL_CONFIG:-} && $installed_config == "$FAKE_ANDROID_FAIL_CONFIG" ]]; then
+                    printf 'BUSTER_ANDROID_TEST_RESULT:1\n'
+                elif [[ -n ${FAKE_ANDROID_STOP_AFTER_CONFIG:-} && $installed_config == "$FAKE_ANDROID_STOP_AFTER_CONFIG" ]]; then
+                    : >"$state/kill"
+                    emulator_pid=$(<"$state/emulator.pid")
+                    stopped_deadline=$((SECONDS + 3))
+                    while :; do
+                        if ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
+                            break
+                        fi
+                        emulator_state=$(ps -o stat= -p "$emulator_pid" 2>/dev/null | tr -d ' ' || true)
+                        if [[ $emulator_state == Z* || $emulator_state == X* ]]; then
+                            break
+                        fi
+                        if [[ $SECONDS -ge $stopped_deadline ]]; then
+                            printf 'fake Android emulator %s still running after stop request\n' "$emulator_pid" >&2
+                            exit 1
+                        fi
+                        sleep 0.1
+                    done
+                    printf 'BUSTER_ANDROID_TEST_RESULT:0\n'
                 elif [[ ${FAKE_ANDROID_TEST_RESULT:-0} == 0 ]]; then
                     printf 'BUSTER_ANDROID_TEST_RESULT:0\n'
                 else
@@ -68,6 +109,7 @@ case "$tool" in
                 exit 0
                 ;;
             emu)
+                sleep "${FAKE_ANDROID_ADB_KILL_SLEEP_SECONDS:-0}"
                 if [[ ${FAKE_ANDROID_ADB_KILL_STATUS:-0} -ne 0 ]]; then
                     exit "${FAKE_ANDROID_ADB_KILL_STATUS}"
                 fi
@@ -94,6 +136,7 @@ case "$tool" in
             printf 'accel: fake hardware acceleration\n'
             exit 0
         fi
+        printf '%s\n' "$$" >"$state/emulator.pid"
         sleep "${FAKE_ANDROID_BOOT_DELAY_SECONDS:-1}"
         if [[ ${FAKE_ANDROID_NEVER_BOOT:-0} == 0 ]]; then
             : >"$state/device"

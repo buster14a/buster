@@ -195,14 +195,17 @@ cleanup_monitor() {
     trap - EXIT INT TERM
     stop_monitor
     adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
+    printf 'ANDROID_PAYLOAD_RESULT config=%s phase=%s status=%s\n' "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$test_phase" "$status"
     exit "$status"
 }
+test_phase=wait-device
 trap cleanup_monitor EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 wait_for_device_ready
 validate_device_before_install
+test_phase=install
 adb_with_timeout "$adb_command_timeout_seconds" uninstall "$package" >/dev/null 2>&1 || true
 if ! adb_with_timeout "$adb_install_timeout_seconds" install -r "$apk"; then
     echo "adb install -r failed; uninstalling ${package} and retrying" >&2
@@ -228,6 +231,7 @@ monitor_reader_pid=$!
 # Do not use `am start -W` here: on some emulator builds the wait-for-launch
 # shell command can lose its adb connection even though the activity started and
 # is still producing the logcat test result we actually care about.
+test_phase=launch
 if adb_with_timeout "$adb_command_timeout_seconds" shell "am start -n $(android_shell_quote "$activity") --es buster_args $(android_shell_quote "$test_args")"; then
     start_status=0
 else
@@ -240,6 +244,7 @@ if [[ $start_status -ne 0 ]]; then
     exit "$start_status"
 fi
 
+test_phase=monitor
 if wait "$monitor_reader_pid"; then
     monitor_reader_status=0
 else
@@ -255,6 +260,8 @@ fi
 monitor_producer_pid=
 exec {monitor_fd}<&-
 monitor_fd=
+
+printf 'ANDROID_MONITOR_RESULT config=%s reader_status=%s producer_status=%s timeout_seconds=%s\n' "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$monitor_reader_status" "$monitor_producer_status" "$timeout_seconds"
 
 if [[ $monitor_reader_status -eq 10 || $monitor_reader_status -eq 11 ]]; then
     status=$monitor_reader_status
