@@ -5566,6 +5566,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
                         "#if __has_c_attribute(nodiscard) || __has_c_attribute(deprecated) || __has_c_attribute(gnu::packed)\n"
                         "#error C attribute query answered an unimplemented attribute\n"
                         "#endif\n"
+
                         "int attribute_query_probe;\n"),
                      (CPreprocessOptions){0});
     BUSTER_TEST(arguments, attribute_queries.diagnostic_count == 0);
@@ -5576,6 +5577,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     }
     CParseResult attribute_queries_parse = c_parse(arguments->arena, attribute_queries);
     BUSTER_TEST(arguments, attribute_queries_parse.diagnostic_count == 0);
+
+    // An empty argument list is malformed for both operators and still fails
+    // the directive; relaxing the argument shape for the namespaced C spelling
+    // must not turn that into a silent 0.
+    CPreprocessResult empty_attribute_argument = c_preprocess(arguments->arena,
+                                                              S8("#if __has_c_attribute()\n"
+                                                                 "int unreachable_probe;\n"
+                                                                 "#endif\n"),
+                                                              (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, empty_attribute_argument.diagnostic_count != 0);
 
     CPreprocessResult include = c_preprocess(arguments->arena,
                                              S8("#include \"basic_c_include.h\"\n"

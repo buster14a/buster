@@ -5453,12 +5453,13 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]))
                                     : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
         }
-        else if (has_c_attribute)
+        else if (has_c_attribute && argument_count)
         {
-            // Any argument shape the balanced scan above accepted, so that the
-            // namespaced spelling this operator's own contract admits --
-            // `__has_c_attribute(gnu::packed)`, three tokens -- answers 0
-            // instead of failing the directive.
+            // Any non-empty argument shape the balanced scan above accepted,
+            // so that the namespaced spelling this operator's own contract
+            // admits -- `__has_c_attribute(gnu::packed)` -- answers 0 instead
+            // of failing the directive, however the `::` is tokenized. An
+            // empty argument list is still malformed and still fails below.
             supported = c_conditional_c_attribute_supported();
         }
         else if ((is_target_arch || is_target_environment || is_target_os || is_target_vendor) && argument_count == 1 &&
