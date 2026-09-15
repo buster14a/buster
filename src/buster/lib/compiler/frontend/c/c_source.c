@@ -3217,6 +3217,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
     S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
     S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
+    S8_INITIALIZER("_Float16"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -7992,6 +7993,27 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
     }
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
+    // The `_Float16` half of the <float.h> vocabulary, with clang's own
+    // spellings and values. They describe IEEE-754 binary16, which is what
+    // `_Float16` is on every target here, and they carry the C23 `F16`
+    // suffix exactly as clang's do -- a resource header that reaches for
+    // FLT16_MAX gets a constant of the right type, not a double.
+    C_DEFINE_TYPE_MACRO("__FLT16_MANT_DIG__", S8("11"));
+    C_DEFINE_TYPE_MACRO("__FLT16_DIG__", S8("3"));
+    C_DEFINE_TYPE_MACRO("__FLT16_DECIMAL_DIG__", S8("5"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MAX__", S8("6.5504e+4F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_NORM_MAX__", S8("6.5504e+4F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MIN__", S8("6.103515625e-5F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_DENORM_MIN__", S8("5.9604644775390625e-8F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_EPSILON__", S8("9.765625e-4F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MAX_EXP__", S8("16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MIN_EXP__", S8("(-13)"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MAX_10_EXP__", S8("4"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MIN_10_EXP__", S8("(-4)"));
+    C_DEFINE_TYPE_MACRO("__FLT16_HAS_DENORM__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__FLT16_HAS_INFINITY__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__FLT16_HAS_QUIET_NAN__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT16__", string_format(arena, S8("{u32}"), layout.float16_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_DOUBLE__", string_format(arena, S8("{u32}"), layout.double_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_DOUBLE__", string_format(arena, S8("{u32}"), layout.long_double_type.size));
     // The hosted <float.h> supplied by Clang/GCC spells DBL_EPSILON in terms

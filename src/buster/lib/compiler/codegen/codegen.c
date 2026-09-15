@@ -3003,9 +3003,32 @@ void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 
     x64_emit_vector_native_binary_operation_kind(builder, integer_operation, element_width, prefix, opcode, size, base);
 }
 
+// A vector element the canonical emitters have lane instructions for: any of
+// the four integer widths they address, and a float lane only at the two IEEE
+// widths their arithmetic implements. The scalarized lane loops already asked
+// this of a float before operating; the shape guards at the top of both
+// emitters did not, so a binary16 lane was admitted and then selected the
+// binary32 or binary64 encoding. The MIR selectors spell the same rule.
+BUSTER_GLOBAL_LOCAL bool codegen_vector_element_supported(IrType* element)
+{
+    return element &&
+           ((element->kind == IR_TYPE_INTEGER &&
+             (element->bit_width == 8 || element->bit_width == 16 || element->bit_width == 32 || element->bit_width == 64)) ||
+            (element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64)));
+}
+
 bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
 {
     if (size <= 16 || size > target_vector_register_size(target))
+    {
+        return false;
+    }
+    // The packed float arithmetic here is ADDPS/ADDPD and their siblings, so
+    // a float lane narrower than binary32 has no encoding at all: binary16
+    // needs AVX512-FP16's ADDPH, which this backend does not select. Without
+    // this the binary32/binary64 pair was chosen for a `_Float16` lane and the
+    // vector was added as if its lanes were twice as wide.
+    if (!integer_operation && element_width < 32)
     {
         return false;
     }
@@ -6895,8 +6918,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
     IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
     IrType* vector = ir_type_from_id(&program->types, operand_type_id);
     IrType* element = vector ? ir_type_from_id(&program->types, vector->element_type) : 0;
-    if (!vector || vector->kind != IR_TYPE_VECTOR || !element || (element->kind != IR_TYPE_INTEGER && element->kind != IR_TYPE_FLOAT) ||
-        (element->bit_width != 8 && element->bit_width != 16 && element->bit_width != 32 && element->bit_width != 64) ||
+    if (!vector || vector->kind != IR_TYPE_VECTOR || !codegen_vector_element_supported(element) ||
         instruction->result.value == IR_ID_UNDERLYING_INVALID)
     {
         return false;
@@ -7816,8 +7838,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_vector_operation(CodegenBuffer* b
     IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
     IrType* vector = ir_type_from_id(&program->types, operand_type_id);
     IrType* element = vector ? ir_type_from_id(&program->types, vector->element_type) : 0;
-    if (!vector || vector->kind != IR_TYPE_VECTOR || !element || (element->kind != IR_TYPE_INTEGER && element->kind != IR_TYPE_FLOAT) ||
-        (element->bit_width != 8 && element->bit_width != 16 && element->bit_width != 32 && element->bit_width != 64) ||
+    if (!vector || vector->kind != IR_TYPE_VECTOR || !codegen_vector_element_supported(element) ||
         instruction->result.value == IR_ID_UNDERLYING_INVALID || vector->element_count > UINT32_MAX)
     {
         return false;

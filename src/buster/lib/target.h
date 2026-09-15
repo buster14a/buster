@@ -237,6 +237,10 @@ struct TargetDataLayout
     TargetTypeLayout unsigned_long_long_integer;
     TargetTypeLayout integer128;
     TargetTypeLayout unsigned_integer128;
+    // IEEE-754 binary16, the layout behind C's `_Float16`.  Every target
+    // here stores it in two naturally aligned bytes; whether the backend can
+    // compute with it is a separate question the frontend asks elsewhere.
+    TargetTypeLayout float16_type;
     TargetTypeLayout float_type;
     TargetTypeLayout double_type;
     TargetTypeLayout long_double_type;
