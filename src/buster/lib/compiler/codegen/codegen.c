@@ -9047,6 +9047,11 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
 #define CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT 64u
 BUSTER_CT_CHECK(MACHINE_X64_REGISTER_COUNT <= CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT);
 BUSTER_CT_CHECK(MACHINE_A64_REGISTER_COUNT <= CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT);
+// The predicate bank numbers above the unified file and reaches recording
+// through the merged edit stream. Keeping it inside the range gives it real
+// buckets; past the range it would still be correct through the extra bucket,
+// but every predicate edit would become an event for every tracked register.
+BUSTER_CT_CHECK(MACHINE_PREDICATE_REGISTER_BASE + MACHINE_PREDICATE_REGISTER_COUNT <= CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT);
 
 typedef struct CodegenMachineDebugRowGroups CodegenMachineDebugRowGroups;
 struct CodegenMachineDebugRowGroups
