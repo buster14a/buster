@@ -34516,8 +34516,6 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_atomic_manifest(BenchServiceRecipe
 #else
     ok = false;
 #endif
-    if (descriptor >= 0) close(descriptor);
-    if (parent >= 0) close(parent);
     return ok;
 }
 
