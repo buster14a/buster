@@ -121,6 +121,9 @@ NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
 )
+EXTERNAL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 
 
 class MaterializationError(ValueError):
@@ -212,6 +215,125 @@ def _canonical_relative(value, field):
     return normalized
 
 
+def _canonical_descriptor_relative(value, field):
+    """Canonicalize a path relative to the descriptor itself.
+
+    ``source_root`` is intentionally allowed to be ``..`` because the checked
+    in descriptor lives below the repository root. It still needs the same
+    spelling discipline as include-relative paths: accepting ``a/../b``
+    would make the descriptor identity depend on a host path resolver.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        _fail(f"{field} must be a non-empty descriptor-relative path")
+    value = value.replace("\\", "/")
+    if "://" in value or value.startswith("/") or (len(value) >= 2 and value[1] == ":"):
+        _fail(f"{field} must be descriptor-relative: {value!r}")
+    normalized = posixpath.normpath(value)
+    if normalized != value or normalized == "" or any(
+            ord(character) < 0x20 or ord(character) == 0x7f for character in normalized):
+        _fail(f"{field} is not canonical: {value!r}")
+    if any(part == "" for part in value.split("/")):
+        _fail(f"{field} is not canonical: {value!r}")
+    return normalized
+
+
+def _external_name(value, field):
+    if not isinstance(value, str) or not EXTERNAL_NAME.fullmatch(value):
+        _fail(f"{field} must be a simple external dependency name")
+    return value
+
+
+def _external_revision(value, field):
+    if not isinstance(value, str) or not GIT_REVISION.fullmatch(value):
+        _fail(f"{field} must be a lowercase 40-digit Git revision")
+    return value
+
+
+def _external_declarations(manifest):
+    """Validate the immutable external checkout closure without touching disk.
+
+    Checkouts are deliberately declarations, not fetch instructions.  The
+    workflow obtains them with pinned ``actions/checkout`` steps; the separate
+    external verifier proves that the local bytes are at those revisions before
+    this materializer reads any source file.
+    """
+    raw_checkouts = manifest.get("external_checkouts", [])
+    raw_generated = manifest.get("external_generated", [])
+    if not isinstance(raw_checkouts, list) or not isinstance(raw_generated, list):
+        _fail("external_checkouts and external_generated must be lists")
+    checkouts = []
+    names = set()
+    paths = set()
+    for index, value in enumerate(raw_checkouts):
+        if not isinstance(value, dict):
+            _fail(f"external checkout {index} is not an object")
+        name = _external_name(value.get("name"), f"external checkout {index} name")
+        repository = value.get("repository")
+        if not isinstance(repository, str) or not GITHUB_REPOSITORY.fullmatch(repository):
+            _fail(f"external checkout {index} repository is not owner/name")
+        revision = _external_revision(value.get("revision"), f"external checkout {index} revision")
+        path = _canonical_relative(value.get("path"), f"external checkout {index} path")
+        if not path.startswith("external/") or path != f"external/{name}":
+            _fail(f"external checkout {index} path must be external/{name}")
+        if name in names or path in paths:
+            _fail(f"external checkout {index} is duplicated")
+        names.add(name)
+        paths.add(path)
+        checkouts.append({"name": name, "repository": repository,
+                          "revision": revision, "path": path})
+    generated = []
+    generated_names = set()
+    generated_paths = set()
+    checkout_names = {item["name"] for item in checkouts}
+    for index, value in enumerate(raw_generated):
+        if not isinstance(value, dict):
+            _fail(f"external generated closure {index} is not an object")
+        name = _external_name(value.get("name"), f"external generated closure {index} name")
+        checkout = _external_name(value.get("checkout"), f"external generated closure {index} checkout")
+        if checkout not in checkout_names:
+            _fail(f"external generated closure {index} names an undeclared checkout: {checkout}")
+        revision = _external_revision(value.get("revision"), f"external generated closure {index} revision")
+        checkout_revision = next(item["revision"] for item in checkouts if item["name"] == checkout)
+        if revision != checkout_revision:
+            _fail(f"external generated closure {index} revision does not match checkout: {checkout}")
+        path = _canonical_relative(value.get("path"), f"external generated closure {index} path")
+        if not path.startswith("external/") or path.startswith("external/" + checkout + "/"):
+            _fail(f"external generated closure {index} path must be separate from checkout: {path}")
+        generator = value.get("generator")
+        _safe_text(generator, f"external generated closure {index} generator", allow_empty=False)
+        if name in generated_names or path in generated_paths or path in paths:
+            _fail(f"external generated closure {index} is duplicated")
+        generated_names.add(name)
+        generated_paths.add(path)
+        generated.append({"name": name, "checkout": checkout, "revision": revision,
+                          "path": path, "generator": generator})
+    return tuple(checkouts), tuple(generated)
+
+
+def _validate_external_records(records, checkouts, generated):
+    checkout_paths = {item["name"]: item["path"] for item in checkouts}
+    generated_paths = {item["name"]: item["path"] for item in generated}
+    for record in records:
+        if not record.source.startswith("external/"):
+            continue
+        if any(record.source == path or record.source.startswith(path + "/")
+               for path in checkout_paths.values()):
+            continue
+        if any(record.source == path or record.source.startswith(path + "/")
+               for path in generated_paths.values()):
+            continue
+        _fail(f"external dependency source is not in the declared closure: {record.source}")
+
+
+def _safe_text(value, field, allow_empty=True):
+    """Validate a single non-path ledger field before it is serialized."""
+    if not isinstance(value, str) or (not allow_empty and not value):
+        _fail(f"{field} must be text")
+    if any(ord(character) < 0x20 or ord(character) == 0x7f for character in value):
+        _fail(f"{field} contains a control character")
+    return value
+
+
 def _canonical_provenance(value):
     if not isinstance(value, str) or not value or "\x00" in value:
         _fail("provenance must be a non-empty offline identity")
@@ -275,8 +397,7 @@ def _record(value, index, default_kind=None):
     size = _field(value, "bytes", "size")
     digest = _field(value, "sha256", "source_sha256", "digest")
     fixture = _field(value, "fixture", "subject", default="")
-    if not isinstance(fixture, str):
-        _fail(f"dependency record {index} fixture must be text")
+    fixture = _safe_text(fixture, f"dependency record {index} fixture")
     if source is None or destination is None or provenance is None or size is None or digest is None:
         _fail(f"dependency record {index} is missing source, destination, provenance, bytes, or sha256")
     normalized_kind = _kind(kind)
@@ -319,6 +440,7 @@ def parse_manifest(manifest):
         _fail("dependency manifest must be an object")
     if manifest.get("schema") != SCHEMA or manifest.get("version") != VERSION:
         _fail("unsupported dependency manifest schema")
+    external_checkouts, external_generated = _external_declarations(manifest)
     raw = manifest.get("files", manifest.get("dependencies"))
     if raw is None:
         # The split form is convenient for hand-authored archives.  It is
@@ -380,6 +502,7 @@ def parse_manifest(manifest):
     # Metadata names are also a namespace: two spellings that normalize to one
     # name were rejected above, and a dependency cannot hide one.
     canonical.sort(key=lambda item: (item.destination, item.kind, item.provenance))
+    _validate_external_records(canonical, external_checkouts, external_generated)
     return tuple(canonical), tuple(sorted(generated_paths))
 
 
@@ -786,6 +909,7 @@ def materialize(manifest, source_root, output, descriptor_sha256=None, descripto
     no network or subprocess is used by this function.
     """
     records, metadata = parse_manifest(manifest)
+    external_checkouts, external_generated = _external_declarations(manifest)
     archived_replay = _archived_replay(manifest, records)
     output = Path(output)
     if not output.is_absolute():
@@ -821,7 +945,13 @@ def materialize(manifest, source_root, output, descriptor_sha256=None, descripto
             "resource_include_sha256": _include_closure(records, "resource-header", source_root),
             "project_include_sha256": _include_closure(records, "project-header", source_root),
             "files_by_destination": [record.destination for record in records],
+            "external_checkouts": list(external_checkouts),
+            "external_generated": list(external_generated),
         }
+        receipt["external_closure_sha256"] = _canonical_digest({
+            "external_checkouts": receipt["external_checkouts"],
+            "external_generated": receipt["external_generated"],
+        })
         if descriptor_sha256 is not None:
             receipt["descriptor_sha256"] = _sha256(descriptor_sha256, "descriptor_sha256")
         if descriptor_path is not None:
@@ -845,11 +975,7 @@ def _descriptor_source_root(manifest_path, manifest, source_root):
     declared = manifest.get("source_root")
     if declared is None:
         return Path(source_root)
-    if not isinstance(declared, str) or not declared or "\x00" in declared:
-        _fail("manifest source_root must be a relative descriptor path")
-    declared = declared.replace("\\", "/")
-    if declared.startswith("/") or (len(declared) >= 2 and declared[1] == ":"):
-        _fail("manifest source_root must be descriptor-relative")
+    declared = _canonical_descriptor_relative(declared, "manifest source_root")
     descriptor_parent = Path(os.path.abspath(os.fspath(manifest_path))).parent
     derived = Path(os.path.abspath(os.fspath(descriptor_parent / PurePosixPath(declared))))
     supplied = Path(os.path.abspath(os.fspath(source_root)))
