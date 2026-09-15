@@ -204,6 +204,28 @@ class ContractTests(unittest.TestCase):
             {"row": row_number, "telemetry": f"CODEGEN_FALLBACK opcode=7 count=1 version=1 row={row_number} target={target} allocator={allocator}"},
         ])
 
+    def install_structured_reference_failure(self, baseline_functions="0"):
+        """Make one direct group structurally unresolved, not label-unresolved."""
+        shard = self.shards[0]
+        fields, results = read_table(shard / "results.tsv")
+        baseline = next(row for row in results if row["row"] == "0")
+        baseline.update({"kind": "1", "status": "7", "counters_valid": "0",
+                         "target_identity_valid": "0", "function_records_valid": "0",
+                         "functions": baseline_functions, "fallbacks": "0",
+                         "baseline_functions": baseline_functions, "object_bytes": "0",
+                         "object_sha256": ""})
+        candidates = [row for row in results if row["group"] == baseline["group"] and
+                      row["row"] != baseline["row"]]
+        for index, candidate in enumerate(candidates):
+            # All three MIR rows have authenticated counts different from the
+            # partial/zero direct count; their objects and other evidence stay
+            # clean unless a caller deliberately adds a defect below.
+            candidate["functions"] = str(index + 4)
+            candidate["baseline_functions"] = baseline_functions
+        write_table(shard / "results.tsv", fields, results)
+        for name in ("fallback-functions.tsv", "fallback-counters.tsv"):
+            (shard / name).unlink(missing_ok=True)
+
     def test_clean_complete_partition_passes(self):
         report = self.validate()
         self.assertEqual(report["profile"], contract.SELF_TEST_PROFILE)
@@ -230,6 +252,24 @@ class ContractTests(unittest.TestCase):
         ])
         write_table(self.shards[0] / "dependencies.tsv", fields, dependencies)
         with self.assertRaisesRegex(AssertionError, "global include namespace collision"):
+            contract.validate(self.shards[0])
+
+    def test_object_argv_cannot_admit_a_host_sysroot_or_system_include(self):
+        manifest_path = self.shards[0] / "manifest.txt"
+        manifest = dict(line.split("=", 1) for line in manifest_path.read_text(encoding="utf-8").splitlines())
+        manifest["sysroot"] = str(self.root / "host-sysroot")
+        manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
+        with self.assertRaises(AssertionError):
+            contract.validate(self.shards[0])
+
+        manifest["sysroot"] = "none"
+        manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
+        argv_path = self.shards[0] / "groups/0/none.argv"
+        argv = argv_path.read_bytes().split(b"\0")[:-1]
+        insertion = argv.index(b"-nostdinc") + 1
+        argv[insertion:insertion] = [b"-isysroot", b"/host/sdk"]
+        argv_path.write_bytes(b"\0".join(argv) + b"\0")
+        with self.assertRaisesRegex(AssertionError, "argv mismatch"):
             contract.validate(self.shards[0])
 
     def test_clean_self_test_cannot_satisfy_production_acceptance(self):
@@ -321,6 +361,51 @@ class ContractTests(unittest.TestCase):
         self.assertIn(1, report["telemetry_defect_rows"])
         with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
             self.validate()
+
+    def test_unresolved_reference_count_is_not_candidate_shape_oracle(self):
+        for baseline_functions in ("0", "2"):
+            with self.subTest(baseline_functions=baseline_functions):
+                self.install_structured_reference_failure(baseline_functions)
+                report = self.validate(require_clean=False)
+                self.assertEqual(report["candidate_failure_rows"], [])
+                self.assertEqual(report["reference_failure_rows"], [0, 1, 2, 3])
+                self.assertEqual(report["acceptance_failure_rows"], [0, 1, 2, 3])
+                self.assertEqual(report["telemetry_defect_rows"], [0])
+                self.assertTrue(report["clean_candidate"])
+                self.assertFalse(report["clean_acceptance"])
+                # A reference-only failure must not block the independent
+                # candidate gate, even though it remains an acceptance fail.
+                self.assertTrue(self.validate()["clean_candidate"])
+
+    def test_unresolved_reference_does_not_hide_candidate_evidence_defects(self):
+        for defect in ("execution", "object", "telemetry", "fallback"):
+            with self.subTest(defect=defect):
+                self.install_structured_reference_failure()
+                shard = self.shards[0]
+                fields, results = read_table(shard / "results.tsv")
+                candidate = next(row for row in results if row["row"] == "1")
+                if defect == "execution":
+                    candidate.update({"kind": "1", "status": "1"})
+                    write_table(shard / "results.tsv", fields, results)
+                elif defect == "object":
+                    candidate.update({"object_bytes": "0", "object_sha256": ""})
+                    write_table(shard / "results.tsv", fields, results)
+                elif defect == "telemetry":
+                    candidate["function_records_valid"] = "0"
+                    write_table(shard / "results.tsv", fields, results)
+                else:
+                    telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=1 target=x86_64-linux allocator=mir-stack "
+                                 "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                                 "source_hex=612063 function_hex=66")
+                    self.install_single_fallback(0, "1", telemetry)
+
+                report = self.validate(require_clean=False)
+                self.assertEqual(report["candidate_failure_rows"], [1])
+                self.assertIn(1, report["acceptance_failure_rows"])
+                self.assertIn(0, report["reference_failure_rows"])
+                self.assertFalse(report["clean_candidate"])
+                with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
+                    self.validate()
 
     def test_counters_must_be_canonical_unsigned_decimals(self):
         fields, results = read_table(self.shards[0] / "results.tsv")

@@ -17535,6 +17535,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
     return result;
 }
 
+// Transparent-union ABI regressions stay in the frontend unit-test surface:
+// the native retirement census deliberately freezes every tracked tests/*.c
+// byte, while these source strings exercise the same parser and lowering
+// entry points without becoming production census subjects.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_abi(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool accepted;
+    } cases[] = {
+        {S8("typedef union { int value; float bits; } integer_first __attribute__((transparent_union));"
+            "static int read_int(integer_first value) { return value.value; }"
+            "static float read_float(integer_first value) { return value.bits; }"
+            "int probe(void) { return read_int(7) == 7 && read_float(1.5f) == 1.5f ? 0 : 1; }\n"), true},
+        {S8("typedef union { void *any; int *integer; const int *readonly; } pointer_union __attribute__((transparent_union));"
+            "static void *read_any(pointer_union value) { return value.any; }"
+            "int probe(void) { int value = 42; int *integer = &value; const int *readonly = &value;"
+            " return read_any(integer) != &value || read_any((void *)&value) != &value || read_any(readonly) != &value ||"
+            " read_any(0) != 0 || read_any((void *)0) != 0; }\n"), true},
+        {S8("typedef union { float value; unsigned int bits; } float_first __attribute__((transparent_union));"
+            "static unsigned int read_bits(float_first value) { return value.bits; }"
+            "int probe(void) { return read_bits(7U) == 7U ? 0 : 1; }\n"), false},
+        {S8("typedef union { double value; long long bits; } double_first __attribute__((transparent_union));"
+            "static long long read_bits(double_first value) { return value.bits; }"
+            "int probe(void) { return read_bits(7LL) == 7LL ? 0 : 1; }\n"), false},
+        {S8("typedef union { float value; float bits; } all_float_first __attribute__((transparent_union));"
+            "static float read_float(all_float_first value) { return value.bits; }"
+            "int probe(void) { return read_float(1.0f) == 1.0f ? 0 : 1; }\n"), false},
+        {S8("typedef union { void *any; int *integer; } qualifier_drop __attribute__((transparent_union));"
+            "static void *read_any(qualifier_drop value) { return value.any; }"
+            "int probe(void) { int value = 42; const int *readonly = &value;"
+            " return read_any(readonly) != &value; }\n"), false},
+        {S8("typedef union { int narrow; long long wide; } mismatch __attribute__((transparent_union));"
+            "static long long read_wide(mismatch value) { return value.wide; }"
+            "int probe(void) { return read_wide(7) == 7 ? 0 : 1; }\n"), false},
+    };
+    Target targets[] = {target_native, target_native, target_native, target_native};
+    targets[1].os = OPERATING_SYSTEM_WINDOWS;
+    targets[2].cpu_arch = CPU_ARCH_AARCH64;
+    targets[2].os = OPERATING_SYSTEM_LINUX;
+    targets[3].cpu_arch = CPU_ARCH_AARCH64;
+    targets[3].os = OPERATING_SYSTEM_MACOS;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessOptions options = {
+                    .target = targets[target_index],
+                    .data_layout = target_data_layout(targets[target_index]),
+                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                };
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, options);
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("transparent-union-internal.c"), tokens, parse,
+                                                                      targets[target_index], (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                bool accepted = tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.program && lowered.diagnostic_count == 0;
+                BUSTER_TEST_RAW(arguments, accepted == cases[case_index].accepted, cases[case_index].source);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                if (cases[case_index].accepted)
+                {
+                    BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+                    if (lowered.program && lowered.diagnostic_count == 0)
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -17560,6 +17643,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
