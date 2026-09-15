@@ -2770,7 +2770,11 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_place_promoted(MachineFunction const* mac
 BUSTER_GLOBAL_LOCAL bool machine_debug_constant_value(IrFunction const* function, IrValueId value, u64* constant_out)
 {
     bool result = false;
-    if (function && constant_out && value.value < function->value_count)
+    // The arrays are checked, not just their counts. The debug-value builder
+    // reaches this from a path that already tolerates a null row pointer beside
+    // a non-zero instruction count, so a count alone does not establish that
+    // either array is there to read.
+    if (function && constant_out && function->values && function->instructions && value.value < function->value_count)
     {
         IrInstructionId definition = function->values[value.value].definition;
         if (definition.value < function->instruction_count)
