@@ -820,9 +820,21 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
         }
         self.assertEqual(counts, expected)
         self.assertEqual(len(rows), sum(expected.values()))
+        subject_obligations = {}
+        for row in rows:
+            if row["role"] == "subject":
+                obligation = row["compile_obligation"]
+                subject_obligations[obligation] = subject_obligations.get(obligation, 0) + 1
+        self.assertEqual(subject_obligations, {
+            "supported-object-zero-fallback": 396,
+            "registered-non-object-control": 6,
+        })
         prose = " ".join((ROOT / "docs/native-retirement-census.md").read_text().split())
         sentence = (f"Its {len(rows)} explicit SHA-256 rows bind every tracked test byte at the approval point: "
-                    f"{expected['subject']} supported object subjects, {expected['negative-diagnostic-fixture']} "
+                    f"{expected['subject']} subject inputs "
+                    f"({subject_obligations['supported-object-zero-fallback']} supported-object subjects and "
+                    f"{subject_obligations['registered-non-object-control']} registered non-object controls), "
+                    f"{expected['negative-diagnostic-fixture']} "
                     f"registered rejection controls, {expected['support-file']} support files and "
                     f"{expected['dormant-custom-language']} dormant custom-language files.")
         self.assertIn(sentence, prose)

@@ -9,7 +9,7 @@ differential runner; it does not replace either or authorize backend retirement.
 The admitted input inventory is
 [`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 548
 explicit SHA-256 rows bind every tracked test byte at the approval point: 402
-subject inputs (397 supported-object subjects and 5 registered non-object
+subject inputs (396 supported-object subjects and 6 registered non-object
 controls), 12 registered rejection controls, 70 support files and 64 dormant
 custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
