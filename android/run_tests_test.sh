@@ -278,10 +278,15 @@ BUSTER_ANDROID_TEST_WRAPPER_PID_FILE="$state/wrapper.pid" \
         'test --verbose=1 --ci=1' >"$state/run.log" 2>&1 &
 timeout_pid=$!
 deadline=$((SECONDS + 5))
-while (( SECONDS < deadline )) && [[ ! -f $state/wrapper.pid || ! -f $state/producer.pid || ! -f $state/am-start.ready ]]; do
-    sleep 1
+while (( SECONDS < deadline )); do
+    if [[ -f $state/wrapper.pid && -f $state/producer.pid ]] &&
+       grep -qF 'ANDROID_MONITOR_START config=standalone timeout_seconds=30' "$state/run.log" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
 done
-if [[ ! -f $state/wrapper.pid || ! -f $state/producer.pid || ! -f $state/am-start.ready ]]; then
+if [[ ! -f $state/wrapper.pid || ! -f $state/producer.pid ]] ||
+   ! grep -qF 'ANDROID_MONITOR_START config=standalone timeout_seconds=30' "$state/run.log" 2>/dev/null; then
     echo "assertion failed: interrupt wrapper did not reach the monitor phase" >&2
     kill "$timeout_pid" >/dev/null 2>&1 || true
     exit 1

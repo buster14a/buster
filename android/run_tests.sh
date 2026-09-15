@@ -245,6 +245,7 @@ if [[ $start_status -ne 0 ]]; then
 fi
 
 test_phase=monitor
+printf 'ANDROID_MONITOR_START config=%s timeout_seconds=%s\n' "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$timeout_seconds"
 if wait "$monitor_reader_pid"; then
     monitor_reader_status=0
 else
