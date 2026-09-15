@@ -1684,62 +1684,64 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
             u64 argument_length = 0;
             bool in_quotes = false;
 
+            // Microsoft's documented C argument parsing, in its own order: a
+            // backslash run is counted first, because only a quote directly
+            // behind it is escaped; 2N backslashes decode to N and leave the
+            // quote as a delimiter, 2N+1 decode to N and the quote survives as
+            // a literal. A quote that stays a delimiter is the one place the
+            // doubled-quote rule applies: a second quote immediately inside a
+            // quoted argument is one literal quote, and quoting continues
+            // across the pair rather than closing and reopening (#637).
+            //
+            // Every step consumes at least as many input units as it writes,
+            // so `argument` stays within the single command-line-sized buffer
+            // allocated once above (#113/#486).
             while (i < command_line_length)
             {
-                char16 c = command_line[i];
-                if (!in_quotes && (c == ' ' || c == '\t'))
+                u64 backslash_count = 0;
+                while (i < command_line_length && command_line[i] == '\\')
+                {
+                    backslash_count += 1;
+                    i += 1;
+                }
+
+                bool copy_character = true;
+                if (i < command_line_length && command_line[i] == '"')
+                {
+                    if (!(backslash_count & 1))
+                    {
+                        if (in_quotes && i + 1 < command_line_length && command_line[i + 1] == '"')
+                        {
+                            // Step over the first quote of the pair and let the
+                            // copy below emit the second one literally.
+                            i += 1;
+                        }
+                        else
+                        {
+                            copy_character = false;
+                            in_quotes = !in_quotes;
+                        }
+                    }
+                    backslash_count /= 2;
+                }
+
+                for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
+                {
+                    argument[argument_length] = '\\';
+                    argument_length += 1;
+                }
+
+                if (i >= command_line_length || (!in_quotes && (command_line[i] == ' ' || command_line[i] == '\t')))
                 {
                     break;
                 }
 
-                if (c == '\\')
+                if (copy_character)
                 {
-                    u64 backslash_count = 0;
-                    while (i < command_line_length && command_line[i] == '\\')
-                    {
-                        backslash_count += 1;
-                        i += 1;
-                    }
-
-                    if (i < command_line_length && command_line[i] == '"')
-                    {
-                        for (u64 backslash_i = 0; backslash_i < backslash_count / 2; backslash_i += 1)
-                        {
-                            argument[argument_length] = '\\';
-                            argument_length += 1;
-                        }
-
-                        if (backslash_count & 1)
-                        {
-                            argument[argument_length] = '"';
-                            argument_length += 1;
-                        }
-                        else
-                        {
-                            in_quotes = !in_quotes;
-                        }
-                        i += 1;
-                    }
-                    else
-                    {
-                        for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
-                        {
-                            argument[argument_length] = '\\';
-                            argument_length += 1;
-                        }
-                    }
-                }
-                else if (c == '"')
-                {
-                    in_quotes = !in_quotes;
-                    i += 1;
-                }
-                else
-                {
-                    argument[argument_length] = c;
+                    argument[argument_length] = command_line[i];
                     argument_length += 1;
-                    i += 1;
                 }
+                i += 1;
             }
 
             argument[argument_length] = 0;
@@ -1893,11 +1895,18 @@ char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 st
     return result;
 }
 
+// Reserving zero elements moves the arena cursor to the String8 boundary the
+// first append would have aligned it to anyway, so the saved start is a real
+// arena position rather than a rounded-up one the cursor has not reached. An
+// empty builder then flushes to a zero-length slice at every valid initial
+// alignment instead of subtracting a larger start from a smaller cursor and
+// underflowing the byte count (#638).
 OsArgumentBuilder os_argument_builder_start(Arena* arena)
 {
+    (void)arena_allocate(arena, String8, 0);
     OsArgumentBuilder result = {
         .arena = arena,
-        .position = align_forward(arena->position, BUSTER_ALIGN_OF(String8)),
+        .position = arena->position,
     };
     return result;
 }
