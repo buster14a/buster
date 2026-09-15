@@ -196,21 +196,68 @@ case "$tool" in
                 fi
                 if [[ ${1:-} == devices ]]; then
                     case " $* " in
-                        *" -j "*) printf '{"devices":{}}\n' ;;
+                        *" -j "*)
+                            if [[ ${FAKE_IOS_BORROWED_DEVICE:-0} == 1 ]]; then
+                                printf '%s\n' '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"name":"buster-ci","udid":"00000000-0000-0000-0000-0000000000b0","isAvailable":true,"state":"Shutdown"}]}}'
+                            else
+                                printf '{"devices":{}}\n'
+                            fi
+                            ;;
                         *) printf 'fake iOS simulator list\n' ;;
                     esac
                 elif [[ ${1:-} == runtimes ]]; then
-                    printf '{"runtimes":[]}\n'
+                    if [[ ${FAKE_IOS_RUNTIME_AVAILABLE:-0} == 1 ]]; then
+                        printf '%s\n' '{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-5","version":"26.5","isAvailable":true,"supportedDeviceTypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro","name":"iPhone 17 Pro","productFamily":"iPhone"}]}]}'
+                    else
+                        printf '{"runtimes":[]}\n'
+                    fi
                 else
                     printf 'fake iOS simulator list\n'
                 fi
                 ;;
             delete)
+                if [[ ${1:-} != unavailable ]]; then
+                    if [[ ${FAKE_IOS_DELETE_SLEEP_SECONDS:-0} -ne 0 ]]; then
+                        sleep "${FAKE_IOS_DELETE_SLEEP_SECONDS}"
+                    fi
+                    if [[ ${FAKE_IOS_DELETE_STATUS:-0} -ne 0 ]]; then
+                        printf 'delete rejected\n' >&2
+                        exit "${FAKE_IOS_DELETE_STATUS}"
+                    fi
+                    printf '%s\n' "${1:-}" >>"$state/deleted"
+                fi
                 ;;
             boot)
                 : >"$state/booted"
                 ;;
             bootstatus)
+                bootstatus_count_file="$state/bootstatus.count"
+                bootstatus_count=0
+                if [[ -f $bootstatus_count_file ]]; then
+                    bootstatus_count=$(cat "$bootstatus_count_file")
+                fi
+                bootstatus_count=$((bootstatus_count + 1))
+                printf '%s\n' "$bootstatus_count" >"$bootstatus_count_file"
+                case "${FAKE_IOS_BOOTSTATUS_MODE:-success}" in
+                    timeout-first)
+                        if [[ $bootstatus_count -eq 1 ]]; then
+                            printf 'first readiness diagnostic\n'
+                            sleep "${FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS:-60}"
+                        fi
+                        ;;
+                    always-timeout)
+                        printf 'readiness diagnostic\n'
+                        sleep "${FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS:-60}"
+                        ;;
+                    numeric-124)
+                        printf 'numeric timeout-like status\n'
+                        exit 124
+                        ;;
+                    reject)
+                        printf 'readiness rejected\n' >&2
+                        exit "${FAKE_IOS_BOOTSTATUS_STATUS:-9}"
+                        ;;
+                esac
                 printf 'Device booted\n'
                 ;;
             install)
@@ -270,7 +317,36 @@ case "$tool" in
                 : >"$state/shutdown"
                 ;;
             create)
-                printf 'FAKE-UDID\n'
+                create_count_file="$state/create.count"
+                create_count=0
+                if [[ -f $create_count_file ]]; then
+                    create_count=$(cat "$create_count_file")
+                fi
+                create_count=$((create_count + 1))
+                printf '%s\n' "$create_count" >"$create_count_file"
+                if [[ ${FAKE_IOS_CREATE_STATUS:-0} -ne 0 \
+                    && (${FAKE_IOS_CREATE_FAIL_AFTER_FIRST:-0} != 1 || $create_count -gt 1) ]]; then
+                    printf 'create rejected\n' >&2
+                    exit "${FAKE_IOS_CREATE_STATUS}"
+                fi
+                create_udid=$(printf '00000000-0000-0000-0000-00000000000%s' "$create_count")
+                if [[ ${FAKE_IOS_CREATE_INVALID_OUTPUT:-0} == 1 && $create_count -gt 1 ]]; then
+                    printf 'create rejected diagnostic\n'
+                    exit 0
+                fi
+                if [[ ${FAKE_IOS_CREATE_SLEEP_SECONDS:-0} -ne 0 \
+                    && (${FAKE_IOS_CREATE_FAIL_AFTER_FIRST:-0} != 1 || $create_count -gt 1) ]]; then
+                    if [[ ${FAKE_IOS_CREATE_EMIT_BEFORE_HANG:-0} == 1 ]]; then
+                        printf '%s\n' "$create_udid"
+                    fi
+                    sleep "${FAKE_IOS_CREATE_SLEEP_SECONDS}"
+                fi
+                if [[ ${FAKE_IOS_CREATE_EMIT_BEFORE_HANG:-0} != 1 \
+                    || ${FAKE_IOS_CREATE_SLEEP_SECONDS:-0} -eq 0 \
+                    || ${FAKE_IOS_CREATE_FAIL_AFTER_FIRST:-0} != 1 \
+                    || $create_count -eq 1 ]]; then
+                    printf '%s\n' "$create_udid"
+                fi
                 ;;
             runtime)
                 ;;
