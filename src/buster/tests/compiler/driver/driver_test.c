@@ -9709,6 +9709,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             bool supported;
         } half_element_rows[] = {
             {S8("_Float16"), false},
+            {S8("__bf16"), false},
             {S8("float"), true},
             {S8("double"), true},
             {S8("short"), true},

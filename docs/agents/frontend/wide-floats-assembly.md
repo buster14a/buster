@@ -39,6 +39,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   are analyzed and then dropped unused. Lifting the restriction is
   backend-owned work: binary16 loads/stores, f16↔f32 conversion, and the SSE
   or NEON argument class.
+- **`__bf16` has a distinct bfloat16 representation.** Its own
+  `C_TYPE_BFLOAT16`, `TargetDataLayout.bfloat16_type` (two naturally aligned
+  bytes), and `IrType.float_format` discriminating `IR_FLOAT_FORMAT_BFLOAT16`
+  from `IR_FLOAT_FORMAT_IEEE` at the same 16-bit width; an equal-width
+  identity conversion between the two formats is invalid. Scalar constants
+  round once from the binary64 carrier through
+  `c_ir_bfloat16_bits_from_f64`, and integer-to-bfloat16 conversion uses
+  precision 8. No backend implements 16-bit float runtime operations, so a
+  `__bf16` value needed at run time is refused by the structured codegen
+  diagnostic, as binary16 is. Not established: mixed `_Float16`/`__bf16`
+  arithmetic (the usual arithmetic conversions refuse the pair pending
+  reference semantics), `long double` constant conversion to `__bf16`, and
+  exact resource-header builtin acceptance.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

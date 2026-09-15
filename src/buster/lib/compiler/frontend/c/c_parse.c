@@ -1100,9 +1100,13 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
         alignment = layout.unsigned_integer.alignment;
         break;
     case C_TYPE_FLOAT16:
-        size = layout.float16_type.size;
-        alignment = layout.float16_type.alignment;
+    case C_TYPE_BFLOAT16:
+    {
+        TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
+        size = narrow.size;
+        alignment = narrow.alignment;
         break;
+    }
     case C_TYPE_FLOAT:
         size = layout.float_type.size;
         alignment = layout.float_type.alignment;
@@ -2759,6 +2763,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
     case C_TYPE_VOID:
     case C_TYPE_BOOL:
     case C_TYPE_FLOAT16:
+    case C_TYPE_BFLOAT16:
     case C_TYPE_FLOAT:
     case C_TYPE_DOUBLE:
     case C_TYPE_LONG_DOUBLE:
@@ -2816,7 +2821,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* resul
     // computes the same result type.
     if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16)
     {
-        return c_parse_expression_scalar_type(result, C_TYPE_FLOAT16);
+        return left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16 ? C_TYPE_ID_INVALID
+                                                                 : c_parse_expression_scalar_type(result, C_TYPE_FLOAT16);
+    }
+    if (left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
+    {
+        return c_parse_expression_scalar_type(result, C_TYPE_BFLOAT16);
     }
     if (!c_parse_expression_integer_kind(left) || !c_parse_expression_integer_kind(right))
     {
@@ -3341,8 +3351,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 CTypeKind kind = result->types[last.value].kind;
                 kind = c_parse_expression_promoted_kind(kind);
-                last = (c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_FLOAT || kind == C_TYPE_DOUBLE ||
-                        kind == C_TYPE_LONG_DOUBLE)
+                last = (c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
+                        kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE)
                            ? c_parse_expression_scalar_type(result, kind)
                            : C_TYPE_ID_INVALID;
             }
@@ -5553,7 +5563,8 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     case 6:
     {
         return string_equal(spelling, S8("signed")) || string_equal(spelling, S8("double")) || string_equal(spelling, S8("extern")) ||
-               string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct"));
+               string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct")) ||
+               string_equal(spelling, S8("__bf16"));
     }
     case 7:
     {
@@ -5742,10 +5753,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_float16 = false;
+    bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
     bool seen_complex = false;
     bool seen_imaginary = false;
+    u32 bfloat16_count = 0;
     u32 long_count = 0;
     CType type = {
         .element_type = C_TYPE_ID_INVALID,
@@ -5840,6 +5853,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             seen_float16 = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__bf16")))
+        {
+            seen_bfloat16 = true;
+            bfloat16_count += 1;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("double")))
         {
             seen_double = true;
@@ -5878,10 +5897,19 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     {
         return C_TYPE_ID_INVALID;
     }
+    bool bfloat16_invalid = seen_bfloat16 && (!c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed,
+                                                                             seen_unsigned, seen_int128, seen_float, seen_double, seen_va_list,
+                                                                             long_count) ||
+                                            seen_float16 || seen_complex || seen_imaginary || bfloat16_count != 1);
+    if (bfloat16_invalid)
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("invalid type-specifier combination for __bf16"));
+    }
     // `_Imaginary` is recognized only so that a declaration spelled with it
     // is rejected here instead of parsed as an implicit int with a stray
     // identifier; no target this compiler emits for has imaginary types.
-    if (seen_imaginary || (seen_va_list && seen_complex))
+    if (bfloat16_invalid || seen_imaginary || (seen_va_list && seen_complex))
     {
         return C_TYPE_ID_INVALID;
     }
@@ -5896,15 +5924,20 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         // both accept; a complex integer type is a GNU extension this
         // frontend does not implement, so it refuses rather than dropping
         // the specifier.
-        type.kind = c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned,
-                                         seen_int128, long_count);
+        type.kind = seen_bfloat16 ? C_TYPE_INVALID
+                                  : c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed,
+                                                         seen_unsigned, seen_int128, long_count);
         if (type.kind == C_TYPE_INVALID)
         {
             return C_TYPE_ID_INVALID;
         }
         return c_parse_add_type(result, type);
     }
-    if (seen_va_list)
+    if (seen_bfloat16)
+    {
+        type.kind = C_TYPE_BFLOAT16;
+    }
+    else if (seen_va_list)
     {
         bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
                          seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
@@ -6685,10 +6718,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_float16 = false;
+    bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
     bool seen_complex = false;
     bool seen_imaginary = false;
+    u32 bfloat16_count = 0;
     u32 long_count = 0;
     u32 index = start;
     while (index < end)
@@ -6778,6 +6813,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             seen_float16 = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__bf16")))
+        {
+            seen_bfloat16 = true;
+            bfloat16_count += 1;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("double")))
         {
             seen_double = true;
@@ -6801,16 +6842,25 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     {
         result = C_TYPE_INVALID;
     }
+    else if (seen_bfloat16)
+    {
+        result = c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned, seen_int128, seen_float,
+                                                 seen_double, seen_va_list, long_count) &&
+                         !seen_float16 && !seen_complex && bfloat16_count == 1
+                     ? C_TYPE_BFLOAT16
+                     : C_TYPE_INVALID;
+    }
     else if (seen_va_list)
     {
         bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
-                         seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
+                         seen_bfloat16 || seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
         result = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
     }
     else if (seen_complex)
     {
-        result = c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned,
-                                      seen_int128, long_count);
+        result = seen_bfloat16 ? C_TYPE_INVALID
+                               : c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed,
+                                                      seen_unsigned, seen_int128, long_count);
     }
     // `_Float16` shares a specifier set with nothing, so its arm precedes
     // every kind it refuses to combine with: `_Float16 char` is not a `char`.
@@ -6994,8 +7044,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
     // GNU's vector_size accepts any integer or floating element; `_Float16`
     // joins the ladder because clang's `avx512fp16intrin.h` builds `__m512h`,
     // `__m256h` and `__m128h` out of it.
-    bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_FLOAT ||
-                      base_kind == C_TYPE_DOUBLE;
+    bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
+                      base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
     if (!arithmetic)
     {
         return C_TYPE_ID_INVALID;
@@ -9593,6 +9643,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             case C_TYPE_INVALID:
             case C_TYPE_VOID:
             case C_TYPE_FLOAT16:
+            case C_TYPE_BFLOAT16:
             case C_TYPE_FLOAT:
             case C_TYPE_DOUBLE:
             case C_TYPE_LONG_DOUBLE:
@@ -11229,6 +11280,7 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
         case C_TYPE_INT128:
         case C_TYPE_UNSIGNED_INT128:
         case C_TYPE_FLOAT16:
+        case C_TYPE_BFLOAT16:
         case C_TYPE_FLOAT:
         case C_TYPE_DOUBLE:
         case C_TYPE_LONG_DOUBLE:

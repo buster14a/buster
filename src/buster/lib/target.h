@@ -241,6 +241,7 @@ struct TargetDataLayout
     // here stores it in two naturally aligned bytes; whether the backend can
     // compute with it is a separate question the frontend asks elsewhere.
     TargetTypeLayout float16_type;
+    TargetTypeLayout bfloat16_type;
     TargetTypeLayout float_type;
     TargetTypeLayout double_type;
     TargetTypeLayout long_double_type;

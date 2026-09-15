@@ -42,6 +42,7 @@ enum
     LLVM_BC_TYPE_DOUBLE = 4,
     LLVM_BC_TYPE_INTEGER = 7,
     LLVM_BC_TYPE_HALF = 10,
+    LLVM_BC_TYPE_BFLOAT = 23,
     LLVM_BC_TYPE_ARRAY = 11,
     LLVM_BC_TYPE_VECTOR = 12,
     LLVM_BC_TYPE_X86_FP80 = 13,
@@ -754,7 +755,7 @@ static bool llvm_bc_add_ir_type(LlvmBcContext* context, u32 type_index)
             switch (type->bit_width)
             {
             case 16:
-                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_HALF, 0, 0);
+                result = llvm_bc_add_type_record(context, type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? LLVM_BC_TYPE_BFLOAT : LLVM_BC_TYPE_HALF, 0, 0);
                 break;
             case 32:
                 result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FLOAT, 0, 0);

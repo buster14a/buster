@@ -18993,9 +18993,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND ||
                              instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE))
                         {
+                            bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
+                            if (source_type->float_format != IR_FLOAT_FORMAT_IEEE || target_type->float_format != IR_FLOAT_FORMAT_IEEE ||
+                                source_type->bit_width != (extend ? 32 : 64) || target_type->bit_width != (extend ? 64 : 32))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, value_offsets[instruction->operands[0].value],
                                                                                (u32)source_type->layout.size, false);
-                            codegen_emit_u32(&buffer, instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND ? 0x1e22c000 : 0x1e624000);
+                            codegen_emit_u32(&buffer, extend ? 0x1e22c000 : 0x1e624000);
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, result_offset, (u32)target_type->layout.size, true);
                             instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
@@ -19004,6 +19011,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
                              instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER))
                         {
+                            if (source_type->float_format != IR_FLOAT_FORMAT_IEEE ||
+                                (source_type->bit_width != 32 && source_type->bit_width != 64))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, value_offsets[instruction->operands[0].value],
                                                                                (u32)source_type->layout.size, false);
                             u32 encoded = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ? 0x9e380000 : 0x9e390000;

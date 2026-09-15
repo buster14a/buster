@@ -420,7 +420,8 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
     case C_TYPE_UNSIGNED_INT128:
         return S8("unsigned __int128");
     case C_TYPE_FLOAT16:
-        return S8("_Float16");
+    case C_TYPE_BFLOAT16:
+        return kind == C_TYPE_BFLOAT16 ? S8("__bf16") : S8("_Float16");
     case C_TYPE_FLOAT:
         return S8("float");
     case C_TYPE_DOUBLE:
@@ -530,10 +531,14 @@ BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind
         *alignment = layout.unsigned_integer128.alignment;
         return true;
     case C_TYPE_FLOAT16:
+    case C_TYPE_BFLOAT16:
+    {
+        TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
         *ir_kind = IR_TYPE_FLOAT;
-        *bit_width = layout.float16_type.bit_width;
-        *alignment = layout.float16_type.alignment;
+        *bit_width = narrow.bit_width;
+        *alignment = narrow.alignment;
         return true;
+    }
     case C_TYPE_FLOAT:
         *ir_kind = IR_TYPE_FLOAT;
         *bit_width = layout.float_type.bit_width;
@@ -686,6 +691,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
                                                               .bit_width = bit_width,
                                                               .is_signed = is_signed,
                                                               .is_nullptr = kind == C_TYPE_NULLPTR,
+                                                              .float_format = kind == C_TYPE_BFLOAT16 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE,
                                                           });
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
@@ -3026,6 +3032,9 @@ BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* sou
 BUSTER_C_INTERNAL u64 c_ir_float16_bits_from_f64(f64 value);
 BUSTER_C_INTERNAL f64 c_ir_float16_to_f64(u64 bits);
 BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value);
+BUSTER_C_INTERNAL u64 c_ir_bfloat16_bits_from_f64(f64 value);
+BUSTER_C_INTERNAL f64 c_ir_bfloat16_to_f64(u64 bits);
+BUSTER_C_INTERNAL f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type, u8* bytes, u64 offset, u64 bits, bool sign_extend);
 // The same store through an explicit unit width, which is what a bit-field
 // whose packing narrowed its storage unit writes through.
@@ -7034,7 +7043,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
         IrType* source_element = ir_type_from_id(&builder->program->types, source_value->element_type);
         IrType* target_element = ir_type_from_id(&builder->program->types, target_value->element_type);
         if (source_element && target_element && source_element->kind == target_element->kind &&
-            source_element->bit_width == target_element->bit_width && source_element->is_signed == target_element->is_signed)
+            source_element->bit_width == target_element->bit_width && source_element->is_signed == target_element->is_signed &&
+            (source_element->kind != IR_TYPE_FLOAT || source_element->float_format == target_element->float_format))
         {
             return c_ir_emit_vector_alias_conversion(builder, value, target_type, source);
         }
@@ -7159,9 +7169,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     else if (source_value->kind == IR_TYPE_FLOAT && target_value->kind == IR_TYPE_FLOAT)
     {
-        operation = source_value->bit_width < target_value->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
-                    : source_value->bit_width > target_value->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
-                                                                        : IR_CONVERSION_IDENTITY;
+        if (source_value->bit_width == target_value->bit_width && source_value->float_format != target_value->float_format)
+        {
+            IrValueId widened = c_ir_emit_cast_instruction(builder, value, builder->f32_type, IR_CONVERSION_FLOAT_EXTEND, source);
+            if (widened.value != IR_ID_UNDERLYING_INVALID)
+            {
+                value = widened;
+                operation = IR_CONVERSION_FLOAT_TRUNCATE;
+            }
+        }
+        else
+        {
+            operation = source_value->bit_width < target_value->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
+                        : source_value->bit_width > target_value->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
+                                                                            : IR_CONVERSION_IDENTITY;
+        }
     }
     else if (source_value->kind == IR_TYPE_INTEGER && target_value->kind == IR_TYPE_FLOAT)
     {
@@ -7254,7 +7276,8 @@ BUSTER_C_INTERNAL bool c_ir_scalar_shapes_agree(CIntegerIrBuilder* builder, IrTy
     if (!result && left_type && right_type && left_type->kind == right_type->kind)
     {
         result = left_type->kind != IR_TYPE_INTEGER && left_type->kind != IR_TYPE_FLOAT && left_type->kind != IR_TYPE_BOOLEAN;
-        result = result || (left_type->bit_width == right_type->bit_width && left_type->is_signed == right_type->is_signed);
+        result = result || (left_type->bit_width == right_type->bit_width && left_type->is_signed == right_type->is_signed &&
+                            (left_type->kind != IR_TYPE_FLOAT || left_type->float_format == right_type->float_format));
     }
 
     return result;
@@ -29287,7 +29310,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
         {
             return left_type;
         }
-        return right->bit_width > left->bit_width ? right_type : left_type;
+        return left->bit_width == right->bit_width && left->float_format != right->float_format
+                   ? IR_TYPE_ID_INVALID
+                   : right->bit_width > left->bit_width ? right_type : left_type;
     }
     if (left_type.value == right_type.value)
     {
@@ -37483,7 +37508,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                         if (type->bit_width > 64) return false;
                         if (type->bit_width == 16)
                         {
-                            bits = c_ir_float16_bits_from_f64(converted.floating);
+                            bits = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(converted.floating)
+                                                                                  : c_ir_float16_bits_from_f64(converted.floating);
                         }
                         else if (type->bit_width == 32)
                         {
@@ -37573,7 +37599,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                 value = negative ? -value : value;
                 if (type->bit_width == 16)
                 {
-                    c_ir_constant_store_bits(program, type, bytes, task.offset, c_ir_float16_bits_from_f64(value), false);
+                    c_ir_constant_store_bits(program, type, bytes, task.offset,
+                                           type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(value)
+                                                                                          : c_ir_float16_bits_from_f64(value),
+                                           false);
                 }
                 else if (type->bit_width == 32)
                 {
@@ -40203,7 +40232,7 @@ BUSTER_C_INTERNAL void c_ir_constant_initializer_store_float_leaf(IrType* child,
     u64 bits = 0;
     if (child->bit_width == 16)
     {
-        bits = c_ir_float16_bits_from_f64(floating);
+        bits = child->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(floating) : c_ir_float16_bits_from_f64(floating);
     }
     else if (child->bit_width == 32)
     {
@@ -40245,7 +40274,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_integer_leaf(CIntegerIrBui
         else
         {
             CIrConstantValue source = {.integer = integer, .kind = C_IR_CONSTANT_INTEGER};
-            f64 floating = c_ir_constant_integer_to_float(&source, literal_type, child->bit_width == 32 ? 24 : 53);
+            u32 precision = child->bit_width == 16   ? (child->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? 8u : 11u)
+                            : child->bit_width == 32 ? 24u
+                                                     : 53u;
+            f64 floating = c_ir_constant_integer_to_float(&source, literal_type, precision);
             c_ir_constant_initializer_store_float_leaf(child, floating, bytes);
         }
     }
@@ -41435,7 +41467,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
                 f64 value = 0.0;
                 if (type->bit_width == 16)
                 {
-                    value = c_ir_float16_to_f64(global->initializer_bits);
+                    value = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_to_f64(global->initializer_bits)
+                                                                         : c_ir_float16_to_f64(global->initializer_bits);
                 }
                 else if (type->bit_width == 32)
                 {
@@ -41752,6 +41785,94 @@ BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value)
     return c_ir_float16_to_f64(c_ir_float16_bits_from_f64(value));
 }
 
+enum
+{
+    C_IR_BFLOAT16_SIGNIFICAND_BITS = 7,
+    C_IR_BFLOAT16_EXPONENT_BIAS = 127,
+    C_IR_BFLOAT16_EXPONENT_SPECIAL = 0xff,
+    C_IR_BFLOAT16_SIGNIFICAND_SHIFT = 52 - C_IR_BFLOAT16_SIGNIFICAND_BITS,
+    C_IR_BFLOAT16_INFINITY = C_IR_BFLOAT16_EXPONENT_SPECIAL << C_IR_BFLOAT16_SIGNIFICAND_BITS,
+    C_IR_BFLOAT16_QUIET_NAN = C_IR_BFLOAT16_INFINITY | (1 << (C_IR_BFLOAT16_SIGNIFICAND_BITS - 1)),
+};
+
+BUSTER_C_INTERNAL u64 c_ir_bfloat16_bits_from_f64(f64 value)
+{
+    u64 source = 0;
+    memcpy(&source, &value, sizeof(source));
+    u64 sign = (source >> 48) & UINT64_C(0x8000);
+    s32 exponent = (s32)((source >> 52) & 0x7ff);
+    u64 mantissa = source & UINT64_C(0x000fffffffffffff);
+    u64 magnitude;
+    if (exponent == 0x7ff)
+    {
+        magnitude = mantissa ? (u64)C_IR_BFLOAT16_QUIET_NAN : (u64)C_IR_BFLOAT16_INFINITY;
+    }
+    else if (!exponent)
+    {
+        magnitude = 0;
+    }
+    else
+    {
+        s32 target_exponent = exponent - 1023 + C_IR_BFLOAT16_EXPONENT_BIAS;
+        u64 significand = mantissa | (UINT64_C(1) << 52);
+        u32 shift = target_exponent > 0 ? (u32)C_IR_BFLOAT16_SIGNIFICAND_SHIFT
+                                        : (u32)(C_IR_BFLOAT16_SIGNIFICAND_SHIFT + 1 - target_exponent);
+        if (target_exponent >= C_IR_BFLOAT16_EXPONENT_SPECIAL)
+        {
+            magnitude = (u64)C_IR_BFLOAT16_INFINITY;
+        }
+        else if (shift >= 64)
+        {
+            magnitude = 0;
+        }
+        else
+        {
+            u64 kept = significand >> shift;
+            u64 discarded = significand & ((UINT64_C(1) << shift) - 1);
+            u64 halfway = UINT64_C(1) << (shift - 1);
+            kept += discarded > halfway || (discarded == halfway && (kept & 1));
+            magnitude = target_exponent > 0 ? ((u64)target_exponent << C_IR_BFLOAT16_SIGNIFICAND_BITS) + kept -
+                                                  (UINT64_C(1) << C_IR_BFLOAT16_SIGNIFICAND_BITS)
+                                            : kept;
+        }
+    }
+    return sign | magnitude;
+}
+
+BUSTER_C_INTERNAL f64 c_ir_bfloat16_to_f64(u64 bits)
+{
+    u64 sign = (bits & UINT64_C(0x8000)) << 48;
+    u32 exponent = (u32)((bits >> C_IR_BFLOAT16_SIGNIFICAND_BITS) & C_IR_BFLOAT16_EXPONENT_SPECIAL);
+    u64 mantissa = bits & ((UINT64_C(1) << C_IR_BFLOAT16_SIGNIFICAND_BITS) - 1);
+    u64 result_bits;
+    if (exponent == C_IR_BFLOAT16_EXPONENT_SPECIAL)
+    {
+        result_bits = sign | UINT64_C(0x7ff0000000000000) | (mantissa << C_IR_BFLOAT16_SIGNIFICAND_SHIFT);
+    }
+    else if (exponent)
+    {
+        result_bits = sign | ((u64)(exponent - C_IR_BFLOAT16_EXPONENT_BIAS + 1023) << 52) | (mantissa << C_IR_BFLOAT16_SIGNIFICAND_SHIFT);
+    }
+    else if (mantissa)
+    {
+        u32 top = 63u - leading_zeroes_u64(mantissa);
+        s32 unbiased = (s32)top - (C_IR_BFLOAT16_EXPONENT_BIAS + C_IR_BFLOAT16_SIGNIFICAND_BITS - 1);
+        result_bits = sign | ((u64)(unbiased + 1023) << 52) | ((mantissa << (52 - top)) & UINT64_C(0x000fffffffffffff));
+    }
+    else
+    {
+        result_bits = sign;
+    }
+    f64 result;
+    memcpy(&result, &result_bits, sizeof(result));
+    return result;
+}
+
+BUSTER_C_INTERNAL f64 c_ir_bfloat16_round(f64 value)
+{
+    return c_ir_bfloat16_to_f64(c_ir_bfloat16_bits_from_f64(value));
+}
+
 // Round an integer magnitude once, at the destination precision. Converting
 // through a signed host integer loses unsigned values; converting through f64
 // before f32 can double-round. The two-limb path also retains all 128 bits.
@@ -41941,8 +42062,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                               (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type));
                     if (success)
                     {
+                        u32 precision = target->bit_width == 16   ? (target->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? 8u : 11u)
+                                        : target->bit_width == 32 ? 24u
+                                                                  : 53u;
                         f64 floating = source.kind == C_IR_CONSTANT_FLOAT ? source.floating
-                                                                         : c_ir_constant_integer_to_float(&source, source_type, target->bit_width == 32 ? 24 : 53);
+                                                                         : c_ir_constant_integer_to_float(&source, source_type, precision);
                         // A floating source still rounds at the destination's
                         // precision; the integer path has already rounded once.
                         // binary16 rounds from the binary64 carrier in both
@@ -41950,7 +42074,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                         // integer path's own rounding cannot have moved a
                         // result across a half-precision boundary first.
                         if (target->bit_width == 16)
-                            floating = c_ir_float16_round(floating);
+                            floating = target->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_round(floating)
+                                                                                        : c_ir_float16_round(floating);
                         else if (target->bit_width == 32)
                             floating = (f64)(f32)floating;
                         *result = (CIrConstantValue){.type = target_type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
@@ -42364,7 +42489,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         // another operation or conversion can observe excess precision; a
         // `_Float16` expression rounds for the same reason, one format down.
         if (type->bit_width == 16)
-            left.floating = c_ir_float16_round(left.floating);
+            left.floating = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_round(left.floating) : c_ir_float16_round(left.floating);
         else if (type->bit_width == 32)
             left.floating = (f64)(f32)left.floating;
         *result = left;
@@ -43393,7 +43518,8 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
                 {
                     // `converted` has already been rounded to binary16 by the
                     // cast above, so the encoding here cannot round twice.
-                    global->initializer_bits = c_ir_float16_bits_from_f64(converted.floating);
+                    global->initializer_bits = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(converted.floating)
+                                                                                              : c_ir_float16_bits_from_f64(converted.floating);
                 }
                 else if (type->bit_width == 32)
                 {
@@ -44219,13 +44345,14 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
             // The `f16` suffix reports as 'h'; see c_ir_float_suffix. A
             // literal that already has the object's type has nothing left to
             // round, so C23 6.7.1p6's exactness rule does not apply to it.
-            bool source_is_half = suffix == 'h';
-            f64 narrowed = c_ir_float16_round(value);
+            bool bfloat16 = type->float_format == IR_FLOAT_FORMAT_BFLOAT16;
+            bool source_is_half = !bfloat16 && suffix == 'h';
+            f64 narrowed = bfloat16 ? c_ir_bfloat16_round(value) : c_ir_float16_round(value);
             if (declaration.is_constexpr && !source_is_half && narrowed != value)
             {
                 return false;
             }
-            global->initializer_bits = c_ir_float16_bits_from_f64(value);
+            global->initializer_bits = bfloat16 ? c_ir_bfloat16_bits_from_f64(value) : c_ir_float16_bits_from_f64(value);
         }
         else if (type->bit_width == 32)
         {

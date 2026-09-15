@@ -672,6 +672,7 @@ typedef enum CTypeKind
     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
     // `__m512h` out of it, which is what brought it in.
     C_TYPE_FLOAT16,
+    C_TYPE_BFLOAT16,
     C_TYPE_FLOAT,
     C_TYPE_DOUBLE,
     C_TYPE_LONG_DOUBLE,
