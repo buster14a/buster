@@ -151,7 +151,8 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 548 input rows, 402 supported subjects, 77,184 support-contract identities,
+the 548 input rows, 402 subject inputs (397 supported-object subjects and five
+non-object controls), 77,184 support-contract identities,
 or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
 generated data, or any other non-repo dependency remain visible diagnostic rows
 until their owning gate supplies that setup.
@@ -192,6 +193,16 @@ The current 402-subject support contract therefore freezes exactly
 `402 x 12 x 2 x 2 x 4 = 77,184` row identities. Applicability evidence is an
 additional validator-owned projection; it never removes a row or changes the
 input-byte ledger.
+
+The five subject-level non-object controls are `basic_c_macro_options.c`,
+`ebpf_scalar_regression.c`, `runtime_boundary_regression.c`,
+`wasm_memory_alignment_regression.c` and `windows_unicode_regression.c`.
+Their source registration is authenticated as
+`registered-non-object-control`: every matrix identity remains in `rows.tsv`,
+but the producer emits a retained-control record and does not invoke an object
+compiler for that harness. The valid-C `basic_c_sizeof_anonymous_aggregate.c`
+fixture remains a supported-object subject; its compiler debt stays admitted
+and fatal until the compiler supports it.
 
 Every row supplies `-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char
 -fverify-codegen -nostdinc`, the frozen resource include, an explicit target,
@@ -307,7 +318,7 @@ classes are:
 | Class | Meaning | Owner |
 | --- | --- | --- |
 | `admitted-supported` | The supported-object obligation is admitted to the candidate compiler. | candidate |
-| `retained-control` | The allocator-`none` direct compilation is retained as the group control. | reference |
+| `retained-control` | The allocator-`none` direct compilation, or an authenticated non-object control, is retained as the control. | reference/control |
 | `retained-reference` | Candidate evidence is retained, but its direct reference is unresolved. | reference |
 | `platform-inapplicable` | Native execution belongs to a platform owner that is unavailable for this object cell. | platform |
 | `unavailable` | Compiler/process/evidence admission is unavailable or not admitted. | admission |
@@ -331,7 +342,13 @@ an unexpected defect is still fatal. The acceptance gate additionally requires
 every retained reference/control to resolve. This class distinction does not
 waive unexpected compile, object, process, fallback or telemetry defects: those
 remain fatal for any applicable cell, including platform-inapplicable controls.
-A production manifest is admitted only as `profile=full-census`: it must bind
+Authenticated platform-inapplicable and unavailable cells are instead
+represented by explicit non-executed results and row-bound
+`applicability-skips.tsv` provenance. A skip is valid only with the exact
+zero-artifact/zero-counter shape; malformed status, process, fallback, object
+or telemetry evidence remains fatal, and a caller-supplied disposition cannot
+select the skip path. A production manifest is admitted only as
+`profile=full-census`: it must bind
 the exact 548-input/402-subject/77,184-row, four-shard population. The producer
 also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
 directory and binds its SHA-256 in the manifest. The validator checks that
@@ -339,6 +356,18 @@ authenticated seven-column ledger, including all 192 immutable row identities,
 before deriving applicability; result `disposition` text cannot add, remove or
 reclassify a declared gap. Smaller fixtures must explicitly use
 `profile=self-test` and can never satisfy production profile acceptance.
+The producer also copies the immutable
+`docs/native-retirement-applicability-v1.tsv` projection and binds its SHA-256.
+For the full profile it must contain the exact authenticated 440 fixture/target
+entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
+Only this projection can classify a target-specific residual as
+`platform-inapplicable` or `unavailable`; a result disposition, row count,
+fallback counter or diagnostic cannot forge applicability. Every 77,184 row
+identity and input byte remains in the manifest and validation partition.
+The five whole-fixture non-object controls are authenticated by the support
+contract instead of receiving row outcome classes in this fixture/target
+ledger. The aggregate report also records the skip evidence path alongside
+`applicability.tsv` and `residual.tsv`.
 A bounded, deterministic
 `residual.tsv` is emitted beside `applicability.tsv`; it retains at most 256
 diagnostic rows and joins fallback attribution to fixture, function, target,

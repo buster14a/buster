@@ -220,6 +220,7 @@ class MaterializerTests(unittest.TestCase):
             (repository / "docs/native-retirement-dependencies-v1.json").read_text(encoding="utf-8"))
         production_records, _metadata = materializer.parse_manifest(production_descriptor)
         replay = materializer._archived_replay(production_descriptor, production_records)
+        materializer._verify_archived_fixture_inputs(replay, repository)
         self.assertEqual(replay["projection"], {
             "fixtures": 28, "mir_candidate_rows": 4032,
             "repo_owned_project_header_rows_closed": 264,

@@ -58,6 +58,8 @@ class ContractTests(unittest.TestCase):
                           "bytes": str(len(source)), "sha256": sha(source)}]
         write_table(directory / "support-contract.tsv", contract.SUPPORT_FIELDS, contract_rows)
         write_table(directory / "supported-gap-ledger.tsv", contract.SUPPORTED_GAP_LEDGER_FIELDS, [])
+        write_table(directory / "applicability-ledger.tsv", contract.APPLICABILITY_LEDGER_FIELDS, [])
+        write_table(directory / "applicability-skips.tsv", contract.APPLICABILITY_SKIP_FIELDS, [])
         input_rows = [{"path": "tests/unit.c", "role": "subject",
                        "compile_obligation": "supported-object-zero-fallback", "bytes": str(len(source)),
                        "buster_hash_64": "0", "sha256": sha(source), "fixture_recipe": "compiler-default",
@@ -96,6 +98,9 @@ class ContractTests(unittest.TestCase):
             "supported_gap_count": "0", "supported_gap_sha256": contract.canonical_rows_digest([]),
             "supported_gap_ledger": "docs/native-retirement-supported-gaps-v1.tsv",
             "supported_gap_ledger_sha256": sha((directory / "supported-gap-ledger.tsv").read_bytes()),
+            "applicability_ledger": "docs/native-retirement-applicability-v1.tsv",
+            "applicability_ledger_sha256": sha((directory / "applicability-ledger.tsv").read_bytes()),
+            "applicability_ledger_entries": "0",
             "manifest_only": "0", "timeout_seconds": "30",
             "function_evidence": "all-observed-fallbacks-plus-first-fatal-diagnostic",
             "fixture_flags": "exact-path-recipes-in-inputs.tsv",
@@ -185,6 +190,48 @@ class ContractTests(unittest.TestCase):
                              "supported_gap_sha256": contract.canonical_rows_digest(row_numbers),
                              "supported_gap_ledger_sha256": sha((shard / "supported-gap-ledger.tsv").read_bytes())})
             manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
+
+    def install_applicability(self, records):
+        """Install one identical authenticated projection in every shard."""
+        input_fields, input_rows = read_table(self.shards[0] / "inputs.tsv")
+        del input_fields
+        subject_hash = {row["path"]: row["sha256"] for row in input_rows if row["role"] == "subject"}
+        ledger_rows = []
+        for fixture, target, classification, reason in sorted(records):
+            ledger_rows.append({"fixture": fixture, "target": target,
+                                "fixture_sha256": subject_hash[fixture],
+                                "applicability": classification, "reason": reason})
+        for shard in self.shards:
+            path = shard / "applicability-ledger.tsv"
+            write_table(path, contract.APPLICABILITY_LEDGER_FIELDS, ledger_rows)
+            manifest_path = shard / "manifest.txt"
+            manifest = dict(line.split("=", 1) for line in manifest_path.read_text(encoding="utf-8").splitlines())
+            manifest.update({"applicability_ledger_sha256": sha(path.read_bytes()),
+                             "applicability_ledger_entries": str(len(ledger_rows))})
+            manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
+            _row_fields, rows = read_table(shard / "rows.tsv")
+            _result_fields, results = read_table(shard / "results.tsv")
+            projection = {(record["fixture"], record["target"]):
+                          (record["applicability"], record["reason"]) for record in ledger_rows}
+            skip_rows = []
+            for row in rows:
+                if row["selected"] != "1":
+                    continue
+                skip = contract.expected_nonexecuted(
+                    row, *(projection.get((row["fixture"], row["target"]), ("", ""))))
+                if skip:
+                    skip_class, skip_reason = skip
+                    skip_rows.append({"row": row["row"], "group": row["group"], "fixture": row["fixture"],
+                                      "target": row["target"], "allocator": row["allocator"],
+                                      "applicability": skip_class, "reason": skip_reason})
+                    result = next(item for item in results if item["row"] == row["row"])
+                    result.update({"disposition": skip_class, "kind": "0", "status": "0",
+                                   "counters_valid": "1", "target_identity_valid": "1",
+                                   "function_records_valid": "1", "functions": "0", "fallbacks": "0",
+                                   "baseline_functions": "0", "object_bytes": "0", "object_hash": "0",
+                                   "object_sha256": ""})
+            write_table(shard / "results.tsv", contract.RESULT_FIELDS, results)
+            write_table(shard / "applicability-skips.tsv", contract.APPLICABILITY_SKIP_FIELDS, skip_rows)
 
     def install_single_fallback(self, shard_index, row_number, telemetry):
         """Install one row-bound fallback and its aggregate counters."""
@@ -329,6 +376,110 @@ class ContractTests(unittest.TestCase):
             self.assertIn(record["allocator"], contract.ALLOCATORS[1:])
             self.assertIn(record["frontend_lowering"], {"local-backed-canonical", "direct-ssa"})
             self.assertIn(record["PIC"], {"0", "1"})
+
+    def test_checked_in_applicability_projection_is_canonical_and_authenticated(self):
+        ledger_path = Path(__file__).resolve().parents[1] / "docs/native-retirement-applicability-v1.tsv"
+        fields, records = read_table(ledger_path)
+        self.assertEqual(fields, contract.APPLICABILITY_LEDGER_FIELDS)
+        identities = [(record["fixture"], record["target"]) for record in records]
+        self.assertEqual(len(records), contract.FULL_APPLICABILITY_LEDGER_COUNT)
+        self.assertEqual(len(set(identities)), contract.FULL_APPLICABILITY_LEDGER_COUNT)
+        self.assertEqual(identities, sorted(identities))
+        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_APPLICABILITY_LEDGER_SHA256)
+        for record in records:
+            self.assertIn(record["applicability"], contract.AUTHENTICATED_APPLICABILITY_CLASSES)
+            self.assertTrue(record["fixture_sha256"])
+            self.assertRegex(record["reason"], r"^[A-Za-z0-9._-]+$")
+
+    def test_authenticated_nonexecution_requires_structurally_valid_evidence(self):
+        target = next(iter(contract.TARGETS))
+        self.install_applicability({("tests/unit.c", target, "platform-inapplicable", "source-registration-test")})
+        clean = self.validate(require_clean=False)
+        self.assertIn(1, clean["inapplicable_rows"])
+        self.assertNotIn(1, clean["candidate_failure_rows"])
+        fields, results = read_table(self.shards[0] / "results.tsv")
+        candidate = next(row for row in results if row["row"] == "1")
+        candidate.update({"kind": "1", "status": "1", "disposition": "admitted-supported"})
+        write_table(self.shards[0] / "results.tsv", fields, results)
+
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+        # A producer-controlled disposition cannot select non-execution on its
+        # own when the authenticated skip evidence is absent.
+        self.install_applicability({("tests/unit.c", target, "platform-inapplicable", "source-registration-test")})
+        fields, results = read_table(self.shards[0] / "results.tsv")
+        candidate = next(row for row in results if row["row"] == "1")
+        candidate["disposition"] = "strict-success"
+        write_table(self.shards[0] / "results.tsv", fields, results)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_authenticated_admitted_supported_precedes_structured_reference_state(self):
+        target = next(iter(contract.TARGETS))
+        self.install_applicability({("tests/unit.c", target, "admitted-supported", "source-reviewed-residual")})
+        self.install_structured_reference_failure()
+
+        report = self.validate(require_clean=False)
+        self.assertIn(0, report["reference_failure_rows"])
+        self.assertIn(0, report["acceptance_failure_rows"])
+        self.assertNotIn(0, report["candidate_failure_rows"])
+        _fields, applicability_rows = read_table(self.root / "applicability.tsv")
+        row_zero = next(row for row in applicability_rows if row["row"] == "0")
+        self.assertEqual(row_zero["applicability"], "admitted-supported")
+        self.assertEqual(row_zero["admission"], "admitted-supported")
+        self.assertEqual(row_zero["reason"], "source-reviewed-residual")
+        self.assertEqual(row_zero["reference_failure"], "1")
+        self.assertFalse(report["clean_acceptance"])
+
+    def test_authenticated_unavailable_nonexecution_remains_fail_closed(self):
+        target = "x86_64-apple-ios"
+        self.install_applicability({("tests/unit.c", target, "unavailable", "sdk-not-materialized")})
+        report = self.validate(require_clean=False)
+        _fields, applicability_rows = read_table(self.root / "applicability.tsv")
+        row = next(item for item in applicability_rows if item["target"] == target and item["allocator"] == "none")
+        self.assertEqual(row["applicability"], "unavailable")
+        self.assertNotEqual(row["candidate_failure"], "1")
+
+        shard = self.shards[0]
+        result_fields, results = read_table(shard / "results.tsv")
+        malformed = next(item for item in results if item["row"] == row["row"])
+        malformed["counters_valid"] = "0"
+        write_table(shard / "results.tsv", result_fields, results)
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_applicability_projection_bytes_and_fixture_identity_are_authenticated(self):
+        target = next(iter(contract.TARGETS))
+        self.install_applicability({("tests/unit.c", target, "unavailable", "source-registration-test")})
+        path = self.shards[0] / "applicability-ledger.tsv"
+        path.write_bytes(path.read_bytes().replace(b"source-registration-test", b"tampered-reason"))
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+        self.install_applicability({("tests/unit.c", target, "unavailable", "source-registration-test")})
+        fields, records = read_table(path)
+        records[0]["fixture_sha256"] = "0" * 64
+        write_table(path, fields, records)
+        for shard in self.shards:
+            if shard == self.shards[0]:
+                continue
+            other = shard / "applicability-ledger.tsv"
+            other.write_bytes(path.read_bytes())
+            manifest_path = shard / "manifest.txt"
+            manifest = dict(line.split("=", 1) for line in manifest_path.read_text(encoding="utf-8").splitlines())
+            manifest["applicability_ledger_sha256"] = sha(other.read_bytes())
+            manifest_path.write_text("".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8")
+        with self.assertRaises(AssertionError):
+            self.validate(require_clean=False)
+
+    def test_applicability_projection_cannot_reclassify_declared_gap(self):
+        target = next(iter(contract.TARGETS))
+        identity = ("tests/unit.c", target, "local-backed-canonical", "0", "mir-stack")
+        self.declare_gaps({identity})
+        self.install_applicability({("tests/unit.c", target, "platform-inapplicable", "source-registration-test")})
+        with self.assertRaisesRegex(AssertionError, "supported gap was reclassified"):
+            self.validate(require_clean=False)
 
     def test_checked_in_support_contract_replays_every_tree_path(self):
         root = Path(__file__).resolve().parents[1]

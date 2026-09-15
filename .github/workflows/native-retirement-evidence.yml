@@ -7,7 +7,10 @@ on:
     paths:
       - .github/workflows/native-retirement-evidence.yml
       - docs/native-retirement-dependencies-v1.json
+      - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-census.md
       - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-applicability-v1.tsv
       - docs/performance-audits/evidence/2026-09-12-retirement/**
       - tools/native_retirement_materializer.py
       - tools/native_retirement_materializer_test.py
