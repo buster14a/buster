@@ -229,6 +229,25 @@ BUSTER_GLOBAL_LOCAL void bq_test_physical_temp_paths(void)
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_workspace_root_group_policy(void)
+{
+    char root[BQ_PATH_CAP + 1] = "/tmp/buster-workspace-group-XXXXXX";
+    bool root_ok = bq_test_mkdtemp_physical(root, sizeof(root));
+    int directory = root_ok && chmod(root, 0710) == 0 ?
+                    open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_CHECK(directory >= 0);
+    if (directory >= 0)
+    {
+#ifdef __APPLE__
+        BQ_CHECK(bq_workspace_root_directory(directory));
+#else
+        BQ_CHECK(!bq_workspace_root_directory(directory));
+#endif
+        close(directory);
+    }
+    if (root_ok) BQ_CHECK(rmdir(root) == 0);
+}
+
 typedef struct BqFixture
 {
     char path[80];
@@ -3560,6 +3579,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_codec();
 #ifndef _WIN32
     bq_test_physical_temp_paths();
+    bq_test_workspace_root_group_policy();
     bq_test_closed_handle();
     bq_test_admission();
     bq_test_prefixes_and_corruption();
