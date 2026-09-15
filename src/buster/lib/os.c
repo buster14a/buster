@@ -852,18 +852,29 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 {
     String8 result = {0};
 #if defined(__linux__) || defined(__APPLE__)
-    u64 position = arena->position;
-    u64 length = PATH_MAX;
-    char8* buffer = arena_allocate(arena, char8, length + null_terminate);
-    char* syscall_result = realpath((char*)relative_file_path.pointer, buffer);
-
-    if (syscall_result)
+    bool valid = relative_file_path.pointer || !relative_file_path.length;
+    for (u64 i = 0; i < relative_file_path.length && valid; i += 1)
     {
-        result = string_from_pointer(syscall_result);
-        BUSTER_VALIDATE(result.length <= length);
+        valid = relative_file_path.pointer[i] != 0;
     }
+    if (valid && relative_file_path.length)
+    {
+        TemporalArena temp = scratch_begin(&arena, 1);
+        String8 terminated = string_duplicate_arena(temp.arena, relative_file_path, true);
+        u64 position = arena->position;
+        u64 length = PATH_MAX;
+        char8* buffer = arena_allocate(arena, char8, length + null_terminate);
+        char* syscall_result = realpath((char*)terminated.pointer, buffer);
 
-    arena_set_position(arena, position + result.length + null_terminate);
+        if (syscall_result)
+        {
+            result = string_from_pointer(syscall_result);
+            BUSTER_VALIDATE(result.length <= length);
+        }
+
+        arena_set_position(arena, position + result.length + null_terminate);
+        scratch_end(temp);
+    }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(&arena, 1);
     String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
@@ -951,7 +962,18 @@ bool os_make_directory_attempt(String8 path)
 void os_make_directory(String8 path)
 {
 #if defined(__linux__) || defined(__APPLE__)
-    mkdir((const char*)path.pointer, 0755);
+    bool valid = path.pointer != 0 && path.length != 0;
+    for (u64 i = 0; i < path.length && valid; i += 1)
+    {
+        valid = path.pointer[i] != 0;
+    }
+    if (valid)
+    {
+        TemporalArena temp = scratch_begin(0, 0);
+        String8 terminated = string_duplicate_arena(temp.arena, path, true);
+        mkdir((const char*)terminated.pointer, 0755);
+        scratch_end(temp);
+    }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(0, 0);
     String16 path_w = string16_from_string8(temp.arena, path, true);
