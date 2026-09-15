@@ -27,16 +27,22 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"
-FULL_SUPPORT_CONTRACT_SHA256 = "feea92fd08e8c513ee74ae976232e1e828bc7815b3759324d1384fc20344b985"
+FULL_SUPPORT_CONTRACT_SHA256 = "b8aa950cbf566f3a8057cd2a401bf71851f6ca8e5bca1d34e6b327e8899c98fb"
+SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
+NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
 # and observed result.  It deliberately does not appear in rows.tsv/results.tsv:
 # those files are producer evidence, while this projection is derived here so a
 # child cannot opt a supported cell out by supplying a convenient label.
 APPLICABILITY_CLASSES = ("admitted-supported", "retained-control", "retained-reference",
                          "platform-inapplicable", "unavailable")
+AUTHENTICATED_APPLICABILITY_CLASSES = ("admitted-supported", "platform-inapplicable", "unavailable")
 MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
+APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
+FULL_APPLICABILITY_LEDGER_COUNT = 440
+FULL_APPLICABILITY_LEDGER_SHA256 = "49907ded17309ba2ae7a68c1acb5217a7465f343624717a20c9ce0dca8eae801"
 FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1"
 FULL_DEPENDENCY_RECEIPT_SHA256 = "944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435"
 FULL_DEPENDENCY_PROJECT_SHA256 = "d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be"
@@ -60,6 +66,7 @@ FULL_ARCHIVED_ROW_SHA256 = "9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a
 APPLICABILITY_FIELDS = ("row", "group", "fixture", "target", "cpu", "frontend", "allocator", "PIC",
                         "applicability", "admission", "disposition", "reason", "ownership",
                         "candidate_failure", "reference_failure", "acceptance_failure")
+APPLICABILITY_SKIP_FIELDS = ("row", "group", "fixture", "target", "allocator", "applicability", "reason")
 RESIDUAL_FIELDS = ("row", "group", "fixture", "function", "function_id", "target", "cpu", "frontend",
                    "allocator", "PIC", "applicability", "admission", "disposition", "reason", "ownership",
                    "diagnostic", "stage", "opcode_id", "source_hex", "function_hex", "line", "column")
@@ -397,13 +404,105 @@ def validate_supported_gap_ledger(directory, manifest, rows, profile):
     for identity in identities:
         assert identity in row_by_identity, f"supported-gap ledger references unknown row: {identity!r}"
         row = row_by_identity[identity]
-        assert row["allocator"] != "none" and row["compile_obligation"] == "supported-object-zero-fallback"
+        assert row["allocator"] != "none" and row["compile_obligation"] == SUPPORTED_OBJECT_OBLIGATION
         gap_row_numbers.append(int(row["row"]))
     gap_row_numbers.sort()
     if profile == FULL_CENSUS_PROFILE:
         assert len(records) == FULL_SUPPORTED_GAP_COUNT
         assert canonical_rows_digest(gap_row_numbers) == FULL_SUPPORTED_GAP_SHA256
     return set(identities), set(gap_row_numbers), ledger_sha256
+
+
+def validate_applicability_ledger(directory, manifest, rows, inputs, profile, gap_identities):
+    """Authenticate the immutable fixture/target applicability projection.
+
+    This ledger is deliberately keyed by the immutable fixture identity and
+    target triple, rather than by a result row or producer disposition.  A
+    result can therefore report any prose it likes without changing whether
+    a target-specific fixture is admitted.  The full profile binds the exact
+    checked-in bytes and count; self-tests may use a smaller explicit ledger.
+    """
+    path = directory / "applicability-ledger.tsv"
+    assert path.is_file() and not path.is_symlink(), path
+    ledger_sha256 = sha256(path)
+    assert manifest.get("applicability_ledger") == "docs/native-retirement-applicability-v1.tsv"
+    assert manifest.get("applicability_ledger_sha256") == ledger_sha256
+    fields, records = table_with_fields(path)
+    assert fields == APPLICABILITY_LEDGER_FIELDS
+    if profile == FULL_CENSUS_PROFILE:
+        assert ledger_sha256 == FULL_APPLICABILITY_LEDGER_SHA256
+        assert len(records) == FULL_APPLICABILITY_LEDGER_COUNT
+    if "applicability_ledger_entries" in manifest:
+        assert manifest["applicability_ledger_entries"] == str(len(records))
+    input_hashes = {path: row["sha256"] for path, row in inputs.items() if row["role"] == "subject"}
+    gap_pairs = {(identity[0], identity[1]) for identity in gap_identities}
+    identities = []
+    projection = {}
+    for record in records:
+        fixture = record["fixture"]
+        target = record["target"]
+        classification = record["applicability"]
+        reason = record["reason"]
+        assert fixture in input_hashes, f"applicability ledger references unknown subject: {fixture!r}"
+        assert target in TARGETS, f"applicability ledger references unknown target: {target!r}"
+        assert record["fixture_sha256"] == input_hashes[fixture], fixture
+        assert classification in AUTHENTICATED_APPLICABILITY_CLASSES
+        assert reason and reason.isascii() and all(character.isalnum() or character in "-._" for character in reason)
+        identity = (fixture, target)
+        assert identity not in projection, f"duplicate applicability identity: {identity!r}"
+        if identity in gap_pairs:
+            assert classification == "admitted-supported", \
+                f"supported gap was reclassified by applicability ledger: {identity!r}"
+        identities.append(identity)
+        projection[identity] = (classification, reason)
+    assert identities == sorted(identities), "applicability ledger is not canonically sorted"
+    return projection, ledger_sha256
+
+
+def expected_nonexecuted(row, authenticated_class, authenticated_reason):
+    """Return the source-authenticated non-execution disposition for a row.
+
+    Fixture/target applicability is the only source for platform/unavailable
+    skips.  Whole-fixture non-object controls are independently authenticated
+    by the support contract.  A result disposition never participates in this
+    decision.
+    """
+    if row["compile_obligation"] == NON_OBJECT_CONTROL_OBLIGATION:
+        return "retained-control", NON_OBJECT_CONTROL_OBLIGATION
+    if authenticated_class in {"platform-inapplicable", "unavailable"}:
+        return authenticated_class, authenticated_reason
+    return None
+
+
+def validate_skip_provenance(directory, rows, by_result, applicability_ledger):
+    """Validate explicit non-executed rows against source-owned identities."""
+    path = directory / "applicability-skips.tsv"
+    assert path.is_file() and not path.is_symlink(), path
+    fields, records = table_with_fields(path)
+    assert fields == APPLICABILITY_SKIP_FIELDS
+    by_row = {row["row"]: row for row in rows}
+    expected = {}
+    for key in by_result:
+        row = by_row[key]
+        auth_class, auth_reason = applicability_ledger.get((row["fixture"], row["target"]), ("", ""))
+        skip = expected_nonexecuted(row, auth_class, auth_reason)
+        if skip:
+            expected[key] = skip
+    observed = {}
+    for record in records:
+        key = record["row"]
+        assert key in by_result, f"skip provenance references unselected row: {key}"
+        assert key not in observed, f"duplicate skip provenance row: {key}"
+        row = by_row[key]
+        assert record["group"] == row["group"]
+        assert record["fixture"] == row["fixture"]
+        assert record["target"] == row["target"]
+        assert record["allocator"] == row["allocator"]
+        assert key in expected, f"skip provenance is not source-authenticated: {key}"
+        assert (record["applicability"], record["reason"]) == expected[key]
+        observed[key] = (record["applicability"], record["reason"])
+    assert set(observed) == set(expected), "authenticated non-executed rows lack skip provenance"
+    return expected
 
 
 def validate_profile(manifest, inputs, row_count):
@@ -466,7 +565,7 @@ def validate_argv(directory, manifest, row, recipes):
     assert argv == expected, f"argv mismatch for row {row['row']}"
 
 
-def classify_result(row, result, expected_baseline_functions, baseline_unresolved=False):
+def classify_result(row, result, expected_baseline_functions, baseline_unresolved=False, skip_expected=False):
     """Classify an executed row from structured evidence, never its label.
 
     ``disposition`` is retained as producer text for diagnostics only.  It is
@@ -486,7 +585,7 @@ def classify_result(row, result, expected_baseline_functions, baseline_unresolve
     functions = unsigned_decimal(result["functions"], 32, "functions")
     baseline_functions = unsigned_decimal(result["baseline_functions"], 32, "baseline_functions")
     object_bytes = unsigned_decimal(result["object_bytes"], 64, "object_bytes")
-    baseline_count_defect = baseline_functions != expected_baseline_functions
+    baseline_count_defect = not skip_expected and baseline_functions != expected_baseline_functions
     # The object census does not observe native program execution.  Preserve
     # this row-level obligation as metadata, while keeping every compiler,
     # process, object, fallback and telemetry check below active.
@@ -500,11 +599,18 @@ def classify_result(row, result, expected_baseline_functions, baseline_unresolve
     # telemetry remain checked, but a different authenticated function count
     # is reference-only evidence.  Keep the baseline-count copy check above
     # row-bound, so a producer cannot silently substitute another reference.
-    function_shape_defect = (not baseline_unresolved and
+    function_shape_defect = (not skip_expected and not baseline_unresolved and
                              functions != expected_baseline_functions)
     # The direct allocator is the immutable reference side.  A bad direct
     # object is an acceptance/reference failure, not a candidate failure.  MIR
     # rows are candidate-owned regardless of the producer's disposition text.
+    if skip_expected:
+        # A ledger-bound non-executed row has no compiler artifact or compiler
+        # telemetry by design.  Its structural result shape is authenticated
+        # by validate_skip_provenance; disposition text cannot select this
+        # branch because the caller supplies this flag from the ledger and
+        # source obligation only.
+        artifact_defect = False
     telemetry_defect = (bool(telemetry_defects) or function_shape_defect or artifact_defect or
                         baseline_count_defect)
     evidence_defect = fallback_defect or telemetry_defect or execution_defect
@@ -513,7 +619,11 @@ def classify_result(row, result, expected_baseline_functions, baseline_unresolve
     # direct allocator is always the reference side, and every MIR allocator
     # is candidate-owned.  Baseline resolution is derived from its structured
     # process/object/telemetry evidence and then row-bound to the MIR group.
-    if allocator == "none":
+    if skip_expected:
+        candidate_failure = False
+        reference_failure = False
+        side = "control"
+    elif allocator == "none":
         candidate_failure = False
         reference_failure = evidence_defect
         side = "baseline"
@@ -539,22 +649,37 @@ def classify_result(row, result, expected_baseline_functions, baseline_unresolve
     }
 
 
-def classify_applicability(row, result, outcome, baseline_unresolved=False, declared_supported_gap=False):
+def classify_applicability(row, result, outcome, baseline_unresolved=False, declared_supported_gap=False,
+                           authenticated_class="", authenticated_reason=""):
     """Derive admission only from the authenticated row/support ledger.
 
     ``result["disposition"]`` is deliberately not inspected.  Applicability
-    remains stable when a producer forges that text, while reference retention
-    is derived from the independently checked baseline outcome.
+    remains stable when a producer forges that text.  An authenticated
+    fixture/target class takes precedence over baseline state; retained
+    control/reference classes are derived only when no such class is present.
     """
     if declared_supported_gap:
+        assert not authenticated_class or authenticated_class == "admitted-supported"
         classification = "admitted-supported"
-        reason = "supported-object-zero-fallback"
+        reason = SUPPORTED_OBJECT_OBLIGATION
         ownership = "candidate-compiler"
+    elif authenticated_class == "admitted-supported":
+        classification = "admitted-supported"
+        reason = authenticated_reason
+        ownership = "applicability-manifest"
+    elif authenticated_class in {"retained-control", "retained-reference", "platform-inapplicable", "unavailable"}:
+        classification = authenticated_class
+        reason = authenticated_reason
+        ownership = "applicability-manifest"
     elif row["execution_obligation"] == "unavailable-platform-control":
         classification = "platform-inapplicable"
         reason = "native-execution-owner-unavailable"
         ownership = "platform-execution"
-    elif row["compile_obligation"] != "supported-object-zero-fallback":
+    elif row["compile_obligation"] == NON_OBJECT_CONTROL_OBLIGATION:
+        classification = "retained-control"
+        reason = NON_OBJECT_CONTROL_OBLIGATION
+        ownership = "source-registration"
+    elif row["compile_obligation"] != SUPPORTED_OBJECT_OBLIGATION:
         classification = "unavailable"
         reason = "compile-obligation-not-admitted"
         ownership = "admission"
@@ -568,7 +693,7 @@ def classify_applicability(row, result, outcome, baseline_unresolved=False, decl
         ownership = "reference-compiler"
     else:
         classification = "admitted-supported"
-        reason = "supported-object-zero-fallback"
+        reason = SUPPORTED_OBJECT_OBLIGATION
         ownership = "candidate-compiler"
     assert classification in APPLICABILITY_CLASSES
     return classification, classification, reason, ownership
@@ -878,6 +1003,8 @@ def validate(directory):
     validate_dependency_binding(directory, manifest, profile, inputs)
     gap_ledger_identities, declared_gap_rows, gap_ledger_sha256 = validate_supported_gap_ledger(
         directory, manifest, rows, profile)
+    applicability_ledger, applicability_ledger_sha256 = validate_applicability_ledger(
+        directory, manifest, rows, inputs, profile, gap_ledger_identities)
     manifest_rows = unsigned_decimal(manifest["rows"], 64, "manifest rows")
     assert len(rows) == manifest_rows
     assert [unsigned_decimal(row["row"], 64, "row") for row in rows] == list(range(len(rows)))
@@ -888,7 +1015,7 @@ def validate(directory):
         assert row["fixture"] in inputs and inputs[row["fixture"]]["role"] == "subject"
         assert row["fixture_recipe"] == inputs[row["fixture"]]["fixture_recipe"]
         assert row["compile_obligation"] == inputs[row["fixture"]]["compile_obligation"]
-        assert row["compile_obligation"] == "supported-object-zero-fallback"
+        assert row["compile_obligation"] in {SUPPORTED_OBJECT_OBLIGATION, NON_OBJECT_CONTROL_OBLIGATION}
         assert row["diagnostic_obligation"] == "none"
         assert row["cpu"] == manifest["cpu"] and row["cpu_features"]
         assert row["frontend_lowering"] in {"direct-ssa", "local-backed-canonical"}
@@ -915,6 +1042,7 @@ def validate(directory):
     assert len(by_result) == len(results), "duplicate result row"
     assert set(by_result) <= set(by_row), "result references unknown row"
     assert set(by_result) == {key for key, row in by_row.items() if row["selected"] == "1"}, "selected/result mismatch"
+    skip_rows = validate_skip_provenance(directory, rows, by_result, applicability_ledger)
     parsed_results = {}
     for key, result in by_result.items():
         parsed_results[key] = {
@@ -938,7 +1066,10 @@ def validate(directory):
     for key, result in by_result.items():
         row = by_row[key]
         if row["allocator"] == "none":
-            baseline_outcomes[row["group"]] = classify_result(row, result, baseline_by_group[row["group"]])
+            auth_class, auth_reason = applicability_ledger.get((row["fixture"], row["target"]), ("", ""))
+            baseline_outcomes[row["group"]] = classify_result(
+                row, result, baseline_by_group[row["group"]],
+                skip_expected=(key in skip_rows or bool(expected_nonexecuted(row, auth_class, auth_reason))))
     assert set(baseline_outcomes) == selected_groups, "selected group baseline evidence is incomplete"
     recipes = {path: shlex.split(row["fixture_flags"]) for path, row in inputs.items()}
     identities = {}
@@ -953,20 +1084,40 @@ def validate(directory):
         if result["target_identity_valid"] == "1":
             assert result["cpu"] == row["cpu"] and result["cpu_features"] == row["cpu_features"]
         size = parsed_results[key]["object_bytes"]
+        skip = skip_rows.get(key)
+        if skip:
+            expected_disposition, _expected_reason = skip
+            assert result["disposition"] == expected_disposition
+            assert result["kind"] == "0" and result["status"] == "0"
+            assert result["counters_valid"] == "1" and result["target_identity_valid"] == "1"
+            assert result["function_records_valid"] == "1"
+            assert all(result[field] == "0" for field in ("functions", "fallbacks", "baseline_functions",
+                                                            "object_bytes", "object_hash"))
+            assert result["object_sha256"] == ""
         if size:
             exact_sha(directory / "groups" / row["group"] / (row["allocator"] + ".o"), size,
                       result["object_sha256"])
         else:
             assert result["object_sha256"] == ""
         baseline_unresolved = baseline_outcomes[row["group"]]["reference_failure"]
-        outcome = classify_result(row, result, baseline_by_group[row["group"]], baseline_unresolved)
+        outcome = classify_result(row, result, baseline_by_group[row["group"]], baseline_unresolved,
+                                  skip_expected=skip is not None)
         outcome.update({"row": int(key), "group": int(row["group"]), "allocator": row["allocator"],
                         "fallbacks": int(result["fallbacks"]), "functions": int(result["functions"])})
         identity = tuple(row[field] for field in ("fixture", "target", "frontend_lowering", "PIC", "allocator"))
         declared_supported_gap = identity in gap_ledger_identities
+        authenticated_class, authenticated_reason = applicability_ledger.get(
+            (row["fixture"], row["target"]), ("", ""))
         applicability, admission, reason, ownership = classify_applicability(row, result, outcome,
                                                                                baseline_unresolved,
-                                                                               declared_supported_gap)
+                                                                               declared_supported_gap,
+                                                                               authenticated_class,
+                                                                               authenticated_reason)
+        if authenticated_class == "platform-inapplicable":
+            # Preserve the authenticated applicability class while retaining
+            # every compiler/process/object/fallback/telemetry defect.  The
+            # class is evidence ownership, not a waiver of malformed output.
+            outcome["inapplicable"] = True
         outcome.update({"applicability": applicability, "admission": admission,
                         "classification": applicability, "reason": reason, "ownership": ownership,
                         "baseline_unresolved": baseline_unresolved})
@@ -1021,6 +1172,10 @@ def validate(directory):
         "supported_gap_sha256": supported_gap_sha256,
         "declared_gap_identities": gap_ledger_identities,
         "supported_gap_ledger_sha256": gap_ledger_sha256,
+        "applicability_ledger_sha256": applicability_ledger_sha256,
+        "applicability_ledger_entries": len(applicability_ledger),
+        "applicability_skip_rows": sorted(skip_rows),
+        "applicability_skip_evidence": str(directory / "applicability-skips.tsv"),
         "residuals": residuals,
         "residual_source_truncated": residual_source_truncated,
     }
@@ -1052,6 +1207,8 @@ def partition_shards(reports, require_clean_candidate=False, require_clean_accep
     assert all(report["input_ledger_sha256"] == reports[0]["input_ledger_sha256"] for report in reports[1:])
     assert all(report["manifest_identity_sha256"] == reports[0]["manifest_identity_sha256"]
                for report in reports[1:]), "manifest identity mismatch"
+    assert all(report["applicability_ledger_sha256"] == reports[0]["applicability_ledger_sha256"]
+               for report in reports[1:]), "applicability ledger mismatch"
 
     selected_rows = set()
     identities = set()
@@ -1098,10 +1255,16 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
     row_records = {}
     residuals = []
     residual_source_truncated = False
+    skip_records = []
     for report in reports:
         row_records.update(report["selected_row_records"])
         residuals.extend(report["residuals"])
         residual_source_truncated |= report["residual_source_truncated"]
+        skip_path = Path(report["applicability_skip_evidence"])
+        skip_fields, shard_skips = table_with_fields(skip_path)
+        assert skip_fields == APPLICABILITY_SKIP_FIELDS
+        skip_records.extend(shard_skips)
+    assert len({row["row"] for row in skip_records}) == len(skip_records), "duplicate skip provenance across shards"
     assert set(row_records) == {str(row) for row in selected_rows}, "selected row records are incomplete"
     def counts(side):
         return {key: value for key, value in sorted(Counter(item["disposition"] for item in outcomes.values()
@@ -1160,8 +1323,11 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
     residual_truncated = residual_source_truncated or len(residuals) > MAX_RESIDUAL_ROWS
     residuals = residuals[:MAX_RESIDUAL_ROWS]
     applicability_path = output.parent / "applicability.tsv"
+    applicability_skip_path = output.parent / "applicability-skips.tsv"
     residual_path = output.parent / "residual.tsv"
     write_table(applicability_path, APPLICABILITY_FIELDS, applicability_rows)
+    skip_records.sort(key=lambda row: int(row["row"]))
+    write_table(applicability_skip_path, APPLICABILITY_SKIP_FIELDS, skip_records)
     write_table(residual_path, RESIDUAL_FIELDS, residuals)
     result = {
         "schema": 2,
@@ -1176,6 +1342,8 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "baseline_sha256": first["baseline_sha256"],
         "support_contract_sha256": first["support_contract_sha256"],
         "supported_gap_ledger_sha256": reports[0]["supported_gap_ledger_sha256"],
+        "applicability_ledger_sha256": reports[0]["applicability_ledger_sha256"],
+        "applicability_ledger_entries": reports[0]["applicability_ledger_entries"],
         "resource_include_sha256": first["resource_include_sha256"],
         "manifest_identity_sha256": reports[0]["manifest_identity_sha256"],
         "rows_identity_fields": list(reports[0]["rows_identity_fields"]),
@@ -1199,6 +1367,8 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "applicability_evidence": str(applicability_path),
         "applicability_tsv": str(applicability_path),
         "applicability_sha256": sha256(applicability_path),
+        "applicability_skip_rows": [int(row["row"]) for row in skip_records],
+        "applicability_skip_evidence": str(applicability_skip_path),
         "residual_evidence": str(residual_path),
         "residual_tsv": str(residual_path),
         "residual_sha256": sha256(residual_path),
@@ -1243,6 +1413,8 @@ def self_test():
         report["input_ledger"] = {"tests/unit.c": ("subject",)}
         report["input_ledger_sha256"] = canonical_map_digest(report["input_ledger"])
         report["manifest_identity_sha256"] = manifest_identity_digest(report["manifest"])
+        report["applicability_ledger_sha256"] = "self-test"
+        report["applicability_ledger_entries"] = 0
         report["selected_row_records"] = {str(key): {} for key in report["selected_rows"]}
         report["residuals"] = []
         report["residual_source_truncated"] = False
