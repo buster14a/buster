@@ -34,6 +34,17 @@ def sha(data):
 
 
 class ContractTests(unittest.TestCase):
+    def test_fixture_cpu_profiles_are_target_scoped(self):
+        self.assertEqual(contract.expected_cpu("tests/basic_c_predicate_bank.c",
+                                               "x86_64-unknown-linux-gnu", "baseline"),
+                         "skylake-avx512")
+        self.assertEqual(contract.expected_cpu("tests/basic_c_atomic_aggregate.c",
+                                               "x86_64-pc-windows-msvc", "baseline"),
+                         "haswell")
+        self.assertEqual(contract.expected_cpu("tests/basic_c_predicate_bank.c",
+                                               "aarch64-unknown-linux-gnu", "baseline"),
+                         "baseline")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
