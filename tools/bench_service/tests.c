@@ -492,7 +492,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         snprintf(workspace, sizeof(workspace), "%s/%s", fixture.workspaces, name);
         snprintf(base_source, sizeof(base_source), "%s/base/source/src/main.c", workspace);
         snprintf(candidate_source, sizeof(candidate_source), "%s/candidate/source/src/main.c", workspace);
-        struct stat base, candidate;
+        struct stat base, candidate, workspace_root_info, workspace_info;
+        BQ_CHECK(stat(fixture.workspaces, &workspace_root_info) == 0 && stat(workspace, &workspace_info) == 0 &&
+                 workspace_info.st_gid == workspace_root_info.st_gid);
         BQ_CHECK(stat(base_source, &base) == 0 && stat(candidate_source, &candidate) == 0 && base.st_ino != candidate.st_ino);
         BQ_CHECK((base.st_mode & 0222) == 0 && (candidate.st_mode & 0222) == 0);
         BQ_CHECK(chmod(base_source, 0600) == 0);
@@ -1810,7 +1812,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
         if (lease.descriptor >= 0) close(lease.descriptor);
         lease.descriptor = -1;
         BqWorkerLease transferred = {.descriptor = -1};
-        BqError received = bq_worker_lease_handoff_receive(S8(lease_path), S8(result_root), S8("1"), S8("2"),
+        BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
+                                                            S8("1"), S8("2"),
                                                             &transferred);
         u8 state = received == BQ_OK ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));

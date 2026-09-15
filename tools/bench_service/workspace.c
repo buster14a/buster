@@ -121,7 +121,15 @@ BUSTER_GLOBAL_LOCAL bool bq_workspace_root_directory(int fd)
 {
     struct stat info;
     bool ok = fstat(fd, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
-              (info.st_mode & 067) == 0 && (info.st_mode & S_ISGID) != 0;
+              (info.st_mode & 067) == 0;
+#ifdef __APPLE__
+    /* Darwin applies BSD directory group inheritance without requiring the
+     * Linux setgid contract. Pin the root to the service's effective group;
+     * descendants are independently checked for inherited group identity. */
+    ok = ok && info.st_gid == getegid();
+#else
+    ok = ok && (info.st_mode & S_ISGID) != 0;
+#endif
     return ok;
 }
 
