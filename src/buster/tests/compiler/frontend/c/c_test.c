@@ -12473,10 +12473,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         scratch_end(temporary);
     }
     {
-        // Sixteen-byte aggregate atomics remain representable in canonical IR
-        // on baseline x86-64 even though the downstream CMPXCHG16B admission
-        // still requires cx16.  The same representation is emitted on
-        // haswell/cx16 and AArch64, where the backend has a native admission.
+        // Baseline x86-64 does not promise CMPXCHG16B. Plain language-level
+        // aggregate stores and builtin exchanges therefore share the fixed
+        // libatomic ABI there; cx16 and AArch64 retain native atomic IR.
         Target targets[] = {
             {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
             {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = OPERATING_SYSTEM_LINUX},
@@ -12506,6 +12505,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
                 u32 atomic_store_count = 0;
                 u32 aggregate_exchange_count = 0;
+                u32 runtime_store_count = 0;
+                u32 runtime_exchange_count = 0;
                 bool atomic_store_shape = false;
                 bool aggregate_exchange_shape = false;
                 for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
@@ -12541,30 +12542,136 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                                             operation_type->layout.resolved && operation_type->layout.size == 16 && operation_type->bit_width == 128;
                             }
                         }
+                        if (instruction->opcode == IR_OPCODE_CALL)
+                        {
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, instruction->symbol);
+                            runtime_store_count += symbol && string_equal(symbol->link_name, S8("__atomic_store_16"));
+                            runtime_exchange_count += symbol && string_equal(symbol->link_name, S8("__atomic_exchange_16"));
+                        }
                     }
                 }
-                BUSTER_TEST(arguments, atomic_store_count == 1);
-                BUSTER_TEST(arguments, aggregate_exchange_count == 1);
-                BUSTER_TEST(arguments, atomic_store_shape);
-                BUSTER_TEST(arguments, aggregate_exchange_shape);
-                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
-                                                                             (CodegenModuleOptions){0});
                 if (target_index == 0)
                 {
-                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+                    BUSTER_TEST(arguments, atomic_store_count == 0 && aggregate_exchange_count == 0);
+                    BUSTER_TEST(arguments, runtime_store_count == 1 && runtime_exchange_count == 1);
                 }
                 else
                 {
-                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, atomic_store_count == 1 && aggregate_exchange_count == 1);
+                    BUSTER_TEST(arguments, runtime_store_count == 0 && runtime_exchange_count == 0);
+                    BUSTER_TEST(arguments, atomic_store_shape);
+                    BUSTER_TEST(arguments, aggregate_exchange_shape);
                 }
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
+                                                                             (CodegenModuleOptions){0});
+                BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
             }
             scratch_end(temporary);
         }
     }
     {
-        // Wider than any lock-free access the target has, which would need a
-        // `libatomic` lock this toolchain does not link: lowering refuses it by
-        // name rather than leaving code generation to fail internally (#762).
+        // The scalar form is the complete no-cx16 regression: every
+        // sixteen-byte C atomic operation lowers to its libatomic ABI helper,
+        // while a cx16 target keeps the native canonical atomic operations.
+        Target targets[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = OPERATING_SYSTEM_LINUX},
+        };
+        String8 runtime_names[] = {
+            S8("__atomic_load_16"),
+            S8("__atomic_store_16"),
+            S8("__atomic_fetch_add_16"),
+            S8("__atomic_fetch_sub_16"),
+            S8("__atomic_fetch_and_16"),
+            S8("__atomic_fetch_or_16"),
+            S8("__atomic_fetch_xor_16"),
+            S8("__atomic_exchange_16"),
+            S8("__atomic_compare_exchange_16"),
+        };
+        u32 runtime_call_counts[] = {2, 2, 1, 1, 1, 1, 1, 2, 1};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(runtime_names) == BUSTER_ARRAY_LENGTH(runtime_call_counts));
+        String8 source = S8("typedef unsigned __int128 wide;"
+                            " typedef signed __int128 signed_wide;"
+                            " static _Atomic(wide) object;"
+                            " static volatile _Atomic(signed_wide) signed_object;"
+                            " signed_wide atomic_wide_signed_load(void) { return signed_object; }"
+                            " void atomic_wide_signed_store(signed_wide value) { signed_object = value; }"
+                            " signed_wide atomic_wide_signed_exchange(signed_wide value) {"
+                            " return __c11_atomic_exchange(&signed_object, value, __ATOMIC_SEQ_CST); }"
+                            " void atomic_wide_store(wide value) { __c11_atomic_store(&object, value, __ATOMIC_SEQ_CST); }"
+                            " wide atomic_wide_load(void) { return __c11_atomic_load(&object, __ATOMIC_ACQUIRE); }"
+                            " wide atomic_wide_add(wide value) { return __c11_atomic_fetch_add(&object, value, __ATOMIC_ACQ_REL); }"
+                            " wide atomic_wide_sub(wide value) { return __c11_atomic_fetch_sub(&object, value, __ATOMIC_RELAXED); }"
+                            " wide atomic_wide_and(wide value) { return __c11_atomic_fetch_and(&object, value, __ATOMIC_SEQ_CST); }"
+                            " wide atomic_wide_or(wide value) { return __c11_atomic_fetch_or(&object, value, __ATOMIC_RELEASE); }"
+                            " wide atomic_wide_xor(wide value) { return __c11_atomic_fetch_xor(&object, value, __ATOMIC_ACQUIRE); }"
+                            " wide atomic_wide_exchange(wide value) { return __c11_atomic_exchange(&object, value, __ATOMIC_SEQ_CST); }"
+                            " int atomic_wide_compare(wide *expected, wide value) {"
+                            " return __c11_atomic_compare_exchange_strong(&object, expected, value,"
+                            " __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); }\n");
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            Target target = targets[target_index];
+            TargetDataLayout data_layout = target_data_layout(target);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                                     (CPreprocessOptions){.target = target, .data_layout = data_layout});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("atomic-wide-runtime.c"), tokens, parse, target);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+            if (lowered.program)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                u32 runtime_calls[BUSTER_ARRAY_LENGTH(runtime_names)] = {0};
+                u32 atomic_load_count = 0;
+                u32 atomic_store_count = 0;
+                u32 atomic_rmw_count = 0;
+                u32 atomic_compare_count = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + instruction_index;
+                        atomic_load_count += instruction->opcode == IR_OPCODE_ATOMIC_LOAD;
+                        atomic_store_count += instruction->opcode == IR_OPCODE_ATOMIC_STORE;
+                        atomic_rmw_count += instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE;
+                        atomic_compare_count += instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE;
+                        if (instruction->opcode == IR_OPCODE_CALL)
+                        {
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, instruction->symbol);
+                            for (u32 runtime_index = 0; symbol && runtime_index < BUSTER_ARRAY_LENGTH(runtime_names); runtime_index += 1)
+                            {
+                                runtime_calls[runtime_index] += string_equal(symbol->link_name, runtime_names[runtime_index]);
+                            }
+                        }
+                    }
+                }
+                for (u32 runtime_index = 0; runtime_index < BUSTER_ARRAY_LENGTH(runtime_names); runtime_index += 1)
+                {
+                    BUSTER_TEST(arguments, runtime_calls[runtime_index] == (target_index == 0 ? runtime_call_counts[runtime_index] : 0u));
+                }
+                if (target_index == 0)
+                {
+                    BUSTER_TEST(arguments, atomic_load_count == 0 && atomic_store_count == 0 && atomic_rmw_count == 0 && atomic_compare_count == 0);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, atomic_load_count == 2 && atomic_store_count == 2 && atomic_rmw_count == 7 && atomic_compare_count == 1);
+                }
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
+                                                                             (CodegenModuleOptions){0});
+                BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+            }
+            scratch_end(temporary);
+        }
+    }
+    {
+        // Wider than any lock-free access the target has, which would need the
+        // generic locking libatomic ABI this toolchain does not provide:
+        // lowering refuses it by name rather than leaving code generation to
+        // fail internally (#762).
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult wide_atomic_tokens = c_preprocess(temporary.arena,
                                                             S8("typedef struct { long long a, b, c; } twentyfour;"
