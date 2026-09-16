@@ -6,6 +6,12 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-contract.yml
+      # Android status tests reuse frozen mobile support inputs. Keep their
+      # contract validation scheduled even when tests/** itself is unchanged.
+      - .github/workflows/ci.yml
+      - .github/workflows/ios-monitor-tests.yml
+      - android/**
+      - .github/workflows/native-retirement-evidence.yml
       - build.c
       - docs/agents/build.md
       - docs/native-retirement-census.md
@@ -14,6 +20,8 @@ on:
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
+      - tools/native_retirement_archive.py
+      - tools/native_retirement_evidence_upload_test.py
       - tools/native_retirement_result_input.py
       - tools/native_retirement_result_input_test.py
       - tests/**
@@ -44,6 +52,7 @@ jobs:
           "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_evidence_upload_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v

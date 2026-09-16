@@ -3,6 +3,11 @@
 // conversion, path helpers, and OS argument/command-line building
 // including Windows quoting. Everything allocates from caller arenas;
 // nothing here owns memory or touches the OS.
+//
+// string16_from_string8 and string8_from_string16 are the Windows OS text
+// boundary. Both replace what they cannot represent with U+FFFD instead of
+// reinterpreting it; string.h publishes that contract and utf8_decode states
+// the consumption rule. Compiler-internal decoding does not run through them.
 
 #include <buster/lib/string.h>
 #include <buster/lib/arena.h>
@@ -344,6 +349,10 @@ struct Utf8DecodeResult
     u64 advance;
 };
 
+// U+FFFD REPLACEMENT CHARACTER, the one scalar both boundary conversions
+// substitute for input they cannot represent.
+#define UNICODE_REPLACEMENT_CODE_POINT 0xFFFDu
+
 BUSTER_GLOBAL_LOCAL Utf8DecodeResult utf8_decode(String8 string, u64 index);
 BUSTER_GLOBAL_LOCAL u64 utf16_write_code_point(char16* destination, u32 code_point);
 BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point);
@@ -357,9 +366,14 @@ String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate)
         u32 code_point = s.pointer[i];
         u64 advance = 1;
 
-        if (code_point >= 0xD800u && code_point <= 0xDBFFu && i + 1 < s.length)
+        // A high surrogate pairs only with a low surrogate directly behind it
+        // inside this input, so one standing at the end of the input is
+        // isolated like any other unpaired half. Every isolated surrogate is
+        // consumed alone and replaced, which keeps this direction symmetric
+        // with the UTF-8 side (#106).
+        if (code_point >= 0xD800u && code_point <= 0xDBFFu)
         {
-            u32 second = s.pointer[i + 1];
+            u32 second = i + 1 < s.length ? (u32)s.pointer[i + 1] : 0;
             if (second >= 0xDC00u && second <= 0xDFFFu)
             {
                 code_point = (((code_point - 0xD800u) << 10) | (second - 0xDC00u)) + 0x10000u;
@@ -367,12 +381,12 @@ String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate)
             }
             else
             {
-                code_point = 0xFFFDu;
+                code_point = UNICODE_REPLACEMENT_CODE_POINT;
             }
         }
         else if (code_point >= 0xDC00u && code_point <= 0xDFFFu)
         {
-            code_point = 0xFFFDu;
+            code_point = UNICODE_REPLACEMENT_CODE_POINT;
         }
 
         Utf8Result encoding_result = utf8_from_code_point(code_point);
@@ -799,10 +813,23 @@ BUSTER_GLOBAL_LOCAL bool utf8_code_unit_is_continuation(u8 code_unit)
     return (code_unit & 0xC0u) == 0x80u;
 }
 
+// Decode one code point at index for the Windows UTF-16 boundary (#106).
+// A byte that neither begins nor completes a well-formed sequence is
+// ill-formed: it decodes to U+FFFD and advances exactly one byte, so an
+// invalid leader, an overlong form, a sequence truncated by the end of the
+// input, a bad continuation, an encoded UTF-16 surrogate and a scalar above
+// U+10FFFF each yield one replacement character per byte they occupy. The
+// byte is never reinterpreted as the scalar with that value, which is what
+// used to turn 0xFF into U+00FF. Replacement is lossy; the original bytes
+// cannot be recovered from the decoded text.
+//
+// Consuming one byte at a time is the rule callers may rely on. It also keeps
+// the emitted UTF-16 code-unit count at or below the UTF-8 byte count, which
+// is the bound string16_from_string8 allocates against.
 BUSTER_GLOBAL_LOCAL Utf8DecodeResult utf8_decode(String8 string, u64 index)
 {
     Utf8DecodeResult result = {
-        .code_point = (u8)string.pointer[index],
+        .code_point = UNICODE_REPLACEMENT_CODE_POINT,
         .advance = 1,
     };
 
@@ -810,6 +837,7 @@ BUSTER_GLOBAL_LOCAL Utf8DecodeResult utf8_decode(String8 string, u64 index)
 
     if ((first & 0x80u) == 0)
     {
+        result.code_point = first;
     }
     else if ((first & 0xE0u) == 0xC0u && index + 1 < string.length)
     {
@@ -882,7 +910,7 @@ BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
 
     if (code_point > 0x10FFFFu || (code_point >= 0xD800u && code_point <= 0xDFFFu))
     {
-        code_point = 0xFFFDu;
+        code_point = UNICODE_REPLACEMENT_CODE_POINT;
     }
 
     if (code_point <= 0x7Fu)
@@ -1684,62 +1712,64 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
             u64 argument_length = 0;
             bool in_quotes = false;
 
+            // Microsoft's documented C argument parsing, in its own order: a
+            // backslash run is counted first, because only a quote directly
+            // behind it is escaped; 2N backslashes decode to N and leave the
+            // quote as a delimiter, 2N+1 decode to N and the quote survives as
+            // a literal. A quote that stays a delimiter is the one place the
+            // doubled-quote rule applies: a second quote immediately inside a
+            // quoted argument is one literal quote, and quoting continues
+            // across the pair rather than closing and reopening (#637).
+            //
+            // Every step consumes at least as many input units as it writes,
+            // so `argument` stays within the single command-line-sized buffer
+            // allocated once above (#113/#486).
             while (i < command_line_length)
             {
-                char16 c = command_line[i];
-                if (!in_quotes && (c == ' ' || c == '\t'))
+                u64 backslash_count = 0;
+                while (i < command_line_length && command_line[i] == '\\')
+                {
+                    backslash_count += 1;
+                    i += 1;
+                }
+
+                bool copy_character = true;
+                if (i < command_line_length && command_line[i] == '"')
+                {
+                    if (!(backslash_count & 1))
+                    {
+                        if (in_quotes && i + 1 < command_line_length && command_line[i + 1] == '"')
+                        {
+                            // Step over the first quote of the pair and let the
+                            // copy below emit the second one literally.
+                            i += 1;
+                        }
+                        else
+                        {
+                            copy_character = false;
+                            in_quotes = !in_quotes;
+                        }
+                    }
+                    backslash_count /= 2;
+                }
+
+                for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
+                {
+                    argument[argument_length] = '\\';
+                    argument_length += 1;
+                }
+
+                if (i >= command_line_length || (!in_quotes && (command_line[i] == ' ' || command_line[i] == '\t')))
                 {
                     break;
                 }
 
-                if (c == '\\')
+                if (copy_character)
                 {
-                    u64 backslash_count = 0;
-                    while (i < command_line_length && command_line[i] == '\\')
-                    {
-                        backslash_count += 1;
-                        i += 1;
-                    }
-
-                    if (i < command_line_length && command_line[i] == '"')
-                    {
-                        for (u64 backslash_i = 0; backslash_i < backslash_count / 2; backslash_i += 1)
-                        {
-                            argument[argument_length] = '\\';
-                            argument_length += 1;
-                        }
-
-                        if (backslash_count & 1)
-                        {
-                            argument[argument_length] = '"';
-                            argument_length += 1;
-                        }
-                        else
-                        {
-                            in_quotes = !in_quotes;
-                        }
-                        i += 1;
-                    }
-                    else
-                    {
-                        for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
-                        {
-                            argument[argument_length] = '\\';
-                            argument_length += 1;
-                        }
-                    }
-                }
-                else if (c == '"')
-                {
-                    in_quotes = !in_quotes;
-                    i += 1;
-                }
-                else
-                {
-                    argument[argument_length] = c;
+                    argument[argument_length] = command_line[i];
                     argument_length += 1;
-                    i += 1;
                 }
+                i += 1;
             }
 
             argument[argument_length] = 0;
@@ -1755,6 +1785,10 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
 
 String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate)
 {
+    // utf8_decode replaces every ill-formed byte with one U+FFFD and consumes
+    // it alone, so one input byte never produces more than one code unit
+    // except in a well-formed four-byte sequence, which produces two from
+    // four. The UTF-8 byte count is therefore a valid upper bound (#106).
     char16* pointer = arena_allocate(arena, char16, string.length + null_terminate);
     u64 result_length = 0;
 
@@ -1893,11 +1927,18 @@ char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 st
     return result;
 }
 
+// Reserving zero elements moves the arena cursor to the String8 boundary the
+// first append would have aligned it to anyway, so the saved start is a real
+// arena position rather than a rounded-up one the cursor has not reached. An
+// empty builder then flushes to a zero-length slice at every valid initial
+// alignment instead of subtracting a larger start from a smaller cursor and
+// underflowing the byte count (#638).
 OsArgumentBuilder os_argument_builder_start(Arena* arena)
 {
+    (void)arena_allocate(arena, String8, 0);
     OsArgumentBuilder result = {
         .arena = arena,
-        .position = align_forward(arena->position, BUSTER_ALIGN_OF(String8)),
+        .position = arena->position,
     };
     return result;
 }

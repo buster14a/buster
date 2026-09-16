@@ -95,16 +95,42 @@ Clang control checks relative includes and confirms a changed transitive header
 is reanalyzed. Every desktop combination entrypoint and the independent analyzer
 job run these controls.
 
-The analyzer CI job bootstraps the PR base's build driver and the candidate on
-the same checkout, with the same Clang, then analyzes the **same split database**.
-`--baseline-driver` runs that reference first and records metrics in `baseline.log` (diagnostics remain in the full CI log); its
-failure fails the comparison. On this change's base the reference is the
-monolithic, CPU-count-batched scheduler. On later revisions it measures whatever
-implementation that reference contains. A main/dispatch run uses its own revision
-as reference. No historical issue timing is presented as a current measurement.
+The analyzer CI job resolves both the checked-out candidate and requested
+reference to commit identities before compiling either driver. When those
+identities are the same on a push or workflow dispatch, it records
+`selection=skip` and `reason=same-revision` in `comparison-selection.txt`, does
+not compile or run a second driver, and executes the complete candidate
+split-source analysis and fail-closed aggregate once. An unresolvable identity
+fails the job instead of being treated as a same-revision result. Main and tag
+pushes and dispatches currently select their checked-out revision as the
+reference. Pull requests select their base revision and keep the comparison.
+Merge-group events also keep comparison even if the available reference resolves
+to the checkout commit; an event not admitted to the narrow skip policy cannot
+silently inherit it.
 
-`ANALYZE_BASELINE` and `ANALYZE_RUN` record complete wall microseconds. The
-baseline reports host logical CPU capacity, not an inferred limit for an
+Immediately before analysis, the campaign re-resolves both revisions from the
+unchanged checkout, re-derives the event decision, and requires the retained
+six-line V1 selection record and exported selection to agree exactly. The record
+must be a regular, non-symlink file whose bytes, including its final newline,
+match the re-derived record. Missing, extra, malformed, tampered or stale fields,
+NUL data and alternate framing fail before an analyzer launches.
+The skip path refuses any reference-driver path, including a dangling symlink,
+while comparison requires a regular, executable, non-symlink reference driver.
+
+When the identities differ, CI preserves the existing explicit comparison path.
+`--baseline-driver` runs that reference first against the **same split database**
+and records metrics in `baseline.log` (diagnostics remain in the full CI log);
+its failure fails the comparison. Passing `--baseline-driver` directly remains
+the reproducible opt-in path for requested measurements. The current different-
+revision workflow compiles the historical `build.c` against the candidate
+checkout's include tree, so it is not a fully frozen historical driver dependency
+closure. Freezing that closure and classifying analyzer-relevant changes remain
+separate #603 acceptance work; the same-revision elimination does not broaden
+that claim. No historical issue timing is presented as a current measurement.
+
+`ANALYZE_BASELINE` is present only when comparison was selected;
+`ANALYZE_RUN` records the candidate's complete wall microseconds in both modes.
+The baseline reports host logical CPU capacity, not an inferred limit for an
 arbitrary reference driver; the candidate records its configured worker limit.
 `peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
 actual analyzer overlap can be lower, particularly for empty or tiny shards.

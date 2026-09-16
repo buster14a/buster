@@ -215,6 +215,12 @@ for index in "${!build_configs[@]}"; do
         if [[ $first_failed_config == none ]]; then
             first_failed_config=$build_config
         fi
+        # An interrupted payload is a cancelled batch, not another test
+        # failure to aggregate. Preserve its status and do not launch more work.
+        if [[ $test_status -eq 130 || $test_status -eq 143 ]]; then
+            android_config=$first_failed_config
+            exit "$test_status"
+        fi
     fi
 done
 

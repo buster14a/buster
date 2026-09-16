@@ -4,6 +4,7 @@
 // the bounded linear remapping oracle and large-fanout structural controls.
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
+// machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -1137,6 +1138,93 @@ BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModu
     return UINT32_MAX;
 }
 #endif
+
+// Full C->canonical->MIR->bytes coverage for both directions of pointer/frame
+// copies across imm12, including sized tails. Native AArch64 Unix hosts also
+// execute the generated function and compare every byte plus guard regions.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_large_aggregate_copy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 sizes[] = {32768, 32775, 65543};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_WINDOWS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = systems[system]};
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 size = sizes[size_index];
+                String8 source = string_format(temporary.arena,
+                    S8("typedef struct Payload {{ unsigned char bytes[{u32}]; }} Payload; "
+                       "void copy_payload(Payload *out, Payload const *in) {{ Payload local = *in; *out = local; }"), size);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("large-aggregate-copy.c"), source, target,
+                    (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                BUSTER_TEST(arguments, program && program->module_count);
+                if (program && program->module_count)
+                {
+                    IrModule* module = program->modules;
+                    IrFunction* function = machine_test_ir_function_find(module, S8("copy_payload"));
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        bool from_pointer = false;
+                        bool to_pointer = false;
+                        for (u32 row = 0; selected.supported && row < selected.function.instruction_count; row += 1)
+                        {
+                            MachineInstruction const* instruction = selected.function.instructions + row;
+                            from_pointer |= instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_PTR && instruction->payload == size;
+                            to_pointer |= instruction->opcode == MACHINE_A64_COPY_PTR_FROM_FRAME && instruction->payload == size;
+                        }
+                        BUSTER_TEST(arguments, from_pointer && to_pointer);
+                    }
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.code.length != 0);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0 && generated.relocation_count == 0);
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                        if (target.os == target_native.os && generated.error == CODEGEN_ERROR_NONE && generated.relocation_count == 0)
+                        {
+                            CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                            u32 offset = machine_test_module_offset(&generated, module, S8("copy_payload"));
+                            BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE && offset != UINT32_MAX);
+                            if (executable.address && offset != UINT32_MAX)
+                            {
+                                u8* input = arena_allocate(temporary.arena, u8, size);
+                                u8* output = arena_allocate(temporary.arena, u8, size + 16u);
+                                for (u32 index = 0; index < size; index += 1)
+                                {
+                                    input[index] = (u8)(index * 37u + 19u);
+                                }
+                                memset(output, 0xa5, size + 16u);
+                                void* address = (u8*)executable.address + offset;
+                                void (*copy)(void*, void const*) = 0;
+                                memcpy(&copy, &address, sizeof(copy));
+                                copy(output + 8, input);
+                                BUSTER_TEST(arguments, memcmp(output + 8, input, size) == 0);
+                                bool guards = true;
+                                for (u32 index = 0; index < 8; index += 1)
+                                {
+                                    guards &= output[index] == 0xa5 && output[size + 8u + index] == 0xa5;
+                                }
+                                BUSTER_TEST(arguments, guards);
+                            }
+                            codegen_release_executable(executable);
+                        }
+#endif
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
 {
@@ -4760,6 +4848,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
                     CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
                         (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
                     BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+                    // The driver records locations by default. The mask-only
+                    // locals a, b and c name homeless predicate registers.
+                    CodegenModule located = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true, .debug_info = true});
+                    BUSTER_TEST(arguments, located.error == CODEGEN_ERROR_NONE && located.statistics.fallback_function_count == 0);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
                     TargetCpuFeatures features = cpu_detect_features_x86_64();
                     bool execute = system == 0 && target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) &&
@@ -4915,7 +5008,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_edges(UnitTestArgument
                 mode == 1 ? machine_fast_placement_build(arguments->arena, &function) : machine_quality_placement_build(arguments->arena, &function);
             MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &function, &placement);
             BUSTER_TEST(arguments, placement.valid && encoded.valid);
-            BUSTER_TEST(arguments, variant == 0 || (placement.rematerialize_count > 0 && placement.virtual_register_offsets[2] == UINT32_MAX));
+            BUSTER_TEST(arguments, variant == 0 || (placement.rematerialize_count > 0 && placement.virtual_register_offsets[2] == MACHINE_VIRTUAL_REGISTER_NO_HOME));
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
             TargetCpuFeatures features = cpu_detect_features_x86_64();
             bool execute = target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) && target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW);
@@ -5316,6 +5409,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_large_aggregate_copy);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
@@ -9908,21 +10002,41 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                             string_format(arguments->arena, S8("a64 generated {S8} offset {u32}"), a64_memory_forms[form_index].name,
                                           offsets[offset_index]));
         }
-        if (size > 1)
+        // A large aggregate copy can reach both out-of-range and unaligned
+        // sized tails. Pin all expanded forms independently, not only whether
+        // a module produced bytes. Small aligned addresses above remain exact.
+        u32 expanded_offsets[] = {1, 4096u * size};
+        for (u32 expanded = size == 1 ? 1u : 0u; expanded < BUSTER_ARRAY_LENGTH(expanded_offsets); expanded += 1)
         {
             u32 bytes[4] = {0};
             u32 byte_count = 0;
             bool error = false;
-            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, 1, size, store, false, &byte_count,
-                                                                            &error) &&
-                                      error && byte_count == 0);
+            u32 offset = expanded_offsets[expanded];
+            BUSTER_TEST(arguments, machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, offset, size, store, false,
+                                                                         &byte_count, &error) && !error && byte_count == 12);
+            BUSTER_TEST(arguments, bytes[0] == (UINT32_C(0xd2800010) | (offset << 5)) &&
+                                   bytes[1] == UINT32_C(0x8b100390) && bytes[2] == (base | (16u << 5) | 17u));
         }
-        u32 bytes[4] = {0};
-        u32 byte_count = 0;
-        bool error = false;
-        BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, 4096u * size, size, store, false, &byte_count,
-                                                                        &error) &&
-                                  error && byte_count == 0);
+        // Invalid transfer widths/register ids and destructive address-scratch
+        // aliases stay errors, with no published prefix.
+        u32 invalid[][4] = {{17, 28, 0, 3}, {32, 28, 0, size}, {17, 32, 0, size},
+                            {17, 16, 4096u * size, size}, {17, 31, 4096u * size, size}};
+        for (u32 bad = 0; bad < BUSTER_ARRAY_LENGTH(invalid); bad += 1)
+        {
+            u32 bytes[4] = {0};
+            u32 byte_count = 0;
+            bool error = false;
+            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), invalid[bad][0], invalid[bad][1],
+                invalid[bad][2], invalid[bad][3], store, false, &byte_count, &error) && error && byte_count == 0);
+        }
+        if (store)
+        {
+            u32 bytes[4] = {0};
+            u32 byte_count = 0;
+            bool error = false;
+            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 16, 28, 4096u * size, size,
+                true, false, &byte_count, &error) && error && byte_count == 0);
+        }
     }
     {
         u32 bytes[16] = {0};

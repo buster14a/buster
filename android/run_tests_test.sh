@@ -710,6 +710,99 @@ test_android_workflow_body() (
     echo "Android workflow body evidence passed: $case_name"
 )
 
+
+# Exercise cancellation through the actual workflow and batch, not just the
+# workflow's EXIT trap. The existing payload seam supplies signal-style statuses;
+# the standalone monitor case above covers a real TERM during log monitoring.
+test_android_batch_interruption() (
+    set -euo pipefail
+    local case_name=$1 debug_status=$2 release_status=$3 expected_status=$4
+    local first_failed_config=$5 cleanup_status=$6
+    local state="$test_root/android-interruption-$case_name"
+    local actual_status expected_release=not-run
+    setup_android_fixture "$state"
+    export BUSTER_ANDROID_RUN_TESTS_SCRIPT="$state/payload.sh"
+    export FAKE_ANDROID_DEBUG_PAYLOAD_STATUS=$debug_status
+    export FAKE_ANDROID_RELEASE_PAYLOAD_STATUS=$release_status
+    if [[ $cleanup_status -ne 0 ]]; then export FAKE_ANDROID_ADB_KILL_STATUS=7; fi
+    cat >"$state/payload.sh" <<'PAYLOAD'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# -eq 5 ]]
+printf '%s\n' "$BUSTER_ANDROID_TEST_CONFIG" >>"$FAKE_ANDROID_STATE_DIR/configs-ran"
+if [[ $BUSTER_ANDROID_TEST_CONFIG == Debug ]]; then
+    exit "$FAKE_ANDROID_DEBUG_PAYLOAD_STATUS"
+fi
+exit "$FAKE_ANDROID_RELEASE_PAYLOAD_STATUS"
+PAYLOAD
+    set +e
+    (cd "$repo_root" && timeout --kill-after=1s 15s bash "$android_workflow_body") >"$state/run.log" 2>&1
+    actual_status=$?
+    set -e
+    assert_case_status "$case_name" "$actual_status" "$expected_status" "$state/run.log"
+    if [[ $debug_status -eq 130 || $debug_status -eq 143 ]]; then
+        [[ $(cat "$state/configs-ran") == Debug ]]
+    else
+        [[ $(cat "$state/configs-ran") == $'Debug\nRelease' ]]
+        expected_release=$release_status
+    fi
+    [[ $(grep -c '^ANDROID_CONFIG_RESULT ' "$state/run.log") -eq 2 ]]
+    assert_file_contains "ANDROID_CONFIG_RESULT config=Debug status=$debug_status" "$state/run.log"
+    assert_file_contains "ANDROID_CONFIG_RESULT config=Release status=$expected_release" "$state/run.log"
+    assert_file_contains "ANDROID_BATCH_RESULT phase=tests config=$first_failed_config status=$expected_status cleanup_status=$cleanup_status" "$state/run.log"
+    assert_file_contains "ANDROID_CI_RESULT phase=tests payload_status=$expected_status cleanup_status=not-run status=$expected_status" "$state/run.log"
+    [[ ! -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]
+    assert_android_owned_process_stopped "$state/emulator.pid"
+    echo "Android batch interruption evidence passed: $case_name"
+)
+
+
+# Keep the terminated child unreaped for the entire helper call so this tests
+# the zombie path deterministically instead of racing the host's PID reaper.
+test_android_zombie_cleanup() (
+    set -euo pipefail
+    local state="$test_root/android-zombie-cleanup"
+    setup_android_fixture "$state"
+    python3 -S - "$repo_root/android/start_emulator_ci.sh" <<'PYTHON'
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+marker = Path(os.environ['BUSTER_ANDROID_EMULATOR_STARTED_MARKER'])
+state = Path(os.environ['FAKE_ANDROID_STATE_DIR'])
+child = os.fork()
+if child == 0:
+    os._exit(0)
+try:
+    deadline = time.monotonic() + 5
+    while True:
+        probe = subprocess.run(['ps', '-o', 'stat=', '-p', str(child)],
+                               capture_output=True, text=True, check=True)
+        if probe.stdout.strip().startswith('Z'):
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError('owned child did not reach the zombie state')
+        time.sleep(0.01)
+    marker.write_text(str(child) + '\n')
+    result = subprocess.run(['bash', sys.argv[1], 'stop'],
+                            capture_output=True, text=True, timeout=10)
+    log = result.stdout + result.stderr
+    (state / 'run.log').write_text(log)
+    print(log, end='')
+    assert result.returncode == 0, result.returncode
+    assert 'is no longer running' in log
+    assert not marker.exists()
+    adb_log = state / 'adb.log'
+    assert not adb_log.exists() or 'emu kill' not in adb_log.read_text()
+finally:
+    marker.unlink(missing_ok=True)
+    os.waitpid(child, 0)
+PYTHON
+    echo "Android zombie cleanup evidence passed"
+)
+
 android_workflow_body="$test_root/android-workflow.sh"
 android_workflow_interrupt_body="$test_root/android-workflow-interrupt.sh"
 android_workflow_exit23_body="$test_root/android-workflow-exit23.sh"
@@ -724,5 +817,11 @@ for workflow_case in all-pass debug-failure debug-timeout missing-marker cleanup
     cleanup-timeout failure-and-cleanup7 already-stopped interruption payload-23-cleanup7; do
     test_android_workflow_body "$workflow_case"
 done
+
+test_android_zombie_cleanup
+test_android_batch_interruption debug-int 130 0 130 Debug 0
+test_android_batch_interruption debug-term 143 0 143 Debug 0
+test_android_batch_interruption debug-term-cleanup-failure 143 0 143 Debug 1
+test_android_batch_interruption release-term-after-failure 1 143 143 Debug 0
 
 echo "Android run_tests and CI status harness passed"
