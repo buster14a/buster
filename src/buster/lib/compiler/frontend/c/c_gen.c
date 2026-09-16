@@ -2013,6 +2013,7 @@ BUSTER_C_INTERNAL String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_signbit"), S8("signbit")}, {S8("__builtin_signbitf"), S8("signbitf")},
         {S8("__builtin_signbitl"), S8("signbitl")},
         {S8("__builtin_inff"), S8("inff")},
+        {S8("__builtin_inf"), S8("huge_val")},
         {S8("__builtin_huge_val"), S8("huge_val")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
