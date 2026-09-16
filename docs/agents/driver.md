@@ -151,17 +151,20 @@ allocator (`mir-stack`, `fast` or `quality`); NONE, direct non-native emission,
 preprocessing and syntax-only checks cannot satisfy the gate. Assembly inputs
 and linked prebuilt objects have no canonical C functions to gate.
 For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
-`compiler_driver_test_machine_fallback` runs the same eleven-fixture arithmetic,
+`compiler_driver_test_machine_fallback` runs the same eighteen-fixture arithmetic,
 control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
 Linux, macOS and Windows, under all three machine allocators and both explicit
-frontend forms in `test_all`, including CI. Its 396 object-compilation rows
-require 396 non-empty strict successes, including the two variadic fixtures on
+frontend forms in `test_all`, including CI. Its 648 object-compilation rows
+require 648 non-empty strict successes, including the variadic fixtures on
 Windows/Darwin AArch64. Any future explicit refusals require exact fallback-function, reason and opcode counts, preserve an
 existing output, and still compile through the direct fallback. They are not
 skips; implementing a gap must replace its refusal expectation with strict
 success. Every target/allocator/frontend cohort emits a `MIR_COVERAGE` row
 with actual strict successes, validated expected rejections and failures.
-Object compilation is not target execution. Separate AArch64 vector,
+Object compilation is not target execution. A separate partial-width CPUID
+control on x86-64 Linux and Windows proves permissive fallback telemetry,
+strict source/function/opcode diagnostics, output preservation, and later-unit
+statistics without weakening the strict corpus. Separate AArch64 vector,
 integer-pair and sixteen-byte atomic load/store tests, unsupported signature
 controls, Windows/UEFI large-frame tests, and native Windows ARM64
 unwind-boundary execution remain registered. The atomic lane is strict across

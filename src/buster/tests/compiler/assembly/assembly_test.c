@@ -8667,6 +8667,51 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyEncodeResult aarch64_system_generic = assembly_encode(
         arguments->arena, S8("brk #1\nmrs x0, nzcv\n"), (AssemblyEncodeOptions){.target = aarch64_target});
     BUSTER_TEST(arguments, aarch64_system_generic.diagnostic_count == 2 && aarch64_system_generic.bytes.length == 0);
+    AssemblyEncodeResult aarch64_system_register_generic = assembly_encode(
+        arguments->arena,
+        S8("mrs x0, fpsr\n"
+           "msr fpsr, x0\n"
+           "mrs x1, fpcr\n"
+           "msr fpcr, x1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
+    static u8 const expected_aarch64_system_register_generic[] = {
+        0x20, 0x44, 0x3b, 0xd5,
+        0x20, 0x44, 0x1b, 0xd5,
+        0x01, 0x44, 0x3b, 0xd5,
+        0x01, 0x44, 0x1b, 0xd5,
+    };
+    BUSTER_TEST(arguments, aarch64_system_register_generic.diagnostic_count == 0 &&
+                               aarch64_system_register_generic.relocation_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_system_register_generic.bytes,
+                                                         expected_aarch64_system_register_generic,
+                                                         sizeof(expected_aarch64_system_register_generic)));
+    AssemblyEncodeResult aarch64_system_register_generic_invalid = assembly_encode(
+        arguments->arena,
+        S8("mrs w0, fpsr\n"
+           "msr fpcr, w0\n"
+           "mrs x0, nzcv\n"
+           "mrs x0, S3_3_C7_C8_1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
+    BUSTER_TEST(arguments, aarch64_system_register_generic_invalid.diagnostic_count == 4 &&
+                               aarch64_system_register_generic_invalid.bytes.length == 0 &&
+                               aarch64_system_register_generic_invalid.relocation_count == 0);
+    static String8 const aarch64_system_register_generic_comma_invalid[] = {
+        S8_INITIALIZER("mrs x0, fpsr,\n"),
+        S8_INITIALIZER("msr fpsr, x0,\n"),
+        S8_INITIALIZER("mrs , fpsr\n"),
+        S8_INITIALIZER("msr , fpsr, x0\n"),
+        S8_INITIALIZER("mrs x0,, fpsr\n"),
+        S8_INITIALIZER("msr fpcr,, x0\n"),
+        S8_INITIALIZER("mrs x0, fpsr, x1\n"),
+        S8_INITIALIZER("msr fpcr, x0, x1\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(aarch64_system_register_generic_comma_invalid); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_comma = assembly_encode(
+            arguments->arena, aarch64_system_register_generic_comma_invalid[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
+        BUSTER_TEST(arguments, invalid_comma.diagnostic_count == 1 && invalid_comma.bytes.length == 0 && invalid_comma.relocation_count == 0);
+    }
     Aarch64SystemRegisterLookup nzcv_lookup = {0};
     BUSTER_TEST(arguments, aarch64_system_register_lookup_name(S8("nzcv"), &nzcv_lookup) &&
                                nzcv_lookup.packed_encoding == UINT16_C(0xda10) && nzcv_lookup.mode == AARCH64_SYSTEM_REGISTER_MODE_READ_WRITE);

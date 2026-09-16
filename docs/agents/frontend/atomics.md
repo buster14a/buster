@@ -151,27 +151,34 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   promoted width**, which is what the promotion above exists for: a three-byte
   record is read and written through four bytes, and the padding the promotion
   added is written as zero, because Clang copies the value through a zeroed
-  temporary and that is the oracle. The widths the canonical emitters lower
-  that access at are one, two, four and eight bytes on both targets, plus
-  sixteen on x86-64 where `cx16` gives them `CMPXCHG16B`, and on AArch64
-  through exclusive-pair loops -- the sequences `_Atomic __int128` already
-  uses, which also take aggregates promoted into that width. The
+  temporary and that is the oracle. The frontend represents widths one, two,
+  four and eight bytes on both targets, plus sixteen on x86-64 and on AArch64.
+  A sixteen-byte x86-64 aggregate uses native canonical atomic operations when
+  `cx16` admits `CMPXCHG16B`. On baseline x86-64 without `cx16`, the C frontend
+  instead emits the fixed type-specific libatomic ABI calls
+  (`__atomic_load_16`, `__atomic_store_16`, the fetch/exchange family, and
+  `__atomic_compare_exchange_16`) so canonical code generation never receives
+  an operation the selected CPU cannot implement. The object format retains
+  those imports; a hosted final link must supply libatomic, as the registered
+  contention fixture does. AArch64 lowers sixteen-byte accesses through
+  exclusive-pair loops -- the sequences `_Atomic __int128` already uses, which
+  also take aggregates promoted into that width. The
   AArch64 selector now handles the promoted aggregate loads/stores through
   sixteen bytes as well as full-width integer exchange/RMW/CAS. Its pair
   update rows consume the integer images described below; they do not widen
   arbitrary smaller frame objects. Any other target-specific selection miss
   remains visible in fallback statistics pending native-backend retirement.
-  Anything wider would need a `libatomic` lock and there is none here,
-  so lowering refuses it with a diagnostic naming the width rather than leaving
-  code generation to fail internally (#762). The refusal is
+  Anything wider would need the generic locking libatomic ABI, which this
+  toolchain does not provide, so lowering refuses it with a diagnostic naming
+  the width rather than leaving code generation to fail internally (#762). The refusal is
   `c_ir_atomic_aggregate_accesses_lowerable` in `c_gen.c`, and it runs over the
   *finished* body rather than where the access is built, because an operand is
   lowered as a value before an expression that only wanted its address recovers
   the place and drops the load again: refusing at the emit site rejects
   `&object.atomic_member`, which performs no atomic access at all and is what
   `tests/basic_c_packed_layout.c` writes over its seventeen-byte atomic
-  member. The sixteen-byte x86-64 access requires `cx16`, so the refusal is
-  target-dependent where the layout rule above is not.
+  member. The x86-64 frontend choice between native atomic IR and a runtime
+  call is target-dependent on `cx16`.
   `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
   Clang's answers baked in, including the padding.
 - **Aggregate C11 exchange and compare-exchange use integer representations
