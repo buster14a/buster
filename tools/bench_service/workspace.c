@@ -14,12 +14,18 @@ BUSTER_GLOBAL_LOCAL char const bq_real_recipe[] =
     "recipe=validate-buster-v1\n"
     "repository=buster14a/buster\n"
     "source-manifest=BQ-SOURCE-V1\n"
-    "layout=separate-source-build-v1\n";
+    "layout=separate-source-build-v1\n"
+    "experiment=native-retirement-performance-v1\n"
+    "result=sealed-partitioned-evidence-v1\n"
+    "entrypoint=source-digest-pinned-v1\n"
+    "definition=compiled-sha256-v1\n"
+    "verdict=validator-after-independent-replay-v1\n";
 
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -65,6 +71,19 @@ BUSTER_GLOBAL_LOCAL bool bq_string_path(String8 path, char result[BQ_PATH_CAP + 
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_workspace_append(char* output, u32 capacity, u32* offset,
+                                              char const* bytes, u64 length)
+{
+    bool ok = output && offset && bytes && *offset < capacity && length < capacity - *offset && length <= UINT32_MAX;
+    if (ok)
+    {
+        memcpy(output + *offset, bytes, (size_t)length);
+        *offset += (u32)length;
+        output[*offset] = 0;
+    }
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL int bq_open_absolute_directory(String8 path)
 {
     int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -100,6 +119,30 @@ BUSTER_GLOBAL_LOCAL bool bq_owned_directory(int fd, bool private_directory, bool
     {
         ok = (info.st_mode & 0222) == 0;
     }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_workspace_root_directory(int fd)
+{
+    struct stat info;
+    bool ok = fstat(fd, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
+              (info.st_mode & 067) == 0;
+#ifdef __APPLE__
+    /* Darwin applies BSD directory group inheritance without requiring the
+     * Linux setgid contract. Pin the root to the service's effective group;
+     * descendants are independently checked for inherited group identity. */
+    ok = ok && info.st_gid == getegid();
+#else
+    ok = ok && (info.st_mode & S_ISGID) != 0;
+#endif
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_workspace_reconcile_root_directory(int fd)
+{
+    struct stat info;
+    bool ok = fstat(fd, &info) == 0 && S_ISDIR(info.st_mode) &&
+              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 027) == 0;
     return ok;
 }
 
@@ -304,7 +347,7 @@ BUSTER_GLOBAL_LOCAL int bq_create_destination_file(int root, String8 path, u32* 
         char name[BQ_PATH_CAP + 1];
         memcpy(name, leaf.pointer, (size_t)leaf.length);
         name[leaf.length] = 0;
-        result = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+        result = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0440);
         close(parent);
     }
     return result;
@@ -366,7 +409,10 @@ BUSTER_GLOBAL_LOCAL bool bq_manifest_header(String8 manifest, String8 revision, 
 {
     String8 line;
     char expected[BQ_PATH_CAP + 1];
-    int length = snprintf(expected, sizeof(expected), "revision=%.*s", (int)revision.length, revision.pointer);
+    u32 used = 0;
+    bool expected_ok = bq_workspace_append(expected, sizeof(expected), &used, "revision=", 9) &&
+                       bq_workspace_append(expected, sizeof(expected), &used, (char const*)revision.pointer, revision.length);
+    int length = expected_ok && used <= INT_MAX ? (int)used : -1;
     bool ok = bq_next_line(manifest, offset, &line) && string_equal(line, S8("BQ-SOURCE-V1")) &&
               bq_next_line(manifest, offset, &line) && string_equal(line, S8("repository=buster14a/buster")) &&
               length > 0 && (u32)length < sizeof(expected) && bq_next_line(manifest, offset, &line) &&
@@ -377,7 +423,10 @@ BUSTER_GLOBAL_LOCAL bool bq_manifest_header(String8 manifest, String8 revision, 
 BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String8 revision)
 {
     char name[80];
-    int length = snprintf(name, sizeof(name), "sources/%.*s", (int)revision.length, revision.pointer);
+    u32 name_size = 0;
+    bool name_ok = bq_workspace_append(name, sizeof(name), &name_size, "sources/", 8) &&
+                   bq_workspace_append(name, sizeof(name), &name_size, (char const*)revision.pointer, revision.length);
+    int length = name_ok && name_size <= INT_MAX ? (int)name_size : -1;
     int source_root = length > 0 && (u32)length < sizeof(name) ?
                       bq_open_installed_directory(installed, string_from_pointer(name)) : -1;
     int manifest_fd = source_root >= 0 ?
@@ -394,7 +443,7 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     {
         ok = bq_manifest_header(manifest, revision, &offset);
     }
-    int copy = ok ? openat(destination, ".source-manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+    int copy = ok ? openat(destination, ".source-manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0440) : -1;
     if (ok)
     {
         ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) && fsync(copy) == 0;
@@ -504,7 +553,7 @@ BUSTER_GLOBAL_LOCAL bool bq_make_sources_read_only(int root)
     {
         String8 path = string_from_pointer(list.paths[i - 1]);
         int fd = path.length ? bq_open_directory_path(root, path) : openat(root, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        ok = fd >= 0 && fchmod(fd, 0500) == 0 && fsync(fd) == 0;
+        ok = fd >= 0 && fchmod(fd, 0550) == 0 && fsync(fd) == 0;
         if (fd >= 0)
         {
             close(fd);
@@ -669,11 +718,25 @@ BUSTER_GLOBAL_LOCAL bool bq_workspace_seal_bytes(BqJob const* job, char bytes[51
 {
     String8 base = bq_field(&job->request, 3);
     String8 candidate = bq_field(&job->request, 4);
-    int length = snprintf(bytes, 512, "BQ-WORKSPACE-V1\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\nrecipe=validate-buster-v1\nbase=%.*s\ncandidate=%.*s\n",
-                          (uint64_t)job->id, (uint64_t)job->token, job->digest, (int)base.length, base.pointer,
-                          (int)candidate.length, candidate.pointer);
-    bool ok = length > 0 && length < 512;
-    *size = ok ? (u32)length : 0;
+    char number[32];
+    int job_length = snprintf(number, sizeof(number), "%" PRIu64, (uint64_t)job->id);
+    u32 used = 0;
+    bool ok = job_length > 0 && (u32)job_length < sizeof(number) &&
+              bq_workspace_append(bytes, 512, &used, "BQ-WORKSPACE-V1\njob=", sizeof("BQ-WORKSPACE-V1\njob=") - 1) &&
+              bq_workspace_append(bytes, 512, &used, number, (u32)job_length) &&
+              bq_workspace_append(bytes, 512, &used, "\ntoken=", sizeof("\ntoken=") - 1);
+    int token_length = ok ? snprintf(number, sizeof(number), "%" PRIu64, (uint64_t)job->token) : -1;
+    ok = ok && token_length > 0 && (u32)token_length < sizeof(number) &&
+         bq_workspace_append(bytes, 512, &used, number, (u32)token_length) &&
+         bq_workspace_append(bytes, 512, &used, "\nrequest=", sizeof("\nrequest=") - 1) &&
+         bq_workspace_append(bytes, 512, &used, job->digest, SHA256_HEX_CAPACITY - 1) &&
+         bq_workspace_append(bytes, 512, &used, "\nrecipe=validate-buster-v1\nbase=",
+                             sizeof("\nrecipe=validate-buster-v1\nbase=") - 1) &&
+         bq_workspace_append(bytes, 512, &used, (char const*)base.pointer, base.length) &&
+         bq_workspace_append(bytes, 512, &used, "\ncandidate=", sizeof("\ncandidate=") - 1) &&
+         bq_workspace_append(bytes, 512, &used, (char const*)candidate.pointer, candidate.length) &&
+         bq_workspace_append(bytes, 512, &used, "\n", sizeof("\n") - 1);
+    *size = ok ? used : 0;
     return ok;
 }
 
@@ -1064,7 +1127,7 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     bool collision = false;
     if (error == BQ_OK && (installed < 0 || workspaces < 0 || fstat(installed, &installed_info) != 0 ||
                            fstat(workspaces, &workspaces_info) != 0 || !bq_owned_directory(installed, false, true) ||
-                           !bq_owned_directory(workspaces, true, false) || !bq_workspace_name(name, *id, *token)))
+                           !bq_workspace_root_directory(workspaces) || !bq_workspace_name(name, *id, *token)))
     {
         error = BQ_CONFIGURATION_MISMATCH;
     }
@@ -1078,7 +1141,11 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     }
     if (error == BQ_OK)
     {
-        created = mkdirat(workspaces, name, 0700) == 0;
+        created = mkdirat(workspaces, name, 02770) == 0;
+        if (created && fchmodat(workspaces, name, 02770, 0) != 0)
+        {
+            created = false;
+        }
         if (!created)
         {
             collision = errno == EEXIST;
@@ -1094,9 +1161,17 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     char const* subjects[] = {"base", "candidate"};
     for (u32 subject = 0; error == BQ_OK && subject < 2; subject += 1)
     {
-        bool made = mkdirat(workspace, subjects[subject], 0700) == 0;
+        mode_t subject_mode = subject == 0 ? 02750 : 02770;
+        mode_t build_mode = subject == 0 ? 02750 : 0700;
+        bool made = mkdirat(workspace, subjects[subject], subject_mode) == 0;
+        if (made && fchmodat(workspace, subjects[subject], subject_mode, 0) != 0)
+        {
+            made = false;
+        }
         int subject_fd = made ? openat(workspace, subjects[subject], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        made = subject_fd >= 0 && mkdirat(subject_fd, "source", 0700) == 0 && mkdirat(subject_fd, "build", 0700) == 0;
+        made = subject_fd >= 0 && mkdirat(subject_fd, "source", 02750) == 0 &&
+               fchmodat(subject_fd, "source", 02750, 0) == 0 && mkdirat(subject_fd, "build", build_mode) == 0 &&
+               fchmodat(subject_fd, "build", build_mode, 0) == 0;
         int source = made ? openat(subject_fd, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
         if (made)
         {
@@ -1216,7 +1291,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
     int workspaces = error == BQ_OK ? bq_open_absolute_directory(workspace_root) : -1;
     struct stat workspaces_info = {0}, workspace_info = {0};
     if (error == BQ_OK && (workspaces < 0 || fstat(workspaces, &workspaces_info) != 0 ||
-                           !bq_owned_directory(workspaces, true, false)))
+                           !bq_workspace_reconcile_root_directory(workspaces)))
     {
         bool recoverable_configuration = !has_attempt && failure == BQ_CONFIGURATION_MISMATCH &&
                                          (job->phase == BQ_RESERVED || job->phase == BQ_CLEANING);

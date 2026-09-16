@@ -1,0 +1,42 @@
+name: Native retirement performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_commit:
+        description: Full lowercase 40-hex direct-native baseline commit
+        required: true
+        type: string
+      candidate_commit:
+        description: Full lowercase 40-hex MIR-only candidate commit
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: native-retirement-performance-ryzen-9700x
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && github.ref_protected == true && github.event.repository.default_branch == 'main' }}
+    environment: native-retirement-performance
+    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 10
+    steps:
+      - name: Submit fixed native-retirement experiment
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASELINE_COMMIT: ${{ inputs.baseline_commit }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          REQUEST_KEY: gh-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          exec /usr/local/libexec/buster-bench-service \
+            submit-remote \
+            /run/buster-bench/control.sock \
+            github-actions \
+            "$REQUEST_KEY" \
+            validate-buster-v1 \
+            "$BASELINE_COMMIT" \
+            "$CANDIDATE_COMMIT"

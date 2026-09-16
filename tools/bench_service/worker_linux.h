@@ -11,8 +11,17 @@
 #define BQ_WORKER_BOOT_CAP 40u
 #define BQ_WORKER_CGROUP_CAP 192u
 #define BQ_WORKER_INVOCATION_CAP 40u
+#define BQ_WORKER_IDENTITY_CAP 64u
 #define BQ_WORKER_OUTPUT_CAP 4096u
 #define BQ_WORKER_ARG_CAP 32u
+#define BQ_WORKER_BUNDLE_CAP (8u * 1024u * 1024u)
+#define BQ_WORKER_BUNDLE_ENTRY_CAP 4096u
+#define BQ_WORKER_BUNDLE_FILE_CAP (2ull * 1024 * 1024 * 1024)
+#define BQ_WORKER_BUNDLE_TOTAL_CAP (16ull * 1024 * 1024 * 1024)
+#define BQ_WORKER_BUNDLE_DEPTH_CAP 256u
+#define BQ_WORKER_BUNDLE_PATH_CAP BQ_PATH_CAP
+#define BQ_WORKER_BUNDLE_LINE_CAP 320u
+#define BQ_WORKER_EVIDENCE_CAP 4096u
 
 typedef struct BqWorkerLimits
 {
@@ -39,6 +48,8 @@ typedef struct BqWorkerObserved
     char unit[BQ_WORKER_UNIT_CAP];
     char cgroup[BQ_WORKER_CGROUP_CAP];
     char invocation_id[BQ_WORKER_INVOCATION_CAP];
+    char user[BQ_WORKER_IDENTITY_CAP];
+    char group[BQ_WORKER_IDENTITY_CAP];
     char allowed_cpus[64];
     u64 memory_max;
     u64 memory_swap_max;
@@ -50,6 +61,35 @@ typedef struct BqWorkerObserved
     bool active;
     bool populated;
     bool send_sigkill;
+    bool no_new_privileges;
+    bool private_tmp;
+    bool private_devices;
+    bool private_network;
+    bool protect_home;
+    bool protect_system;
+    bool protect_proc;
+    bool restrict_suidsgid;
+    bool protect_control_groups;
+    bool protect_kernel_tunables;
+    bool protect_kernel_modules;
+    bool protect_kernel_logs;
+    bool protect_clock;
+    bool protect_hostname;
+    bool lock_personality;
+    bool memory_deny_write_execute;
+    bool remove_ipc;
+    bool keyring_private;
+    bool restrict_namespaces;
+    bool restrict_realtime;
+    bool address_families_unix;
+    bool syscall_architectures_native;
+    bool syscall_filter_system_service;
+    bool syscall_error_number_eperm;
+    bool security_properties_valid;
+    bool paths_valid;
+    char inaccessible_paths[BQ_PATH_CAP * 2 + 2];
+    char read_only_paths[BQ_PATH_CAP + 1];
+    char read_write_paths[BQ_PATH_CAP + 1];
     u64 cgroup_device;
     u64 cgroup_inode;
     u64 cgroup_root_device;
@@ -88,10 +128,20 @@ typedef struct BqWorkerConfig
     BqWorkerLimits limits;
     BqWorkerBackend* backend;
     BqWorkerQuarantine* quarantine;
+    /* Absolute service-owned queue directory. Production services make it
+     * inaccessible to the recipe; private test backends may leave it empty. */
+    String8 queue_root;
+    /* Set for the installed fixed recipe even when a deterministic injected
+     * backend supplies the manager seam. The backend must still satisfy every
+     * observed security property; it only replaces process control in tests. */
+    bool production_path;
 } BqWorkerConfig;
 
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);
-BUSTER_F_DECL BqError bq_worker_unit(String8 lease_file, int lease_fd);
+BUSTER_F_DECL BqError bq_worker_result_binding_validate(BqJob const* job);
+BUSTER_F_DECL BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token,
+                                     String8 workspace_root, String8 base_revision, String8 candidate_revision,
+                                     String8 result_root);
 BUSTER_F_DECL void bq_worker_backend_systemd(BqWorkerBackend* backend);
 
 #endif

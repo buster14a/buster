@@ -24,6 +24,7 @@
 //   xed_import_*, assembly_import_*              x86 metadata importer (XED)
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
+//   bench_service_recipe                        fixed validate-buster service recipe
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
@@ -49,7 +50,10 @@
 #endif
 #if BUSTER_LINUX
 #include <linux/perf_event.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 #include <buster/lib/string.c>
@@ -71,6 +75,8 @@ typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BENCH_SERVICE,
+    BUILD_COMMAND_BENCH_SERVICE_RECIPE,
+    BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_GENERATE,
@@ -195,6 +201,7 @@ struct ProcessRun
     SliceString8 environment_values;
     ProcessSpawnOptions spawn_options;
     ProcessSpawnResult spawn;
+    ProcessResult result;
     String8 working_directory;
     String8 timing_description;
     String8 timing_configuration;
@@ -22470,6 +22477,7 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 
 BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments);
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments);
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena);
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
@@ -34251,6 +34259,2897 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
     native_foundation_tool_add(arena, arguments, false);
 }
 
+/* Fixed service recipe ----------------------------------------------------
+ *
+ * This is the build-driver half of the service handoff.  The worker supplies
+ * exactly six values below; all executables, build flags and output names are
+ * constants owned by this file.  In particular, no service request reaches
+ * the argument builder as a command, option or path other than the validated
+ * subject identities and the materializer-owned roots.
+ */
+#define BENCH_SERVICE_RECIPE_ARGUMENT_COUNT 6u
+#define BENCH_SERVICE_RECIPE_PATH_CAP 2048u
+#define BENCH_SERVICE_RECIPE_MANIFEST_CAP 32768u
+#define BENCH_SERVICE_RECIPE_BUNDLE_CAP (32u * 1024u * 1024u)
+#define BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP 4096u
+#define BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP (2ull * 1024 * 1024 * 1024)
+#define BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP (16ull * 1024 * 1024 * 1024)
+#define BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP 256u
+#define BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP 192u
+#define BENCH_SERVICE_RECIPE_CPU "2"
+#define BENCH_SERVICE_RECIPE_MEMORY "8589934592"
+#define BENCH_SERVICE_RECIPE_SWAP "0"
+#define BENCH_SERVICE_RECIPE_TASKS "256"
+#define BENCH_SERVICE_RECIPE_RUNTIME "432000000000us"
+#define BENCH_SERVICE_RECIPE_STAGE_TIMEOUT 3600u
+#define BENCH_SERVICE_RECIPE_PERFORMANCE_TIMEOUT 432000u
+#define BENCH_SERVICE_RECIPE_MANIFEST_NAME "validate-buster-v1.manifest"
+#define BENCH_SERVICE_RECIPE_BUNDLE_NAME "validate-buster-v1.bundle"
+#ifndef BENCH_SERVICE_RECIPE_DRIVER
+#define BENCH_SERVICE_RECIPE_DRIVER "/usr/local/libexec/buster-bench-build"
+#endif
+#ifndef BENCH_SERVICE_RECIPE_PERFORMANCE
+#define BENCH_SERVICE_RECIPE_PERFORMANCE "/usr/local/libexec/buster-native-retirement-performance"
+#endif
+#define BENCH_SERVICE_RECIPE_PERFORMANCE_SHA256 "f8c5eabf03f24f3bdeceb3230a2a1594bd48b7bf81399e5f97a85f864e734933"
+#ifndef BENCH_SERVICE_RECIPE_DEFINITION
+#define BENCH_SERVICE_RECIPE_DEFINITION "/usr/local/share/buster-bench/native-retirement-performance-v1"
+#endif
+#ifndef BENCH_SERVICE_RECIPE_DEFINITION_SHA256
+#define BENCH_SERVICE_RECIPE_DEFINITION_SHA256 "required-at-deployment"
+#endif
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE 1u
+#endif
+
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_temp_name(char const* prefix, char output[128])
+{
+    char const digits[] = "0123456789abcdef";
+    u8 entropy[16] = {0};
+    int source = open("/dev/urandom", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    u32 used = 0;
+    bool ok = source >= 0;
+    while (ok && used < sizeof(entropy))
+    {
+        ssize_t count = read(source, entropy + used, sizeof(entropy) - used);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok) used += (u32)count;
+    }
+    if (source >= 0 && close(source) != 0) ok = false;
+    u32 prefix_length = prefix ? (u32)strlen(prefix) : 0;
+    ok = ok && prefix_length + 1 + sizeof(entropy) * 2 + 5 < 128;
+    if (ok)
+    {
+        memcpy(output, prefix, prefix_length);
+        output[prefix_length] = '.';
+        for (u32 index = 0; index < sizeof(entropy); index += 1)
+        {
+            output[prefix_length + 1 + index * 2] = digits[entropy[index] >> 4];
+            output[prefix_length + 2 + index * 2] = digits[entropy[index] & 15];
+        }
+        memcpy(output + prefix_length + 1 + sizeof(entropy) * 2, ".tmp", 5);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_entry_matches(int parent, char const* name,
+                                                             struct stat const* expected)
+{
+    struct stat actual = {0};
+    bool ok = parent >= 0 && name && expected && fstatat(parent, name, &actual, AT_SYMLINK_NOFOLLOW) == 0 &&
+              actual.st_dev == expected->st_dev && actual.st_ino == expected->st_ino &&
+              S_ISREG(actual.st_mode) && actual.st_nlink >= 1;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_unlink_if_same(int parent, char const* name,
+                                                              struct stat const* expected)
+{
+    bool ok = !name || !name[0] || bench_service_recipe_entry_matches(parent, name, expected);
+    if (ok && name && name[0]) ok = unlinkat(parent, name, 0) == 0;
+    return ok;
+}
+#endif
+
+/* This override is only assigned by the deterministic recipe self-test below.
+ * The production command has no environment or request-controlled executable
+ * path: it always uses the two constants above. */
+BUSTER_GLOBAL_LOCAL String8 bench_service_recipe_driver_override;
+BUSTER_GLOBAL_LOCAL String8 bench_service_recipe_throughput_override;
+BUSTER_GLOBAL_LOCAL char bench_service_recipe_throughput_digest_override[SHA256_HEX_CAPACITY];
+BUSTER_GLOBAL_LOCAL char bench_service_recipe_definition_digest_override[SHA256_HEX_CAPACITY];
+/* Self-test seam: model coordinator cancellation/crash after the trusted throughput
+ * directory is renamed but before its bundle index is written.  Production
+ * never assigns this flag; recovery must bind the already-published tree on
+ * the next fixed-recipe invocation. */
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_cancel_after_publish;
+
+typedef struct BenchServiceRecipeManifest BenchServiceRecipeManifest;
+typedef struct BenchServiceRecipeStage BenchServiceRecipeStage;
+
+struct BenchServiceRecipeManifest
+{
+    String8 path;
+    String8 job_id;
+    String8 attempt_token;
+    String8 workspace_root;
+    String8 base_revision;
+    String8 candidate_revision;
+    String8 result_root;
+    String8 driver;
+    String8 throughput;
+    String8 throughput_digest;
+    String8 definition;
+    String8 definition_digest;
+    String8 base_source;
+    String8 base_build;
+    String8 candidate_source;
+    String8 candidate_stage_build;
+    String8 throughput_output;
+    String8 candidate_build;
+    String8 base_binary;
+    String8 candidate_stage_binary;
+    String8 candidate_binary;
+    int result_directory;
+    int base_build_directory;
+    int candidate_build_directory;
+    /* The descriptor-backed implementation is Linux-only, but this record is
+     * parsed by the portable build driver on every supported host. */
+    u64 result_device;
+    u64 result_inode;
+    char base_digest[SHA256_HEX_CAPACITY];
+    char candidate_digest[SHA256_HEX_CAPACITY];
+    char bundle_digest[SHA256_HEX_CAPACITY];
+};
+
+struct BenchServiceRecipeStage
+{
+    BenchServiceRecipeManifest* manifest;
+    ProcessRun* run;
+    String8 name;
+};
+
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspace_root, String8 attempt_root,
+                                                    String8 result_root, String8 base_source, String8 base_build,
+                                                    String8 candidate_source, String8 candidate_build,
+                                                    String8 job_id, String8 attempt_token, String8 base_revision,
+                                                    String8 candidate_revision);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_binary_digest(int build_directory, char output[SHA256_HEX_CAPACITY]);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_executable_digest(String8 path,
+                                                                 char output[SHA256_HEX_CAPACITY]);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_performance_identity(String8 path);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_performance_result(Arena* arena,
+                                                                  BenchServiceRecipeManifest* manifest);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_digest_equal(char const left[SHA256_HEX_CAPACITY],
+                                                            char const right[SHA256_HEX_CAPACITY]);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 candidate_subject,
+                                                                       String8 candidate_stage_build);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_visibility(Arena* arena,
+                                                                            BenchServiceRecipeManifest* manifest);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_throughput_output(Arena* arena,
+                                                                         String8 candidate_stage_build,
+                                                                         String8 throughput_output);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_candidate(Arena* arena,
+                                                                 BenchServiceRecipeManifest* manifest);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_throughput(Arena* arena,
+                                                                  BenchServiceRecipeManifest* manifest);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
+                                                                        BenchServiceRecipeManifest* manifest);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int directory, bool candidate_visible);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sync_tree(Arena* arena, int directory);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchServiceRecipeManifest* manifest);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_digest(int directory, char const* name,
+                                                             u64* size, char output[SHA256_HEX_CAPACITY]);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_recover_published(Arena* arena,
+                                                                BenchServiceRecipeManifest* manifest);
+#endif
+
+BUSTER_GLOBAL_LOCAL char const* bench_service_recipe_process_name(ProcessResult result)
+{
+    char const* names[PROCESS_RESULT_COUNT] = {
+        [PROCESS_RESULT_SUCCESS] = "success",
+        [PROCESS_RESULT_FAILED] = "failed",
+        [PROCESS_RESULT_FAILED_TRY_AGAIN] = "failed-try-again",
+        [PROCESS_RESULT_CRASH] = "crash",
+        [PROCESS_RESULT_NOT_EXISTENT] = "not-existent",
+        [PROCESS_RESULT_RUNNING] = "running",
+        [PROCESS_RESULT_UNKNOWN] = "unknown",
+    };
+    char const* result_name = result < PROCESS_RESULT_COUNT && names[result] ? names[result] : "unknown";
+    return result_name;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_names(String8 stage, bool final,
+                                                              char target[96], char temporary[128])
+{
+    bool known = string_equal(stage, S8("prepare")) || string_equal(stage, S8("base-generate")) ||
+                 string_equal(stage, S8("base-build")) || string_equal(stage, S8("candidate-generate")) ||
+                 string_equal(stage, S8("candidate-build")) || string_equal(stage, S8("throughput"));
+    int target_length = known ? snprintf(target, 96, final ? BENCH_SERVICE_RECIPE_MANIFEST_NAME :
+                                         "validate-buster-v1.%.*s.manifest", (int)stage.length, stage.pointer) : -1;
+    int temporary_length = target_length > 0 ? snprintf(temporary, 128, "%s.tmp", target) : -1;
+    return known && target_length > 0 && (u32)target_length < 96 && temporary_length > 0 && (u32)temporary_length < 128;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_atomic_manifest(BenchServiceRecipeManifest* manifest, String8 stage,
+                                                               bool final, String8 body)
+{
+    bool ok = body.length <= BENCH_SERVICE_RECIPE_MANIFEST_CAP && manifest && manifest->result_directory >= 0;
+#if BUSTER_LINUX
+    int parent = -1;
+    int descriptor = -1;
+    char target[96] = {0}, temporary[128] = {0};
+    struct stat temporary_info = {0}, published_info = {0};
+    ok = ok && bench_service_recipe_manifest_names(stage, final, target, temporary);
+    ok = ok && bench_service_recipe_temp_name(final ? BENCH_SERVICE_RECIPE_MANIFEST_NAME : target, temporary);
+    if (ok)
+    {
+        struct stat info = {0};
+        ok = fstat(manifest->result_directory, &info) == 0 && S_ISDIR(info.st_mode) && info.st_dev == manifest->result_device &&
+             info.st_ino == manifest->result_inode && (parent = fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3)) >= 0;
+    }
+    if (ok)
+    {
+        /* O_EXCL|O_NOFOLLOW makes a stale or planted temporary a hard,
+         * reviewable failure.  The directory fd is held from preparation, so
+         * path replacement cannot redirect publication to another namespace. */
+        descriptor = openat(parent, temporary,
+                            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        ok = descriptor >= 0;
+    }
+    for (u64 offset = 0; ok && offset < body.length;)
+    {
+        ssize_t wrote = write(descriptor, body.pointer + offset, (size_t)(body.length - offset));
+        if (wrote < 0 && errno == EINTR) continue;
+        ok = wrote > 0;
+        if (ok) offset += (u64)wrote;
+    }
+    if (descriptor >= 0)
+    {
+        if (ok && fchmod(descriptor, 0400) != 0) ok = false;
+        if (ok && fsync(descriptor) != 0) ok = false;
+        if (ok && fstat(descriptor, &temporary_info) != 0) ok = false;
+        if (ok) ok = S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1 &&
+                       bench_service_recipe_entry_matches(parent, temporary, &temporary_info);
+    }
+    /* linkat is the no-replace publication primitive available on every
+     * supported Linux filesystem.  renameat would silently replace a planted
+     * result (or a prior durable stage), which would make a crash/race look
+     * like a successful retry. */
+    if (ok && linkat(parent, temporary, parent, target, 0) != 0) ok = false;
+    if (ok && fstatat(parent, target, &published_info, AT_SYMLINK_NOFOLLOW) != 0) ok = false;
+    if (ok) ok = published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
+                       S_ISREG(published_info.st_mode);
+    if (ok && !bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info)) ok = false;
+    if (ok && fsync(parent) != 0) ok = false;
+    if (!ok && parent >= 0 && temporary[0]) bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info);
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    descriptor = -1;
+    if (parent >= 0)
+    {
+        if (close(parent) != 0) ok = false;
+        parent = -1;
+    }
+#else
+    ok = false;
+#endif
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_write(Arena* arena, BenchServiceRecipeManifest* manifest,
+                                                              String8 stage, ProcessResult result)
+{
+    char const* process = bench_service_recipe_process_name(result);
+    char const* status = result == PROCESS_RESULT_SUCCESS ? string_equal(stage, S8("throughput")) ? "succeeded" : "running" : "failed";
+    String8 base_digest = manifest->base_digest[0] ? string_from_pointer(manifest->base_digest) : S8("");
+    String8 candidate_digest = manifest->candidate_digest[0] ? string_from_pointer(manifest->candidate_digest) : S8("");
+    String8 bundle_digest = manifest->bundle_digest[0] ? string_from_pointer(manifest->bundle_digest) : S8("");
+    String8 body = string_format(arena,
+        S8("schema=1\nrecipe=validate-buster-v1\nstatus={S8}\nstage={S8}\nprocess-result={S8}\n"
+           "job-id={S8}\nattempt-token={S8}\nworkspace-root={S8}\nresult-root={S8}\n"
+           "base-revision={S8}\ncandidate-revision={S8}\ndriver={S8}\nthroughput={S8}\n"
+           "throughput-sha256={S8}\nperformance-definition={S8}\nperformance-definition-sha256={S8}\n"
+           "trusted-source-scope=operator-installed-read-only\n"
+           "namespace-policy=private-workspace-post-run-identity\n"
+           "generate-policy=Release clang no-include-tests no-developer-targets no-check-optional-warnings no-fuzz no-sanitize no-time-trace no-instrument no-lto\n"
+           "build-policy=Release target=ide jobs=1\n"
+           "performance-policy=decision=native-retirement-performance-v1 aa=required ab=paired rounds=2 pairs=bound-60-to-254 warmups=2 guard=required partition-record-cap=16777216 partition-count-cap=3 total-record-cap=39518208 total-byte-cap=17179869184 sealed-result=required independent-replay=required\n"
+           "base-source={S8}\nbase-build={S8}\ncandidate-source={S8}\ncandidate-stage-build={S8}\n"
+           "throughput-output={S8}\ncandidate-build={S8}\n"
+           "base-binary={S8}\ncandidate-binary={S8}\nbase-binary-sha256={S8}\ncandidate-binary-sha256={S8}\n"
+           "bundle-sha256={S8}\n"),
+        string_from_pointer(status), stage, string_from_pointer(process), manifest->job_id, manifest->attempt_token, manifest->workspace_root, manifest->result_root,
+        manifest->base_revision, manifest->candidate_revision, manifest->driver, manifest->throughput,
+        manifest->throughput_digest, manifest->definition, manifest->definition_digest, manifest->base_source,
+        manifest->base_build, manifest->candidate_source, manifest->candidate_stage_build, manifest->throughput_output,
+        manifest->candidate_build,
+        manifest->base_binary, manifest->candidate_binary,
+        base_digest, candidate_digest, bundle_digest);
+    bool final = string_equal(stage, S8("throughput")) ||
+                 (result != PROCESS_RESULT_SUCCESS && result != PROCESS_RESULT_RUNNING);
+    return bench_service_recipe_atomic_manifest(manifest, stage, final, body);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* arena, void* data)
+{
+    BenchServiceRecipeStage* stage = data;
+    ProcessResult result = stage->run ? stage->run->result : PROCESS_RESULT_UNKNOWN;
+    bool simulated_crash = false;
+#if BUSTER_LINUX
+    if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("base-build")))
+    {
+        if (!bench_service_recipe_binary_digest(stage->manifest->base_build_directory, stage->manifest->base_digest) ||
+            !bench_service_recipe_lock_tree(arena, stage->manifest->base_build_directory, true))
+            result = PROCESS_RESULT_FAILED;
+    }
+    else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("candidate-build")))
+    {
+        if (!bench_service_recipe_promote_candidate(arena, stage->manifest) ||
+            !bench_service_recipe_lock_tree(arena, stage->manifest->candidate_build_directory, true) ||
+            !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest))
+            result = PROCESS_RESULT_FAILED;
+    }
+    else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("throughput")))
+    {
+        char base_digest[SHA256_HEX_CAPACITY] = {0};
+        char candidate_digest[SHA256_HEX_CAPACITY] = {0};
+        bool stale = bench_service_recipe_cleanup_throughput_temps(arena, stage->manifest);
+        bool tree = stale && bench_service_recipe_tree(arena, stage->manifest->workspace_root,
+                                              path_join(arena, stage->manifest->workspace_root,
+                                                        string_format(arena, S8("job-{S8}-attempt-{S8}"), stage->manifest->job_id,
+                                                                      stage->manifest->attempt_token)),
+                                              stage->manifest->result_root, stage->manifest->base_source,
+                                              stage->manifest->base_build, stage->manifest->candidate_source,
+                                              stage->manifest->candidate_build, stage->manifest->job_id,
+                                              stage->manifest->attempt_token, stage->manifest->base_revision,
+                                              stage->manifest->candidate_revision);
+        bool digests = bench_service_recipe_binary_digest(stage->manifest->base_build_directory, base_digest) &&
+                       bench_service_recipe_binary_digest(stage->manifest->candidate_build_directory, candidate_digest) &&
+                       bench_service_recipe_digest_equal(stage->manifest->base_digest, base_digest) &&
+                       bench_service_recipe_digest_equal(stage->manifest->candidate_digest, candidate_digest);
+        bool validated = tree && digests && bench_service_recipe_performance_result(arena, stage->manifest);
+        bool promoted = validated && bench_service_recipe_promote_throughput(arena, stage->manifest);
+        simulated_crash = promoted && bench_service_recipe_test_cancel_after_publish;
+        if (simulated_crash)
+        {
+            bench_service_recipe_test_cancel_after_publish = false;
+            result = PROCESS_RESULT_FAILED;
+        }
+        bool indexed = promoted && !simulated_crash && bench_service_recipe_bundle_index(arena, stage->manifest);
+        if (!simulated_crash && (!promoted || !indexed))
+        {
+            string_print(S8("error: fixed performance evidence publication failed stale={u32} tree={u32} digests={u32} validated={u32} promoted={u32} indexed={u32}\n"),
+                         stale, tree, digests, validated, promoted, indexed);
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+    if (!simulated_crash && result != PROCESS_RESULT_SUCCESS && stage->manifest && stage->manifest->result_directory >= 0)
+    {
+        bool stale = !string_equal(stage->name, S8("throughput")) ||
+                     bench_service_recipe_cleanup_throughput_temps(arena, stage->manifest);
+        if (!stale || !bench_service_recipe_bundle_index(arena, stage->manifest)) result = PROCESS_RESULT_FAILED;
+    }
+#endif
+    bool recorded = !simulated_crash && bench_service_recipe_manifest_write(arena, stage->manifest, stage->name, result);
+    if (!recorded && !simulated_crash) result = PROCESS_RESULT_FAILED;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_decimal(String8 value)
+{
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
+    return parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == value.length && parsed.value != 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_revision(String8 value)
+{
+    bool ok = value.length == 40 || value.length == 64;
+    for (u64 i = 0; ok && i < value.length; i += 1)
+    {
+        u8 c = (u8)value.pointer[i];
+        ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_path(String8 value)
+{
+    bool ok = value.length > 0 && value.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(value);
+    u64 component_start = 0;
+    if (ok && value.pointer[0] == '/') component_start = 1;
+    for (u64 i = component_start; ok && i <= value.length; i += 1)
+    {
+        if (i == value.length || value.pointer[i] == '/')
+        {
+            u64 length = i - component_start;
+            ok = length != 0 && !(length == 1 && value.pointer[component_start] == '.') &&
+                 !(length == 2 && value.pointer[component_start] == '.' && value.pointer[component_start + 1] == '.');
+            component_start = i + 1;
+        }
+        else
+        {
+            u8 c = (u8)value.pointer[i];
+            ok = c != '\\' && c != '\n' && c != '\r' && c != 0;
+        }
+    }
+    return ok;
+}
+
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL int bench_service_recipe_open_directory(String8 path)
+{
+    bool valid = path.length > 0 && path.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(path);
+    int current = -1;
+    if (valid)
+    {
+        current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    u64 offset = 1;
+    while (current >= 0 && offset < path.length)
+    {
+        u64 end = offset;
+        while (end < path.length && path.pointer[end] != '/') end += 1;
+        char name[BENCH_SERVICE_RECIPE_PATH_CAP];
+        u64 length = end - offset;
+        bool component = length > 0 && length < sizeof(name);
+        if (component)
+        {
+            memcpy(name, path.pointer + offset, (size_t)length);
+            name[length] = 0;
+            int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            close(current);
+            current = next;
+        }
+        else
+        {
+            close(current);
+            current = -1;
+        }
+        offset = end + 1;
+    }
+    if (current >= 0)
+    {
+        struct stat info = {0};
+        if (fstat(current, &info) != 0 || !S_ISDIR(info.st_mode))
+        {
+            close(current);
+            current = -1;
+        }
+    }
+    return current;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_private_directory(int descriptor, bool writable)
+{
+    struct stat info = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+                    (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 077) == 0;
+    if (ok && !writable) ok = (info.st_mode & 0222) == 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_candidate_directory(int descriptor)
+{
+    struct stat info = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0222) == 0 &&
+              (info.st_mode & 0050) == 0050;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_candidate_traverse_directory(int descriptor)
+{
+    struct stat info = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0022) == 0 &&
+              (info.st_mode & 0010) == 0010;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_realpath(String8 path, char output[BENCH_SERVICE_RECIPE_PATH_CAP])
+{
+    bool ok = path.length > 0 && path.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(path) &&
+              !memchr(path.pointer, 0, (size_t)path.length);
+    if (ok)
+    {
+        char input[BENCH_SERVICE_RECIPE_PATH_CAP];
+        char* resolved = NULL;
+        memcpy(input, path.pointer, (size_t)path.length);
+        input[path.length] = 0;
+        resolved = realpath(input, NULL);
+        ok = resolved && strlen(resolved) < BENCH_SERVICE_RECIPE_PATH_CAP && !strcmp(input, resolved);
+        if (ok) memcpy(output, resolved, strlen(resolved) + 1);
+        free(resolved);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prefix(String8 path, char output[BENCH_SERVICE_RECIPE_PATH_CAP],
+                                                      u8 bytes[4096], u32* size)
+{
+    bool ok = path.length > 0 && path.length < BENCH_SERVICE_RECIPE_PATH_CAP && path_is_absolute(path) &&
+              !memchr(path.pointer, 0, (size_t)path.length);
+    char input[BENCH_SERVICE_RECIPE_PATH_CAP];
+    int original = -1;
+    int resolved_fd = -1;
+    if (ok)
+    {
+        memcpy(input, path.pointer, (size_t)path.length);
+        input[path.length] = 0;
+        original = open(input, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        ok = original >= 0;
+    }
+    if (ok)
+    {
+        char* resolved = realpath(input, NULL);
+        ok = resolved && strlen(resolved) < BENCH_SERVICE_RECIPE_PATH_CAP && !strcmp(input, resolved);
+        if (ok)
+        {
+            memcpy(output, resolved, strlen(resolved) + 1);
+            resolved_fd = open(resolved, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        }
+        free(resolved);
+    }
+    struct stat original_info = {0}, resolved_info = {0};
+    if (ok) ok = resolved_fd >= 0 && fstat(original, &original_info) == 0 && fstat(resolved_fd, &resolved_info) == 0 &&
+                     S_ISREG(original_info.st_mode) && original_info.st_nlink == 1 && (original_info.st_mode & 0222) == 0 &&
+                     (original_info.st_uid == 0 || original_info.st_uid == geteuid()) && original_info.st_dev == resolved_info.st_dev &&
+                     original_info.st_ino == resolved_info.st_ino;
+    u32 used = 0;
+    while (ok && used < 4095)
+    {
+        ssize_t count = read(original, bytes + used, 4095 - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = false;
+        else if (!count) break;
+        else used += (u32)count;
+    }
+    if (ok)
+    {
+        char extra;
+        ok = read(original, &extra, 1) == 0;
+    }
+    if (resolved_fd >= 0 && close(resolved_fd) != 0) ok = false;
+    if (original >= 0 && close(original) != 0) ok = false;
+    *size = ok ? used : 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_trusted_source(String8 path)
+{
+    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
+    bool ok = bench_service_recipe_realpath(path, resolved);
+    int descriptor = ok ? bench_service_recipe_open_directory(string_from_pointer(resolved)) : -1;
+    struct stat info = {0};
+    if (ok) ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+                    (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0222) == 0 &&
+                    (info.st_mode & 0050) == 0050;
+    if (descriptor >= 0) close(descriptor);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_line(u8 const* bytes, u32 size, String8 expected)
+{
+    bool found = false;
+    for (u32 offset = 0; !found && offset + expected.length <= size; offset += 1)
+    {
+        found = !memcmp(bytes + offset, expected.pointer, (size_t)expected.length) &&
+                (offset + expected.length == size || bytes[offset + expected.length] == '\n');
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_source_manifest(Arena* arena, String8 path, String8 revision)
+{
+    u8 bytes[4096] = {0};
+    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
+    u32 size = 0;
+    String8 header = string_format(arena, S8("BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision={S8}\n"), revision);
+    bool ok = bench_service_recipe_prefix(path, resolved, bytes, &size) && size >= header.length &&
+              !memcmp(bytes, header.pointer, (size_t)header.length);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_workspace_identity(Arena* arena, String8 path, String8 job_id,
+                                                                  String8 attempt_token, String8 base_revision,
+                                                                  String8 candidate_revision)
+{
+    u8 bytes[4096] = {0};
+    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
+    u32 size = 0;
+    String8 job_line = string_format(arena, S8("job={S8}"), job_id);
+    String8 token_line = string_format(arena, S8("token={S8}"), attempt_token);
+    String8 recipe_line = S8("recipe=validate-buster-v1");
+    String8 base_line = string_format(arena, S8("base={S8}"), base_revision);
+    String8 candidate_line = string_format(arena, S8("candidate={S8}"), candidate_revision);
+    bool ok = bench_service_recipe_prefix(path, resolved, bytes, &size) && size >= 16 &&
+              !memcmp(bytes, "BQ-WORKSPACE-V1\n", 16) && bench_service_recipe_line(bytes, size, job_line) &&
+              bench_service_recipe_line(bytes, size, token_line) && bench_service_recipe_line(bytes, size, recipe_line) &&
+              bench_service_recipe_line(bytes, size, base_line) && bench_service_recipe_line(bytes, size, candidate_line);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspace_root, String8 attempt_root,
+                                                    String8 result_root, String8 base_source, String8 base_build,
+                                                    String8 candidate_source, String8 candidate_build,
+                                                    String8 job_id, String8 attempt_token, String8 base_revision,
+                                                    String8 candidate_revision)
+{
+    char workspace_real[BENCH_SERVICE_RECIPE_PATH_CAP], actual[BENCH_SERVICE_RECIPE_PATH_CAP];
+    bool ok = bench_service_recipe_realpath(workspace_root, workspace_real);
+    String8 canonical_workspace = ok ? string_from_pointer(workspace_real) : (String8){0};
+    String8 canonical_attempt = ok ? path_join(arena, canonical_workspace,
+                                               string_format(arena, S8("job-{S8}-attempt-{S8}"), job_id, attempt_token)) : (String8){0};
+    String8 canonical_result = ok ? path_join(arena, canonical_workspace,
+                                              string_format(arena, S8("results/job-{S8}-attempt-{S8}"), job_id, attempt_token)) : (String8){0};
+    String8 canonical_base_source = ok ? path_join(arena, canonical_attempt, S8("base/source")) : (String8){0};
+    String8 canonical_base_build = ok ? path_join(arena, canonical_attempt, S8("base/build")) : (String8){0};
+    String8 canonical_candidate_source = ok ? path_join(arena, canonical_attempt, S8("candidate/source")) : (String8){0};
+    String8 canonical_candidate_build = ok ? path_join(arena, canonical_attempt, S8("candidate/build")) : (String8){0};
+    String8 actual_paths[] = {attempt_root, result_root, base_source, base_build, candidate_source, candidate_build};
+    String8 expected_paths[] = {canonical_attempt, canonical_result, canonical_base_source, canonical_base_build,
+                                canonical_candidate_source, canonical_candidate_build};
+    for (u32 i = 0; ok && i < BUSTER_ARRAY_LENGTH(actual_paths); i += 1)
+    {
+        ok = bench_service_recipe_realpath(actual_paths[i], actual) &&
+             string_equal(string_from_pointer(actual), expected_paths[i]);
+    }
+    String8 base_manifest = path_join(arena, base_source, S8(".source-manifest"));
+    String8 candidate_manifest = path_join(arena, candidate_source, S8(".source-manifest"));
+    String8 identity = path_join(arena, attempt_root, S8(".identity"));
+    int workspace_descriptor = ok ? bench_service_recipe_open_directory(canonical_workspace) : -1;
+    int attempt_descriptor = ok ? bench_service_recipe_open_directory(canonical_attempt) : -1;
+    int result_descriptor = ok ? bench_service_recipe_open_directory(canonical_result) : -1;
+    int base_build_descriptor = ok ? bench_service_recipe_open_directory(canonical_base_build) : -1;
+    int candidate_build_descriptor = ok ? bench_service_recipe_open_directory(canonical_candidate_build) : -1;
+    ok = ok && (bench_service_recipe_private_directory(workspace_descriptor, true) ||
+                bench_service_recipe_candidate_traverse_directory(workspace_descriptor)) &&
+         (bench_service_recipe_private_directory(attempt_descriptor, true) ||
+          bench_service_recipe_candidate_traverse_directory(attempt_descriptor)) &&
+         bench_service_recipe_private_directory(result_descriptor, true) &&
+         (bench_service_recipe_private_directory(base_build_descriptor, true) ||
+          bench_service_recipe_candidate_directory(base_build_descriptor)) &&
+         (bench_service_recipe_private_directory(candidate_build_descriptor, true) ||
+          bench_service_recipe_candidate_directory(candidate_build_descriptor)) &&
+         bench_service_recipe_trusted_source(base_source) && bench_service_recipe_trusted_source(candidate_source) &&
+         bench_service_recipe_source_manifest(arena, base_manifest, base_revision) &&
+         bench_service_recipe_source_manifest(arena, candidate_manifest, candidate_revision) &&
+         bench_service_recipe_workspace_identity(arena, identity, job_id, attempt_token, base_revision, candidate_revision);
+    if (workspace_descriptor >= 0) close(workspace_descriptor);
+    if (attempt_descriptor >= 0) close(attempt_descriptor);
+    if (result_descriptor >= 0) close(result_descriptor);
+    if (base_build_descriptor >= 0) close(base_build_descriptor);
+    if (candidate_build_descriptor >= 0) close(candidate_build_descriptor);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_binary_digest(int build_directory, char output[SHA256_HEX_CAPACITY])
+{
+    int release = build_directory >= 0 ? openat(build_directory, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int binary = release >= 0 ? openat(release, "ide", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    bool ok = binary >= 0 && fstat(binary, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+              (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 0111) != 0;
+    Sha256 digest;
+    sha256_init(&digest);
+    u8 bytes[64 * 1024];
+    while (ok)
+    {
+        ssize_t count = read(binary, bytes, sizeof(bytes));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = false;
+        else if (!count) break;
+        else sha256_add(&digest, bytes, (u64)count);
+    }
+    if (ok) sha256_finish_hex(&digest, (char8*)output);
+    if (binary >= 0) close(binary);
+    if (release >= 0) close(release);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_executable_digest(String8 path,
+                                                                 char output[SHA256_HEX_CAPACITY])
+{
+    char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
+    bool ok = bench_service_recipe_realpath(path, resolved);
+    int descriptor = ok ? open(resolved, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat before = {0}, after = {0};
+    ok = ok && descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
+         before.st_nlink == 1 && (before.st_mode & 0111) != 0 && (before.st_mode & 0222) == 0 &&
+         (before.st_uid == 0 || before.st_uid == geteuid());
+    Sha256 digest;
+    sha256_init(&digest);
+    u8 bytes[64 * 1024];
+    while (ok)
+    {
+        ssize_t count = read(descriptor, bytes, sizeof(bytes));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = false;
+        else if (!count) break;
+        else sha256_add(&digest, bytes, (u64)count);
+    }
+    if (ok)
+    {
+        ok = fstat(descriptor, &after) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino &&
+             after.st_size == before.st_size && after.st_mtime == before.st_mtime && after.st_ctime == before.st_ctime;
+    }
+    if (ok) sha256_finish_hex(&digest, (char8*)output);
+    else output[0] = 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_performance_identity(String8 path)
+{
+    char actual[SHA256_HEX_CAPACITY] = {0};
+    char const* expected = bench_service_recipe_throughput_override.length ?
+                           bench_service_recipe_throughput_digest_override :
+                           BENCH_SERVICE_RECIPE_PERFORMANCE_SHA256;
+    bool ok = expected[0] && strlen(expected) == SHA256_HEX_CAPACITY - 1 &&
+              bench_service_recipe_executable_digest(path, actual) &&
+              !memcmp(actual, expected, SHA256_HEX_CAPACITY - 1);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_performance_result(Arena* arena,
+                                                                  BenchServiceRecipeManifest* manifest)
+{
+    String8 validation = manifest ? path_join(arena, manifest->throughput_output, S8("performance-validation.json")) : (String8){0};
+    String8 verdict = manifest ? path_join(arena, manifest->throughput_output,
+                                           S8("native-retirement-performance-verdict.json")) : (String8){0};
+    char binding_digest[SHA256_HEX_CAPACITY] = {0}, validation_digest[SHA256_HEX_CAPACITY] = {0};
+    char replay_digest[SHA256_HEX_CAPACITY] = {0};
+    char binding_identity[96] = {0}, validation_identity[96] = {0}, replay_identity[112] = {0};
+    u8 validation_bytes[4096] = {0}, verdict_bytes[4096] = {0};
+    char validation_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char verdict_path[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    u32 validation_size = 0, verdict_size = 0;
+    int output_directory = manifest ? bench_service_recipe_open_directory(manifest->throughput_output) : -1;
+    bool ok = manifest && output_directory >= 0 && bench_service_recipe_performance_identity(manifest->throughput);
+    if (ok)
+    {
+        u64 ignored = 0;
+        ok = bench_service_recipe_bundle_digest(output_directory,
+                                                 "performance-binding.json", &ignored, binding_digest) &&
+             bench_service_recipe_bundle_digest(output_directory,
+                                                 "performance-validation.json", &ignored, validation_digest) &&
+             bench_service_recipe_bundle_digest(output_directory,
+                                                 "workflow/independent-replay.json", &ignored, replay_digest) &&
+             bench_service_recipe_prefix(validation, validation_path, validation_bytes, &validation_size) &&
+             bench_service_recipe_prefix(verdict, verdict_path, verdict_bytes, &verdict_size);
+    }
+    if (ok)
+    {
+        validation_bytes[validation_size] = 0;
+        verdict_bytes[verdict_size] = 0;
+        int binding_length = snprintf(binding_identity, sizeof(binding_identity),
+                                      "\"binding_sha256\":\"%s\"", binding_digest);
+        int validation_length = snprintf(validation_identity, sizeof(validation_identity),
+                                         "\"validation_sha256\":\"%s\"", validation_digest);
+        int replay_length = snprintf(replay_identity, sizeof(replay_identity),
+                                     "\"independent_replay_sha256\":\"%s\"", replay_digest);
+        ok = binding_length > 0 && (size_t)binding_length < sizeof(binding_identity) &&
+             validation_length > 0 && (size_t)validation_length < sizeof(validation_identity) &&
+             replay_length > 0 && (size_t)replay_length < sizeof(replay_identity);
+    }
+    if (ok)
+    {
+        ok = strstr((char const*)validation_bytes, "\"evidence_checked\":true") &&
+             strstr((char const*)validation_bytes, "\"rows_recomputed\":true") &&
+             strstr((char const*)validation_bytes, "\"bundle_checked\":true") &&
+             strstr((char const*)validation_bytes, "\"proof\":\"independent-evidence-and-receipts-checked\"") &&
+             strstr((char const*)verdict_bytes, "\"schema\":\"buster-native-retirement-performance-verdict-v1\"") &&
+             strstr((char const*)verdict_bytes, binding_identity) &&
+             strstr((char const*)verdict_bytes, validation_identity) &&
+             strstr((char const*)verdict_bytes, replay_identity) &&
+             (strstr((char const*)verdict_bytes, "\"outcome\":\"pass\"") ||
+              strstr((char const*)verdict_bytes, "\"outcome\":\"regression\"") ||
+              strstr((char const*)verdict_bytes, "\"outcome\":\"inconclusive\"") ||
+              strstr((char const*)verdict_bytes, "\"outcome\":\"invalid\""));
+    }
+    if (output_directory >= 0 && close(output_directory) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 candidate_subject,
+                                                                       String8 candidate_stage_build)
+{
+    int parent = bench_service_recipe_open_directory(candidate_subject);
+    int stage = parent >= 0 ? openat(parent, "staging", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool ok = parent >= 0;
+    if (stage < 0 && ok && errno == ENOENT)
+    {
+        ok = mkdirat(parent, "staging", 02770) == 0 && fchmodat(parent, "staging", 02770, 0) == 0 && fsync(parent) == 0;
+        if (ok) stage = openat(parent, "staging", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    struct stat info = {0};
+    if (ok)
+    {
+        ok = stage >= 0 && fstat(stage, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
+             (info.st_mode & 007) == 0 && (info.st_mode & 02770) == 02770;
+    }
+    if (ok && fsync(stage) != 0) ok = false;
+    if (stage >= 0 && close(stage) != 0) ok = false;
+    if (parent >= 0 && close(parent) != 0) ok = false;
+    (void)candidate_stage_build;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_make_visible_directory(String8 path, mode_t mode)
+{
+    int descriptor = bench_service_recipe_open_directory(path);
+    struct stat info = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+              (info.st_uid == 0 || info.st_uid == geteuid());
+    if (ok) ok = fchmod(descriptor, mode) == 0 && fsync(descriptor) == 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_visibility(Arena* arena,
+                                                                            BenchServiceRecipeManifest* manifest)
+{
+    String8 attempt = manifest ? path_join(arena, manifest->workspace_root,
+                                           string_format(arena, S8("job-{S8}-attempt-{S8}"), manifest->job_id,
+                                                         manifest->attempt_token)) : (String8){0};
+    String8 base = path_join(arena, attempt, S8("base"));
+    String8 candidate = path_join(arena, attempt, S8("candidate"));
+    String8 paths[] = {manifest ? manifest->workspace_root : (String8){0}, attempt, base, candidate,
+                       manifest ? manifest->base_source : (String8){0},
+                       manifest ? manifest->candidate_source : (String8){0}};
+    mode_t modes[] = {02710, 02710, 02710, 02710, 0550, 0550};
+    bool ok = manifest != NULL;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+        ok = bench_service_recipe_make_visible_directory(paths[index], modes[index]);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_throughput_output(Arena* arena,
+                                                                         String8 candidate_stage_build,
+                                                                         String8 throughput_output)
+{
+    String8 expected = path_join(arena, candidate_stage_build, S8("throughput-results"));
+    int parent = bench_service_recipe_open_directory(candidate_stage_build);
+    int descriptor = -1;
+    bool ok = parent >= 0 && string_equal(expected, throughput_output);
+    if (ok)
+    {
+        descriptor = openat(parent, "throughput-results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (descriptor < 0 && errno == ENOENT)
+        {
+            ok = mkdirat(parent, "throughput-results", 02770) == 0 &&
+                 fchmodat(parent, "throughput-results", 02770, 0) == 0 && fsync(parent) == 0;
+            if (ok) descriptor = openat(parent, "throughput-results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        }
+    }
+    struct stat info = {0};
+    if (ok)
+    {
+        ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
+             (info.st_mode & 007) == 0 && (info.st_mode & 02770) == 02770;
+    }
+    if (ok) ok = fsync(descriptor) == 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    if (parent >= 0 && close(parent) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_candidate(Arena* arena,
+                                                                 BenchServiceRecipeManifest* manifest)
+{
+    int stage = manifest ? bench_service_recipe_open_directory(manifest->candidate_stage_build) : -1;
+    int release_source = stage >= 0 ? openat(stage, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int source = release_source >= 0 ? openat(release_source, "ide", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat source_info = {0}, source_after = {0};
+    bool ok = source >= 0 && fstat(source, &source_info) == 0 && S_ISREG(source_info.st_mode) &&
+              source_info.st_nlink == 1 && source_info.st_size > 0 &&
+              (u64)source_info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
+              (source_info.st_mode & 0111) != 0;
+    int parent = manifest && manifest->candidate_build_directory >= 0 ?
+                 fcntl(manifest->candidate_build_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int release = -1;
+    if (ok && parent >= 0)
+    {
+        release = openat(parent, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (release < 0 && errno == ENOENT)
+        {
+            ok = mkdirat(parent, "Release", 0700) == 0 && fsync(parent) == 0;
+            if (ok) release = openat(parent, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        }
+        struct stat release_info = {0};
+        ok = ok && release >= 0 && fstat(release, &release_info) == 0 && S_ISDIR(release_info.st_mode) &&
+             release_info.st_uid == geteuid() && (release_info.st_mode & 077) == 0;
+    }
+    char temporary[128] = {0};
+    struct stat temporary_info = {0}, published_info = {0};
+    int descriptor = ok && bench_service_recipe_temp_name("ide", temporary) ?
+                     openat(release, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0500) : -1;
+    ok = ok && descriptor >= 0;
+    Sha256 digest;
+    sha256_init(&digest);
+    u8 bytes[64 * 1024];
+    u64 copied = 0;
+    while (ok && copied < (u64)source_info.st_size)
+    {
+        ssize_t count = read(source, bytes, sizeof(bytes));
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok)
+        {
+            sha256_add(&digest, bytes, (u64)count);
+            u64 offset = 0;
+            while (ok && offset < (u64)count)
+            {
+                ssize_t wrote = write(descriptor, bytes + offset, (size_t)((u64)count - offset));
+                if (wrote < 0 && errno == EINTR) continue;
+                ok = wrote > 0;
+                if (ok) offset += (u64)wrote;
+            }
+            if (ok) copied += (u64)count;
+        }
+    }
+    if (ok) ok = copied == (u64)source_info.st_size && fstat(source, &source_after) == 0 &&
+                  source_after.st_dev == source_info.st_dev && source_after.st_ino == source_info.st_ino &&
+                  source_after.st_size == source_info.st_size && fchmod(descriptor, 0500) == 0 &&
+                  fsync(descriptor) == 0 && fstat(descriptor, &temporary_info) == 0 &&
+                  S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1;
+    char candidate_digest[SHA256_HEX_CAPACITY] = {0};
+    if (ok) sha256_finish_hex(&digest, (char8*)candidate_digest);
+    if (ok && linkat(release, temporary, release, "ide", 0) != 0) ok = false;
+    if (ok)
+    {
+        ok = fstatat(release, "ide", &published_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+             published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
+             S_ISREG(published_info.st_mode) && published_info.st_uid == geteuid() && published_info.st_nlink == 2;
+    }
+    if (ok && !bench_service_recipe_unlink_if_same(release, temporary, &temporary_info)) ok = false;
+    if (ok)
+    {
+        struct stat final_info = {0};
+        ok = fstatat(release, "ide", &final_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+             final_info.st_dev == temporary_info.st_dev && final_info.st_ino == temporary_info.st_ino &&
+             S_ISREG(final_info.st_mode) && final_info.st_uid == geteuid() && final_info.st_nlink == 1;
+    }
+    if (ok && fsync(release) != 0) ok = false;
+    if (!ok && release >= 0 && temporary[0]) bench_service_recipe_unlink_if_same(release, temporary, &temporary_info);
+    if (ok && manifest)
+    {
+        char verified[SHA256_HEX_CAPACITY] = {0};
+        ok = bench_service_recipe_binary_digest(manifest->candidate_build_directory, verified) &&
+             bench_service_recipe_digest_equal(candidate_digest, verified);
+        if (ok) memcpy(manifest->candidate_digest, verified, sizeof(manifest->candidate_digest));
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    if (source >= 0 && close(source) != 0) ok = false;
+    if (release_source >= 0 && close(release_source) != 0) ok = false;
+    if (stage >= 0 && close(stage) != 0) ok = false;
+    if (release >= 0 && close(release) != 0) ok = false;
+    if (parent >= 0 && close(parent) != 0) ok = false;
+    (void)arena;
+    return ok;
+}
+
+typedef struct BenchServiceRecipeCopyFrame BenchServiceRecipeCopyFrame;
+struct BenchServiceRecipeCopyFrame
+{
+    DIR* source;
+    int destination;
+};
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_throughput_temp_name(char const* name)
+{
+    u32 length = name ? (u32)strlen(name) : 0;
+    bool ok = length == 47 && !strncmp(name, "throughput.", 11) && !strcmp(name + 43, ".tmp");
+    for (u32 index = 11; ok && index < 43; index += 1)
+    {
+        u8 value = (u8)name[index];
+        ok = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
+                                                                        BenchServiceRecipeManifest* manifest)
+{
+    int parent = manifest && manifest->result_directory >= 0 ?
+                 fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    DIR* stream = parent >= 0 ? fdopendir(parent) : NULL;
+    bool ok = stream != NULL;
+    if (!stream && parent >= 0) close(parent);
+    while (ok)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(stream);
+        if (!entry)
+        {
+            ok = errno == 0;
+            break;
+        }
+        if (bench_service_recipe_throughput_temp_name(entry->d_name))
+        {
+            struct stat info = {0};
+            int directory = dirfd(stream);
+            ok = directory >= 0 && fstatat(directory, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 S_ISDIR(info.st_mode) && info.st_uid == geteuid() && (info.st_mode & 077) == 0;
+            if (ok)
+            {
+                String8 path = path_join(arena, manifest->result_root, string_from_pointer((char8*)entry->d_name));
+                remove_path_recursive(arena, path);
+                struct stat remaining = {0};
+                ok = fstatat(directory, entry->d_name, &remaining, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT &&
+                     fsync(directory) == 0;
+            }
+        }
+    }
+    if (stream && closedir(stream) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_throughput(Arena* arena,
+                                                                  BenchServiceRecipeManifest* manifest)
+{
+    BenchServiceRecipeCopyFrame* frames = arena_allocate(arena, BenchServiceRecipeCopyFrame,
+                                                           BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+    int source_root = manifest ? bench_service_recipe_open_directory(manifest->throughput_output) : -1;
+    int parent = manifest && manifest->result_directory >= 0 ? fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int destination_root = -1;
+    DIR* source_stream = NULL;
+    char temporary[128] = {0};
+    bool temporary_created = false;
+    bool published = false;
+    u32 depth = 0, entries = 0, files = 0;
+    u64 total = 0;
+    bool ok = source_root >= 0 && parent >= 0;
+    struct stat source_info = {0}, destination_info = {0}, final_info = {0};
+    if (ok)
+    {
+        ok = fstat(source_root, &source_info) == 0 && S_ISDIR(source_info.st_mode) &&
+             (source_info.st_mode & 0002) == 0;
+    }
+    if (ok)
+    {
+        errno = 0;
+        bool final_present = fstatat(parent, "throughput", &final_info, AT_SYMLINK_NOFOLLOW) == 0;
+        ok = !final_present && errno == ENOENT && bench_service_recipe_temp_name("throughput", temporary) &&
+             mkdirat(parent, temporary, 0700) == 0;
+        temporary_created = ok;
+        if (ok && fsync(parent) != 0) ok = false;
+        destination_root = ok ? openat(parent, temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = ok && destination_root >= 0 && fstat(destination_root, &destination_info) == 0 &&
+             S_ISDIR(destination_info.st_mode) && destination_info.st_uid == geteuid() &&
+             (destination_info.st_mode & 077) == 0;
+    }
+    if (ok)
+    {
+        source_stream = fdopendir(source_root);
+        if (source_stream)
+        {
+            source_root = -1;
+            frames[0] = (BenchServiceRecipeCopyFrame){.source = source_stream, .destination = destination_root};
+            depth = 1;
+            destination_root = -1;
+        }
+        else
+        {
+            ok = false;
+        }
+    }
+    while (ok && depth)
+    {
+        BenchServiceRecipeCopyFrame* frame = frames + depth - 1;
+        errno = 0;
+        struct dirent* entry = readdir(frame->source);
+        if (!entry)
+        {
+            int current = dirfd(frame->source);
+            int destination = frame->destination;
+            /* Flush each source/destination pair before its frame is closed.
+             * The rename below is allowed only after every destination
+             * directory, including nested children and the root, is durable. */
+            ok = errno == 0 && current >= 0 && destination >= 0 && fsync(current) == 0 && fsync(destination) == 0 &&
+                 closedir(frame->source) == 0 && close(destination) == 0;
+            frame->source = NULL;
+            frame->destination = -1;
+            if (ok) depth -= 1;
+        }
+        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+        {
+        }
+        else
+        {
+            int source_parent = dirfd(frame->source);
+            entries += 1;
+            struct stat info = {0};
+            ok = entries <= BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP && source_parent >= 0 &&
+                 bench_service_recipe_bundle_path(string_from_pointer((char8*)entry->d_name)) &&
+                 fstatat(source_parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
+            if (ok && S_ISDIR(info.st_mode))
+            {
+                int source_child = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP ?
+                                   openat(source_parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                int destination_child = ok ? mkdirat(frame->destination, entry->d_name, 0700) == 0 ?
+                                                  openat(frame->destination, entry->d_name,
+                                                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1 : -1;
+                struct stat opened = {0}, destination_child_info = {0};
+                ok = source_child >= 0 && destination_child >= 0 && fstat(source_child, &opened) == 0 &&
+                     opened.st_dev == info.st_dev && opened.st_ino == info.st_ino &&
+                     fstat(destination_child, &destination_child_info) == 0 &&
+                     destination_child_info.st_uid == geteuid() && (destination_child_info.st_mode & 077) == 0;
+                if (ok)
+                {
+                    DIR* child_stream = fdopendir(source_child);
+                    if (child_stream)
+                    {
+                        source_child = -1;
+                        if (depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP)
+                        {
+                            frames[depth] = (BenchServiceRecipeCopyFrame){.source = child_stream,
+                                                                            .destination = destination_child};
+                            depth += 1;
+                            destination_child = -1;
+                        }
+                        else
+                        {
+                            ok = false;
+                            closedir(child_stream);
+                        }
+                    }
+                    else
+                    {
+                        ok = false;
+                    }
+                }
+                if (source_child >= 0) close(source_child);
+                if (destination_child >= 0) close(destination_child);
+            }
+            else if (ok && S_ISREG(info.st_mode))
+            {
+                int source_file = openat(source_parent, entry->d_name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+                struct stat opened = {0};
+                int destination_file = -1;
+                u64 copied = 0;
+                ok = files < BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP && info.st_nlink == 1 && info.st_size >= 0 &&
+                     (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
+                     (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP - total && source_file >= 0 &&
+                     fstat(source_file, &opened) == 0 && opened.st_dev == info.st_dev && opened.st_ino == info.st_ino;
+                destination_file = ok ? openat(frame->destination, entry->d_name,
+                                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+                ok = ok && destination_file >= 0;
+                u8 bytes[64 * 1024];
+                while (ok && copied < (u64)info.st_size)
+                {
+                    ssize_t count = read(source_file, bytes, sizeof(bytes));
+                    if (count < 0 && errno == EINTR) continue;
+                    ok = count > 0;
+                    if (ok)
+                    {
+                        u64 offset = 0;
+                        while (ok && offset < (u64)count)
+                        {
+                            ssize_t wrote = write(destination_file, bytes + offset, (size_t)((u64)count - offset));
+                            if (wrote < 0 && errno == EINTR) continue;
+                            ok = wrote > 0;
+                            if (ok) offset += (u64)wrote;
+                        }
+                        if (ok) copied += (u64)count;
+                    }
+                }
+                struct stat source_after = {0}, destination_file_info = {0};
+                ok = ok && copied == (u64)info.st_size && fstat(source_file, &source_after) == 0 &&
+                     source_after.st_dev == info.st_dev && source_after.st_ino == info.st_ino &&
+                     source_after.st_size == info.st_size && fchmod(destination_file, 0400) == 0 &&
+                     fsync(destination_file) == 0 && fstat(destination_file, &destination_file_info) == 0 &&
+                     S_ISREG(destination_file_info.st_mode) && destination_file_info.st_nlink == 1 &&
+                     destination_file_info.st_uid == geteuid() && (destination_file_info.st_mode & 0222) == 0;
+                if (destination_file >= 0 && close(destination_file) != 0) ok = false;
+                if (source_file >= 0 && close(source_file) != 0) ok = false;
+                destination_file = -1;
+                source_file = -1;
+                if (ok)
+                {
+                    files += 1;
+                    total += copied;
+                }
+            }
+            else if (ok)
+            {
+                ok = false;
+            }
+        }
+    }
+    while (depth)
+    {
+        if (frames[depth - 1].source) closedir(frames[depth - 1].source);
+        if (frames[depth - 1].destination >= 0) close(frames[depth - 1].destination);
+        depth -= 1;
+    }
+    if (source_root >= 0) close(source_root);
+    if (destination_root >= 0) close(destination_root);
+    if (ok && parent >= 0)
+    {
+        /* The complete trusted staging tree is published as one directory
+         * entry.  RENAME_NOREPLACE keeps a prior durable result immutable and
+         * makes restart/crash recovery deterministic. */
+#if defined(__NR_renameat2)
+        ok = syscall(__NR_renameat2, parent, temporary, parent, "throughput", RENAME_NOREPLACE) == 0;
+#else
+        ok = false;
+#endif
+        published = ok;
+        if (ok)
+        {
+            ok = fstatat(parent, "throughput", &final_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 S_ISDIR(final_info.st_mode) && final_info.st_uid == geteuid() &&
+                 (final_info.st_mode & 077) == 0 && fsync(parent) == 0;
+        }
+    }
+    if (!published && temporary_created && parent >= 0)
+    {
+        String8 temporary_path = path_join(arena, manifest->result_root, string_from_pointer(temporary));
+        remove_path_recursive(arena, temporary_path);
+        fsync(parent);
+    }
+    if (parent >= 0 && close(parent) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_digest_equal(char const left[SHA256_HEX_CAPACITY],
+                                                            char const right[SHA256_HEX_CAPACITY])
+{
+    return left[0] && right[0] && !memcmp(left, right, SHA256_HEX_CAPACITY - 1);
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int directory, bool candidate_visible)
+{
+    typedef struct BenchServiceRecipeLockFrame BenchServiceRecipeLockFrame;
+    struct BenchServiceRecipeLockFrame { DIR* stream; };
+    BenchServiceRecipeLockFrame* frames = arena_allocate(arena, BenchServiceRecipeLockFrame,
+                                                           BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+    int root = directory >= 0 ? fcntl(directory, F_DUPFD_CLOEXEC, 3) : -1;
+    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
+    u32 depth = stream ? 1 : 0;
+    bool ok = stream != NULL;
+    if (ok)
+    {
+        memset(frames, 0, sizeof(*frames) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+        frames[0].stream = stream;
+        struct stat root_info = {0};
+        mode_t root_mode = 0;
+        ok = fstat(directory, &root_info) == 0;
+        if (ok)
+        {
+            root_mode = root_info.st_mode & 07777;
+            root_mode = candidate_visible ? (root_mode & (S_ISUID | S_ISGID | S_ISVTX)) | 0550 : root_mode & ~0222;
+            ok = fchmod(directory, root_mode) == 0;
+        }
+        ok = ok &&
+             fsync(directory) == 0;
+    }
+    else if (root >= 0)
+    {
+        close(root);
+    }
+    while (ok && depth)
+    {
+        BenchServiceRecipeLockFrame* frame = frames + depth - 1;
+        errno = 0;
+        struct dirent* entry = readdir(frame->stream);
+        if (!entry)
+        {
+            if (errno) ok = false;
+            else
+            {
+                ok = fsync(dirfd(frame->stream)) == 0;
+                closedir(frame->stream);
+                frame->stream = NULL;
+                depth -= 1;
+            }
+        }
+        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+        {
+        }
+        else
+        {
+            int parent = dirfd(frame->stream);
+            struct stat info = {0};
+            ok = parent >= 0 && fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 (S_ISDIR(info.st_mode) || (S_ISREG(info.st_mode) && info.st_nlink == 1)) &&
+                 (info.st_uid == 0 || info.st_uid == geteuid());
+            int child = ok ? openat(parent, entry->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+                                    (S_ISDIR(info.st_mode) ? O_DIRECTORY : 0)) : -1;
+            mode_t child_mode = info.st_mode & 07777;
+            if (candidate_visible)
+            {
+                child_mode = (child_mode & (S_ISUID | S_ISGID | S_ISVTX)) | (S_ISDIR(info.st_mode) ? 0550 :
+                                                                                 (info.st_mode & 0111) ? 0550 : 0440);
+            }
+            else
+            {
+                child_mode &= ~0222;
+            }
+            ok = ok && child >= 0 && fchmod(child, child_mode) == 0;
+            if (ok && S_ISDIR(info.st_mode))
+            {
+                ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
+                DIR* child_stream = ok ? fdopendir(child) : NULL;
+                if (!child_stream && child >= 0) close(child);
+                ok = ok && child_stream != NULL;
+                if (ok)
+                {
+                    BenchServiceRecipeLockFrame* next = frames + depth;
+                    memset(next, 0, sizeof(*next));
+                    next->stream = child_stream;
+                    depth += 1;
+                }
+            }
+            else if (child >= 0)
+            {
+                if (fsync(child) != 0 || close(child) != 0) ok = false;
+            }
+        }
+    }
+    while (depth)
+    {
+        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+        depth -= 1;
+    }
+    return ok;
+}
+
+typedef struct BenchServiceRecipeBundleEntry BenchServiceRecipeBundleEntry;
+struct BenchServiceRecipeBundleEntry
+{
+    String8 path;
+    u64 size;
+    char digest[SHA256_HEX_CAPACITY];
+};
+
+typedef struct BenchServiceRecipeBundleFrame BenchServiceRecipeBundleFrame;
+struct BenchServiceRecipeBundleFrame
+{
+    DIR* stream;
+    char path[BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP + 1];
+    u32 depth;
+};
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sync_tree(Arena* arena, int directory)
+{
+    BenchServiceRecipeBundleFrame* frames = arena_allocate(arena, BenchServiceRecipeBundleFrame,
+                                                            BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+    int root = directory >= 0 ? fcntl(directory, F_DUPFD_CLOEXEC, 3) : -1;
+    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
+    bool ok = stream != NULL;
+    u32 depth = ok ? 1 : 0;
+    memset(frames, 0, sizeof(*frames) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+    if (ok) frames[0].stream = stream;
+    else if (root >= 0) close(root);
+    while (ok && depth)
+    {
+        BenchServiceRecipeBundleFrame* frame = frames + depth - 1;
+        errno = 0;
+        struct dirent* entry = readdir(frame->stream);
+        if (!entry)
+        {
+            int current = dirfd(frame->stream);
+            ok = !errno && current >= 0 && fsync(current) == 0;
+            if (ok)
+            {
+                closedir(frame->stream);
+                frame->stream = NULL;
+                depth -= 1;
+            }
+        }
+        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+        {
+        }
+        else
+        {
+            int parent = dirfd(frame->stream);
+            struct stat info = {0};
+            ok = parent >= 0 && fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
+            if (ok && S_ISDIR(info.st_mode))
+            {
+                int child = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP ?
+                            openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                struct stat opened = {0};
+                DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
+                ok = child_stream != NULL && fstat(child, &opened) == 0 && opened.st_dev == info.st_dev &&
+                     opened.st_ino == info.st_ino && (info.st_mode & 022) == 0;
+                if (!child_stream && child >= 0) close(child);
+                if (ok)
+                {
+                    frames[depth].stream = child_stream;
+                    depth += 1;
+                }
+                else if (child_stream)
+                {
+                    closedir(child_stream);
+                }
+            }
+            else if (ok && S_ISREG(info.st_mode))
+            {
+                int descriptor = openat(parent, entry->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+                struct stat opened = {0};
+                ok = descriptor >= 0 && fstat(descriptor, &opened) == 0 && opened.st_dev == info.st_dev &&
+                     opened.st_ino == info.st_ino && opened.st_nlink == 1 && opened.st_size == info.st_size &&
+                     fsync(descriptor) == 0;
+                if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+            }
+            else if (ok)
+            {
+                ok = false;
+            }
+        }
+    }
+    while (depth)
+    {
+        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+        depth -= 1;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path)
+{
+    bool ok = path.length > 0 && path.length <= BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP && path.pointer[0] != '/';
+    u64 component = 0;
+    for (u64 index = 0; ok && index <= path.length; index += 1)
+    {
+        if (index == path.length || path.pointer[index] == '/')
+        {
+            u64 length = index - component;
+            ok = length && !(length == 1 && path.pointer[component] == '.') &&
+                 !(length == 2 && path.pointer[component] == '.' && path.pointer[component + 1] == '.');
+            component = index + 1;
+        }
+        else
+        {
+            u8 value = (u8)path.pointer[index];
+            ok = value >= 0x21 && value <= 0x7e && value != '\\';
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_reserved(String8 path)
+{
+    String8 names[] = {S8(BENCH_SERVICE_RECIPE_MANIFEST_NAME), S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME),
+                       S8("validate-buster-v1.outcome")};
+    bool reserved = false;
+    for (u32 index = 0; !reserved && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        reserved = string_equal(path, names[index]);
+    }
+    return reserved;
+}
+
+BUSTER_GLOBAL_LOCAL int bench_service_recipe_bundle_compare(BenchServiceRecipeBundleEntry const* left,
+                                                              BenchServiceRecipeBundleEntry const* right)
+{
+    u64 shared = left->path.length < right->path.length ? left->path.length : right->path.length;
+    u64 index = 0;
+    while (index < shared && left->path.pointer[index] == right->path.pointer[index]) index += 1;
+    int result = index == shared ? left->path.length < right->path.length ? -1 : left->path.length != right->path.length :
+                 (u8)left->path.pointer[index] < (u8)right->path.pointer[index] ? -1 : 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_digest(int directory, char const* name,
+                                                             u64* size, char output[SHA256_HEX_CAPACITY])
+{
+    int descriptor = directory >= 0 ? openat(directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+              info.st_size >= 0 && (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
+              (info.st_uid == 0 || info.st_uid == geteuid());
+    Sha256 digest;
+    sha256_init(&digest);
+    u8 bytes[64 * 1024];
+    u64 total = 0;
+    while (ok)
+    {
+        ssize_t count = read(descriptor, bytes, sizeof(bytes));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = false;
+        else if (!count) break;
+        else
+        {
+            sha256_add(&digest, bytes, (u64)count);
+            total += (u64)count;
+        }
+    }
+    if (ok)
+    {
+        struct stat after = {0};
+        ok = fstat(descriptor, &after) == 0 && after.st_dev == info.st_dev && after.st_ino == info.st_ino &&
+             after.st_size == info.st_size && total == (u64)info.st_size;
+        if (ok) sha256_finish_hex(&digest, (char8*)output);
+    }
+    if (size) *size = ok ? total : 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_atomic(BenchServiceRecipeManifest* manifest, String8 body)
+{
+    bool ok = manifest && manifest->result_directory >= 0 && body.length <= BENCH_SERVICE_RECIPE_BUNDLE_CAP;
+    int parent = -1;
+    int descriptor = -1;
+    char temporary[128] = {0};
+    struct stat temporary_info = {0}, published_info = {0};
+    if (ok)
+    {
+        struct stat info = {0};
+        ok = fstat(manifest->result_directory, &info) == 0 && S_ISDIR(info.st_mode) &&
+             (u64)info.st_dev == manifest->result_device && (u64)info.st_ino == manifest->result_inode &&
+             (parent = fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3)) >= 0;
+    }
+    if (ok)
+    {
+        ok = bench_service_recipe_temp_name(BENCH_SERVICE_RECIPE_BUNDLE_NAME, temporary);
+        descriptor = ok ? openat(parent, temporary,
+                                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+        ok = descriptor >= 0;
+    }
+    for (u64 offset = 0; ok && offset < body.length;)
+    {
+        ssize_t wrote = write(descriptor, body.pointer + offset, (size_t)(body.length - offset));
+        if (wrote < 0 && errno == EINTR) continue;
+        ok = wrote > 0;
+        if (ok) offset += (u64)wrote;
+    }
+    if (descriptor >= 0)
+    {
+        if (ok && fchmod(descriptor, 0400) != 0) ok = false;
+        if (ok && fsync(descriptor) != 0) ok = false;
+        if (ok && fstat(descriptor, &temporary_info) != 0) ok = false;
+        if (ok) ok = S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1 &&
+                       bench_service_recipe_entry_matches(parent, temporary, &temporary_info);
+    }
+    if (ok && linkat(parent, temporary, parent,
+                     BENCH_SERVICE_RECIPE_BUNDLE_NAME, 0) != 0) ok = false;
+    if (ok && fstatat(parent, BENCH_SERVICE_RECIPE_BUNDLE_NAME, &published_info, AT_SYMLINK_NOFOLLOW) != 0) ok = false;
+    if (ok) ok = published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
+                       S_ISREG(published_info.st_mode);
+    if (ok && !bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info)) ok = false;
+    if (ok && fsync(parent) != 0) ok = false;
+    if (!ok && parent >= 0 && temporary[0]) bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info);
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    descriptor = -1;
+    if (parent >= 0 && close(parent) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchServiceRecipeManifest* manifest)
+{
+    BenchServiceRecipeBundleEntry* entries = arena_allocate(arena, BenchServiceRecipeBundleEntry,
+                                                              BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP);
+    BenchServiceRecipeBundleFrame* frames = arena_allocate(arena, BenchServiceRecipeBundleFrame,
+                                                            BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+    int root = manifest && manifest->result_directory >= 0 ?
+               openat(manifest->result_directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
+    bool ok = stream != NULL;
+    u32 depth = ok ? 1 : 0;
+    u32 entry_count = 0;
+    u32 file_count = 0;
+    u64 total = 0;
+    bool synced = manifest && manifest->result_directory >= 0 &&
+                  bench_service_recipe_sync_tree(arena, manifest->result_directory);
+    memset(frames, 0, sizeof(*frames) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
+    ok = ok && synced;
+    if (ok)
+    {
+        frames[0].stream = stream;
+        frames[0].depth = 1;
+    }
+    if (!stream && root >= 0) close(root);
+    while (ok && depth)
+    {
+        BenchServiceRecipeBundleFrame* frame = frames + depth - 1;
+        errno = 0;
+        struct dirent* entry = readdir(frame->stream);
+        if (!entry)
+        {
+            if (errno) ok = false;
+            else
+            {
+                closedir(frame->stream);
+                frame->stream = NULL;
+                depth -= 1;
+            }
+        }
+        else if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+        {
+        }
+        else
+        {
+            entry_count += 1;
+            ok = entry_count <= BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP;
+            char relative[BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP + 1];
+            int length = ok ? snprintf(relative, sizeof(relative), frame->path[0] ? "%s/%s" : "%s",
+                                       frame->path[0] ? frame->path : entry->d_name,
+                                       frame->path[0] ? entry->d_name : "") : -1;
+            ok = ok && length > 0 && (u32)length <= BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP &&
+                 bench_service_recipe_bundle_path(string_from_pointer(relative));
+            struct stat info = {0};
+            int parent = ok ? dirfd(frame->stream) : -1;
+            ok = ok && fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
+            if (ok && S_ISDIR(info.st_mode))
+            {
+                ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP &&
+                     (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 022) == 0;
+                int child = ok ? openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
+                if (!child_stream && child >= 0) close(child);
+                if (ok) ok = child_stream != NULL;
+                if (ok)
+                {
+                    BenchServiceRecipeBundleFrame* next = frames + depth;
+                    memset(next, 0, sizeof(*next));
+                    next->stream = child_stream;
+                    next->depth = frame->depth + 1;
+                    memcpy(next->path, relative, (size_t)length + 1);
+                    depth += 1;
+                }
+            }
+            else if (ok && S_ISREG(info.st_mode))
+            {
+                String8 path = string_from_pointer(relative);
+                if (!bench_service_recipe_bundle_reserved(path))
+                {
+                    u64 file_size = 0;
+                    char digest[SHA256_HEX_CAPACITY] = {0};
+                    ok = info.st_size >= 0 && (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP &&
+                         (info.st_uid == 0 || info.st_uid == geteuid()) &&
+                         (u64)info.st_size <= BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP - total &&
+                         bench_service_recipe_bundle_digest(parent, entry->d_name, &file_size, digest);
+                    if (ok)
+                    {
+                        entries[file_count].path = string_duplicate_arena(arena, path, true);
+                        entries[file_count].size = file_size;
+                        memcpy(entries[file_count].digest, digest, sizeof(digest));
+                        file_count += 1;
+                        total += file_size;
+                    }
+                }
+            }
+            else if (ok)
+            {
+                ok = false;
+            }
+        }
+    }
+    if (depth)
+    {
+        while (depth)
+        {
+            if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+            depth -= 1;
+        }
+    }
+    if (ok)
+    {
+        for (u32 index = 1; index < file_count; index += 1)
+        {
+            BenchServiceRecipeBundleEntry value = entries[index];
+            u32 position = index;
+            while (position && bench_service_recipe_bundle_compare(&value, entries + position - 1) < 0)
+            {
+                entries[position] = entries[position - 1];
+                position -= 1;
+            }
+            entries[position] = value;
+        }
+        String8List lines = {0};
+        string8_list_push(arena, &lines, S8("BQ-BUNDLE-V1\n"));
+        string8_list_push(arena, &lines, string_format(arena, S8("entries={u32}\nbytes={u64}\n"), file_count, total));
+        for (u32 index = 0; ok && index < file_count; index += 1)
+        {
+            string8_list_push(arena, &lines,
+                              string_format(arena, S8("{S8} {u64} {S8}\n"),
+                                            string_from_pointer(entries[index].digest), entries[index].size,
+                                            entries[index].path));
+        }
+        String8 body = string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+        ok = body.length <= BENCH_SERVICE_RECIPE_BUNDLE_CAP && bench_service_recipe_bundle_atomic(manifest, body);
+        if (ok)
+        {
+            u64 index_size = 0;
+            ok = bench_service_recipe_bundle_digest(manifest->result_directory,
+                                                    BENCH_SERVICE_RECIPE_BUNDLE_NAME, &index_size,
+                                                    manifest->bundle_digest);
+            ok = ok && index_size == body.length;
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_recover_published(Arena* arena,
+                                                                BenchServiceRecipeManifest* manifest)
+{
+    struct stat final_manifest = {0}, throughput_info = {0};
+    int throughput = -1;
+    bool no_final_manifest = false;
+    bool ok = manifest && manifest->result_directory >= 0;
+    if (ok)
+    {
+        errno = 0;
+        no_final_manifest = fstatat(manifest->result_directory, BENCH_SERVICE_RECIPE_MANIFEST_NAME,
+                                    &final_manifest, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+        throughput = no_final_manifest ? openat(manifest->result_directory, "throughput",
+                                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = no_final_manifest && throughput >= 0 && fstat(throughput, &throughput_info) == 0 &&
+             S_ISDIR(throughput_info.st_mode) && (throughput_info.st_uid == 0 || throughput_info.st_uid == geteuid()) &&
+             (throughput_info.st_mode & 077) == 0;
+    }
+    if (ok)
+    {
+        char base_digest[SHA256_HEX_CAPACITY] = {0};
+        char candidate_digest[SHA256_HEX_CAPACITY] = {0};
+        bool digests = bench_service_recipe_binary_digest(manifest->base_build_directory, base_digest) &&
+                       bench_service_recipe_binary_digest(manifest->candidate_build_directory, candidate_digest);
+        if (digests)
+        {
+            memcpy(manifest->base_digest, base_digest, sizeof(manifest->base_digest));
+            memcpy(manifest->candidate_digest, candidate_digest, sizeof(manifest->candidate_digest));
+        }
+        ok = bench_service_recipe_bundle_index(arena, manifest) &&
+             bench_service_recipe_manifest_write(arena, manifest, S8("throughput"), PROCESS_RESULT_FAILED);
+    }
+    if (throughput >= 0 && close(throughput) != 0) ok = false;
+    return ok;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_process_add(Arena* arena, BuildStep* step, SliceString8 arguments,
+                                                                  String8 working_directory, BenchServiceRecipeStage* stage)
+{
+    ProcessRun* run = run_add(arena, step);
+    /* Stage metadata is allocated immediately before the builder is flushed
+     * in the fixed graph below.  That allocation leaves one zero String8 at
+     * the builder tail; never pass a null argv entry to exec. */
+    u64 argument_count = arguments.length;
+    while (argument_count && !arguments.pointer[argument_count - 1].pointer && !arguments.pointer[argument_count - 1].length)
+        argument_count -= 1;
+    String8* stable_arguments = arena_allocate(arena, String8, argument_count);
+    memcpy(stable_arguments, arguments.pointer, (size_t)(argument_count * sizeof(*stable_arguments)));
+    SliceString8 stable_slice = {.pointer = stable_arguments, .length = argument_count};
+    u64 timeout = stage && string_equal(stage->name, S8("throughput")) ?
+                  BENCH_SERVICE_RECIPE_PERFORMANCE_TIMEOUT : BENCH_SERVICE_RECIPE_STAGE_TIMEOUT;
+    *run = (ProcessRun){.arguments = stable_slice, .working_directory = working_directory,
+                        .timeout_seconds = timeout, .flags = PROCESS_RUN_FLAG_PRINT_COMMAND,
+                        .cleanup_callback = bench_service_recipe_stage_cleanup, .cleanup_data = stage,
+                        .spawn_options = {.use_process_environment = 1}};
+    stage->run = run;
+    return run;
+}
+
+typedef enum BenchServiceRecipeIdentity BenchServiceRecipeIdentity;
+enum BenchServiceRecipeIdentity
+{
+    BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
+    BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE,
+    BENCH_SERVICE_RECIPE_IDENTITY_INVALID,
+};
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_append(Arena* arena, String8List* wrapped,
+                                                               BenchServiceRecipeIdentity identity)
+{
+    bool ok = identity == BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED || identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE;
+    if (ok)
+    {
+        String8 account = identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE ? S8("buster-bench-candidate") : S8("buster-bench");
+        String8 umask = identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE ? S8("0007") : S8("0077");
+        string8_list_push(arena, wrapped, string_format(arena, S8("--uid={S8}"), account));
+        string8_list_push(arena, wrapped, string_format(arena, S8("--gid={S8}"), account));
+        string8_list_push(arena, wrapped, string_format(arena, S8("--property=UMask={S8}"), umask));
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* arena, BuildStep* step,
+                                                                          SliceString8 arguments,
+                                                                          String8 working_directory,
+                                                                          String8 read_only_paths,
+                                                                          String8 read_write_path,
+                                                                          String8 result_root,
+                                                                          BenchServiceRecipeIdentity identity,
+                                                                          BenchServiceRecipeStage* stage);
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_argument_present(SliceString8 arguments, String8 expected)
+{
+    bool found = false;
+    for (u64 index = 0; !found && index < arguments.length; index += 1)
+        found = string_equal(arguments.pointer[index], expected);
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
+{
+    String8List trusted = {0}, candidate = {0}, invalid = {0};
+    bool ok = bench_service_recipe_identity_append(arena, &trusted, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) &&
+              bench_service_recipe_identity_append(arena, &candidate, BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE) &&
+              !bench_service_recipe_identity_append(arena, &invalid, BENCH_SERVICE_RECIPE_IDENTITY_INVALID);
+    SliceString8 trusted_arguments = string8_list_to_slice(arena, trusted);
+    SliceString8 candidate_arguments = string8_list_to_slice(arena, candidate);
+    ok = ok && invalid.count == 0 && trusted_arguments.length == 3 && candidate_arguments.length == 3 &&
+         string_equal(trusted_arguments.pointer[0], S8("--uid=buster-bench")) &&
+         string_equal(trusted_arguments.pointer[1], S8("--gid=buster-bench")) &&
+         string_equal(trusted_arguments.pointer[2], S8("--property=UMask=0077")) &&
+         string_equal(candidate_arguments.pointer[0], S8("--uid=buster-bench-candidate")) &&
+         string_equal(candidate_arguments.pointer[1], S8("--gid=buster-bench-candidate")) &&
+         string_equal(candidate_arguments.pointer[2], S8("--property=UMask=0007"));
+    BuildGraph saved_graph = program.build_graph;
+    program.build_graph = (BuildGraph){0};
+    String8 production_arguments[] = {S8(BENCH_SERVICE_RECIPE_DRIVER), S8("generate")};
+    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2")};
+    BenchServiceRecipeStage stage = {.manifest = &test_manifest, .name = S8("throughput")};
+    ProcessRun* trusted_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
+                                                                         S8("/"), S8("/installed /source"), S8("/workspace"),
+                                                                         S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
+                                                                         &stage);
+    ProcessRun* candidate_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+                                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
+                                                                           S8("/"), S8("/installed /source"), S8("/workspace"),
+                                                                           S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE,
+                                                                           &stage);
+    ProcessRun* invalid_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
+                                                                         S8("/"), S8("/installed /source"), S8("/workspace"),
+                                                                         S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_INVALID,
+                                                                         &stage);
+    SliceString8 trusted_wrapped = trusted_run ? trusted_run->arguments : (SliceString8){0};
+    SliceString8 candidate_wrapped = candidate_run ? candidate_run->arguments : (SliceString8){0};
+    SliceString8 invalid_wrapped = invalid_run ? invalid_run->arguments : (SliceString8){0};
+    bool common = trusted_wrapped.length > 5 && candidate_wrapped.length > 5 &&
+                  string_equal(trusted_wrapped.pointer[0], S8("/usr/bin/systemd-run")) &&
+                  string_equal(trusted_wrapped.pointer[1], S8("--quiet")) &&
+                  string_equal(trusted_wrapped.pointer[2], S8("--wait")) &&
+                  string_equal(trusted_wrapped.pointer[4], S8("--service-type=exec")) &&
+                  string_equal(candidate_wrapped.pointer[0], S8("/usr/bin/systemd-run")) &&
+                  string_equal(candidate_wrapped.pointer[1], S8("--quiet")) &&
+                  string_equal(candidate_wrapped.pointer[2], S8("--wait")) &&
+                  string_equal(candidate_wrapped.pointer[4], S8("--service-type=exec"));
+    bool trusted_identity = common && bench_service_recipe_argument_present(trusted_wrapped, S8("--uid=buster-bench")) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--gid=buster-bench")) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=UMask=0077")) &&
+                            !bench_service_recipe_argument_present(trusted_wrapped, S8("--uid=buster-bench-candidate")) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--slice=buster-bench.slice")) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU)) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY)) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP)) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS)) &&
+                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
+    bool candidate_identity = common && bench_service_recipe_argument_present(candidate_wrapped, S8("--uid=buster-bench-candidate")) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--gid=buster-bench-candidate")) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=UMask=0007")) &&
+                              !bench_service_recipe_argument_present(candidate_wrapped, S8("--uid=buster-bench")) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--slice=buster-bench.slice")) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU)) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY)) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP)) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS)) &&
+                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
+    bool invalid_identity = invalid_wrapped.length == 1 && string_equal(invalid_wrapped.pointer[0], S8("/usr/bin/false"));
+    bool nested_relation = bench_service_recipe_argument_present(candidate_wrapped,
+                                                                  S8("--unit=buster-bench-1-2-throughput.service")) &&
+                           bench_service_recipe_argument_present(candidate_wrapped,
+                                                                  S8("--property=PartOf=buster-bench-1-2.service"));
+    program.build_graph = saved_graph;
+    ok = ok && trusted_identity && candidate_identity && invalid_identity && nested_relation;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* arena, BuildStep* step,
+                                                                          SliceString8 arguments,
+                                                                          String8 working_directory,
+                                                                          String8 read_only_paths,
+                                                                          String8 read_write_path,
+                                                                          String8 result_root,
+                                                                          BenchServiceRecipeIdentity identity,
+                                                                          BenchServiceRecipeStage* stage)
+{
+    String8 driver = arguments.length ? arguments.pointer[0] : (String8){0};
+    bool production_driver = string_equal(driver, S8(BENCH_SERVICE_RECIPE_DRIVER)) ||
+                             string_equal(driver, S8(BENCH_SERVICE_RECIPE_PERFORMANCE));
+    String8List wrapped = {0};
+    bool identity_ok = true;
+    if (production_driver)
+    {
+        string8_list_push(arena, &wrapped, S8("/usr/bin/systemd-run"));
+        string8_list_push(arena, &wrapped, S8("--quiet"));
+        string8_list_push(arena, &wrapped, S8("--wait"));
+        string8_list_push(arena, &wrapped, S8("--pipe"));
+        string8_list_push(arena, &wrapped, S8("--service-type=exec"));
+        string8_list_push(arena, &wrapped, S8("--slice=buster-bench.slice"));
+        string8_list_push(arena, &wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU));
+        string8_list_push(arena, &wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY));
+        string8_list_push(arena, &wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP));
+        string8_list_push(arena, &wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS));
+        string8_list_push(arena, &wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
+        if (stage && stage->manifest)
+        {
+            String8 child_unit = string_format(arena, S8("buster-bench-{S8}-{S8}-{S8}.service"),
+                                                stage->manifest->job_id, stage->manifest->attempt_token, stage->name);
+            String8 parent_unit = string_format(arena, S8("buster-bench-{S8}-{S8}.service"),
+                                                stage->manifest->job_id, stage->manifest->attempt_token);
+            string8_list_push(arena, &wrapped, string_format(arena, S8("--unit={S8}"), child_unit));
+            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=PartOf={S8}"), parent_unit));
+        }
+        identity_ok = bench_service_recipe_identity_append(arena, &wrapped, identity);
+        string8_list_push(arena, &wrapped, S8("--property=KillMode=control-group"));
+        string8_list_push(arena, &wrapped, S8("--property=SendSIGKILL=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=TimeoutStopSec=10s"));
+        string8_list_push(arena, &wrapped, S8("--property=NoNewPrivileges=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=PrivateTmp=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=PrivateDevices=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectSystem=strict"));
+        string8_list_push(arena, &wrapped, S8("--property=RestrictSUIDSGID=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectHome=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectControlGroups=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelTunables=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelModules=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelLogs=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectClock=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectHostname=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=ProtectProc=invisible"));
+        string8_list_push(arena, &wrapped, S8("--property=LockPersonality=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=MemoryDenyWriteExecute=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=RemoveIPC=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=KeyringMode=private"));
+        string8_list_push(arena, &wrapped, S8("--property=RestrictNamespaces=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=RestrictRealtime=yes"));
+        string8_list_push(arena, &wrapped, S8("--property=RestrictAddressFamilies=AF_UNIX"));
+        string8_list_push(arena, &wrapped, S8("--property=SystemCallArchitectures=native"));
+        string8_list_push(arena, &wrapped, S8("--property=SystemCallFilter=@system-service"));
+        string8_list_push(arena, &wrapped, S8("--property=SystemCallErrorNumber=EPERM"));
+        string8_list_push(arena, &wrapped, string_format(arena, S8("--property=ReadOnlyPaths={S8}"), read_only_paths));
+        string8_list_push(arena, &wrapped, string_format(arena, S8("--property=ReadWritePaths={S8}"), read_write_path));
+        if (result_root.length && !string_equal(result_root, read_write_path))
+            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=InaccessiblePaths={S8}"), result_root));
+        string8_list_push(arena, &wrapped, S8("--property=PrivateNetwork=yes"));
+    }
+    if (!identity_ok)
+    {
+        /* No production stage may fall back to the manager's default root
+         * identity.  An invalid compile-time identity is converted into a
+         * fixed failing command with no caller arguments. */
+        wrapped = (String8List){0};
+        string8_list_push(arena, &wrapped, S8("/usr/bin/false"));
+    }
+    else
+    {
+        for (u64 index = 0; index < arguments.length; index += 1)
+            string8_list_push(arena, &wrapped, arguments.pointer[index]);
+    }
+    SliceString8 stable = string8_list_to_slice(arena, wrapped);
+    return bench_service_recipe_process_add(arena, step, stable, working_directory, stage);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_candidate_process_add(Arena* arena, BuildStep* step,
+                                                                             SliceString8 arguments,
+                                                                             String8 working_directory,
+                                                                             String8 baseline_source,
+                                                                             String8 baseline_build,
+                                                                             String8 candidate_source,
+                                                                             String8 candidate_build,
+                                                                             String8 result_root,
+                                                                             BenchServiceRecipeStage* stage)
+{
+    String8List paths = {0};
+    string8_list_push(arena, &paths, baseline_source);
+    string8_list_push(arena, &paths, S8(" "));
+    string8_list_push(arena, &paths, baseline_build);
+    string8_list_push(arena, &paths, S8(" "));
+    string8_list_push(arena, &paths, candidate_source);
+    String8 read_only = string_join_arena(arena, string8_list_to_slice(arena, paths), false);
+    (void)candidate_source;
+    return bench_service_recipe_sandbox_process_add(arena, step, arguments, working_directory, read_only,
+                                                    candidate_build, result_root,
+                                                    BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, stage);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceString8 arguments)
+{
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (arguments.length != BENCH_SERVICE_RECIPE_ARGUMENT_COUNT)
+    {
+        string_print(S8("error: bench_service_recipe requires JOB_ID ATTEMPT_TOKEN WORKSPACE_ROOT BASE_REVISION CANDIDATE_REVISION RESULT_ROOT\n"));
+    }
+    else
+    {
+        String8 job_id = arguments.pointer[0];
+        String8 attempt_token = arguments.pointer[1];
+        String8 workspace_root = arguments.pointer[2];
+        String8 base_revision = arguments.pointer[3];
+        String8 candidate_revision = arguments.pointer[4];
+        String8 result_root = arguments.pointer[5];
+        String8 attempt_root = path_join(arena, workspace_root, string_format(arena, S8("job-{S8}-attempt-{S8}"), job_id, attempt_token));
+        String8 expected_result = path_join(arena, workspace_root,
+                                            string_format(arena, S8("results/job-{S8}-attempt-{S8}"), job_id, attempt_token));
+        bool valid = BUSTER_LINUX && bench_service_recipe_decimal(job_id) && bench_service_recipe_decimal(attempt_token) &&
+                     bench_service_recipe_path(workspace_root) && bench_service_recipe_revision(base_revision) &&
+                     bench_service_recipe_revision(candidate_revision) && bench_service_recipe_path(result_root) &&
+                     string_equal(result_root, expected_result);
+        if (!valid)
+        {
+            string_print(S8("error: invalid fixed validate-buster-v1 recipe identity or path\n"));
+        }
+        else
+        {
+            String8 base_source = path_join(arena, attempt_root, S8("base/source"));
+            String8 base_build = path_join(arena, attempt_root, S8("base/build"));
+            String8 candidate_source = path_join(arena, attempt_root, S8("candidate/source"));
+            String8 candidate_subject = path_join(arena, attempt_root, S8("candidate"));
+            String8 candidate_stage_build = path_join(arena, candidate_subject, S8("staging"));
+            String8 throughput_output = path_join(arena, candidate_stage_build, S8("throughput-results"));
+            String8 result_identity = string_format(arena, S8("job-{S8}-attempt-{S8}"), job_id, attempt_token);
+            String8 candidate_build = path_join(arena, attempt_root, S8("candidate/build"));
+            String8 base_binary = path_join(arena, base_build, S8("Release/ide"));
+            String8 candidate_binary = path_join(arena, candidate_build, S8("Release/ide"));
+            String8 candidate_stage_binary = path_join(arena, candidate_stage_build, S8("Release/ide"));
+            String8 driver = bench_service_recipe_driver_override.length ? bench_service_recipe_driver_override : S8(BENCH_SERVICE_RECIPE_DRIVER);
+            String8 throughput = bench_service_recipe_throughput_override.length ? bench_service_recipe_throughput_override : S8(BENCH_SERVICE_RECIPE_PERFORMANCE);
+            String8 definition_digest = bench_service_recipe_definition_digest_override[0] ?
+                                        string_from_pointer(bench_service_recipe_definition_digest_override) :
+                                        S8(BENCH_SERVICE_RECIPE_DEFINITION_SHA256);
+            String8 throughput_digest = bench_service_recipe_throughput_override.length ?
+                                        string_from_pointer(bench_service_recipe_throughput_digest_override) :
+                                        S8(BENCH_SERVICE_RECIPE_PERFORMANCE_SHA256);
+            BenchServiceRecipeManifest* manifest = arena_allocate(arena, BenchServiceRecipeManifest, 1);
+            *manifest = (BenchServiceRecipeManifest){
+                .path = path_join(arena, result_root, S8("validate-buster-v1.manifest")), .job_id = job_id,
+                .attempt_token = attempt_token, .workspace_root = workspace_root, .base_revision = base_revision,
+                .candidate_revision = candidate_revision, .result_root = result_root, .driver = driver,
+                .throughput = throughput, .throughput_digest = throughput_digest,
+                .definition = S8(BENCH_SERVICE_RECIPE_DEFINITION), .definition_digest = definition_digest,
+                .base_source = base_source, .base_build = base_build,
+                .candidate_source = candidate_source, .candidate_stage_build = candidate_stage_build,
+                .throughput_output = throughput_output, .candidate_build = candidate_build, .base_binary = base_binary,
+                .candidate_stage_binary = candidate_stage_binary, .candidate_binary = candidate_binary,
+                .result_directory = -1, .base_build_directory = -1,
+                .candidate_build_directory = -1};
+            bool sources = path_exists(arena, result_root) && path_exists(arena, base_source) && path_exists(arena, candidate_source) &&
+                           driver.length > 0 && definition_digest.length == SHA256_HEX_CAPACITY - 1 &&
+                           bench_service_recipe_revision(definition_digest) &&
+                           bench_service_recipe_performance_identity(throughput);
+#if BUSTER_LINUX
+            bool stage_ok = bench_service_recipe_prepare_candidate_stage(candidate_subject, candidate_stage_build);
+            bool output_ok = stage_ok && bench_service_recipe_prepare_throughput_output(arena, candidate_stage_build,
+                                                                                          throughput_output);
+            bool tree_ok = output_ok && bench_service_recipe_tree(arena, workspace_root, attempt_root, result_root, base_source, base_build,
+                                                           candidate_source, candidate_build, job_id, attempt_token, base_revision,
+                                                           candidate_revision);
+            sources = sources && stage_ok && output_ok && tree_ok;
+            if (sources)
+            {
+                manifest->result_directory = bench_service_recipe_open_directory(result_root);
+                manifest->base_build_directory = bench_service_recipe_open_directory(base_build);
+                manifest->candidate_build_directory = bench_service_recipe_open_directory(candidate_build);
+                struct stat result_info = {0};
+                sources = manifest->result_directory >= 0 && manifest->base_build_directory >= 0 &&
+                          manifest->candidate_build_directory >= 0 && fstat(manifest->result_directory, &result_info) == 0 &&
+                          bench_service_recipe_private_directory(manifest->result_directory, true) &&
+                          (bench_service_recipe_private_directory(manifest->base_build_directory, true) ||
+                           bench_service_recipe_candidate_directory(manifest->base_build_directory)) &&
+                          (bench_service_recipe_private_directory(manifest->candidate_build_directory, true) ||
+                           bench_service_recipe_candidate_directory(manifest->candidate_build_directory)) &&
+                          S_ISDIR(result_info.st_mode);
+                if (sources)
+                {
+                    manifest->result_device = result_info.st_dev;
+                    manifest->result_inode = result_info.st_ino;
+                }
+            }
+#endif
+            bool published = false;
+#if BUSTER_LINUX
+            if (sources)
+            {
+                struct stat throughput_info = {0};
+                errno = 0;
+                published = fstatat(manifest->result_directory, "throughput", &throughput_info,
+                                    AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(throughput_info.st_mode) &&
+                            (throughput_info.st_uid == 0 || throughput_info.st_uid == geteuid()) &&
+                            (throughput_info.st_mode & 077) == 0;
+            }
+#endif
+            bool recovered = false;
+#if BUSTER_LINUX
+            recovered = sources && published && bench_service_recipe_recover_published(arena, manifest);
+#endif
+            bool recorded = !published && sources &&
+                            bench_service_recipe_manifest_write(arena, manifest, S8("prepare"), PROCESS_RESULT_RUNNING);
+            if (!recorded && !recovered)
+            {
+                string_print(S8("error: fixed recipe could not establish its durable running manifest\n"));
+            }
+            else if (recorded)
+            {
+                OsArgumentBuilder builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, driver);
+                os_argument_builder_append(&builder, S8("generate"));
+                os_argument_builder_append(&builder, S8("--build-directory"));
+                os_argument_builder_append(&builder, base_build);
+                os_argument_builder_append(&builder, S8("--config"));
+                os_argument_builder_append(&builder, S8("Release"));
+                os_argument_builder_append(&builder, S8("--cc"));
+                os_argument_builder_append(&builder, S8("clang"));
+                os_argument_builder_append(&builder, S8("--no-include-tests"));
+                os_argument_builder_append(&builder, S8("--no-developer-targets"));
+                os_argument_builder_append(&builder, S8("--no-check-optional-warnings"));
+                os_argument_builder_append(&builder, S8("--no-fuzz"));
+                os_argument_builder_append(&builder, S8("--no-sanitize"));
+                os_argument_builder_append(&builder, S8("--no-time-trace"));
+                os_argument_builder_append(&builder, S8("--no-instrument"));
+                os_argument_builder_append(&builder, S8("--no-lto"));
+                SliceString8 base_generate_arguments = os_argument_builder_flush(&builder);
+                BenchServiceRecipeStage* base_generate_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
+                *base_generate_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("base-generate")};
+                String8 base_read_only_paths = string_format(arena, S8("{S8} {S8}"), base_source, candidate_source);
+                bench_service_recipe_sandbox_process_add(arena, step_add(arena), base_generate_arguments, base_source,
+                                                          base_read_only_paths,
+                                                          base_build, result_root, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
+                                                          base_generate_stage);
+
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, driver);
+                os_argument_builder_append(&builder, S8("build"));
+                os_argument_builder_append(&builder, S8("--build-directory"));
+                os_argument_builder_append(&builder, base_build);
+                os_argument_builder_append(&builder, S8("--config"));
+                os_argument_builder_append(&builder, S8("Release"));
+                os_argument_builder_append(&builder, S8("-t"));
+                os_argument_builder_append(&builder, S8("ide"));
+                os_argument_builder_append(&builder, S8("--"));
+                os_argument_builder_append(&builder, S8("-j1"));
+                SliceString8 base_build_arguments = os_argument_builder_flush(&builder);
+                BenchServiceRecipeStage* base_build_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
+                *base_build_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("base-build")};
+                String8 base_build_read_only_paths = string_format(arena, S8("{S8} {S8}"), base_source, candidate_source);
+                bench_service_recipe_sandbox_process_add(arena, step_add(arena), base_build_arguments, base_source,
+                                                         base_build_read_only_paths,
+                                                         base_build, result_root, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
+                                                         base_build_stage);
+
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, driver);
+                os_argument_builder_append(&builder, S8("generate"));
+                os_argument_builder_append(&builder, S8("--build-directory"));
+                os_argument_builder_append(&builder, candidate_stage_build);
+                os_argument_builder_append(&builder, S8("--config"));
+                os_argument_builder_append(&builder, S8("Release"));
+                os_argument_builder_append(&builder, S8("--cc"));
+                os_argument_builder_append(&builder, S8("clang"));
+                os_argument_builder_append(&builder, S8("--no-include-tests"));
+                os_argument_builder_append(&builder, S8("--no-developer-targets"));
+                os_argument_builder_append(&builder, S8("--no-check-optional-warnings"));
+                os_argument_builder_append(&builder, S8("--no-fuzz"));
+                os_argument_builder_append(&builder, S8("--no-sanitize"));
+                os_argument_builder_append(&builder, S8("--no-time-trace"));
+                os_argument_builder_append(&builder, S8("--no-instrument"));
+                os_argument_builder_append(&builder, S8("--no-lto"));
+                SliceString8 candidate_generate_arguments = os_argument_builder_flush(&builder);
+                BenchServiceRecipeStage* candidate_generate_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
+                *candidate_generate_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("candidate-generate")};
+                bench_service_recipe_candidate_process_add(arena, step_add(arena), candidate_generate_arguments,
+                                                           candidate_source, base_source, base_build, candidate_source,
+                                                           candidate_stage_build, result_root, candidate_generate_stage);
+
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, driver);
+                os_argument_builder_append(&builder, S8("build"));
+                os_argument_builder_append(&builder, S8("--build-directory"));
+                os_argument_builder_append(&builder, candidate_stage_build);
+                os_argument_builder_append(&builder, S8("--config"));
+                os_argument_builder_append(&builder, S8("Release"));
+                os_argument_builder_append(&builder, S8("-t"));
+                os_argument_builder_append(&builder, S8("ide"));
+                os_argument_builder_append(&builder, S8("--"));
+                os_argument_builder_append(&builder, S8("-j1"));
+                SliceString8 candidate_build_arguments = os_argument_builder_flush(&builder);
+                BenchServiceRecipeStage* candidate_build_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
+                *candidate_build_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("candidate-build")};
+                bench_service_recipe_candidate_process_add(arena, step_add(arena), candidate_build_arguments,
+                                                           candidate_source, base_source, base_build, candidate_source,
+                                                           candidate_stage_build, result_root, candidate_build_stage);
+
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, bench_service_recipe_throughput_override.length ?
+                                                     bench_service_recipe_throughput_override : S8(BENCH_SERVICE_RECIPE_PERFORMANCE));
+                os_argument_builder_append(&builder, S8("run"));
+                os_argument_builder_append(&builder, S8("--decision-id"));
+                os_argument_builder_append(&builder, S8("native-retirement-performance-v1"));
+                os_argument_builder_append(&builder, S8("--definition"));
+                os_argument_builder_append(&builder, S8(BENCH_SERVICE_RECIPE_DEFINITION));
+                os_argument_builder_append(&builder, S8("--definition-sha256"));
+                os_argument_builder_append(&builder, definition_digest);
+                os_argument_builder_append(&builder, S8("--baseline"));
+                os_argument_builder_append(&builder, base_binary);
+                os_argument_builder_append(&builder, S8("--candidate"));
+                os_argument_builder_append(&builder, candidate_binary);
+                os_argument_builder_append(&builder, S8("--baseline-source"));
+                os_argument_builder_append(&builder, base_source);
+                os_argument_builder_append(&builder, S8("--candidate-source"));
+                os_argument_builder_append(&builder, candidate_source);
+                os_argument_builder_append(&builder, S8("--output"));
+                os_argument_builder_append(&builder, throughput_output);
+                os_argument_builder_append(&builder, S8("--baseline-id"));
+                os_argument_builder_append(&builder, base_revision);
+                os_argument_builder_append(&builder, S8("--candidate-id"));
+                os_argument_builder_append(&builder, candidate_revision);
+                os_argument_builder_append(&builder, S8("--result-id"));
+                os_argument_builder_append(&builder, result_identity);
+                os_argument_builder_append(&builder, S8("--rounds"));
+                os_argument_builder_append(&builder, S8("2"));
+                os_argument_builder_append(&builder, S8("--minimum-pairs-per-round"));
+                os_argument_builder_append(&builder, S8("60"));
+                os_argument_builder_append(&builder, S8("--maximum-pairs-per-round"));
+                os_argument_builder_append(&builder, S8("254"));
+                os_argument_builder_append(&builder, S8("--warmups-per-variant"));
+                os_argument_builder_append(&builder, S8("2"));
+                os_argument_builder_append(&builder, S8("--partition-record-cap"));
+                os_argument_builder_append(&builder, S8("16777216"));
+                os_argument_builder_append(&builder, S8("--partition-count-cap"));
+                os_argument_builder_append(&builder, S8("3"));
+                os_argument_builder_append(&builder, S8("--total-record-cap"));
+                os_argument_builder_append(&builder, S8("39518208"));
+                os_argument_builder_append(&builder, S8("--total-byte-cap"));
+                os_argument_builder_append(&builder, S8("17179869184"));
+                os_argument_builder_append(&builder, S8("--require-aa-admission"));
+                os_argument_builder_append(&builder, S8("--require-paired-ab"));
+                os_argument_builder_append(&builder, S8("--require-sealed-result"));
+                os_argument_builder_append(&builder, S8("--require-independent-replay"));
+                SliceString8 throughput_arguments = os_argument_builder_flush(&builder);
+                BenchServiceRecipeStage* throughput_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
+                *throughput_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("throughput")};
+                String8 throughput_read_only_paths = string_format(arena, S8("{S8} {S8} {S8} {S8}"), base_source, base_build,
+                                                                   candidate_source, candidate_build);
+                bench_service_recipe_sandbox_process_add(arena, step_add(arena), throughput_arguments, candidate_source,
+                                                         throughput_read_only_paths, throughput_output, result_root,
+                                                         BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, throughput_stage);
+                result = PROCESS_RESULT_SUCCESS;
+            }
+        }
+    }
+    return result;
+}
+
+#if BUSTER_LINUX
+typedef struct BenchServiceRecipeTestFixture BenchServiceRecipeTestFixture;
+struct BenchServiceRecipeTestFixture
+{
+    char root[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char workspace[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char attempt[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char result[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char base_source[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char base_build[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char candidate_source[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char candidate_build[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char base_binary[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char candidate_binary[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char identity[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char base_manifest[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char candidate_manifest[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char wrong_result[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char sentinel[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char manifest[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char temporary[BENCH_SERVICE_RECIPE_PATH_CAP];
+};
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_write(char const* path, char const* bytes, mode_t mode)
+{
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode);
+    bool ok = descriptor >= 0;
+    size_t length = bytes ? strlen(bytes) : 0;
+    for (size_t offset = 0; ok && offset < length;)
+    {
+        ssize_t count = write(descriptor, bytes + offset, length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok) offset += (size_t)count;
+    }
+    if (ok) ok = fsync(descriptor) == 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    if (ok) ok = chmod(path, mode) == 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_mkdir(char const* path, mode_t mode)
+{
+    bool ok = mkdir(path, mode) == 0 || errno == EEXIST;
+    struct stat info = {0};
+    if (ok) ok = stat(path, &info) == 0 && S_ISDIR(info.st_mode) && chmod(path, mode) == 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_contains(char const* path, char const* needle)
+{
+    char bytes[BENCH_SERVICE_RECIPE_MANIFEST_CAP + 1];
+    int descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    size_t used = 0;
+    bool ok = descriptor >= 0;
+    while (ok && used < BENCH_SERVICE_RECIPE_MANIFEST_CAP)
+    {
+        ssize_t count = read(descriptor, bytes + used, BENCH_SERVICE_RECIPE_MANIFEST_CAP - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = false;
+        else if (!count) break;
+        else used += (size_t)count;
+    }
+    if (ok)
+    {
+        char extra;
+        ok = read(descriptor, &extra, 1) == 0;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    if (ok)
+    {
+        bytes[used] = 0;
+        ok = strstr(bytes, needle) != NULL;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_child_path(char output[BENCH_SERVICE_RECIPE_PATH_CAP],
+                                                               char const* parent, char const* child)
+{
+    size_t parent_length = parent ? strlen(parent) : 0;
+    size_t child_length = child ? strlen(child) : 0;
+    bool ok = parent && child && parent_length > 0 && parent_length + 1 + child_length < BENCH_SERVICE_RECIPE_PATH_CAP;
+    if (ok)
+    {
+        memcpy(output, parent, parent_length);
+        output[parent_length] = '/';
+        memcpy(output + parent_length + 1, child, child_length + 1);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_fixture_make(BenchServiceRecipeTestFixture* fixture, u32 serial,
+                                                                 char const* base_revision, char const* candidate_revision)
+{
+    *fixture = (BenchServiceRecipeTestFixture){0};
+    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = "/tmp/buster-bench-recipe-XXXXXX";
+    bool ok = mkdtemp(root_template) != NULL;
+    if (ok) snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
+    int length = ok ? snprintf(fixture->workspace, sizeof(fixture->workspace), "%s/workspaces", fixture->root) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->workspace) && bench_service_recipe_test_mkdir(fixture->workspace, 0700);
+    length = ok ? snprintf(fixture->attempt, sizeof(fixture->attempt), "%s/job-1-attempt-2", fixture->workspace) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->attempt) && bench_service_recipe_test_mkdir(fixture->attempt, 0700);
+    char base[BENCH_SERVICE_RECIPE_PATH_CAP], candidate[BENCH_SERVICE_RECIPE_PATH_CAP], results[BENCH_SERVICE_RECIPE_PATH_CAP];
+    length = ok ? snprintf(base, sizeof(base), "%s/base", fixture->attempt) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(base) && bench_service_recipe_test_mkdir(base, 0700);
+    length = ok ? snprintf(candidate, sizeof(candidate), "%s/candidate", fixture->attempt) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(candidate) && bench_service_recipe_test_mkdir(candidate, 0700);
+    length = ok ? snprintf(fixture->base_source, sizeof(fixture->base_source), "%s/source", base) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_source) && bench_service_recipe_test_mkdir(fixture->base_source, 0700);
+    length = ok ? snprintf(fixture->base_build, sizeof(fixture->base_build), "%s/build", base) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_build) && bench_service_recipe_test_mkdir(fixture->base_build, 0700);
+    length = ok ? snprintf(fixture->candidate_source, sizeof(fixture->candidate_source), "%s/source", candidate) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_source) && bench_service_recipe_test_mkdir(fixture->candidate_source, 0700);
+    length = ok ? snprintf(fixture->candidate_build, sizeof(fixture->candidate_build), "%s/build", candidate) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_build) && bench_service_recipe_test_mkdir(fixture->candidate_build, 0700);
+    length = ok ? snprintf(results, sizeof(results), "%s/results", fixture->workspace) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(results) && bench_service_recipe_test_mkdir(results, 0700);
+    length = ok ? snprintf(fixture->result, sizeof(fixture->result), "%s/job-1-attempt-2", results) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->result) && bench_service_recipe_test_mkdir(fixture->result, 0700);
+    length = ok ? snprintf(fixture->identity, sizeof(fixture->identity), "%s/.identity", fixture->attempt) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->identity);
+    if (ok)
+    {
+        char identity[1024];
+        int identity_length = snprintf(identity, sizeof(identity),
+                                       "BQ-WORKSPACE-V1\njob=1\ntoken=2\nrecipe=validate-buster-v1\nbase=%s\ncandidate=%s\n",
+                                       base_revision, candidate_revision);
+        ok = identity_length > 0 && (size_t)identity_length < sizeof(identity) &&
+             bench_service_recipe_test_write(fixture->identity, identity, 0400);
+    }
+    length = ok ? snprintf(fixture->base_manifest, sizeof(fixture->base_manifest), "%s/.source-manifest", fixture->base_source) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_manifest);
+    length = ok ? snprintf(fixture->candidate_manifest, sizeof(fixture->candidate_manifest), "%s/.source-manifest", fixture->candidate_source) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_manifest);
+    if (ok)
+    {
+        char manifest[512];
+        int manifest_length = snprintf(manifest, sizeof(manifest), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n",
+                                       base_revision);
+        ok = manifest_length > 0 && (size_t)manifest_length < sizeof(manifest) &&
+             bench_service_recipe_test_write(fixture->base_manifest, manifest, 0400);
+        manifest_length = snprintf(manifest, sizeof(manifest), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n",
+                                   candidate_revision);
+        ok = ok && manifest_length > 0 && (size_t)manifest_length < sizeof(manifest) &&
+             bench_service_recipe_test_write(fixture->candidate_manifest, manifest, 0400);
+        ok = ok && chmod(fixture->base_source, 0550) == 0 && chmod(fixture->candidate_source, 0550) == 0;
+    }
+    length = ok ? snprintf(fixture->base_binary, sizeof(fixture->base_binary), "%s/Release/ide", fixture->base_build) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_binary);
+    length = ok ? snprintf(fixture->candidate_binary, sizeof(fixture->candidate_binary), "%s/Release/ide", fixture->candidate_build) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->candidate_binary);
+    length = ok ? snprintf(fixture->manifest, sizeof(fixture->manifest), "%s/validate-buster-v1.manifest", fixture->result) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->manifest);
+    length = ok ? snprintf(fixture->temporary, sizeof(fixture->temporary), "%s/validate-buster-v1.manifest.tmp", fixture->result) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->temporary);
+    length = ok ? snprintf(fixture->sentinel, sizeof(fixture->sentinel), "%s/sentinel", fixture->root) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->sentinel);
+    length = ok ? snprintf(fixture->wrong_result, sizeof(fixture->wrong_result), "%s/wrong-result-%u", fixture->workspace, serial) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->wrong_result);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_test_run(Arena* arena, BenchServiceRecipeTestFixture const* fixture,
+                                                                String8 result_root)
+{
+    String8 arguments[] = {S8("1"), S8("2"), string_from_pointer(fixture->workspace),
+                           S8("1111111111111111111111111111111111111111"),
+                           S8("2222222222222222222222222222222222222222"), result_root};
+    program.build_graph = (BuildGraph){0};
+    ProcessResult added = bench_service_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
+    ProcessResult result = added == PROCESS_RESULT_SUCCESS ? entry_point() : added;
+    program.build_graph = (BuildGraph){0};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void bench_service_recipe_test_fixture_cleanup(Arena* arena, BenchServiceRecipeTestFixture const* fixture)
+{
+    /* The fixture deliberately models read-only materialized sources. Restore
+     * parent write permission before deleting the private test tree so a
+     * failed case cannot leave source manifests behind in /tmp. */
+    chmod(fixture->base_source, 0700);
+    chmod(fixture->candidate_source, 0700);
+    chmod(fixture->base_manifest, 0600);
+    chmod(fixture->candidate_manifest, 0600);
+    chmod(fixture->base_build, 0700);
+    chmod(fixture->candidate_build, 0700);
+    chmod(fixture->base_binary, 0700);
+    chmod(fixture->candidate_binary, 0700);
+    char base_release[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_release[BENCH_SERVICE_RECIPE_PATH_CAP];
+    if (bench_service_recipe_test_child_path(base_release, fixture->base_build, "Release")) chmod(base_release, 0700);
+    if (bench_service_recipe_test_child_path(candidate_release, fixture->candidate_build, "Release")) chmod(candidate_release, 0700);
+    remove_path_recursive(arena, string_from_pointer(fixture->root));
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, char script_root[BENCH_SERVICE_RECIPE_PATH_CAP])
+{
+    char root_template[BENCH_SERVICE_RECIPE_PATH_CAP] = "/tmp/buster-bench-recipe-scripts-XXXXXX";
+    bool ok = mkdtemp(root_template) != NULL;
+    if (ok) snprintf(script_root, BENCH_SERVICE_RECIPE_PATH_CAP, "%s", root_template);
+    char driver[BENCH_SERVICE_RECIPE_PATH_CAP], throughput[BENCH_SERVICE_RECIPE_PATH_CAP];
+    int driver_length = ok ? snprintf(driver, sizeof(driver), "%s/driver", script_root) : -1;
+    int throughput_length = ok ? snprintf(throughput, sizeof(throughput), "%s/throughput", script_root) : -1;
+    char driver_script[4096], throughput_script[4096];
+    int driver_script_length = snprintf(driver_script, sizeof(driver_script),
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "mode=\"${1:-}\"\n"
+        "build=\"\"\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"--build-directory\" ]; then build=\"$2\"; shift 2; else shift; fi\n"
+        "done\n"
+        "[ -n \"$build\" ] || exit 40\n"
+        "if [ \"$mode\" = generate ]; then mkdir -p \"$build/Release\"; exit 0; fi\n"
+        "if [ \"$mode\" = build ]; then\n"
+        "  if [ -e \"%s/fail\" ] && [ \"$build\" != \"${build%%/candidate/staging}\" ]; then exit 42; fi\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$build/Release/ide\"\n"
+        "  chmod 0755 \"$build/Release/ide\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 41\n", script_root);
+    int throughput_script_length = snprintf(throughput_script, sizeof(throughput_script),
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "invocation=\"$*\"\n"
+        "case \" $* \" in *\" --no-guard \"*|*\" smoke \"*) exit 43;; esac\n"
+        "case \" $* \" in *\" --decision-id native-retirement-performance-v1 \"*) :;; *) exit 44;; esac\n"
+        "case \" $* \" in *\" --definition /usr/local/share/buster-bench/native-retirement-performance-v1 \"*) :;; *) exit 57;; esac\n"
+        "case \" $* \" in *\" --definition-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \"*) :;; *) exit 58;; esac\n"
+        "case \" $* \" in *\" --baseline-source \"*) :;; *) exit 59;; esac\n"
+        "case \" $* \" in *\" --candidate-source \"*) :;; *) exit 60;; esac\n"
+        "case \" $* \" in *\" --rounds 2 \"*) :;; *) exit 45;; esac\n"
+        "case \" $* \" in *\" --minimum-pairs-per-round 60 \"*) :;; *) exit 46;; esac\n"
+        "case \" $* \" in *\" --maximum-pairs-per-round 254 \"*) :;; *) exit 47;; esac\n"
+        "case \" $* \" in *\" --warmups-per-variant 2 \"*) :;; *) exit 48;; esac\n"
+        "case \" $* \" in *\" --partition-record-cap 16777216 \"*) :;; *) exit 49;; esac\n"
+        "case \" $* \" in *\" --partition-count-cap 3 \"*) :;; *) exit 50;; esac\n"
+        "case \" $* \" in *\" --total-record-cap 39518208 \"*) :;; *) exit 51;; esac\n"
+        "case \" $* \" in *\" --total-byte-cap 17179869184 \"*) :;; *) exit 52;; esac\n"
+        "case \" $* \" in *\" --require-aa-admission \"*) :;; *) exit 53;; esac\n"
+        "case \" $* \" in *\" --require-paired-ab \"*) :;; *) exit 54;; esac\n"
+        "case \" $* \" in *\" --require-sealed-result \"*) :;; *) exit 55;; esac\n"
+        "case \" $* \" in *\" --require-independent-replay \"*) :;; *) exit 56;; esac\n"
+        "baseline=\"\"\n"
+        "candidate=\"\"\n"
+        "output=\"\"\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"--baseline\" ]; then baseline=\"$2\"; shift 2; elif [ \"$1\" = \"--candidate\" ]; then candidate=\"$2\"; shift 2; elif [ \"$1\" = \"--output\" ]; then output=\"$2\"; shift 2; else shift; fi\n"
+        "done\n"
+        "[ -n \"$output\" ] && mkdir -p \"$output/nested\" \"$output/raw\" \"$output/workflow\" && printf 'synthetic-throughput\\n' > \"$output/result.txt\" && printf 'synthetic-nested-throughput\\n' > \"$output/nested/result.txt\"\n"
+        "printf '%%s\\n' \"$invocation\" > \"$output/invocation.txt\"\n"
+        "printf '{\"schema\":\"buster-native-retirement-performance-binding-v1\"}\\n' > \"$output/binding.json\"\n"
+        "printf '{\"record_id\":\"partition-0\"}\\n' > \"$output/raw/partition-000.jsonl\"\n"
+        "printf '{\"record_id\":\"partition-1\"}\\n' > \"$output/raw/partition-001.jsonl\"\n"
+        "printf '{\"record_id\":\"partition-2\"}\\n' > \"$output/raw/partition-002.jsonl\"\n"
+        "printf '{}\\n' > \"$output/performance-binding.json\"\n"
+        "printf '{\"bundle_checked\":true,\"evidence_checked\":true,\"proof\":\"independent-evidence-and-receipts-checked\",\"rows_recomputed\":true}\\n' > \"$output/performance-validation.json\"\n"
+        "printf '{}\\n' > \"$output/workflow/independent-replay.json\"\n"
+        "printf '{\"binding_sha256\":\"ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356\",\"independent_replay_sha256\":\"ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356\",\"outcome\":\"pass\",\"schema\":\"buster-native-retirement-performance-verdict-v1\",\"validation_sha256\":\"f6b5c2d1b2da65b5e296ab4688a0a26c6444a9d7ea3937ec8a256be38ce05421\"}\\n' > \"$output/native-retirement-performance-verdict.json\"\n"
+        "chmod 0400 \"$output/performance-binding.json\" \"$output/performance-validation.json\" \"$output/workflow/independent-replay.json\" \"$output/native-retirement-performance-verdict.json\"\n"
+        "if [ -e \"%s/safe-shaped\" ]; then rm -f \"$output/performance-binding.json\" \"$output/performance-validation.json\" \"$output/workflow/independent-replay.json\" \"$output/native-retirement-performance-verdict.json\"; fi\n"
+        "if [ -e \"%s/invalid-output\" ]; then printf 'invalid\\n' > \"$output/bad name\"; fi\n"
+        "if [ -e \"%s/tamper\" ]; then printf 'tampered\\n' > \"$baseline\"; chmod 0555 \"$baseline\"; fi\n"
+        "if [ -e \"%s/candidate-tamper\" ]; then printf 'tampered\\n' > \"$candidate\"; chmod 0555 \"$candidate\"; fi\n"
+        "exit 0\n", script_root, script_root, script_root, script_root);
+    ok = ok && driver_length > 0 && (size_t)driver_length < sizeof(driver) && throughput_length > 0 &&
+         (size_t)throughput_length < sizeof(throughput) && driver_script_length > 0 &&
+         (size_t)driver_script_length < sizeof(driver_script) && throughput_script_length > 0 &&
+         (size_t)throughput_script_length < sizeof(throughput_script) && bench_service_recipe_test_write(driver, driver_script, 0500) &&
+         bench_service_recipe_test_write(throughput, throughput_script, 0500);
+    if (ok)
+    {
+        bench_service_recipe_driver_override = string_duplicate_arena(arena, string_from_pointer(driver), true);
+        bench_service_recipe_throughput_override = string_duplicate_arena(arena, string_from_pointer(throughput), true);
+        ok = bench_service_recipe_executable_digest(bench_service_recipe_throughput_override,
+                                                     bench_service_recipe_throughput_digest_override);
+        if (ok)
+        {
+            memset(bench_service_recipe_definition_digest_override, 'd', SHA256_HEX_CAPACITY - 1);
+            bench_service_recipe_definition_digest_override[SHA256_HEX_CAPACITY - 1] = 0;
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_mode(char const* path, bool directory, bool executable)
+{
+    struct stat info = {0};
+    bool ok = path && lstat(path, &info) == 0 && (directory ? S_ISDIR(info.st_mode) : S_ISREG(info.st_mode)) &&
+              info.st_uid == geteuid() && (info.st_mode & 0022) == 0;
+    if (ok && directory) ok = (info.st_mode & 0050) == 0050;
+    if (ok && !directory) ok = (info.st_mode & 0040) == 0040 && (!executable || (info.st_mode & 0010) == 0010);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_traverse_mode(char const* path)
+{
+    struct stat info = {0};
+    bool ok = path && lstat(path, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
+              (info.st_mode & 0022) == 0 && (info.st_mode & 0010) == 0010;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
+{
+    char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    bool ok = bench_service_recipe_test_script_setup(arena, script_root);
+    u32 cases = 1;
+    ok = ok && bench_service_recipe_identity_test(arena);
+    char const* base_revision = "1111111111111111111111111111111111111111";
+    char const* candidate_revision = "2222222222222222222222222222222222222222";
+    char fail_marker[BENCH_SERVICE_RECIPE_PATH_CAP], tamper_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char invalid_output_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char candidate_tamper_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char safe_shaped_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
+    int fail_length = ok ? snprintf(fail_marker, sizeof(fail_marker), "%s/fail", script_root) : -1;
+    int tamper_length = ok ? snprintf(tamper_marker, sizeof(tamper_marker), "%s/tamper", script_root) : -1;
+    int invalid_output_length = ok ? snprintf(invalid_output_marker, sizeof(invalid_output_marker), "%s/invalid-output", script_root) : -1;
+    int candidate_tamper_length = ok ? snprintf(candidate_tamper_marker, sizeof(candidate_tamper_marker), "%s/candidate-tamper", script_root) : -1;
+    int safe_shaped_length = ok ? snprintf(safe_shaped_marker, sizeof(safe_shaped_marker), "%s/safe-shaped", script_root) : -1;
+    ok = ok && fail_length > 0 && (size_t)fail_length < sizeof(fail_marker) && tamper_length > 0 &&
+         (size_t)tamper_length < sizeof(tamper_marker) && candidate_tamper_length > 0 &&
+         (size_t)candidate_tamper_length < sizeof(candidate_tamper_marker) && invalid_output_length > 0 &&
+         (size_t)invalid_output_length < sizeof(invalid_output_marker) && safe_shaped_length > 0 &&
+         (size_t)safe_shaped_length < sizeof(safe_shaped_marker);
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 1, base_revision, candidate_revision);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool positive_status = bench_service_recipe_test_contains(fixture.manifest, "status=succeeded");
+        bool positive_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
+        bool positive_namespace = bench_service_recipe_test_contains(fixture.manifest, "namespace-policy=private-workspace-post-run-identity");
+        bool positive_base_digest = bench_service_recipe_test_contains(fixture.manifest, "base-binary-sha256=");
+        bool positive_candidate_digest = bench_service_recipe_test_contains(fixture.manifest, "candidate-binary-sha256=");
+        bool positive_policy = bench_service_recipe_test_contains(fixture.manifest,
+            "performance-policy=decision=native-retirement-performance-v1 aa=required ab=paired rounds=2 pairs=bound-60-to-254 warmups=2 guard=required partition-record-cap=16777216 partition-count-cap=3 total-record-cap=39518208 total-byte-cap=17179869184 sealed-result=required independent-replay=required");
+        bool positive_manifest = access(fixture.manifest, F_OK) == 0;
+        char positive_throughput_line[BENCH_SERVICE_RECIPE_PATH_CAP + 32];
+        char positive_candidate_line[BENCH_SERVICE_RECIPE_PATH_CAP + 32];
+        int positive_throughput_length = snprintf(positive_throughput_line, sizeof(positive_throughput_line),
+                                                  "throughput-output=%s/candidate/staging/throughput-results",
+                                                  fixture.attempt);
+        int positive_candidate_length = snprintf(positive_candidate_line, sizeof(positive_candidate_line),
+                                                 "candidate-build=%s/candidate/build", fixture.attempt);
+        bool positive_manifest_paths = positive_throughput_length > 0 &&
+                                       (size_t)positive_throughput_length < sizeof(positive_throughput_line) &&
+                                       positive_candidate_length > 0 && (size_t)positive_candidate_length < sizeof(positive_candidate_line) &&
+                                       bench_service_recipe_test_contains(fixture.manifest, positive_throughput_line) &&
+                                       bench_service_recipe_test_contains(fixture.manifest, positive_candidate_line);
+        char positive_bundle_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        int positive_bundle_length = snprintf(positive_bundle_path, sizeof(positive_bundle_path),
+                                              "%s/%s", fixture.result, BENCH_SERVICE_RECIPE_BUNDLE_NAME);
+        struct stat bundle_info = {0};
+        bool positive_bundle = positive_bundle_length > 0 && (size_t)positive_bundle_length < sizeof(positive_bundle_path) &&
+                               lstat(positive_bundle_path, &bundle_info) == 0 && S_ISREG(bundle_info.st_mode) &&
+                               (bundle_info.st_mode & 0222) == 0 &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "BQ-BUNDLE-V1\n") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/result.txt") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/nested/result.txt") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/invocation.txt") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/binding.json") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/raw/partition-000.jsonl") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/raw/partition-001.jsonl") &&
+                               bench_service_recipe_test_contains(positive_bundle_path, "throughput/raw/partition-002.jsonl");
+        bool positive_bundle_digest = !bench_service_recipe_test_contains(fixture.manifest, "bundle-sha256=\n");
+        bool positive_tmp = access(fixture.temporary, F_OK) != 0;
+        struct stat manifest_info = {0};
+        bool positive_mode = stat(fixture.manifest, &manifest_info) == 0 && (manifest_info.st_mode & 0222) == 0;
+        char attempt_candidate[BENCH_SERVICE_RECIPE_PATH_CAP], attempt_base[BENCH_SERVICE_RECIPE_PATH_CAP];
+        bool candidate_parent_mode = bench_service_recipe_test_child_path(attempt_candidate, fixture.attempt, "candidate") &&
+                                     bench_service_recipe_test_child_path(attempt_base, fixture.attempt, "base") &&
+                                     bench_service_recipe_test_candidate_traverse_mode(fixture.workspace) &&
+                                     bench_service_recipe_test_candidate_traverse_mode(fixture.attempt) &&
+                                     bench_service_recipe_test_candidate_traverse_mode(attempt_candidate) &&
+                                     bench_service_recipe_test_candidate_traverse_mode(attempt_base);
+        char base_release[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_release[BENCH_SERVICE_RECIPE_PATH_CAP];
+        bool candidate_tree_mode = bench_service_recipe_test_child_path(base_release, fixture.base_build, "Release") &&
+                                   bench_service_recipe_test_child_path(candidate_release, fixture.candidate_build, "Release") &&
+                                   bench_service_recipe_test_candidate_mode(fixture.base_source, true, false) &&
+                                   bench_service_recipe_test_candidate_mode(fixture.candidate_source, true, false) &&
+                                   bench_service_recipe_test_candidate_mode(fixture.base_build, true, false) &&
+                                   bench_service_recipe_test_candidate_mode(fixture.candidate_build, true, false) &&
+                                   bench_service_recipe_test_candidate_mode(base_release, true, false) &&
+                                   bench_service_recipe_test_candidate_mode(candidate_release, true, false) &&
+                                   bench_service_recipe_test_candidate_mode(fixture.base_binary, false, true) &&
+                                   bench_service_recipe_test_candidate_mode(fixture.candidate_binary, false, true);
+        ok = ok && result == PROCESS_RESULT_SUCCESS && positive_status && positive_stage && positive_namespace && positive_manifest_paths && positive_base_digest &&
+             positive_policy &&
+             positive_candidate_digest && positive_manifest && positive_bundle && positive_bundle_digest && positive_tmp && positive_mode &&
+             candidate_parent_mode && candidate_tree_mode;
+        if (!ok)
+            string_print(S8("error: fixed performance recipe positive case result={u32} status={u32} stage={u32} namespace={u32} paths={u32} base-digest={u32} policy={u32} candidate-digest={u32} manifest={u32} bundle={u32} bundle-digest={u32} temp={u32} mode={u32} parent-mode={u32} tree-mode={u32}\n"),
+                         result, positive_status, positive_stage, positive_namespace, positive_manifest_paths,
+                         positive_base_digest, positive_policy, positive_candidate_digest, positive_manifest,
+                         positive_bundle, positive_bundle_digest, positive_tmp, positive_mode, candidate_parent_mode,
+                         candidate_tree_mode);
+        chmod(fixture.base_source, 0700);
+        chmod(fixture.candidate_source, 0700);
+        chmod(fixture.base_build, 0700);
+        chmod(fixture.candidate_build, 0700);
+        chmod(fixture.base_binary, 0700);
+        chmod(fixture.candidate_binary, 0700);
+        if (bench_service_recipe_test_child_path(base_release, fixture.base_build, "Release")) chmod(base_release, 0700);
+        if (bench_service_recipe_test_child_path(candidate_release, fixture.candidate_build, "Release")) chmod(candidate_release, 0700);
+        remove_path_recursive(arena, string_from_pointer(fixture.attempt));
+        bool retained = access(fixture.attempt, F_OK) != 0 && access(fixture.manifest, F_OK) == 0 &&
+                        bench_service_recipe_test_contains(fixture.manifest, "status=succeeded") &&
+                        bench_service_recipe_test_contains(fixture.manifest, "result-root=");
+        ok = ok && retained;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 2, base_revision, candidate_revision) &&
+             bench_service_recipe_test_write(fail_marker, "fail\n", 0600);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool failed_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        bool failed_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=candidate-build");
+        bool failed_process = bench_service_recipe_test_contains(fixture.manifest, "process-result=failed");
+        bool failed_manifest = access(fixture.manifest, F_OK) == 0;
+        ok = ok && result == PROCESS_RESULT_FAILED && failed_status && failed_stage && failed_process && failed_manifest;
+        unlink(fail_marker);
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 4, base_revision, candidate_revision) &&
+             bench_service_recipe_test_write(candidate_tamper_marker, "tamper\n", 0600);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool tamper_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        bool tamper_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
+        bool tamper_manifest = access(fixture.manifest, F_OK) == 0;
+        ok = ok && result != PROCESS_RESULT_SUCCESS && tamper_status &&
+             tamper_stage && tamper_manifest;
+        unlink(candidate_tamper_marker);
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 3, base_revision, candidate_revision) &&
+             bench_service_recipe_test_write(tamper_marker, "tamper\n", 0600);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool tamper_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        bool tamper_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
+        bool tamper_manifest = access(fixture.manifest, F_OK) == 0;
+        ok = ok && result != PROCESS_RESULT_SUCCESS && tamper_status &&
+             tamper_stage && tamper_manifest;
+        unlink(tamper_marker);
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char wrong_source_manifest[512];
+        int wrong_source_length = snprintf(wrong_source_manifest, sizeof(wrong_source_manifest),
+                                           "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=3333333333333333333333333333333333333333\n");
+        ok = bench_service_recipe_test_fixture_make(&fixture, 5, base_revision, candidate_revision) &&
+             wrong_source_length > 0 && (size_t)wrong_source_length < sizeof(wrong_source_manifest) &&
+             chmod(fixture.candidate_manifest, 0600) == 0 &&
+             bench_service_recipe_test_write(fixture.candidate_manifest, wrong_source_manifest, 0600) &&
+             chmod(fixture.candidate_manifest, 0400) == 0;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 6, base_revision, candidate_revision);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.wrong_result)) : PROCESS_RESULT_FAILED;
+        ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0 && access(fixture.wrong_result, F_OK) != 0;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 7, base_revision, candidate_revision) &&
+             bench_service_recipe_test_write(fixture.sentinel, "sentinel\n", 0600) && symlink(fixture.sentinel, fixture.temporary) == 0;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        struct stat temporary_info = {0};
+        ok = ok && result == PROCESS_RESULT_FAILED && lstat(fixture.temporary, &temporary_info) == 0 && S_ISLNK(temporary_info.st_mode) &&
+             bench_service_recipe_test_contains(fixture.sentinel, "sentinel") && access(fixture.manifest, F_OK) == 0 &&
+             bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 8, base_revision, candidate_revision) &&
+             bench_service_recipe_test_write(invalid_output_marker, "invalid\n", 0600) &&
+             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") == true;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        struct stat throughput_info = {0};
+        bool no_final_tree = lstat(throughput_path, &throughput_info) != 0;
+        bool invalid_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        ok = ok && result == PROCESS_RESULT_FAILED && invalid_status && no_final_tree;
+        unlink(invalid_output_marker);
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 13, base_revision, candidate_revision) &&
+             bench_service_recipe_test_write(safe_shaped_marker, "safe-shaped\n", 0600) &&
+             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput");
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        struct stat throughput_info = {0};
+        bool no_final_tree = lstat(throughput_path, &throughput_info) != 0;
+        bool failed_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        bool failed_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
+        ok = ok && result == PROCESS_RESULT_FAILED && no_final_tree && failed_status && failed_stage;
+        unlink(safe_shaped_marker);
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP], sentinel_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 9, base_revision, candidate_revision) &&
+             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") &&
+             mkdir(throughput_path, 0700) == 0 &&
+             bench_service_recipe_test_child_path(sentinel_path, throughput_path, "restart-sentinel") &&
+             bench_service_recipe_test_write(sentinel_path, "durable\n", 0400);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool preserved = bench_service_recipe_test_contains(sentinel_path, "durable") &&
+                         bench_service_recipe_test_contains(fixture.manifest, "status=failed");
+        ok = ok && result == PROCESS_RESULT_FAILED && preserved;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char staging_path[BENCH_SERVICE_RECIPE_PATH_CAP], throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 11, base_revision, candidate_revision) &&
+             bench_service_recipe_test_child_path(staging_path, fixture.attempt, "candidate/staging") &&
+             mkdir(staging_path, 02770) == 0 && fchmodat(AT_FDCWD, staging_path, 02770, 0) == 0 &&
+             bench_service_recipe_test_child_path(throughput_path, staging_path, "throughput-results") &&
+             symlink(fixture.sentinel, throughput_path) == 0;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        struct stat throughput_info = {0};
+        bool retained_link = lstat(throughput_path, &throughput_info) == 0 && S_ISLNK(throughput_info.st_mode);
+        ok = ok && result == PROCESS_RESULT_FAILED && retained_link && access(fixture.manifest, F_OK) != 0;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char temporary[128] = {0}, temporary_path[BENCH_SERVICE_RECIPE_PATH_CAP], temporary_file[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 10, base_revision, candidate_revision) &&
+             bench_service_recipe_temp_name("throughput", temporary) &&
+             bench_service_recipe_test_child_path(temporary_path, fixture.result, temporary) &&
+             mkdir(temporary_path, 0700) == 0 &&
+             bench_service_recipe_test_child_path(temporary_file, temporary_path, "partial.txt") &&
+             bench_service_recipe_test_write(temporary_file, "partial\n", 0400);
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool recovered = result == PROCESS_RESULT_SUCCESS && access(temporary_path, F_OK) != 0 &&
+                         bench_service_recipe_test_contains(fixture.manifest, "status=succeeded");
+        ok = ok && recovered;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    if (ok)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char prepare_manifest[BENCH_SERVICE_RECIPE_PATH_CAP], throughput_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        char throughput_file[BENCH_SERVICE_RECIPE_PATH_CAP];
+        char bundle_path[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 12, base_revision, candidate_revision) &&
+             bench_service_recipe_test_child_path(prepare_manifest, fixture.result, "validate-buster-v1.prepare.manifest") &&
+             bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") &&
+             bench_service_recipe_test_child_path(throughput_file, throughput_path, "result.txt") &&
+             bench_service_recipe_test_child_path(bundle_path, fixture.result, BENCH_SERVICE_RECIPE_BUNDLE_NAME);
+        bench_service_recipe_test_cancel_after_publish = ok;
+        ProcessResult interrupted = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool interrupted_prefix = interrupted == PROCESS_RESULT_FAILED && access(throughput_path, F_OK) == 0 &&
+                                  access(prepare_manifest, F_OK) == 0 && access(bundle_path, F_OK) != 0 &&
+                                  access(fixture.manifest, F_OK) != 0 &&
+                                  bench_service_recipe_test_contains(prepare_manifest, "process-result=running");
+        if (interrupted_prefix) unlink(prepare_manifest);
+        ProcessResult restarted = interrupted_prefix ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool recovered = restarted == PROCESS_RESULT_FAILED && access(throughput_path, F_OK) == 0 &&
+                         bench_service_recipe_test_contains(throughput_file, "synthetic-throughput") &&
+                         bench_service_recipe_test_contains(fixture.manifest, "status=failed") &&
+                         bench_service_recipe_test_contains(bundle_path, "throughput/result.txt") &&
+                         bench_service_recipe_test_contains(bundle_path, "throughput/nested/result.txt");
+        ok = ok && interrupted_prefix && recovered;
+        bench_service_recipe_test_cancel_after_publish = false;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    unlink(fail_marker);
+    unlink(tamper_marker);
+    unlink(candidate_tamper_marker);
+    unlink(invalid_output_marker);
+    unlink(safe_shaped_marker);
+    bench_service_recipe_driver_override = (String8){0};
+    bench_service_recipe_throughput_override = (String8){0};
+    memset(bench_service_recipe_throughput_digest_override, 0, sizeof(bench_service_recipe_throughput_digest_override));
+    memset(bench_service_recipe_definition_digest_override, 0, sizeof(bench_service_recipe_definition_digest_override));
+    if (script_root[0]) remove_path_recursive(arena, string_from_pointer(script_root));
+    string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases, ok ? S8("pass") : S8("fail"));
+    return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+#else
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
+{
+    BUSTER_UNUSED(arena);
+    string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST result=unsupported\n"));
+    return PROCESS_RESULT_FAILED;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 {
     native_foundation_tool_add(arena, arguments, true);
@@ -34346,9 +37245,11 @@ ProcessResult process_arguments(void)
 
     Arena* arena = program_state->arena;
 
-    BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
+        [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
+        [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
@@ -34499,7 +37400,8 @@ ProcessResult process_arguments(void)
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
         String8 argument = arguments.pointer[argument_i];
-        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
+        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+            command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
             string8_list_push(arena, &throughput_arguments, argument);
             argument_i += 1;
@@ -35428,6 +38330,16 @@ ProcessResult process_arguments(void)
             bench_service_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
+        case BUILD_COMMAND_BENCH_SERVICE_RECIPE:
+        {
+            result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST:
+        {
+            result = bench_service_recipe_self_test(arena);
+        }
+        break;
         case BUILD_COMMAND_BENCH_THROUGHPUT:
         {
             bench_throughput_add(arena, string8_list_to_slice(arena, throughput_arguments));
@@ -35693,6 +38605,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
 {
     ProcessWaitResult wait_result = os_process_wait_deadline(arena, run->spawn, run->timeout_seconds * 1000000);
     ProcessResult result = wait_result.result;
+    run->result = result;
     bool has_warning = false;
 
     if (wait_result.timed_out)
@@ -35726,6 +38639,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
         result = PROCESS_RESULT_FAILED;
     }
 
+    run->result = result;
+
     if (run->cleanup_callback)
     {
         ProcessResult cleanup_result = run->cleanup_callback(arena, run->cleanup_data);
@@ -35734,6 +38649,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
             result = cleanup_result;
         }
     }
+
+    run->result = result;
 
     return result;
 }

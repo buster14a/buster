@@ -6,16 +6,51 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-contract.yml
+      - .github/workflows/native-retirement-performance.yml
       - build.c
       - docs/agents/build.md
+      - docs/agents/benchmarking.md
       - docs/native-retirement-census.md
+      - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-applicability-v1.tsv
+      - docs/native-retirement-dependencies-v1.json
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
+      - tools/native_retirement_materializer.py
+      - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_external.py
+      - tools/native_retirement_external_test.py
       - tools/native_retirement_result_input.py
       - tools/native_retirement_result_input_test.py
+      - tools/native_retirement_archive.py
+      - tools/native_retirement_performance_binding.py
+      - tools/native_retirement_performance_binding_test.py
+      - tools/throughput/retirement_stats.h
+      - tools/throughput/**
+      - tools/throughput/stats.h
+      - tools/throughput/throughput.c
+      - tools/throughput/tests.c
+      - src/buster/lib/arena.c
+      - src/buster/lib/arena.h
+      - src/buster/lib/base.h
+      - src/buster/lib/file.c
+      - src/buster/lib/file.h
+      - src/buster/lib/hash.c
+      - src/buster/lib/hash.h
+      - src/buster/lib/integer.c
+      - src/buster/lib/integer.h
+      - src/buster/lib/os.c
+      - src/buster/lib/os.h
+      - src/buster/lib/os_internal.h
+      - src/buster/lib/string.c
+      - src/buster/lib/string.h
+      - src/buster/lib/system_headers.h
+      - src/buster/lib/time.c
+      - src/buster/lib/time.h
       - tests/**
   workflow_dispatch:
 
@@ -37,6 +72,67 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prepare the pinned external closure
+        run: >-
+          python3 tools/native_retirement_external.py prepare
+          --manifest docs/native-retirement-dependencies-v1.json
+          --source-root "$(pwd)"
       - name: Build and validate the manifest producer
         run: |
           clang --version
@@ -44,9 +140,22 @@ jobs:
           "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_external.py self-test
+          python3 tools/native_retirement_external_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
+      - name: Build and self-test the #619 retirement adapter
+        run: |
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv \
+            -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 \
+            tools/throughput/throughput.c tools/throughput/shared.c -lm \
+            -o "$RUNNER_TEMP/bench-throughput-retirement"
+          "$RUNNER_TEMP/bench-throughput-retirement" self-test
+      - name: Validate immutable performance binding schema
+        run: python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
       - name: Prove unreviewed input drift fails closed
         run: |
           printf '\n' >> tests/basic_c_operations.c
@@ -59,6 +168,10 @@ jobs:
           git restore -- tests/basic_c_operations.c
       - name: Exercise frozen resource and replacement environment
         run: |
+          python3 tools/native_retirement_materializer.py materialize \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" \
+            --output "$(pwd)/evidence/dependency-materialized"
           resource_include="$(clang -print-resource-dir)/include"
           if "$RUNNER_TEMP/retirement-build" native_retirement_census \
             --ide /bin/false \
@@ -68,6 +181,9 @@ jobs:
             --fixture basic_c_operations.c \
             --target x86_64-unknown-linux-gnu \
             --resource-include "$resource_include" \
+            --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include" \
+            --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json" \
+            --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json" \
             --out evidence/resource-smoke; then
             echo 'error: the deliberately failing compiler was accepted' >&2
             exit 1
@@ -77,7 +193,7 @@ jobs:
           grep -Fx 'unfrozen_dependencies=none-for-object-census' evidence/resource-smoke/manifest.txt
           grep -q -F $'resource-header\t' evidence/resource-smoke/dependencies.tsv
           python3 tools/native_retirement_contract.py validate evidence/resource-smoke
-      - name: Retain contract diagnostics
+      - name: Retain seven-day contract diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -85,3 +201,8 @@ jobs:
           path: evidence/
           retention-days: 7
           if-no-files-found: error
+      - name: State durable evidence boundary
+        if: ${{ !cancelled() }}
+        run: |
+          echo 'The seven-day workflow artifact is diagnostic only.'
+          echo 'Final acceptance evidence must be published, downloaded, and independently replayed through #510.'
