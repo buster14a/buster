@@ -15544,15 +15544,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         scratch_end(temporary);
     }
 
+    for (u32 form = 0; form < 2; form += 1)
     {
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult preprocess = {0};
-        CParseResult parse = {0};
-        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("__bf16 a; _Float16 b; char rank[sizeof(a + b)];"),
-                                                     S8("bfloat16-mixed.c"), constant_target.target, &preprocess, &parse);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena,
+                                                    S8("__bf16 a; _Float16 b;\n"
+                                                       "__typeof__(a + b) ab;\n"
+                                                       "__typeof__(b + a) ba;\n"
+                                                       "_Float16 left = (__bf16)1.0 + (_Float16)0x1p-9;\n"
+                                                       "_Float16 right = (_Float16)0x1p-9 + (__bf16)1.0;\n"
+                                                       "__bf16 narrowed = (__bf16)(_Float16)1.5;\n"
+                                                       "_Float16 widened = (_Float16)(__bf16)1.5;"),
+                                                    (CPreprocessOptions){
+                                                        .target = constant_target.target,
+                                                        .data_layout = constant_layout,
+                                                    });
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-mixed.c"), preprocess, syntax, constant_target.target,
+                                                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-        BUSTER_TEST(arguments, parse.diagnostic_count != 0 || lowered.diagnostic_count != 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        IrGlobal* ab = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("ab")) : 0;
+        IrGlobal* ba = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("ba")) : 0;
+        IrGlobal* left = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("left")) : 0;
+        IrGlobal* right = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("right")) : 0;
+        IrGlobal* narrowed = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("narrowed")) : 0;
+        IrGlobal* widened = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("widened")) : 0;
+        IrType* ab_type = ab && lowered.program ? ir_type_from_id(&lowered.program->types, ab->type) : 0;
+        IrType* ba_type = ba && lowered.program ? ir_type_from_id(&lowered.program->types, ba->type) : 0;
+        BUSTER_TEST(arguments, ab_type && ab_type->kind == IR_TYPE_FLOAT && ab_type->bit_width == 16 &&
+                               ab_type->float_format == IR_FLOAT_FORMAT_IEEE);
+        BUSTER_TEST(arguments, ba_type && ba_type->kind == IR_TYPE_FLOAT && ba_type->bit_width == 16 &&
+                               ba_type->float_format == IR_FLOAT_FORMAT_IEEE);
+        BUSTER_TEST(arguments, left && left->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && left->initializer_bits == 0x3c02);
+        BUSTER_TEST(arguments, right && right->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && right->initializer_bits == 0x3c02);
+        BUSTER_TEST(arguments, narrowed && narrowed->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && narrowed->initializer_bits == 0x3fc0);
+        BUSTER_TEST(arguments, widened && widened->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && widened->initializer_bits == 0x3e00);
         scratch_end(temporary);
+    }
+
+    String8 wide_sources[] = {
+        S8("__bf16 wide = 0x1.0100000000000002p0L;"),
+        S8("__bf16 wide[] = {0x1.0100000000000002p0L};"),
+        S8("__bf16 wide = (__bf16)0x1.0100000000000002p0L;"),
+    };
+    String8 wide_targets[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("aarch64-unknown-linux-gnu"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(wide_targets); target_index += 1)
+    {
+        TargetParseResult parsed = target_parse_triple(wide_targets[target_index]);
+        BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed.error == TARGET_PARSE_ERROR_NONE)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(wide_sources); case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    CPreprocessResult preprocess = c_preprocess(temporary.arena, wide_sources[case_index],
+                                                                (CPreprocessOptions){
+                                                                    .target = parsed.target,
+                                                                    .data_layout = target_data_layout(parsed.target),
+                                                                });
+                    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-wide.c"), preprocess, syntax, parsed.target,
+                                                                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                    BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+                    BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+
+    struct
+    {
+        String8 triple;
+        String8 source;
+    } wide_controls[] = {
+        {S8("x86_64-pc-windows-msvc"), S8("__bf16 wide = 0x1.0100000000000002p0L;")},
+        {S8("aarch64-apple-macos"), S8("__bf16 wide = 0x1.0100000000000002p0L;")},
+        {S8("x86_64-unknown-linux-gnu"), S8("__bf16 wide = (double)0x1.0100000000000002p0L;")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(wide_controls); case_index += 1)
+    {
+        TargetParseResult parsed = target_parse_triple(wide_controls[case_index].triple);
+        BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed.error == TARGET_PARSE_ERROR_NONE)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, wide_controls[case_index].source,
+                                                            (CPreprocessOptions){
+                                                                .target = parsed.target,
+                                                                .data_layout = target_data_layout(parsed.target),
+                                                            });
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-wide-control.c"), preprocess, syntax, parsed.target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.program != 0);
+                IrGlobal* wide = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("wide")) : 0;
+                BUSTER_TEST(arguments, wide && wide->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && wide->initializer_bits == 0x3f80);
+                scratch_end(temporary);
+            }
+        }
     }
 
     return result;

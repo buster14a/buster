@@ -12070,6 +12070,11 @@ BUSTER_C_INTERNAL u32 c_ir_find_function(CIntegerIrBuilder* builder, String8 nam
     return resolution ? resolution->declaration_index : UINT32_MAX;
 }
 
+BUSTER_C_INTERNAL u32 c_ir_float_conversion_rank(IrType const* type)
+{
+    return type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? 15u : type->bit_width;
+}
+
 BUSTER_C_INTERNAL u32 c_ir_implicit_conversion_rank(CIntegerIrBuilder* builder, IrTypeId source_id, IrTypeId destination_id)
 {
     if (source_id.value == destination_id.value)
@@ -12104,7 +12109,7 @@ BUSTER_C_INTERNAL u32 c_ir_implicit_conversion_rank(CIntegerIrBuilder* builder, 
         }
         if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_FLOAT)
         {
-            return source->bit_width <= destination->bit_width ? 2 : 3;
+            return c_ir_float_conversion_rank(source) <= c_ir_float_conversion_rank(destination) ? 2 : 3;
         }
         if ((source_integer && destination->kind == IR_TYPE_FLOAT) || (source->kind == IR_TYPE_FLOAT && destination_integer))
         {
@@ -20914,7 +20919,8 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         if (operation_type_value->kind == IR_TYPE_FLOAT || right_type_value->kind == IR_TYPE_FLOAT)
         {
             if (right_type_value->kind == IR_TYPE_FLOAT &&
-                (operation_type_value->kind != IR_TYPE_FLOAT || right_type_value->bit_width > operation_type_value->bit_width))
+                (operation_type_value->kind != IR_TYPE_FLOAT ||
+                 c_ir_float_conversion_rank(right_type_value) > c_ir_float_conversion_rank(operation_type_value)))
             {
                 operation_type = right_type;
                 operation_type_value = right_type_value;
@@ -28986,7 +28992,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             IrType* current = ir_type_from_id(&builder->program->types, result);
             IrType* next = ir_type_from_id(&builder->program->types, candidate);
-            if (!current || (next && next->kind == IR_TYPE_FLOAT && (current->kind != IR_TYPE_FLOAT || next->bit_width > current->bit_width)))
+            if (!current || (next && next->kind == IR_TYPE_FLOAT &&
+                             (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))))
             {
                 result = candidate;
             }
@@ -29261,7 +29268,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         IrType* current = ir_type_from_id(&builder->program->types, result);
         IrType* next = ir_type_from_id(&builder->program->types, candidate);
         if (!current || (current->kind == IR_TYPE_BOOLEAN && next && next->kind != IR_TYPE_BOOLEAN) ||
-            (next && next->kind == IR_TYPE_FLOAT && (current->kind != IR_TYPE_FLOAT || next->bit_width > current->bit_width)) ||
+            (next && next->kind == IR_TYPE_FLOAT &&
+             (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))) ||
             (next && current && next->kind == IR_TYPE_INTEGER && current->kind == IR_TYPE_INTEGER && next->bit_width > current->bit_width))
         {
             result = candidate;
@@ -29310,9 +29318,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
         {
             return left_type;
         }
-        return left->bit_width == right->bit_width && left->float_format != right->float_format
-                   ? IR_TYPE_ID_INVALID
-                   : right->bit_width > left->bit_width ? right_type : left_type;
+        return c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
     }
     if (left_type.value == right_type.value)
     {
@@ -37592,7 +37598,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                 }
                 f64 value = 0.0;
                 char8 suffix = 0;
-                if (!c_ir_float_literal_value(c_token_spelling(preprocess.spelling_base, preprocess.tokens[task.start]), &value, &suffix))
+                if (!c_ir_float_literal_value(c_token_spelling(preprocess.spelling_base, preprocess.tokens[task.start]), &value, &suffix) ||
+                    (type->float_format == IR_FLOAT_FORMAT_BFLOAT16 && (suffix == 'l' || suffix == 'L') &&
+                     target_data_layout(builder->target).long_double_type.bit_width > 64))
                 {
                     return false;
                 }
@@ -40295,7 +40303,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_float_leaf(CIntegerIrBuild
     f64 floating = 0.0;
     char8 suffix = 0;
     bool folded = !c_ir_number_imaginary_spelling(builder->arena, spelling, &ignored_real_spelling) &&
-                  c_ir_float_literal_value(spelling, &floating, &suffix);
+                  c_ir_float_literal_value(spelling, &floating, &suffix) &&
+                  !(child->kind == IR_TYPE_FLOAT && child->float_format == IR_FLOAT_FORMAT_BFLOAT16 && (suffix == 'l' || suffix == 'L') &&
+                    target_data_layout(builder->target).long_double_type.bit_width > 64);
     if (folded)
     {
         c_ir_constant_initializer_store_float_leaf(child, negative ? -floating : floating, bytes);
@@ -42058,8 +42068,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                 }
                 else if (target->kind == IR_TYPE_FLOAT)
                 {
-                    success = source.kind == C_IR_CONSTANT_FLOAT ||
-                              (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type));
+                    success = (source.kind == C_IR_CONSTANT_FLOAT ||
+                               (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type))) &&
+                              !(target->float_format == IR_FLOAT_FORMAT_BFLOAT16 && source.kind == C_IR_CONSTANT_FLOAT && source_type &&
+                                source_type->kind == IR_TYPE_FLOAT && source_type->bit_width > 64);
+                    if (!success && target->float_format == IR_FLOAT_FORMAT_BFLOAT16 && source.kind == C_IR_CONSTANT_FLOAT && source_type &&
+                        source_type->kind == IR_TYPE_FLOAT && source_type->bit_width > 64)
+                    {
+                        builder->failure_message = S8("constant conversion from wide floating point to __bf16 is not implemented");
+                    }
                     if (success)
                     {
                         u32 precision = target->bit_width == 16   ? (target->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? 8u : 11u)
@@ -44332,7 +44349,9 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
     {
         f64 value = 0.0;
         char8 suffix = 0;
-        if (!c_ir_float_literal_value(c_token_spelling(builder->preprocess.spelling_base, token), &value, &suffix))
+        if (!c_ir_float_literal_value(c_token_spelling(builder->preprocess.spelling_base, token), &value, &suffix) ||
+            (type->float_format == IR_FLOAT_FORMAT_BFLOAT16 && (suffix == 'l' || suffix == 'L') &&
+             target_data_layout(builder->target).long_double_type.bit_width > 64))
         {
             return false;
         }

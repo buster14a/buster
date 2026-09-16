@@ -48,10 +48,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `c_ir_bfloat16_bits_from_f64`, and integer-to-bfloat16 conversion uses
   precision 8. No backend implements 16-bit float runtime operations, so a
   `__bf16` value needed at run time is refused by the structured codegen
-  diagnostic, as binary16 is. Not established: mixed `_Float16`/`__bf16`
-  arithmetic (the usual arithmetic conversions refuse the pair pending
-  reference semantics), `long double` constant conversion to `__bf16`, and
-  exact resource-header builtin acceptance.
+  diagnostic, as binary16 is. Mixed `_Float16`/`__bf16` arithmetic selects
+  `_Float16`: bfloat16 carries the lower conversion rank
+  (`c_ir_float_conversion_rank` ranks it below binary16 despite equal storage
+  width), so the usual arithmetic conversions convert `__bf16` to `_Float16`
+  numerically, never as an identity. This can reduce exponent range. Constant
+  conversions from a wide source (`long double` wider than 64 bits) to `__bf16`
+  are rejected explicitly rather than double-rounded; exact `long double`
+  constant conversion to `__bf16` remains pending, as does exact
+  resource-header builtin acceptance.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

@@ -2819,14 +2819,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* resul
     // once the three above have declined: `h * h` and `h * i` are `_Float16`,
     // while `h * f` is `float`. C23 6.3.1.8p1 gives it that rank and clang
     // computes the same result type.
-    if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16)
+    if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
     {
-        return left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16 ? C_TYPE_ID_INVALID
-                                                                 : c_parse_expression_scalar_type(result, C_TYPE_FLOAT16);
-    }
-    if (left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
-    {
-        return c_parse_expression_scalar_type(result, C_TYPE_BFLOAT16);
+        return c_parse_expression_scalar_type(result, left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 ? C_TYPE_FLOAT16 : C_TYPE_BFLOAT16);
     }
     if (!c_parse_expression_integer_kind(left) || !c_parse_expression_integer_kind(right))
     {
