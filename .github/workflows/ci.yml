@@ -164,8 +164,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
-          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
+
+      # Wrapper integration starts many real shells. It must not consume the
+      # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
+      - name: Bootstrap wrapper regression tests
+        id: bootstrap_wrappers
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
 
       - name: Install mold
         id: mold
@@ -274,7 +285,7 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools zig combinations_unix' || 'workflow_tools zig combinations_windows' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows' }}
           BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
 
