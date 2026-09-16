@@ -1,6 +1,79 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Batch/workflow-only extensions live here rather than changing the frozen
+# tests/mobile_ci_fake_tool.sh support input. Delegate ordinary adb commands,
+# CMake/Ninja, and the emulator lifecycle to that unchanged shared fake.
+if [[ -n ${BUSTER_ANDROID_STATUS_FAKE_TOOL:-} ]]; then
+    tool=$BUSTER_ANDROID_STATUS_FAKE_TOOL
+    state=${FAKE_ANDROID_STATE_DIR:?FAKE_ANDROID_STATE_DIR is required}
+    shared_fake=${BUSTER_ANDROID_SHARED_FAKE:?BUSTER_ANDROID_SHARED_FAKE is required}
+    arguments=("$@")
+    if [[ $tool == emulator ]]; then
+        if [[ ${1:-} != -list-avds && ${1:-} != -accel-check ]]; then
+            printf '%s\n' "$$" >"$state/emulator.pid"
+        fi
+    elif [[ $tool == adb ]]; then
+        printf '%s\n' "$*" >>"$state/adb.log"
+        if [[ ${1:-} == -s ]]; then
+            shift 2
+        fi
+        command=${1:-}
+        shift || true
+        case "$command" in
+            install)
+                # install -r supplies the APK last, not as its first argument.
+                printf '%s\n' "${!#}" >"$state/installed_apk"
+                exit 0
+                ;;
+            logcat)
+                if [[ ${1:-} == -c ]]; then
+                    exit 0
+                fi
+                if [[ ${1:-} != -d ]]; then
+                    installed_path=$(<"$state/installed_apk")
+                    installed_config=${installed_path%/*}
+                    installed_config=${installed_config##*/}
+                    printf '%s\n' "$$" >"$state/monitor-$installed_config.pid"
+                    if [[ $installed_config == "${FAKE_ANDROID_TIMEOUT_CONFIG:-}" ]]; then
+                        printf 'test still running\n'
+                        while :; do sleep 1; done
+                    elif [[ $installed_config == "${FAKE_ANDROID_MISSING_MARKER_CONFIG:-}" ]]; then
+                        exit 0
+                    elif [[ $installed_config == "${FAKE_ANDROID_FAIL_CONFIG:-}" ]]; then
+                        printf 'BUSTER_ANDROID_TEST_RESULT:1\n'
+                        exit 0
+                    elif [[ $installed_config == "${FAKE_ANDROID_STOP_AFTER_CONFIG:-}" ]]; then
+                        : >"$state/kill"
+                        emulator_pid=$(<"$state/emulator.pid")
+                        stopped_deadline=$((SECONDS + 3))
+                        while kill -0 "$emulator_pid" >/dev/null 2>&1; do
+                            emulator_state=$(ps -o stat= -p "$emulator_pid" 2>/dev/null | tr -d ' ' || true)
+                            if [[ -z $emulator_state || $emulator_state == Z* || $emulator_state == X* ]]; then
+                                break
+                            fi
+                            if [[ $SECONDS -ge $stopped_deadline ]]; then
+                                echo "fake emulator $emulator_pid did not stop" >&2
+                                exit 1
+                            fi
+                            sleep 0.1
+                        done
+                        printf 'BUSTER_ANDROID_TEST_RESULT:0\n'
+                        exit 0
+                    fi
+                fi
+                ;;
+            emu)
+                sleep "${FAKE_ANDROID_ADB_KILL_SLEEP_SECONDS:-0}"
+                ;;
+        esac
+    else
+        echo "unsupported Android status fake: $tool" >&2
+        exit 1
+    fi
+    FAKE_TOOL_NAME="$tool" exec bash "$shared_fake" "${arguments[@]}"
+fi
+
 # The harness doubles as a deterministic adb replacement. This keeps the
 # production wrapper's five-argument contract intact without requiring an
 # emulator.
@@ -113,14 +186,23 @@ fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 run_tests_script=$repo_root/android/run_tests.sh
-test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-android-run-tests.XXXXXX")
+if [[ -n ${BUSTER_MOBILE_TEST_EVIDENCE_DIR:-} ]]; then
+    mkdir -p "$BUSTER_MOBILE_TEST_EVIDENCE_DIR"
+    test_root=$(mktemp -d "$BUSTER_MOBILE_TEST_EVIDENCE_DIR/android-cases.XXXXXX")
+else
+    test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-android-run-tests.XXXXXX")
+fi
 apk=$test_root/fake.apk
 : >"$apk"
 
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
-    rm -rf "$test_root"
+    if [[ -z ${BUSTER_MOBILE_TEST_EVIDENCE_DIR:-} ]]; then
+        rm -rf "$test_root"
+    else
+        echo "Android lifecycle evidence: $test_root"
+    fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -305,4 +387,342 @@ fi
 assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=143' "$state"
 assert_no_owned_producer "$state"
 
-echo "Android run_tests harness passed"
+# Batch and real workflow-body regressions are kept outside the frozen shared
+# mobile support files. Each invocation owns its SDK, AVD, outputs, and PIDs.
+export BUSTER_ANDROID_STATUS_HARNESS="$repo_root/android/run_tests_test.sh"
+export BUSTER_ANDROID_SHARED_FAKE="$repo_root/tests/mobile_ci_fake_tool.sh"
+fake_bin="$test_root/bin"
+mkdir -p "$fake_bin"
+for tool in adb emulator; do
+    cat >"$fake_bin/$tool" <<EOF
+#!/usr/bin/env bash
+export BUSTER_ANDROID_STATUS_FAKE_TOOL=$tool
+exec bash "\$BUSTER_ANDROID_STATUS_HARNESS" "\$@"
+EOF
+    chmod +x "$fake_bin/$tool"
+done
+for tool in cmake ninja; do
+    ln -s "$BUSTER_ANDROID_SHARED_FAKE" "$fake_bin/$tool"
+done
+
+assert_file_contains() {
+    local needle=$1
+    local path=$2
+    if ! grep -qF "$needle" "$path"; then
+        echo "assertion failed: '$needle' not found in $path" >&2
+        cat "$path" >&2
+        exit 1
+    fi
+}
+
+assert_android_owned_process_stopped() {
+    local pid_file=$1
+    local pid process_state
+    if [[ ! -f $pid_file ]]; then
+        echo "assertion failed: expected owned process pid file $pid_file" >&2
+        exit 1
+    fi
+    pid=$(<"$pid_file")
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        process_state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        if [[ -n $process_state && $process_state != Z* && $process_state != X* ]]; then
+            echo "assertion failed: owned process $pid ($pid_file) is still alive" >&2
+            exit 1
+        fi
+    fi
+}
+
+android_fixture_teardown() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ -n ${control_pid:-} ]]; then
+        kill "$control_pid" >/dev/null 2>&1 || true
+        wait "$control_pid" 2>/dev/null || true
+    fi
+    if [[ -f ${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-} ]] &&
+       ! bash "$repo_root/android/start_emulator_ci.sh" stop; then
+        echo "error: Android fixture teardown could not stop the owned emulator" >&2
+        if [[ $status -eq 0 ]]; then status=1; fi
+    fi
+    exit "$status"
+}
+
+setup_android_fixture() {
+    local state=$1
+    local sdk="$state/sdk"
+    local ndk="$sdk/ndk/fake"
+    mkdir -p "$ndk/build/cmake" "$state/runner-temp/buster-ci" \
+        "$sdk/system-images/android-35/google_apis/x86_64"
+    : >"$ndk/build/cmake/android.toolchain.cmake"
+    export PATH="$fake_bin:$PATH"
+    export ANDROID_HOME="$sdk"
+    export ANDROID_NDK_HOME="$ndk"
+    export ANDROID_USER_HOME="$state/android-home"
+    export ANDROID_AVD_HOME="$state/avd"
+    export FAKE_ANDROID_STATE_DIR="$state"
+    export FAKE_ANDROID_BOOT_DELAY_SECONDS=0
+    export FAKE_CMAKE_LOG="$state/cmake.log"
+    export BUSTER_ANDROID_BUILD_DIRECTORY="$state/build"
+    export RUNNER_TEMP="$state/runner-temp"
+    export BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$RUNNER_TEMP/buster-ci/android-emulator.started"
+    export BUSTER_ANDROID_EMULATOR_LOG="$RUNNER_TEMP/buster-ci/android-emulator.log"
+    export BUSTER_ANDROID_EMULATOR_BOOT_TIMEOUT_SECONDS=8
+    export BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS=2
+    export BUSTER_ANDROID_ADB_TIMEOUT_SECONDS=2
+    export BUSTER_ANDROID_TOOL_TIMEOUT_SECONDS=2
+    export BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS=2
+    export BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=4
+    trap android_fixture_teardown EXIT
+}
+
+extract_android_workflow_body() {
+    local destination=$1
+    local trailer=${2:-}
+    python3 - "$repo_root/.github/workflows/ci.yml" "$destination" "$trailer" <<'PY'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+step = next(i for i, line in enumerate(lines) if line.strip() == '- name: Test (Android)')
+run = next(i for i in range(step, len(lines)) if lines[i] == '        run: |')
+body = []
+for line in lines[run + 1:]:
+    if line and not line.startswith('          '):
+        break
+    body.append(line[10:] if line else '')
+assert body.count('bash ./android/start_emulator_ci.sh start') == 1
+assert body.count('./android/test_ci.sh --all') == 1
+if sys.argv[3]:
+    body = body[:body.index('bash ./android/start_emulator_ci.sh start') + 1]
+    body.extend(['android_phase=tests', sys.argv[3]])
+Path(sys.argv[2]).write_text('\n'.join(body) + '\n')
+PY
+}
+
+assert_case_status() {
+    local case_name=$1 actual=$2 expected=$3 log=$4
+    if [[ $actual -eq 124 || $actual -eq 137 || $actual -ne $expected ]]; then
+        echo "assertion failed: $case_name returned $actual, expected $expected (deadline statuses are never accepted)" >&2
+        cat "$log" >&2
+        exit 1
+    fi
+}
+
+test_android_batch_status() (
+    set -euo pipefail
+    local case_name=$1
+    local expected_status=$2
+    local expected_debug_status=$3
+    local expected_release_status=$4
+    local state="$test_root/android-batch-$case_name"
+    local batch_status
+    setup_android_fixture "$state"
+    export BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS=1
+    export BUSTER_ANDROID_ADB_TIMEOUT_SECONDS=1
+    export BUSTER_ANDROID_TOOL_TIMEOUT_SECONDS=1
+    export BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS=1
+    export BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=1
+    case "$case_name" in
+        payload-failure) export FAKE_ANDROID_FAIL_CONFIG=Debug ;;
+        debug-timeout) export FAKE_ANDROID_TIMEOUT_CONFIG=Debug ;;
+        missing-marker) export FAKE_ANDROID_MISSING_MARKER_CONFIG=Debug ;;
+        all-pass) ;;
+        *) echo "unknown batch case: $case_name" >&2; exit 1 ;;
+    esac
+    bash "$repo_root/android/start_emulator_ci.sh" start
+    [[ -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]
+    set +e
+    timeout --kill-after=1s 15s bash "$repo_root/android/test_ci.sh" --all >"$state/run.log" 2>&1
+    batch_status=$?
+    set -e
+    assert_case_status "$case_name" "$batch_status" "$expected_status" "$state/run.log"
+    assert_file_contains "ANDROID_CONFIG_RESULT config=Debug status=$expected_debug_status" "$state/run.log"
+    assert_file_contains "ANDROID_CONFIG_RESULT config=Release status=$expected_release_status" "$state/run.log"
+    if [[ $expected_status -eq 0 ]]; then
+        assert_file_contains 'ANDROID_BATCH_RESULT phase=tests config=none status=0 cleanup_status=not-run' "$state/run.log"
+    else
+        assert_file_contains "ANDROID_BATCH_RESULT phase=tests config=Debug status=$expected_status cleanup_status=0" "$state/run.log"
+        if grep -qE 'ANDROID_BATCH_RESULT .* status=0 ' "$state/run.log"; then
+            echo "assertion failed: $case_name reported a successful batch after failure" >&2
+            exit 1
+        fi
+        assert_file_contains 'a later configuration success does not clear an earlier failure' "$state/run.log"
+    fi
+    case "$case_name" in
+        payload-failure)
+            assert_file_contains 'Android compiler tests failed' "$state/run.log"
+            assert_file_contains 'ANDROID_PAYLOAD_RESULT config=Debug phase=monitor status=1' "$state/run.log"
+            ;;
+        debug-timeout)
+            assert_file_contains 'Android compiler tests timed out after 1s' "$state/run.log"
+            assert_file_contains 'ANDROID_PAYLOAD_RESULT config=Debug phase=monitor status=1' "$state/run.log"
+            assert_file_contains 'ANDROID_PAYLOAD_RESULT config=Release phase=monitor status=0' "$state/run.log"
+            if grep -qF 'ANDROID_PAYLOAD_RESULT config=Debug phase=monitor status=0' "$state/run.log"; then
+                echo "assertion failed: $case_name reported a successful Debug payload after timeout" >&2
+                exit 1
+            fi
+            ;;
+        missing-marker)
+            assert_file_contains 'ended without a terminal result' "$state/run.log"
+            assert_file_contains 'ANDROID_MONITOR_RESULT config=Debug reader_status=0 producer_status=0' "$state/run.log"
+            ;;
+    esac
+    assert_file_contains Debug "$state/build/Debug/buster.apk"
+    assert_file_contains Release "$state/build/Release/buster.apk"
+    assert_file_contains 'Debug apk' "$state/cmake.log"
+    assert_file_contains 'Release apk' "$state/cmake.log"
+    if [[ -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]; then
+        bash "$repo_root/android/start_emulator_ci.sh" stop
+    fi
+    [[ ! -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]
+    assert_android_owned_process_stopped "$state/emulator.pid"
+    assert_android_owned_process_stopped "$state/monitor-Debug.pid"
+    assert_android_owned_process_stopped "$state/monitor-Release.pid"
+    echo "Android batch status evidence passed: $case_name"
+)
+
+test_android_workflow_body() (
+    set -euo pipefail
+    local case_name=$1
+    local state="$test_root/android-workflow-$case_name"
+    local body=$android_workflow_body
+    local ran_tests=1
+    local body_status control_pid=
+    local expected_status expected_result
+    setup_android_fixture "$state"
+    case "$case_name" in
+        all-pass)
+            expected_status=0
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=0 cleanup_status=0 status=0'
+            ;;
+        debug-failure|debug-timeout|missing-marker)
+            case "$case_name" in
+                debug-failure) export FAKE_ANDROID_FAIL_CONFIG=Debug ;;
+                debug-timeout) export FAKE_ANDROID_TIMEOUT_CONFIG=Debug ;;
+                missing-marker) export FAKE_ANDROID_MISSING_MARKER_CONFIG=Debug ;;
+            esac
+            expected_status=1
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=1 cleanup_status=not-run status=1'
+            ;;
+        cleanup-exit7|cleanup-timeout)
+            if [[ $case_name == cleanup-exit7 ]]; then
+                export FAKE_ANDROID_ADB_KILL_STATUS=7
+            else
+                export FAKE_ANDROID_ADB_KILL_SLEEP_SECONDS=30
+                export BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS=1
+            fi
+            expected_status=1
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=0 cleanup_status=1 status=1'
+            ;;
+        failure-and-cleanup7)
+            export FAKE_ANDROID_FAIL_CONFIG=Debug
+            export FAKE_ANDROID_ADB_KILL_STATUS=7
+            expected_status=1
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=1 cleanup_status=not-run status=1'
+            ;;
+        already-stopped)
+            export FAKE_ANDROID_STOP_AFTER_CONFIG=Release
+            expected_status=0
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=0 cleanup_status=0 status=0'
+            ;;
+        interruption)
+            body=$android_workflow_interrupt_body
+            ran_tests=0
+            expected_status=143
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=143 cleanup_status=0 status=143'
+            ;;
+        payload-23-cleanup7)
+            body=$android_workflow_exit23_body
+            export FAKE_ANDROID_ADB_KILL_STATUS=7
+            ran_tests=0
+            expected_status=23
+            expected_result='ANDROID_CI_RESULT phase=tests payload_status=23 cleanup_status=1 status=23'
+            ;;
+        *) echo "unknown workflow case: $case_name" >&2; exit 1 ;;
+    esac
+    sleep 60 &
+    control_pid=$!
+    set +e
+    (cd "$repo_root" && timeout --kill-after=1s 15s bash "$body") >"$state/body.log" 2>&1
+    body_status=$?
+    set -e
+    assert_case_status "$case_name" "$body_status" "$expected_status" "$state/body.log"
+    assert_file_contains "$expected_result" "$state/body.log"
+    if [[ $expected_status -ne 0 ]] && grep -qE 'ANDROID_CI_RESULT .* status=0$' "$state/body.log"; then
+        echo "assertion failed: $case_name reported a successful workflow after failure" >&2
+        exit 1
+    fi
+    case "$case_name" in
+        debug-failure)
+            assert_file_contains 'ANDROID_BATCH_RESULT phase=tests config=Debug status=1 cleanup_status=0' "$state/body.log"
+            assert_file_contains 'Android CI failed before final emulator cleanup (phase=tests status=1)' "$state/body.log"
+            assert_file_contains 'Android emulator log follows an already-failed phase=tests status=1' "$state/body.log"
+            ;;
+        debug-timeout)
+            assert_file_contains 'Android compiler tests timed out after 4s' "$state/body.log"
+            ;;
+        missing-marker)
+            assert_file_contains 'ended without a terminal result' "$state/body.log"
+            ;;
+        cleanup-exit7)
+            assert_file_contains 'adb emulator shutdown failed with exit status 7' "$state/body.log"
+            assert_file_contains 'Android CI required emulator cleanup failed (status=1)' "$state/body.log"
+            ;;
+        cleanup-timeout)
+            assert_file_contains 'Android CI required emulator cleanup failed (status=1)' "$state/body.log"
+            ;;
+        failure-and-cleanup7)
+            assert_file_contains 'ANDROID_BATCH_RESULT phase=tests config=Debug status=1 cleanup_status=1' "$state/body.log"
+            assert_file_contains 'adb emulator shutdown failed with exit status 7' "$state/body.log"
+            assert_file_contains 'Android CI failed before final emulator cleanup (phase=tests status=1)' "$state/body.log"
+            ;;
+        already-stopped)
+            assert_file_contains 'is no longer running' "$state/body.log"
+            ;;
+        interruption)
+            assert_file_contains 'Android CI failed before final emulator cleanup (phase=tests status=143)' "$state/body.log"
+            assert_file_contains 'Android emulator log follows an already-failed phase=tests status=143' "$state/body.log"
+            ;;
+        payload-23-cleanup7)
+            assert_file_contains 'adb emulator shutdown failed with exit status 7' "$state/body.log"
+            assert_file_contains 'Android CI failed before final emulator cleanup (phase=tests status=23)' "$state/body.log"
+            ;;
+    esac
+    [[ ! -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]
+    assert_android_owned_process_stopped "$state/emulator.pid"
+    if [[ $ran_tests == 1 ]]; then
+        local debug_status=0
+        case "$case_name" in
+            debug-failure|debug-timeout|missing-marker|failure-and-cleanup7) debug_status=1 ;;
+        esac
+        assert_file_contains "ANDROID_CONFIG_RESULT config=Debug status=$debug_status" "$state/body.log"
+        assert_file_contains 'ANDROID_CONFIG_RESULT config=Release status=0' "$state/body.log"
+        assert_android_owned_process_stopped "$state/monitor-Debug.pid"
+        assert_android_owned_process_stopped "$state/monitor-Release.pid"
+    fi
+    if ! kill -0 "$control_pid" >/dev/null 2>&1; then
+        echo "assertion failed: $case_name process handling killed an unrelated process" >&2
+        exit 1
+    fi
+    kill "$control_pid" >/dev/null 2>&1 || true
+    wait "$control_pid" 2>/dev/null || true
+    control_pid=
+    echo "Android workflow body evidence passed: $case_name"
+)
+
+android_workflow_body="$test_root/android-workflow.sh"
+android_workflow_interrupt_body="$test_root/android-workflow-interrupt.sh"
+android_workflow_exit23_body="$test_root/android-workflow-exit23.sh"
+extract_android_workflow_body "$android_workflow_body"
+extract_android_workflow_body "$android_workflow_interrupt_body" 'kill -TERM "$$"'
+extract_android_workflow_body "$android_workflow_exit23_body" 'exit 23'
+test_android_batch_status all-pass 0 0 0
+test_android_batch_status payload-failure 1 1 0
+test_android_batch_status debug-timeout 1 1 0
+test_android_batch_status missing-marker 1 1 0
+for workflow_case in all-pass debug-failure debug-timeout missing-marker cleanup-exit7 \
+    cleanup-timeout failure-and-cleanup7 already-stopped interruption payload-23-cleanup7; do
+    test_android_workflow_body "$workflow_case"
+done
+
+echo "Android run_tests and CI status harness passed"
