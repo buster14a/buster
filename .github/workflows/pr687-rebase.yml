@@ -6,29 +6,104 @@ on:
 permissions:
   contents: read
 jobs:
-  capture:
+  publish:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.rebase.outputs.source }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: transport
           persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ff59741884ef4220094cd1fbb2175b86ef8b4a81
+          path: source
           fetch-depth: 0
-      - name: Capture exact committed inputs without credentials
+      - name: Replay and publish the conflict-resolved rebase with an exact lease
+        id: rebase
+        shell: bash
+        working-directory: source
+        env:
+          EXPECTED_HEAD: ff59741884ef4220094cd1fbb2175b86ef8b4a81
+          EXPECTED_MAIN: 43a2299211a239c6eeaff5d4b5813e2acdce0c7d
+          EXPECTED_TREE: 2aec6edddf4509f593ebf265f5deac22368339b9
+        run: |
+          set -euo pipefail
+          mkdir -p ../evidence
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git config user.name 'PR 687 rebase repair'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b rebase-pr
+          git rebase --rebase-merges --onto "$EXPECTED_MAIN" b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f > ../evidence/rebase.log 2>&1 && status=0 || status=$?
+          test "$status" -eq 1
+          python3 ../transport/tools/pr687_rebase_resolve.py .
+          git add .github/workflows/ios-monitor-tests.yml android/run_tests.sh android/run_tests_test.sh
+          GIT_EDITOR=true git rebase --continue >> ../evidence/rebase.log 2>&1
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          git merge-base --is-ancestor "$EXPECTED_MAIN" HEAD
+          git diff --exit-code "$EXPECTED_MAIN" HEAD -- tests docs/native-retirement-support-v1.tsv
+          git diff --check "$EXPECTED_MAIN"...HEAD
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$EXPECTED_MAIN"
+          git range-diff b8dd9857.."$EXPECTED_HEAD" "$EXPECTED_MAIN"..HEAD > ../evidence/range-diff.txt
+          git diff "$EXPECTED_MAIN"...HEAD > ../evidence/rebased.patch
+          git push --force-with-lease="refs/heads/devin/671-bfloat16:$EXPECTED_HEAD" origin HEAD:refs/heads/devin/671-bfloat16
+          source=$(git rev-parse HEAD)
+          printf 'source=%s\n' "$source" >> "$GITHUB_OUTPUT"
+          printf 'source=%s\ntree=%s\nbase=%s\nprevious=%s\n' "$source" "$EXPECTED_TREE" "$EXPECTED_MAIN" "$EXPECTED_HEAD" | tee ../evidence/publication.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr687-rebase-publication
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.source }}
+          persist-credentials: false
+      - name: Verify the reviewed tree and hosted compiler configuration
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p evidence
-          git update-ref refs/heads/rebase-main 43a2299211a239c6eeaff5d4b5813e2acdce0c7d
-          git update-ref refs/heads/rebase-pr ff59741884ef4220094cd1fbb2175b86ef8b4a81
-          git bundle create evidence/inputs.bundle refs/heads/rebase-main refs/heads/rebase-pr
-          git bundle verify evidence/inputs.bundle
-          git log --graph --oneline --boundary rebase-main..rebase-pr > evidence/history.txt
-          git diff --stat rebase-main...rebase-pr > evidence/delta.txt
-          sha256sum evidence/inputs.bundle > evidence/inputs.sha256
+          mkdir -p "$RUNNER_TEMP/pr687-validation" build
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$RUNNER_TEMP/pr687-validation/source.txt"
+          test "$(git rev-parse 'HEAD^{tree}')" = 2aec6edddf4509f593ebf265f5deac22368339b9
+          clang --version | tee "$RUNNER_TEMP/pr687-validation/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/rebase-driver
+          build/rebase-driver generate --build-directory build/rebase-validation --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+      - name: Run the complete Release compiler regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/rebase-driver build --build-directory build/rebase-validation --config Release -t test_all -- -j2 2>&1 | tee "$RUNNER_TEMP/pr687-validation/test-all.log"
+      - name: Verify ordinary self-hosting
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/rebase-driver test_self_host --build-directory build/rebase-validation --config Release 2>&1 | tee "$RUNNER_TEMP/pr687-validation/self-host.log"
+      - name: Validate combined mobile policy and failure controls
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ios/hosted_signing_budget_test.py 2>&1 | tee "$RUNNER_TEMP/pr687-validation/ios-signing.log"
+          python3 android/ci_summary_test.py -v 2>&1 | tee "$RUNNER_TEMP/pr687-validation/android-summary.log"
+          bash android/run_tests_test.sh 2>&1 | tee "$RUNNER_TEMP/pr687-validation/android-monitor.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: pr687-rebase-inputs
-          path: evidence/
+          name: pr687-rebase-validation
+          path: ${{ runner.temp }}/pr687-validation/
           retention-days: 7
           if-no-files-found: error
