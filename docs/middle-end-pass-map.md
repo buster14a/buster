@@ -43,10 +43,6 @@ code-generation verification requires the general check. For transformed
 producer-certified IR, the separate validation-boundary question remains
 [#294](https://github.com/buster14a/buster/issues/294). Do not remove validation
 because a second call looks redundant: its trust preconditions differ.
-The one sharing preparation performs is exact, not heuristic: the FAST input
-guard asks whether the strict validator has passed over the module in its
-current state, and skips only when the promotion-output or uncertified-input
-scan already established that on an unmutated module.
 
 ## Repeated work and candidate classification
 

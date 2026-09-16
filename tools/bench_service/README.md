@@ -1,37 +1,79 @@
-# Native queue and installed-input materializer for #437
+# Native queued execution service boundary for #437
 
 This is a local, one-shot control tool with a deterministic fake worker and a
 real installed-input materialization boundary and a Linux containment
-supervisor. It is not yet the dedicated-host service: its fixed installed
-helper returns `unsupported`. It does not execute source, change server
-configuration, listen on a socket, authenticate callers, measure performance
-or qualify a 9700X. Do not close #437 or accept compiler performance changes
-because these tests pass.
+supervisor. Linux also provides a long-lived local service endpoint: it owns
+the single queue writer, authenticates Unix peer credentials, and dispatches
+bounded public control frames. The fixed installed helper returns only typed
+build-driver failures until its operator-installed dependencies are available.
+This does not change server configuration, measure performance or qualify a
+9700X.
+Do not close #437 or accept compiler performance changes because these tests
+pass.
 
 ## Linux installed worker boundary
 
 `worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
 single-job supervisor. A request may name `validate-buster-v1`; it cannot
 supply a program, argument, unit name, resource property, cgroup path or
-timeout. The service constructs one fixed `/usr/bin/systemd-run --scope`
-invocation of `/usr/local/libexec/buster-bench-service worker-unit`.
-`worker-unit` currently exits unsupported after proving it inherited the exact
-stable lease open-file description. This cannot be interpreted as a successful
-performance result.
+timeout. The service constructs one fixed `/usr/bin/systemd-run --wait --service-type=exec`
+invocation of `/usr/local/libexec/buster-bench-service worker-unit`, explicitly
+as `--uid=buster-bench --gid=buster-bench`.
+`worker-unit` authenticates the private result-root handoff and adopts the exact
+stable lease open-file description before executing the fixed
+`/usr/local/libexec/buster-bench-build bench_service_recipe` entrypoint. The
+build driver accepts exactly
+`JOB_ID ATTEMPT_TOKEN WORKSPACE_ROOT BASE_REVISION CANDIDATE_REVISION RESULT_ROOT`;
+it supplies the fixed Release generate/build policy and the fixed installed
+throughput harness. No request field supplies a command, flag, executable or
+additional path.
+
+The transient service carries a fixed sandbox policy: the queue directory and
+lease pathname are `InaccessiblePaths`; the installed policy tree is
+`ReadOnlyPaths`; the private workspace is the only `ReadWritePaths`; and the
+service sets `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`,
+`NoNewPrivileges` and `RestrictSUIDSGID`. The remaining fixed systemd policy
+denies kernel/home/control-group exposure, namespace creation, realtime and
+non-local address families. After each build, the trusted driver removes write
+permission from every baseline/candidate build directory and file before
+throughput starts. Baseline generation/build runs explicitly as the trusted
+`buster-bench` identity. Candidate generation/build and the throughput harness
+(which executes the request-selected candidate compiler) run explicitly as the
+separate `buster-bench-candidate` identity in `candidate/staging`; they cannot
+write the final candidate build, queue, lease, installed tree, or final result
+surface. Throughput writes only a candidate-owned staging directory. After a
+successful candidate build, the service UID copies the staged executable
+into the private final candidate build with descriptor identity and digest
+checks, atomically publishes it without replacement, and removes write
+permission from every baseline and final candidate build directory and file
+before throughput starts. After throughput exits, the trusted driver copies that
+staging output into a fresh service-owned result subtree and then publishes the
+final manifest, bundle and outcome evidence with no-replace links; the result
+tree is never writable by the candidate identity and is replayed before success
+is acknowledged.
+
+Each fixed recipe stage helper uses a deterministic unit name linked with
+`PartOf=` to its owning worker unit, so worker cancellation also stops a
+stage service rather than leaving a candidate process outside the worker's
+lifetime. Every nested transient unit is placed in `buster-bench.slice` and
+repeats the admitted CPU, memory, swap, task and runtime limits; the
+coordinator observes the same properties on the outer unit before continuing.
 
 For a fresh real job the server acquires the cooperative host lease before FIFO
-reservation and materialization. It keeps that descriptor while the scoped
-helper receives a duplicate, while result or failure evidence becomes durable,
-while TERM/KILL escalation runs, until `cgroup.events` is unpopulated and
-workspace reconciliation durably releases the queue job. No later queue job
-can reserve while any of those steps is uncertain.
+reservation and materialization. It transfers the descriptor over a private,
+peer-credential-checked result-root `SOCK_SEQPACKET` handoff and closes its own
+copy only after the worker acknowledges receipt. The worker then owns that
+descriptor while result or failure evidence becomes durable, while TERM/KILL
+escalation runs, until `cgroup.events` is unpopulated and workspace
+reconciliation durably releases the queue job. No later queue job can reserve
+while any of those steps is uncertain.
 
 Cleanup sends TERM, polls descriptor-validated recursive population every
 100 ms for the configured 10-second grace, then sends KILL and polls for at
-most another 10 seconds. It reaps the scoped helper only after recursive
+most another 10 seconds. It reaps the service helper only after recursive
 emptiness. A start/observation failure that cannot prove physical ownership
 retains the active queue admission and the live helper's inherited host lock;
-it does not guess that a transient scope disappeared.
+it does not guess that a transient service disappeared.
 
 All manager subprocess pipe reads and child waits use monotonic deadlines;
 signal interruption cannot restart an unbounded relative wait. Fixed manager
@@ -48,14 +90,37 @@ Cancellation is sampled after each durable success-phase transition and after
 physical workspace removal. TERM/INT are masked at a checked boundary
 immediately before the final journal append; that boundary is the completion
 linearization point. A cancellation ordered before it makes the terminal
-outcome `cancelled` on replay.
+outcome `cancelled` on replay. If the success bundle was already published,
+the terminal cancellation retains and binds that exact success bundle/digest
+and publishes a separate cancellation outcome record; replay never replaces
+or loses the durable artifact.
 
-If `systemd-run` starts but no trustworthy scope identity can be bound, the
+## Result bundle and retained evidence
+
+The trusted recipe writes a `BQ-BUNDLE-V1` index beside the final manifest.
+Every non-control result file is listed as `sha256 size relative/path`; the
+worker reopens and hashes every listed file, rejects unlisted regular files,
+symlinks, traversal components and non-private directories, and enforces
+4,096 entries, 512 MiB total bytes, 64 MiB per file, 256 directory levels and
+192-byte relative paths. The index itself is bounded to 8 MiB. The final
+manifest, bundle and failure/cancellation outcome record are separately bound
+control records, so later retrieval does not change the measured bundle. A
+failed, cancelled, or interrupted recipe publishes an empty, digest-bound
+control bundle and terminal manifest before workspace cleanup; restart replay
+therefore exposes the same artifact root and digests for every terminal
+outcome, not only successful measurements.
+
+All temporary publications use `O_EXCL`, `O_NOFOLLOW`, file fsync, a
+no-replace `linkat`, temporary unlink and parent-directory fsync. A planted
+target, stale temporary, crash-window race or post-build tamper fails closed;
+no `rename` replacement is used.
+
+If `systemd-run` starts but no trustworthy service identity can be bound, the
 server cannot signal an unverified unit name. It instead kills and reaps the
 tracked launcher PID under the command deadline while retaining the active job
-and coordinator quarantine lease for the still-ambiguous scope state.
+and coordinator quarantine lease for the still-ambiguous service state.
 
-Before CONT, the server verifies the exact boot ID, deterministic scope name,
+Before CONT, the server verifies the exact boot ID, deterministic service name,
 manager ControlGroup, AllowedCPUs, MemoryMax, MemorySwapMax, TasksMax and
 RuntimeMaxUSec. It opens every cgroup component without following a symlink and
 verifies the leaf plus every ancestor below the trusted cgroup-v2 mount. A
@@ -85,12 +150,15 @@ OOM, runtime timeout, ordinary execution failure and cancellation retain
 distinct evidence/outcomes.
 
 The production systemd path is Linux-only. Windows and macOS return
-`unsupported`; those builds still compile the bounded codec. Injected tests
-cover fixed argv/resource propagation, ancestor verification, lease ordering,
-restart identity, reboot interruption, distinct terminal causes and a live
-`setsid` descendant that forces TERM/KILL cleanup. They do not replace a
-privileged live-systemd qualification. Reference deployment files are under
-`deploy/`; nothing in the build installs, enables or mutates them.
+`unsupported`; those builds still compile the bounded codec and portable
+manifest record. Injected tests cover fixed argv/resource/sandbox propagation,
+ancestor verification, lease ordering, restart identity, reboot interruption,
+distinct terminal causes, retained outcome evidence, full bundle replay and a
+live `setsid` descendant that forces TERM/KILL cleanup. They do not replace a
+privileged live-systemd qualification; if systemd is unavailable, command
+construction and seams are the only validation and deployment remains explicit
+operator work. Reference deployment files are under `deploy/`; nothing in the
+build installs, enables or mutates them.
 
 ## Build and registered tests
 
@@ -100,6 +168,7 @@ The existing native `build.c` driver owns compilation and execution:
 ./build.sh bench_service capabilities
 ./build.sh bench_service self-test
 ./build.sh bench_service self-test --sanitize
+./build.sh bench_service_recipe_self_test
 ```
 
 `test_all_combinations` runs the normal service self-test beside the existing
@@ -110,7 +179,12 @@ foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
 The normal native executable is `build/bench-service-tools/service` (`.exe` on
-Windows). Tests use private, disposable directories with deterministic source manifests;
+Windows). The fixed-recipe self-test is a Linux build-driver command; it uses
+private disposable workspaces and short-lived local fixture helpers, while the
+service tests exercise the installed-path manifest contract and replay
+validator. A passing disposable test is not a live qualification of the
+operator-installed compiler or throughput binary. Tests use private,
+disposable directories with deterministic source manifests;
 no sleeps, timing assertions, external workers or network access are involved.
 Windows validates the portable codec and rejects durable queue opening as
 unsupported. **Journal durability and fake execution are POSIX-only in this
@@ -133,13 +207,19 @@ request-controlled commands, flags, source paths, or executable paths. The
 eventual worker unit must pin them; this unauthenticated local interface must
 not be exposed to untrusted callers.
 
-POSIX write-bit removal prevents accidental writes but is not an immutable-file
-security boundary against the owning effective UID, which can restore write
-permission. Tests explicitly exercise that limitation. A production unit must
-install policy/source inputs under a distinct operator identity and must not run
-an executable worker with the materializer's storage authority. This slice has
-no executable worker; privilege separation or a platform sealing facility is a
-later containment gate.
+POSIX write-bit removal alone is not an immutable-file security boundary
+against an owning UID. The fixed systemd service supplies the actual queue,
+lease, installed-tree and workspace path policy; the trusted driver additionally
+locks built baseline/candidate trees before throughput. The recipe accepts only
+operator-installed source directories and manifests owned by root or the
+service UID, with no group/other access or write bits. It never treats a
+submitted source tree as a source-free broker command. Before publication it
+reopens every source and workspace identity, rechecks the baseline/candidate
+tree roots, and compares the baseline and candidate executable digests captured
+after their builds with the digests after throughput. Any mismatch fails closed
+and leaves a durable failed manifest plus outcome evidence. No production
+qualification is claimed until the operator runs the fixed deployment on a
+host with systemd-v2 and reviews its authorization.
 
 ## Ownership and storage contract
 
@@ -165,7 +245,7 @@ retry, never roll it back in memory and continue appending.
 
 Limits are fixed across journal schemas 1 and 2: eight unfinished jobs
 (including active and cleaning), 64 lifetime submissions, 1,024 journal events, 320-byte request
-payloads, 480-byte maximum journal frames and 536-byte control frames. Normal
+payloads, 564-byte maximum journal frames and 536-byte control frames. Normal
 job transitions use fewer than 16 events each. There is no compaction, rotation,
 expiry or tombstone eviction. Once all 64 lifetime slots are used, new keys fail
 closed even if every job has finished; existing identical retries still work.
@@ -236,8 +316,8 @@ Recipes `fake-success-v1` and `fake-failure-v1` have immutable schema-1 meanings
 repository `buster`, workload `fake-steps-v1`, profile `unmeasured`, toolchain
 `none`, oracle `fake-v1`. The CLI cannot supply flags or arbitrary programs.
 `validate-buster-v1` is the first real materialization recipe. Its exact installed
-bytes are checked against `profiles/validate-buster-v1.recipe`; it still does
-not execute a build. The recipe's own `schema=1` field is independent of the
+bytes are checked against `profiles/validate-buster-v1.recipe`; it does not
+admit arbitrary build policy. The recipe's own `schema=1` field is independent of the
 journal and control schema numbers.
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.
@@ -310,7 +390,12 @@ hash verification. Build directories remain writable and are never shared, so
 `generate` on one subject cannot delete a tree used by the other subject or by
 another attempt. A read-only `.identity` binds the directory to job, token,
 request digest, recipe, and both source identities before the preparing event
-is persisted.
+is persisted. The fixed recipe's durable result lives outside that removable
+attempt directory at `WORKSPACE_ROOT/results/job-<job>-attempt-<token>`; it is
+opened and retained by inode, and is not removed by workspace reconciliation.
+Successful worker finalization requires the retained manifest to match the
+job, revisions, result root and trusted-source namespace policy before the
+finished journal event.
 
 Every attempt whose roots validate first publishes a mode-read-only
 `attempt-<job>` record binding both configured paths and root device/inode
@@ -351,6 +436,67 @@ deterministic attempt entry. A recorded configuration failure also permits an
 unopenable root because workspace creation occurs only after the attempt record.
 All other missing-attempt combinations retain active admission.
 
+## Local authenticated service
+
+`serve` is the operator-owned service loop. It opens the private queue once and
+never lets clients provide installed roots, workspace roots, lease paths,
+resource values, unit names or executable paths. Those six values are fixed at
+startup by the deployment command; the client protocol carries only a named
+recipe request and bounded status/cancel/log operations. The endpoint is a
+Linux `AF_UNIX` `SOCK_SEQPACKET` socket. Each connection contains exactly one
+frame, is capped at the existing 536-byte control limit, and must have the
+daemon's effective UID and GID through `SO_PEERCRED`. The service refuses the
+materialize, workspace-reconcile and worker-run operations over this endpoint;
+the worker configuration is service-owned.
+
+The service retries a queued `validate-buster-v1` request on each bounded idle
+tick and runs the existing supervisor with that fixed configuration. A queued
+real request therefore follows the same lease-before-materialization and
+cleanup/recovery path as the local worker command, including progress after a
+temporary `BQ_BUSY` lease result without another client frame. The synchronous
+worker path remains listener-free: it does not accept,
+poll or process client traffic during preparation, measurement or cleanup.
+`STATUS`, `RESULT`, `LOGS` and `CANCEL` sent while the worker owns the host are
+therefore deferred until the worker returns; a client may hit its bounded I/O
+deadline and must retry. A queued `CANCEL` is acknowledged only after the
+single queue owner durably appends it at a safe boundary. The live cancellation
+path during a worker is the operator's `SIGTERM` or `SIGINT`, which cancels and
+exits the service after durable cleanup. A disconnected client never releases
+the queue or host lease.
+
+The recipe's throughput invocation is deliberately `--profile smoke --pairs 1
+--warmups 1 --no-guard`; this is only a fixed end-to-end validation slice and
+cannot produce a performance qualification or #512 acceptance result.
+
+```sh
+./build.sh bench_service serve STATE SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU
+./build.sh bench_service capabilities-remote SOCKET
+./build.sh bench_service submit-remote SOCKET PRINCIPAL KEY validate-buster-v1 BASE_SHA CANDIDATE_SHA
+./build.sh bench_service status-remote SOCKET JOB
+./build.sh bench_service result-remote SOCKET JOB
+./build.sh bench_service logs-remote SOCKET JOB [AFTER_SEQUENCE]
+./build.sh bench_service cancel-remote SOCKET JOB
+./build.sh bench_service rpc SOCKET <request-frame >response-frame
+```
+
+The `*-remote` commands are the typed operator client for the authenticated
+socket. They construct the same bounded schema-2 requests as the local CLI,
+then require the reply to match the request's schema, operation and correlation
+identity before decoding it. `result-remote` reports the server-bound result
+root plus the manifest, bundle and full-evidence digests; callers must still
+retrieve and independently replay that immutable evidence before accepting a
+verdict. `rpc` remains available for protocol regression and low-level tooling,
+but a protected workflow should use the typed commands rather than construct
+binary frames in workflow-controlled code.
+
+`SOCKET`'s parent must already be a private, operator-provisioned directory;
+the service refuses an existing socket, final symlink, non-private parent or
+replacement inode. The bind uses a restrictive umask and validates the
+pathname inode before listening and again after setup. On shutdown it removes
+only the socket inode it created and reports cleanup or replacement failures.
+Windows and macOS compile the bounded codec but report `unsupported` for
+`serve` and `rpc`; no network listener is added there.
+
 ## CLI
 
 Use a pre-provisioned durable private directory, represented here by `STATE`:
@@ -382,9 +528,12 @@ because stdout or the response channel failed.
 ## Bounded one-frame control protocol
 
 `bench_service protocol STATE` accepts exactly one frame followed by EOF on
-stdin, and writes one response frame. It is a local pipe codec, not a daemon,
-network transport, timeout policy or authentication service. Human CLI commands
-use this same dispatcher.
+stdin, and writes one response frame through the queue opened by that process.
+It remains a local pipe codec without caller authentication and retains the
+fake recipes for deterministic regression work. `bench_service rpc SOCKET`
+forwards schema-2 frames to the authenticated Linux service; that endpoint
+advertises `service-recipes=validate-buster-v1`, rejects fake and supervisor
+internals, and performs the only service queue mutation.
 
 The 24-byte header is `BQP1` (four bytes), schema (u32), operation (u32), payload
 length (u32 <=512), correlation (u64). Control schema 2 adds operations 9..11 and the
@@ -426,10 +575,11 @@ status/result response at the top-level error field.
 | Idempotency and FIFO admission | Same retry after lost stdout/after-sync acknowledgment; conflicting keys; principal separation; queued cancellation; pending and lifetime exhaustion |
 | Explicit active ownership | Persisted fake reservation token; stale-token rejection; one-active through cancellation/cleaning; restart at every phase |
 | Recovery without exactly-once fiction | Poisoned I/O handles; partial/full reservation boundaries; reconciliation required before reuse; recorded outcome preserved |
-| Bounded CLI/control operations | Same dispatcher for CLI and binary frames; truncation/version/length/numeric validation; bounded journal-event pagination |
+| Bounded CLI/control operations | Same dispatcher for CLI, pipe and authenticated socket frames; truncation/version/length/numeric validation; bounded journal-event pagination |
+| Authenticated service loop | One queue writer; bounded Unix seqpacket; peer UID/GID check; service-owned recipe/paths/resources |
 | Separate execution outcome/validity | Successful, failed, cancelled and interrupted fake jobs remain not-evaluated |
 | Lease before installed inputs | `bq_worker_run`; busy inherited-lease fixture leaves the FIFO job queued with no attempt |
-| Durable scoped identity/recovery | intent plus immutable invocation/cgroup-inode binding; same-boot exact termination, same-name reuse quarantine, reboot interruption without contradicting a durable outcome |
+| Durable service identity/recovery | intent plus immutable invocation/cgroup-inode binding; same-boot exact termination, same-name reuse quarantine, and a real fork/exec fixed-recipe SIGKILL followed by journal reopen and reboot-interruption recovery without contradicting a durable outcome |
 | Resource and process-tree containment | Fixed systemd argv; manager plus cgroup-v2 leaf/ancestor validation; live detached descendant TERM/KILL/recursive-empty fixture |
 | Distinct terminal causes | Durable worker failure, OOM and timeout evidence; cancellation outcome retained separately |
 | Installed recipe/source validation | Exact recipe bytes; requested revision, safe sorted paths and source SHA-256; durable failure reasons |
@@ -441,12 +591,12 @@ reproduced on main. Exact candidate SHAs, commands and observed CI results
 belong in the PR evidence; this document is not an assertion that unrun gates
 passed.
 
-Still outside this slice: build/validate/compare execution and real measurement;
-live-systemd/polkit/deployment qualification; transport/authentication;
-multi-client service loop; retention migration; qualification, A/A, physical
-9700X acceptance and real result bundles. This slice contains repository-only
-systemd/cgroup supervision, inherited lease handling and boot/unit
-reconciliation with injected fixtures; those are not claims about a deployed
-host.
+Still outside this slice: live operator-installed build/validate/compare
+qualification and real measurement; live-systemd/polkit/deployment
+qualification; transport credentials beyond the local peer UID/GID boundary;
+retention migration; qualification, A/A and physical 9700X acceptance. The
+repository contains the fixed recipe contract, durable whole-result bundle and
+failure/cancellation evidence with injected replay tests; these are not claims
+about a deployed host or a measured result.
 No credentials, server settings, benchmark thresholds, production runner
 ownership or parent-issue closure are authorized by this implementation.
