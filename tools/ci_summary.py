@@ -237,8 +237,8 @@ def _coverage_strict_hash(value, width):
     return isinstance(value, str) and expression.fullmatch(value) is not None
 
 
-def validate_coverage_manifest(manifest, environment=None):
-    """Validate one driver-produced lane manifest and return all failures."""
+def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"):
+    """Validate the caller's contract; fixture/local modes require explicit opt-in."""
     errors = []
     environment = environment or {}
     if not isinstance(manifest, dict):
@@ -248,6 +248,10 @@ def validate_coverage_manifest(manifest, environment=None):
     if manifest.get("phase") != "complete":
         errors.append("coverage manifest is not complete")
     mode = manifest.get("mode")
+    # The evidence cannot choose a weaker policy. Production callers use the
+    # default; only explicit Python callers may authorize fixture/local modes.
+    if mode != expected_mode:
+        errors.append("coverage manifest mode does not match consumer expectation")
     if mode not in ("ci", "local", "self-test"):
         errors.append("coverage manifest mode is unsupported")
     identity = manifest.get("identity")
@@ -594,7 +598,8 @@ def _coverage_summary(manifest, errors):
     if errors:
         lines += ["", "Coverage manifest failures: " + ", ".join(html.escape(error) for error in errors)]
     return lines
-def write_report(environment):
+def write_report(environment, *, expected_coverage_mode="ci"):
+    # main() deliberately exposes no CLI/environment override for this contract.
     steps = json.loads(environment.get("BUSTER_CI_STEPS", "{}"))
     required = environment.get("BUSTER_CI_REQUIRED", "").split()
     if not isinstance(steps, dict) or not required:
@@ -609,7 +614,7 @@ def write_report(environment):
         else:
             try:
                 coverage = json.loads(Path(coverage_path).read_text(encoding="utf-8"))
-                coverage_errors = validate_coverage_manifest(coverage, environment)
+                coverage_errors = validate_coverage_manifest(coverage, environment, expected_mode=expected_coverage_mode)
             except (OSError, ValueError, TypeError) as error:
                 coverage_errors = [f"coverage manifest could not be read: {error}"]
         failures = sorted(set(failures + ["coverage"] if coverage_errors else failures))
