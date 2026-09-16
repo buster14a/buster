@@ -1,7 +1,10 @@
 #pragma once
 // Private deterministic file-I/O and virtual-memory seams. Only the calling
 // thread and the exact opened path are affected; scripts are bounded data,
-// never callbacks.
+// never callbacks. A staging file created for the selected path as destination
+// is selected too: OPEN fails its creation, descriptor steps apply to it, and
+// REPLACE/DELETE apply to renaming or deleting it. Injected file steps skip
+// the system call.
 #include <buster/lib/os.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -14,6 +17,9 @@ typedef enum OsFileTestOperation
     OS_FILE_TEST_READ,
     OS_FILE_TEST_STATS,
     OS_FILE_TEST_MAP,
+    OS_FILE_TEST_PERMISSIONS,
+    OS_FILE_TEST_REPLACE,
+    OS_FILE_TEST_DELETE,
 } OsFileTestOperation;
 
 typedef enum OsFileTestAction
