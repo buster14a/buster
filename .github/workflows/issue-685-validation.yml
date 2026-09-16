@@ -2,6 +2,9 @@ name: Issue 685 source and validation
 on:
   push:
     branches: [codex/685-android-summary-validation]
+concurrency:
+  group: issue-685-validation-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
@@ -14,7 +17,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Apply the exact locally tested patch
+      - name: Apply and verify the exact locally tested candidate tree
         shell: bash
         run: |
           set -euo pipefail
@@ -23,8 +26,8 @@ jobs:
           import base64, gzip, hashlib, os
           from pathlib import Path
           encoded = Path('.github/issue-685.patch.gz.b64').read_text().strip()
-          # Repair the known transport-only duplicated quartet; the complete
-          # decoded patch must still match the locally tested SHA-256 exactly.
+          # Correct the known duplicated transport quartet. The decoded patch
+          # must still match the complete locally tested SHA-256 exactly.
           encoded = encoded.replace('FaezFaezmR3', 'FaezmR3')
           patch = gzip.decompress(base64.b64decode(encoded, validate=True))
           expected = '742b68142c90ba91c60bad5c8dff7dc7430ec95ae5dcaa1dd7af2ccf948c411d'
@@ -34,7 +37,14 @@ jobs:
           PY
           git apply --check "$RUNNER_TEMP/issue-685/change.patch"
           git apply "$RUNNER_TEMP/issue-685/change.patch"
-          git diff --check
+          # Neither temporary transport file belongs in the final PR. Test the
+          # exact candidate source tree, including the unchanged policy suite.
+          rm -- .github/issue-685.patch.gz.b64 .github/workflows/issue-685-validation.yml
+          git add -A
+          candidate_tree=$(git write-tree)
+          test "$candidate_tree" = aa746d19a320967751fa55c1ee8720bd3ab57264
+          printf '%s\n' "$candidate_tree" > "$RUNNER_TEMP/issue-685/candidate-tree.txt"
+          git diff --cached --check
       - name: Validate summary and existing CI tools
         shell: bash
         run: |
