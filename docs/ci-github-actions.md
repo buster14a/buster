@@ -277,6 +277,29 @@ unpacked tree instead. See
 The aggregate `CI complete` requires all six desktop combination jobs, four
 native jobs, three mobile jobs and workflow lint.
 
+The Android summary also exposes the existing wrapper records from
+`RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
+`result.json`'s `android` field. Its two configuration rows show batch status,
+payload phase/status, monitor reader/producer statuses and deadline. Separate
+batch and final-CI records distinguish a failed Debug payload followed by a
+passing Release from required emulator cleanup failing after successful tests.
+A terminal `BUSTER_ANDROID_TEST_RESULT:0` describes one payload, not the entire
+Debug/Release job. Monitor reader status 10 denotes the success marker; the
+producer can then exit 143 because the wrapper deliberately stops logcat.
+
+These are diagnostics, not a replacement acceptance gate: the existing required
+step outcomes remain authoritative even when logs are missing or contradictory.
+Only complete, anchored wrapper records are copied, never emulator text, command
+echoes or arbitrary payload output. Missing/ambiguous records remain explicitly
+missing; duplicate records cannot replace an earlier failure with a later pass.
+The scan is capped at 64 MiB with 4 KiB line fragments and reports truncation.
+`python3 android/ci_summary_test.py -v` covers these cases without an SDK; the
+existing Linux/macOS mobile lifecycle workflow runs it independently and retains
+`android-summary.log`. No payload deadline, cleanup policy or test selection is
+changed. See [#685](https://github.com/buster14a/buster/issues/685) for the original
+Debug-timeout/Release-success diagnosis and [#686](https://github.com/buster14a/buster/pull/686)
+for the already-landed producer and lifecycle repairs.
+
 The iOS launcher retains separate signing logs for each Debug/Release bundle
 and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
 places these in `RUNNER_TEMP/buster-ci/`, inside its existing artifact. Each

@@ -5,6 +5,7 @@ on:
     paths:
       - 'ios/**'
       - 'android/**'
+      - 'tools/ci_summary.py'
       - 'CMakeLists.txt'
       - 'cmake/AndroidApk.cmake'
       - 'tests/*mobile*'
@@ -17,6 +18,7 @@ on:
     paths:
       - 'ios/**'
       - 'android/**'
+      - 'tools/ci_summary.py'
       - 'CMakeLists.txt'
       - 'cmake/AndroidApk.cmake'
       - 'tests/*mobile*'
@@ -75,16 +77,24 @@ jobs:
           set -euo pipefail
           bash --version
           bash android/run_tests_test.sh 2>&1 | tee "$RUNNER_TEMP/android-status.log"
+      - name: Exercise Android job summary diagnostics
+        id: android_summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 android/ci_summary_test.py -v 2>&1 | tee "$RUNNER_TEMP/android-summary.log"
       - name: Lifecycle result and reproduction
         if: ${{ always() }}
         shell: bash
         env:
           CI_RESULT: ${{ steps.lifecycle.outcome }}
           ANDROID_STATUS_RESULT: ${{ steps.android_status.outcome }}
+          ANDROID_SUMMARY_RESULT: ${{ steps.android_summary.outcome }}
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**.\n\nReproduce: `bash tests/mobile_ci_scripts_test.sh` and `bash android/run_tests_test.sh` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**. Android summary suite: **%s**.\n\nReproduce: `bash tests/mobile_ci_scripts_test.sh`, `bash android/run_tests_test.sh`, and `python3 android/ci_summary_test.py -v` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" "$ANDROID_SUMMARY_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lifecycle log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -93,6 +103,7 @@ jobs:
           path: |
             ${{ runner.temp }}/mobile-lifecycle.log
             ${{ runner.temp }}/android-status.log
+            ${{ runner.temp }}/android-summary.log
             ${{ runner.temp }}/mobile-lifecycle-evidence/
           if-no-files-found: ignore
           retention-days: 7
