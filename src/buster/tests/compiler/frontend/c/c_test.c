@@ -3847,6 +3847,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
     return result;
 }
 
+// Hexadecimal accumulation and Unicode/code-unit policy are separate gates.
+// The old loop's overflow break was already rejected by Unicode validation;
+// these controls preserve that refusal and the exact valid output, rather
+// than weakening the Unicode gate to manufacture a baseline acceptance.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    struct
+    {
+        String8 body;
+        u32 utf16[2];
+        u32 utf32[2];
+        u32 count16;
+        u32 count32;
+        bool accepted;
+    } cases[] = {
+        {S8(""), {0}, {0}, 0, 0, true},
+        {S8("\\x41"), {0x41}, {0x41}, 1, 1, true},
+        {S8("\\x000000041"), {0x41}, {0x41}, 1, 1, true},
+        {S8("\\x000000000000000000000000041"), {0x41}, {0x41}, 1, 1, true},
+        {S8("\\x000000000"), {0}, {0}, 1, 1, true},
+        {S8("\\x41g"), {0x41, 'g'}, {0x41, 'g'}, 2, 2, true},
+        {S8("\\xd7ff"), {0xd7ff}, {0xd7ff}, 1, 1, true},
+        {S8("\\xe000"), {0xe000}, {0xe000}, 1, 1, true},
+        {S8("\\xffff"), {0xffff}, {0xffff}, 1, 1, true},
+        {S8("\\x10000"), {0xd800, 0xdc00}, {0x10000}, 2, 1, true},
+        {S8("\\x10ffff"), {0xdbff, 0xdfff}, {0x10ffff}, 2, 1, true},
+        {S8("\\u0041\\101"), {0x41, 0x41}, {0x41, 0x41}, 2, 2, true},
+        {S8("\\x"), {0}, {0}, 0, 0, false},
+        {S8("\\xg"), {0}, {0}, 0, 0, false},
+        {S8("\\x100000000"), {0}, {0}, 0, 0, false},
+        {S8("\\x100000000g"), {0}, {0}, 0, 0, false},
+        {S8("\\x00000000100000000"), {0}, {0}, 0, 0, false},
+        {S8("\\xffffffffffffffffffffffff"), {0}, {0}, 0, 0, false},
+        {S8("\\xffffffff"), {0}, {0}, 0, 0, false},
+        {S8("\\x110000"), {0}, {0}, 0, 0, false},
+        {S8("\\xd800"), {0}, {0}, 0, 0, false},
+        {S8("\\xdfff"), {0}, {0}, 0, 0, false},
+        {S8("\\u00zz"), {0}, {0}, 0, 0, false},
+        {S8("\\U00110000"), {0}, {0}, 0, 0, false},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 prefixes[] = {S8("u"), S8("U"), S8("L")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        for (u32 prefix_index = 0; prefix_index < BUSTER_ARRAY_LENGTH(prefixes); prefix_index += 1)
+        {
+            String8 prefix = prefixes[prefix_index];
+            u32 width = prefix_index == 0 || (prefix_index == 2 && target_uses_16_bit_wchar(target)) ? 2 : 4;
+            String8 element_type = width == 2 ? S8("unsigned short") :
+                                   prefix_index == 2 && !target_uses_unsigned_wchar(target) ? S8("int") : S8("unsigned int");
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                // A refused middle fragment must not publish the valid prefix
+                // or resume at the following fragment. The single-fragment
+                // case also exercises the allocation-free descriptor path.
+                for (u32 concatenate = 0; concatenate < 2; concatenate += 1)
+                {
+                    String8 literal = string_format(arena, S8("{S8}\"{S8}\""), prefix, cases[case_index].body);
+                    if (concatenate)
+                    {
+                        literal = string_format(arena, S8("{S8}\"A\" {S8} {S8}\"B\""), prefix, literal, prefix);
+                    }
+                    CPreprocessResult tokens = c_preprocess(arena, literal, (CPreprocessOptions){
+                        .target = target,
+                        .data_layout = target_data_layout(target),
+                        .dialect = C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && tokens.tokens != 0))
+                    {
+                        u32 end = (u32)tokens.token_count;
+                        while (end && tokens.tokens[end - 1].kind == C_TOKEN_END_OF_FILE)
+                        {
+                            end -= 1;
+                        }
+                        u64 decode_position = arena->position;
+                        memset(arena_allocate(arena, u8, 4096), 0xa5, 4096);
+                        arena_set_position(arena, decode_position);
+                        bool accepted = false;
+                        BUSTER_TEST_RAW(arguments, c_test_string_literal_range_paths_agree(arena, tokens, 0, end, &accepted), literal);
+                        BUSTER_TEST_RAW(arguments, accepted == cases[case_index].accepted, literal);
+                    }
+
+                    String8 source = string_format(arena, S8("{S8} value[] = {S8};\n"), element_type, literal);
+                    CPreprocessResult preprocess = {0};
+                    CParseResult parse = {0};
+                    CIRLowerResult lowered = c_test_lower_source(arena, source, S8("wide-hex.c"), target, &preprocess, &parse);
+                    if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                    {
+                        if (cases[case_index].accepted)
+                        {
+                            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0 && lowered.canonical_ir_certified, source);
+                            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1 &&
+                                                          lowered.program->modules[0].global_count == 1))
+                            {
+                                IrModule* module = lowered.program->modules;
+                                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                                u32* units = width == 2 ? cases[case_index].utf16 : cases[case_index].utf32;
+                                u32 count = width == 2 ? cases[case_index].count16 : cases[case_index].count32;
+                                u32 expected[5] = {0};
+                                u32 expected_count = 0;
+                                if (concatenate)
+                                {
+                                    expected[expected_count++] = 'A';
+                                }
+                                for (u32 index = 0; index < count; index += 1)
+                                {
+                                    expected[expected_count++] = units[index];
+                                }
+                                if (concatenate)
+                                {
+                                    expected[expected_count++] = 'B';
+                                }
+                                expected_count += 1; // The terminating code unit, including embedded-zero cases.
+                                IrGlobal* global = module->globals;
+                                IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                                BUSTER_TEST(arguments, type && type->layout.resolved && type->layout.size == (u64)expected_count * width);
+                                bool all_zero = true;
+                                for (u32 index = 0; index < expected_count; index += 1)
+                                {
+                                    all_zero = all_zero && expected[index] == 0;
+                                }
+                                ByteSlice bytes = global->bytes;
+                                if (all_zero)
+                                {
+                                    // Canonical all-zero globals carry their size in the
+                                    // type and need no materialized initializer buffer.
+                                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO && bytes.length == 0);
+                                }
+                                else if (BUSTER_REQUIRE(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                                                  bytes.pointer && bytes.length == (u64)expected_count * width))
+                                {
+                                    for (u32 index = 0; index < expected_count; index += 1)
+                                    {
+                                        for (u32 byte = 0; byte < width; byte += 1)
+                                        {
+                                            BUSTER_TEST_RAW(arguments, bytes.pointer[index * width + byte] ==
+                                                                       (u8)(expected[index] >> (byte * 8)), source);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified, source);
+                            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1 && lowered.diagnostics != 0))
+                            {
+                                CDiagnostic diagnostic = lowered.diagnostics[0];
+                                BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                                BUSTER_TEST(arguments, diagnostic.location.line == 1);
+                                BUSTER_TEST_RAW(arguments, string_starts_with_sequence(diagnostic.message,
+                                    S8("C IR lowering: could not determine the size of the string initializer")), diagnostic.message);
+                            }
+                        }
+                    }
+                    arena_set_position(arena, position);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Tokens whose spellings reach and cross 0xFFFF bytes: the fixtures for the
 // CToken u16 length escape. Every length assertion goes through
 // c_token_spelling, never the raw field, so the same fixtures hold before
@@ -17294,6 +17465,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
     BUSTER_TEST_FIXTURE(arguments, c_test_pp_class_masks);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
