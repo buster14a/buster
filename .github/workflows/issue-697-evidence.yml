@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Reconcile with the newly landed service recovery
+        id: prepare
         shell: bash
         run: |
           set -euo pipefail
@@ -30,13 +31,25 @@ jobs:
           git checkout --detach 510fd58c03ef49030e0ffd42903821f4a9de0073
           if ! git merge --no-ff --no-commit 2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd; then
             git diff --name-only --diff-filter=U | tee "$RUNNER_TEMP/issue-697/conflicts.txt"
-            test "$(cat "$RUNNER_TEMP/issue-697/conflicts.txt")" = tools/bench_service/README.md
+            printf 'tools/bench_service/README.md\ntools/bench_service/tests.c\n' > "$RUNNER_TEMP/issue-697/expected-conflicts.txt"
+            cmp "$RUNNER_TEMP/issue-697/conflicts.txt" "$RUNNER_TEMP/issue-697/expected-conflicts.txt"
           fi
-          git show 2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd:tools/bench_service/README.md > tools/bench_service/README.md
           python3 - <<'PY'
           from pathlib import Path
+          import subprocess
+          def source(revision, path):
+              return subprocess.check_output(['git', 'show', revision + ':' + path], text=True)
+          current = '2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd'
+          path = Path('tools/bench_service/tests.c')
+          old = source('23bb293c070afbece177d1407029a6937ce51fe2', str(path))
+          start = old.index('BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_alarm_count;')
+          end = old.index('typedef struct BqWorkerFake\n', start)
+          block = old[start:end]
+          text = source(current, str(path))
+          assert text.count(block) == 1, 'The original deadline block must be unchanged on current main'
+          path.write_text(text.replace(block, '#include "worker_deadline_tests.c"\n\n'))
           path = Path('tools/bench_service/README.md')
-          text = path.read_text()
+          text = source(current, str(path))
           anchor = 'measurement loop or general-purpose testing framework.\n\n'
           assert text.count(anchor) == 1
           paragraph = '''Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
@@ -53,10 +66,10 @@ jobs:
           '''
           path.write_text(text.replace(anchor, anchor + paragraph))
           PY
-          git add tools/bench_service/README.md
+          git add tools/bench_service/README.md tools/bench_service/tests.c
           test -z "$(git diff --name-only --diff-filter=U)"
           git diff --cached --check
-          test "$(git hash-object tools/bench_service/worker_deadline_tests.c)" = 6461ba6bfbe9c2a90dca80e39e2bac75b6f8fa62 || git hash-object tools/bench_service/worker_deadline_tests.c
+          test "$(git hash-object tools/bench_service/worker_deadline_tests.c)" = 6461ba62ca5cf496398d0b9db5cba1e923013990
           test ! -e .github/workflows/issue-697-evidence.yml
           test ! -e tools/bench_service/issue697.patch
           clang -E -P -std=c11 -Isrc -DBUSTER_SINGLE_THREADED=1 tools/bench_service/main.c > "$RUNNER_TEMP/issue-697/production-after.i"
@@ -72,13 +85,13 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/buster-deadline-driver" bench_service self-test 2>&1 | tee "$RUNNER_TEMP/issue-697/normal.log"
       - name: Native ASan and UBSan service tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/buster-deadline-driver" bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/issue-697/sanitized.log"
       - name: GCC with project warning policy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -86,7 +99,7 @@ jobs:
           gcc "${flags[@]}" tools/bench_service/main.c tools/throughput/shared.c -lm -o "$RUNNER_TEMP/service-gcc"
           gcc "${flags[@]}" tools/bench_service/tests.c tools/throughput/shared.c -lm -o "$RUNNER_TEMP/service-tests-gcc"
           "$RUNNER_TEMP/service-tests-gcc" 2>&1 | tee "$RUNNER_TEMP/issue-697/gcc.log"
-      - name: Publish the validated merge without rewriting the fix branch
+      - name: Preserve the validated merge for connected-GitHub publication
         shell: bash
         run: |
           set -euo pipefail
@@ -95,7 +108,7 @@ jobs:
           git diff 2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd HEAD --stat
           git diff 2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd HEAD > "$RUNNER_TEMP/issue-697/repair.patch"
           test "$(git diff --name-only 2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd HEAD | wc -l)" -eq 4
-          git push origin HEAD:refs/heads/work/697-worker-deadline-fix
+          git push origin HEAD:refs/heads/work/697-worker-deadline-reconciled
       - name: Retain validation evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
