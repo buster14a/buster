@@ -17088,6 +17088,192 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 specifiers[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
+        S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("_Complex int"), S8("_Complex char"),
+        S8("float long"), S8("double short"), S8("float unsigned"), S8("double signed"), S8("double long long"),
+        S8("double float"), S8("int _Complex"), S8("char _Complex"), S8("double _Imaginary"), S8("signed unsigned int"),
+        S8("void _Complex"), S8("int float"), S8("short long"), S8("long long long"), S8("int int"), S8("float float"),
+        S8("long _Float16"), S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 unsigned"),
+        S8("_Float16 int"), S8("int _Float16"), S8("_Float16 _Float16"), S8("_Float16 float"),
+        S8("_Float16 double"), S8("void _Float16"), S8("_Bool _Float16"), S8("_Float16 char"),
+        S8("_Complex long _Float16"), S8("_Float16 _Complex int"), S8("_Imaginary _Float16"),
+        S8("_Float16 _Complex _Float16"), S8("const _Float16 const unsigned")};
+    String8 contexts[] = {
+        S8("{S8} v;\nint following;\n"),
+        S8("int f(void) {{ {S8} v; return 1; }}\nint following;\n"),
+        S8("int f({S8} v);\nint following;\n"),
+        S8("typedef {S8} T;\nint following;\n"),
+        S8("int f(void) {{ return sizeof({S8}); }}\nint following;\n"),
+        S8("int f(void) {{ return (int)({S8})0; }}\nint following;\n"),
+        S8("_Static_assert(sizeof({S8}) > 0, \"bad\");\nint following;\n"),
+        S8("_Static_assert(_Alignof({S8}) > 0, \"bad\");\nint following;\n"),
+        S8("static int unused(void) {{ return sizeof({S8}); }}\nint following;\n"),
+        S8("int x = 0 && sizeof({S8});\nint following;\n")
+    };
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(specifiers); specifier += 1)
+    {
+        for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(contexts); context += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, contexts[context], specifiers[specifier]);
+            CPreprocessResult tokens = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("invalid-specifiers.c"), target_native, &tokens, &parse);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count != 0 || lowered.diagnostic_count != 0, source);
+            bool attributed = false;
+            bool blamed_following = false;
+            for (u32 diagnostic = 0; diagnostic < parse.diagnostic_count; diagnostic += 1)
+            {
+                attributed |= parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                              parse.diagnostics[diagnostic].location.line == 1;
+                blamed_following |= parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                                    parse.diagnostics[diagnostic].location.line > 1;
+            }
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+            {
+                attributed |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                              lowered.diagnostics[diagnostic].location.line == 1;
+                blamed_following |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                                    lowered.diagnostics[diagnostic].location.line > 1;
+            }
+            BUSTER_TEST_RAW(arguments, attributed, source);
+            BUSTER_TEST_RAW(arguments, !blamed_following, source);
+            scratch_end(temporary);
+        }
+    }
+    String8 recovered[] = {
+        S8("long float;\nint following;\n"),
+        S8("long float v, w;\nint following;\n"),
+        S8("int f(long float, int next);\nint following;\n"),
+        S8("int f(void) { long float v; int following_local = 2; return following_local; }\nint following;\n"),
+    };
+    for (u32 recovery = 0; recovery < BUSTER_ARRAY_LENGTH(recovered); recovery += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = recovered[recovery];
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("invalid-specifiers-recovery.c"),
+                                 .target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+        bool attributed = false;
+        for (u32 diagnostic = 0; diagnostic < syntax.diagnostic_count; diagnostic += 1)
+        {
+            attributed |= syntax.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                          syntax.diagnostics[diagnostic].location.line == 1;
+        }
+        BUSTER_TEST_RAW(arguments, attributed, source);
+        bool following_declared = false;
+        for (CParserDeclaration* declaration = syntax.first_declaration; declaration; declaration = declaration->next)
+        {
+            following_declared |= declaration->name_token != C_ID_UNDERLYING_INVALID &&
+                                  declaration->name_token < tokens.token_count &&
+                                  string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[declaration->name_token]),
+                                               S8("following"));
+        }
+        BUSTER_TEST_RAW(arguments, following_declared, source);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("int f(void) { return sizeof(long float; }\nint following;\n");
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("invalid-specifiers-malformed.c"),
+                                 .target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count != 0 || syntax.diagnostic_count != 0, source);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("long float");
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("invalid-specifiers-eof.c"),
+                                 .target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count != 0, source);
+        bool attributed = false;
+        for (u32 diagnostic = 0; diagnostic < syntax.diagnostic_count; diagnostic += 1)
+        {
+            attributed |= syntax.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS;
+        }
+        BUSTER_TEST_RAW(arguments, attributed, source);
+        scratch_end(temporary);
+    }
+    String8 control_specifiers[] = {S8("long long"), S8("long int long"), S8("int unsigned long long"),
+        S8("long unsigned long int"), S8("signed char"), S8("unsigned short int"), S8("double long"),
+        S8("_Complex float"), S8("double _Complex"), S8("long _Complex double"), S8("_Complex"), S8("__complex__ double"),
+        S8("_Float16"), S8("_Float16 _Complex"), S8("_Complex _Float16"), S8("__complex__ _Float16"), S8("const _Float16 const")};
+    CTypeKind control_kinds[] = {C_TYPE_LONG_LONG, C_TYPE_LONG_LONG, C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_UNSIGNED_LONG_LONG,
+        C_TYPE_SIGNED_CHAR, C_TYPE_UNSIGNED_SHORT, C_TYPE_LONG_DOUBLE, C_TYPE_FLOAT_COMPLEX, C_TYPE_DOUBLE_COMPLEX,
+        C_TYPE_LONG_DOUBLE_COMPLEX, C_TYPE_DOUBLE_COMPLEX, C_TYPE_DOUBLE_COMPLEX,
+        C_TYPE_FLOAT16, C_TYPE_FLOAT16_COMPLEX, C_TYPE_FLOAT16_COMPLEX, C_TYPE_FLOAT16_COMPLEX, C_TYPE_FLOAT16};
+    TargetDataLayout control_layout = target_data_layout(target_native);
+    u64 control_sizes[] = {
+        control_layout.long_long_integer.size, control_layout.long_long_integer.size,
+        control_layout.unsigned_long_long_integer.size, control_layout.unsigned_long_long_integer.size,
+        control_layout.signed_char.size, control_layout.unsigned_short_integer.size, control_layout.long_double_type.size,
+        2 * control_layout.float_type.size, 2 * control_layout.double_type.size, 2 * control_layout.long_double_type.size,
+        2 * control_layout.double_type.size, 2 * control_layout.double_type.size,
+        control_layout.float16_type.size, 2 * control_layout.float16_type.size, 2 * control_layout.float16_type.size,
+        2 * control_layout.float16_type.size, control_layout.float16_type.size,
+    };
+    for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(control_specifiers); control += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena,
+            S8("{S8} v;\nint take(void) {{ return sizeof(v) == sizeof({S8}); }}\n"),
+            control_specifiers[control], control_specifiers[control]);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("valid-specifiers.c"), target_native, &tokens, &parse);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
+        bool parsed_v = false;
+        for (u32 entity = 0; entity < parse.entity_count; entity += 1)
+        {
+            CEntity* row = &parse.entities[entity];
+            parsed_v |= string_equal(row->name, S8("v")) && row->type.value < parse.type_count &&
+                        parse.types[row->type.value].kind == control_kinds[control];
+        }
+        u64 expected_size = control_sizes[control];
+        bool lowered_v = false;
+        if (lowered.program && lowered.program->module_count)
+        {
+            IrModule* module = &lowered.program->modules[0];
+            for (u32 global = 0; global < module->global_count; global += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, module->globals[global].symbol);
+                if (symbol && string_equal(symbol->name, S8("v")))
+                {
+                    IrType* global_type = ir_type_from_id(&lowered.program->types, module->globals[global].type);
+                    lowered_v = global_type && global_type->layout.resolved && global_type->layout.size == expected_size;
+                }
+            }
+        }
+        BUSTER_TEST_RAW(arguments, parsed_v && lowered_v, source);
+        scratch_end(temporary);
+    }
+    String8 qualified_controls[] = {
+        S8("typedef unsigned long long U;\nconst U v = 7;\nint take(const unsigned long p) { volatile U local = p; return sizeof(local) == sizeof(U); }\n"),
+        S8("const int const prefix = 0;\nint const infix = 0;\nint volatile trailing = 0;\nconst volatile int both = 0;\nint take(void) { const volatile int local = both; return local; }\n"),
+    };
+    for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(qualified_controls); control += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = qualified_controls[control];
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("qualified-specifiers.c"), target_native, &tokens, &parse);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -17173,6 +17359,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);

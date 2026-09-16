@@ -5751,6 +5751,50 @@ BUSTER_C_INTERNAL bool c_parse_float16_specifier_valid(bool seen_void, bool seen
            !seen_double && !seen_va_list && !long_count;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool seen_va_list, bool seen_bool, bool seen_char,
+    bool seen_short, bool seen_int, bool seen_signed, bool seen_unsigned, bool seen_float16, bool seen_float, bool seen_double,
+    bool seen_int128, bool seen_complex, bool seen_imaginary, u32 long_count, bool duplicate)
+{
+    u32 primary_count = (u32)seen_void + (u32)seen_va_list + (u32)seen_bool + (u32)seen_char +
+                        (u32)seen_float16 + (u32)seen_float + (u32)seen_double + (u32)seen_int128;
+    bool valid = !duplicate && !seen_imaginary && !(seen_signed && seen_unsigned) && long_count <= 2 && primary_count <= 1;
+    if (seen_void || seen_va_list || seen_bool)
+    {
+        valid &= !seen_short && !seen_int && !seen_signed && !seen_unsigned && !seen_complex && long_count == 0;
+    }
+    else if (seen_char)
+    {
+        valid &= !seen_short && !seen_int && !seen_complex && long_count == 0;
+    }
+    else if (seen_float16)
+    {
+        valid &= c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed,
+            seen_unsigned, seen_int128, seen_float, seen_double, seen_va_list, long_count);
+    }
+    else if (seen_float)
+    {
+        valid &= !seen_short && !seen_int && !seen_signed && !seen_unsigned && long_count == 0;
+    }
+    else if (seen_double)
+    {
+        valid &= !seen_short && !seen_int && !seen_signed && !seen_unsigned && long_count <= 1;
+    }
+    else if (seen_int128)
+    {
+        valid &= !seen_short && !seen_int && !seen_complex && long_count == 0;
+    }
+    else if (seen_short)
+    {
+        valid &= long_count == 0;
+    }
+    if (seen_complex)
+    {
+        valid &= c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int,
+                                     seen_signed, seen_unsigned, seen_int128, long_count) != C_TYPE_INVALID;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
 {
     bool seen_type = false;
@@ -5769,6 +5813,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     bool seen_complex = false;
     bool seen_imaginary = false;
     u32 long_count = 0;
+    bool duplicate = false;
+    u32 first_type = start;
     CType type = {
         .element_type = C_TYPE_ID_INVALID,
         .return_type = C_TYPE_ID_INVALID,
@@ -5802,48 +5848,61 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             break;
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        if (!seen_type)
+        {
+            first_type = index;
+        }
         if (string_equal(spelling, S8("__builtin_va_list")))
         {
+            duplicate |= seen_va_list;
             seen_va_list = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("void")))
         {
+            duplicate |= seen_void;
             seen_void = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("_Bool")))
         {
+            duplicate |= seen_bool;
             seen_bool = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("char")))
         {
+            duplicate |= seen_char;
             seen_char = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("short")))
         {
+            duplicate |= seen_short;
             seen_short = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("int")))
         {
+            duplicate |= seen_int;
             seen_int = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("__int128")))
         {
+            duplicate |= seen_int128;
             seen_int128 = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("signed")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__signed__")))
         {
+            duplicate |= seen_signed;
             seen_signed = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("unsigned")))
         {
+            duplicate |= seen_unsigned;
             seen_unsigned = true;
             seen_type = true;
         }
@@ -5854,26 +5913,31 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         }
         else if (string_equal(spelling, S8("float")))
         {
+            duplicate |= seen_float;
             seen_float = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("_Float16")))
         {
+            duplicate |= seen_float16;
             seen_float16 = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("double")))
         {
+            duplicate |= seen_double;
             seen_double = true;
             seen_type = true;
         }
         else if (c_parse_complex_specifier_word(spelling))
         {
+            duplicate |= seen_complex;
             seen_complex = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("_Imaginary")))
         {
+            duplicate |= seen_imaginary;
             seen_imaginary = true;
             seen_type = true;
         }
@@ -5896,99 +5960,91 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         index += 1;
     }
     *declarator_start = index;
-    if (!seen_type || (seen_signed && seen_unsigned))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    // `_Imaginary` is recognized only so that a declaration spelled with it
-    // is rejected here instead of parsed as an implicit int with a stray
-    // identifier; no target this compiler emits for has imaginary types.
-    if (seen_imaginary || (seen_va_list && seen_complex))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    if (seen_float16 && !seen_complex && !c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned,
-                                                                          seen_int128, seen_float, seen_double, seen_va_list, long_count))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    if (seen_complex)
-    {
-        // `_Complex` alone is `double _Complex`, which is what GCC and Clang
-        // both accept; a complex integer type is a GNU extension this
-        // frontend does not implement, so it refuses rather than dropping
-        // the specifier.
-        type.kind = c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned,
-                                         seen_int128, long_count);
-        if (type.kind == C_TYPE_INVALID)
-        {
-            return C_TYPE_ID_INVALID;
-        }
-        return c_parse_add_type(result, type);
-    }
-    if (seen_va_list)
-    {
-        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
-                         seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
-        type.kind = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
-    }
-    else if (seen_void)
-    {
-        type.kind = C_TYPE_VOID;
-    }
-    else if (seen_bool)
-    {
-        type.kind = C_TYPE_BOOL;
-    }
-    else if (seen_char)
-    {
-        type.kind = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
-    }
-    else if (seen_float16)
-    {
-        type.kind = C_TYPE_FLOAT16;
-    }
-    else if (seen_float)
-    {
-        type.kind = C_TYPE_FLOAT;
-    }
-    else if (seen_double)
-    {
-        type.kind = long_count ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
-    }
-    else if (seen_short)
-    {
-        type.kind = seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
-    }
-    else if (seen_int128)
-    {
-        type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
-    }
-    else if (long_count >= 2)
-    {
-        type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
-    }
-    else if (long_count == 1)
-    {
-        type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
-    }
-    else
-    {
-        BUSTER_UNUSED(seen_int);
-        type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
-    }
+    bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        long_count, duplicate);
     CTypeId parsed = C_TYPE_ID_INVALID;
-    if (type.kind == C_TYPE_VA_LIST)
+    if (seen_type && !valid_specifiers)
     {
-        parsed = c_parse_variable_argument_list_type(result);
-        if (type.is_const || type.is_volatile || type.is_restrict || type.is_atomic)
-        {
-            parsed = c_parse_add_qualified_type(result, parsed, type);
-        }
+        // `_Imaginary` is recognized only so that a declaration spelled with it
+        // is rejected here instead of parsed as an implicit int with a stray
+        // identifier; no target this compiler emits for has imaginary types.
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[first_type]),
+            C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
     }
-    else if (type.kind != C_TYPE_INVALID)
+    else if (seen_type)
     {
-        parsed = c_parse_add_type(result, type);
+        if (seen_complex)
+        {
+            // `_Complex` alone is `double _Complex`, which is what GCC and Clang
+            // both accept; a complex integer type is a GNU extension this
+            // frontend does not implement, so it refuses rather than dropping
+            // the specifier.
+            type.kind = c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned, seen_int128,
+                                             long_count);
+        }
+        else if (seen_va_list)
+        {
+            bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
+                             seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
+            type.kind = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
+        }
+        else if (seen_void)
+        {
+            type.kind = C_TYPE_VOID;
+        }
+        else if (seen_bool)
+        {
+            type.kind = C_TYPE_BOOL;
+        }
+        else if (seen_char)
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+        }
+        else if (seen_float16)
+        {
+            type.kind = C_TYPE_FLOAT16;
+        }
+        else if (seen_float)
+        {
+            type.kind = C_TYPE_FLOAT;
+        }
+        else if (seen_double)
+        {
+            type.kind = long_count ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+        }
+        else if (seen_short)
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+        }
+        else if (seen_int128)
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
+        }
+        else if (long_count >= 2)
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+        }
+        else if (long_count == 1)
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+        }
+        else
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+        }
+        if (type.kind == C_TYPE_VA_LIST)
+        {
+            parsed = c_parse_variable_argument_list_type(result);
+            if (type.is_const || type.is_volatile || type.is_restrict || type.is_atomic)
+            {
+                parsed = c_parse_add_qualified_type(result, parsed, type);
+            }
+        }
+        else if (type.kind != C_TYPE_INVALID)
+        {
+            parsed = c_parse_add_type(result, type);
+        }
     }
     return parsed;
 }
@@ -6694,7 +6750,8 @@ CAggregateAttributes c_parse_aggregate_attributes(CParseResult const* result, CT
     return attributes;
 }
 
-BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
+BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
+                                                   u32* invalid_specifier)
 {
     bool seen_type = false;
     bool seen_void = false;
@@ -6712,6 +6769,8 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     bool seen_complex = false;
     bool seen_imaginary = false;
     u32 long_count = 0;
+    bool duplicate = false;
+    u32 first_type = start;
     u32 index = start;
     while (index < end)
     {
@@ -6740,48 +6799,61 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             break;
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        if (!seen_type)
+        {
+            first_type = index;
+        }
         if (string_equal(spelling, S8("__builtin_va_list")))
         {
+            duplicate |= seen_va_list;
             seen_va_list = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("void")))
         {
+            duplicate |= seen_void;
             seen_void = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("_Bool")))
         {
+            duplicate |= seen_bool;
             seen_bool = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("char")))
         {
+            duplicate |= seen_char;
             seen_char = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("short")))
         {
+            duplicate |= seen_short;
             seen_short = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("int")))
         {
+            duplicate |= seen_int;
             seen_int = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("__int128")))
         {
+            duplicate |= seen_int128;
             seen_int128 = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("signed")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__signed__")))
         {
+            duplicate |= seen_signed;
             seen_signed = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("unsigned")))
         {
+            duplicate |= seen_unsigned;
             seen_unsigned = true;
             seen_type = true;
         }
@@ -6792,34 +6864,43 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
         }
         else if (string_equal(spelling, S8("float")))
         {
+            duplicate |= seen_float;
             seen_float = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("_Float16")))
         {
+            duplicate |= seen_float16;
             seen_float16 = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("double")))
         {
+            duplicate |= seen_double;
             seen_double = true;
             seen_type = true;
         }
         else if (c_parse_complex_specifier_word(spelling))
         {
+            duplicate |= seen_complex;
             seen_complex = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("_Imaginary")))
         {
+            duplicate |= seen_imaginary;
             seen_imaginary = true;
             seen_type = true;
         }
         index += 1;
     }
     *declarator_start = index;
+    bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        long_count, duplicate);
+    *invalid_specifier = seen_type && !valid_specifiers ? first_type : UINT32_MAX;
     CTypeKind result;
-    if (!seen_type || (seen_signed && seen_unsigned) || seen_imaginary)
+    if (!seen_type || !valid_specifiers)
     {
         result = C_TYPE_INVALID;
     }
@@ -6834,15 +6915,9 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
         result = c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned,
                                       seen_int128, long_count);
     }
-    // `_Float16` shares a specifier set with nothing, so its arm precedes
-    // every kind it refuses to combine with: `_Float16 char` is not a `char`.
-    // c_parse_primitive_type asks the same question ahead of its own ladder.
     else if (seen_float16)
     {
-        result = c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned, seen_int128, seen_float,
-                                                 seen_double, seen_va_list, long_count)
-                     ? C_TYPE_FLOAT16
-                     : C_TYPE_INVALID;
+        result = C_TYPE_FLOAT16;
     }
     else if (seen_void)
     {
@@ -14769,6 +14844,31 @@ BUSTER_C_INTERNAL void c_parser_validate_integer_token(Arena* arena, CParserResu
     }
 }
 
+BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParserResult* result,
+    CPreprocessResult const* preprocess, u32 index, u32* validated_end)
+{
+    if (index >= *validated_end && preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER &&
+        c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[index]))
+    {
+        u32 end = index + 1;
+        while (end < preprocess->token_count && preprocess->tokens[end].kind == C_TOKEN_IDENTIFIER &&
+               c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[end]))
+        {
+            end += 1;
+        }
+        u32 declarator_start;
+        u32 invalid_specifier;
+        c_ir_primitive_type_kind(*preprocess, index, end, &declarator_start, &invalid_specifier);
+        *validated_end = end;
+        if (invalid_specifier != UINT32_MAX)
+        {
+            c_parser_diagnostic(arena, result,
+                c_preprocess_token_location(preprocess, preprocess->tokens[invalid_specifier]),
+                C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
+        }
+    }
+}
+
 typedef struct CParserBlockFrame CParserBlockFrame;
 struct CParserBlockFrame
 {
@@ -15163,6 +15263,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         CParserBodyFrames body_frames = {0};
         u32 index = 0;
+        u32 validated_specifier_end = 0;
         while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
         {
             u32 start = index;
@@ -15190,6 +15291,10 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 if (shape == C_TOKEN_PREPROCESSING_NUMBER)
                 {
                     c_parser_validate_integer_token(arena, &result, &preprocess, token);
+                }
+                else if (shape == C_TOKEN_IDENTIFIER)
+                {
+                    c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
                 }
                 u32 asm_label_end = 0;
                 if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && index > start &&
@@ -15261,6 +15366,10 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                             if (body_shape == C_TOKEN_PREPROCESSING_NUMBER)
                             {
                                 c_parser_validate_integer_token(arena, &result, &preprocess, preprocess.tokens[index]);
+                            }
+                            else if (body_shape == C_TOKEN_IDENTIFIER)
+                            {
+                                c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
                             }
                             CPunctuator body_punctuator = c_token_shape_punctuator(body_shape);
                             if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)

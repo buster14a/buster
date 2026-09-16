@@ -23,6 +23,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_INVALID_LINE] = S8_INITIALIZER("c.invalid-line"),
         [C_DIAGNOSTIC_INVALID_ALIGNMENT] = S8_INITIALIZER("c.invalid-alignment"),
         [C_DIAGNOSTIC_INVALID_ATOMIC_TYPE] = S8_INITIALIZER("c.invalid-atomic-type"),
+        [C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS] = S8_INITIALIZER("c.invalid-type-specifiers"),
         [C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER] = S8_INITIALIZER("c.invalid-flexible-array-member"),
         [C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH] = S8_INITIALIZER("c.invalid-bit-field-width"),
         [C_DIAGNOSTIC_EXPECTED_DECLARATION] = S8_INITIALIZER("c.expected-declaration"),

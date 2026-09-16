@@ -4482,6 +4482,269 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 specifiers[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
+        S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("_Complex int"), S8("_Complex char"),
+        S8("long _Float16"), S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 int"),
+        S8("_Float16 _Float16"), S8("_Float16 float"), S8("_Float16 double"), S8("void _Float16"),
+        S8("_Complex long _Float16"), S8("_Float16 _Complex int"), S8("const _Float16 const unsigned")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 sentinel = S8("existing output must survive invalid type specifiers");
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(specifiers); specifier += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 name = string_format(arena, S8("buster-type-specifiers-{u32}-{u32}-{u32}"), specifier, frontend, dialect);
+                String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+                String8 absent_output = buster_test_temporary_path(arena, string_format(arena, S8("{S8}-absent"), name), S8(".o"));
+                String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), specifiers[specifier]);
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))) &&
+                    BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+                {
+                    String8 syntax_command[] = {S8("-fsyntax-only"), dialects[dialect], S8("-target"), S8("x86_64-linux"),
+                        frontends[frontend], input};
+                    CompilerDriverResult refused = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                    BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, source);
+                    bool coded = false;
+                    for (u32 diagnostic = 0; diagnostic < refused.diagnostic_count; diagnostic += 1)
+                    {
+                        coded |= string_equal(refused.diagnostics[diagnostic].code, S8("c.invalid-type-specifiers")) &&
+                                 refused.diagnostics[diagnostic].primary.position.line == 1;
+                    }
+                    BUSTER_TEST_RAW(arguments, coded, source);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic,
+                        string_format(arena, S8("{S8}:1:"), input)) != BUSTER_STRING_NO_MATCH, source);
+                    String8 command[] = {S8("-c"), dialects[dialect], S8("-target"), S8("x86_64-linux"),
+                        frontends[frontend], S8("-o"), output, input};
+                    CompilerDriverResult refused_compile = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, refused_compile.error != COMPILER_DRIVER_ERROR_NONE, source);
+                    BUSTER_TEST_RAW(arguments, !refused_compile.has_object, source);
+                    BUSTER_TEST_RAW(arguments, refused_compile.diagnostic.length != 0, source);
+                    ByteSlice retained = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), sentinel);
+                    String8 absent_command[] = {S8("-c"), dialects[dialect], S8("-target"), S8("x86_64-linux"),
+                        frontends[frontend], S8("-o"), absent_output, input};
+                    CompilerDriverResult refused_absent = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(absent_command)));
+                    BUSTER_TEST_RAW(arguments, refused_absent.error != COMPILER_DRIVER_ERROR_NONE, source);
+                    BUSTER_TEST_RAW(arguments, file_read_checked(arena, absent_output, (FileReadOptions){0}).status != OS_FILE_READ_OK, source);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    String8 operand_contexts[] = {
+        S8("int take(void) {{ return sizeof({S8}); }}\n"),
+        S8("int take(void) {{ return (int)({S8})0; }}\n"),
+    };
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(specifiers); specifier += 1)
+    {
+        for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(operand_contexts); context += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-type-specifiers-operand-{u32}-{u32}"), specifier, context);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            String8 source = string_format(arena, operand_contexts[context], specifiers[specifier]);
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"), S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, source);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic,
+                    S8("invalid or unsupported type specifier combination")) != BUSTER_STRING_NO_MATCH, source);
+                BUSTER_TEST_RAW(arguments, file_read_checked(arena, output, (FileReadOptions){0}).status != OS_FILE_READ_OK, source);
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 control_targets[] = {S8("x86_64-linux"), S8("aarch64-linux"), S8("x86_64-windows"), S8("aarch64-macos")};
+    String8 control_specifiers[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(control_targets); target += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(control_specifiers); control += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                TargetParseResult parsed_target = target_parse_triple(control_targets[target]);
+                String8 name = string_format(arena, S8("buster-type-specifiers-control-{u32}-{u32}-{u32}"), target, frontend, control);
+                String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+                String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), control_specifiers[control]);
+                if (BUSTER_REQUIRE(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE) &&
+                    BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                {
+                    TargetDataLayout layout = target_data_layout(parsed_target.target);
+                    u64 control_sizes[] = {layout.long_long_integer.size, 2u * layout.double_type.size,
+                        layout.float16_type.size, 2u * layout.float16_type.size};
+                    u64 expected_size = control_sizes[control];
+                    String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), control_targets[target],
+                        frontends[frontend], S8("-o"), output, input};
+                    CompilerDriverResult built = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, built.diagnostic);
+                    if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
+                    {
+                        ObjectSymbol* v = compiler_driver_test_symbol_by_name(&built.object, S8("v"));
+                        BUSTER_TEST_RAW(arguments, v && v->section != OBJECT_SECTION_UNDEFINED && v->kind == OBJECT_SYMBOL_DATA &&
+                            v->size == expected_size, source);
+                        ObjectSymbol* take = compiler_driver_test_symbol_by_name(&built.object, S8("take"));
+                        BUSTER_TEST_RAW(arguments, take && take->section != OBJECT_SECTION_UNDEFINED && take->kind == OBJECT_SYMBOL_FUNCTION, source);
+                        FileMapRead object_map = file_map_read(arena, output, (FileReadOptions){0});
+                        if (BUSTER_REQUIRE(arguments, object_map.bytes.length != 0))
+                        {
+                            ObjectFile round_trip = object_read(arena, object_map.bytes, built.object.target);
+                            BUSTER_TEST_RAW(arguments, round_trip.error == OBJECT_ERROR_NONE, source);
+                            if (round_trip.error == OBJECT_ERROR_NONE)
+                            {
+                                bool elf_format = parsed_target.target.os == OPERATING_SYSTEM_LINUX ||
+                                                  parsed_target.target.os == OPERATING_SYSTEM_ANDROID;
+                                // object_read removes Mach-O's leading underscore; use canonical names
+                                // here while retaining each format's defined-symbol and size contracts.
+                                ObjectSymbol* serialized_v = compiler_driver_test_symbol_by_name(&round_trip, S8("v"));
+                                BUSTER_TEST_RAW(arguments, serialized_v && serialized_v->section != OBJECT_SECTION_UNDEFINED &&
+                                    serialized_v->kind == OBJECT_SYMBOL_DATA &&
+                                    (!elf_format || serialized_v->size == expected_size), source);
+                                ObjectSymbol* serialized_take = compiler_driver_test_symbol_by_name(&round_trip, S8("take"));
+                                BUSTER_TEST_RAW(arguments, serialized_take && serialized_take->section != OBJECT_SECTION_UNDEFINED &&
+                                    serialized_take->kind == OBJECT_SYMBOL_FUNCTION, source);
+                            }
+                            file_map_unmap(object_map);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    {
+        String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+        String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+        BUSTER_TEST(arguments, clang.length != 0 && gcc.length != 0);
+        if (clang.length && gcc.length)
+        {
+            String8 compilers[] = {clang, gcc};
+            for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 version_command[] = {compilers[compiler], S8("--version")};
+                ProcessSpawnResult version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(version_command),
+                    (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, version_spawn.handle != 0))
+                {
+                    ProcessWaitResult version_wait = os_process_wait_deadline(temporary.arena, version_spawn, 30000000);
+                    if (BUSTER_REQUIRE(arguments, !version_wait.timed_out && version_wait.result == PROCESS_RESULT_SUCCESS))
+                    {
+                        string_print(S8("{S8}"), BYTE_SLICE_TO_STRING(8, version_wait.streams[STANDARD_STREAM_OUTPUT]));
+                    }
+                }
+                scratch_end(temporary);
+            }
+            String8 oracle_refused[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
+                S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("long _Float16"),
+                S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 int"), S8("_Float16 _Float16")};
+            String8 oracle_extension[] = {S8("_Complex int"), S8("_Complex char")};
+            String8 oracle_valid[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
+            for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+            {
+                for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+                {
+                    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(oracle_refused); specifier += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        Arena* arena = temporary.arena;
+                        String8 name = string_format(arena, S8("buster-type-specifiers-oracle-{u32}-{u32}-{u32}"), compiler, dialect, specifier);
+                        String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                        String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+                        String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), oracle_refused[specifier]);
+                        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                        {
+                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};
+                            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                            {
+                                ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                                String8 standard_error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+                                bool refused = !waited.timed_out && waited.result != PROCESS_RESULT_SUCCESS &&
+                                               waited.result != PROCESS_RESULT_CRASH &&
+                                               string_first_sequence(standard_error, S8("error:")) != BUSTER_STRING_NO_MATCH &&
+                                               string_first_sequence(standard_error, input) != BUSTER_STRING_NO_MATCH;
+                                BUSTER_TEST_RAW(arguments, refused, source);
+                                string_print(S8("TYPE_SPECIFIER_ORACLE compiler={S8} dialect={S8} source={S8} expected=refused status={u32}\n"),
+                                             compilers[compiler], dialects[dialect], oracle_refused[specifier], (u32)waited.result);
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(oracle_extension) + BUSTER_ARRAY_LENGTH(oracle_valid); specifier += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        Arena* arena = temporary.arena;
+                        String8 accepted = specifier < BUSTER_ARRAY_LENGTH(oracle_extension)
+                            ? oracle_extension[specifier] : oracle_valid[specifier - BUSTER_ARRAY_LENGTH(oracle_extension)];
+                        String8 name = string_format(arena, S8("buster-type-specifiers-oracle-ok-{u32}-{u32}-{u32}"), compiler, dialect, specifier);
+                        String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                        String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+                        String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), accepted);
+                        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                        {
+                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};
+                            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                            {
+                                ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                                BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS, source);
+                                string_print(S8("TYPE_SPECIFIER_ORACLE compiler={S8} dialect={S8} source={S8} expected=accepted status={u32}\n"),
+                                             compilers[compiler], dialects[dialect], accepted, (u32)waited.result);
+                                if (!waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS)
+                                {
+                                    FileMapRead object_map = file_map_read(arena, output, (FileReadOptions){0});
+                                    if (BUSTER_REQUIRE(arguments, object_map.bytes.length != 0))
+                                    {
+                                        ObjectFile emitted = object_read(arena, object_map.bytes, target_native);
+                                        BUSTER_TEST_RAW(arguments, emitted.error == OBJECT_ERROR_NONE, source);
+                                        if (emitted.error == OBJECT_ERROR_NONE)
+                                        {
+                                            ObjectSymbol* v = compiler_driver_test_symbol_by_name(&emitted, S8("v"));
+                                            BUSTER_TEST_RAW(arguments, v && v->section != OBJECT_SECTION_UNDEFINED, source);
+                                            ObjectSymbol* take = compiler_driver_test_symbol_by_name(&emitted, S8("take"));
+                                            BUSTER_TEST_RAW(arguments, take && take->section != OBJECT_SECTION_UNDEFINED &&
+                                                take->kind == OBJECT_SYMBOL_FUNCTION, source);
+                                        }
+                                        file_map_unmap(object_map);
+                                    }
+                                }
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4491,6 +4754,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
