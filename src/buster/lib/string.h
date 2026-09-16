@@ -81,6 +81,26 @@ BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_hexadecimal(String8 string);
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_decimal(String8 string);
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_octal(String8 string);
 BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(String8 string);
+// The Windows OS text boundary. Paths, arguments, environment values and
+// every other string crossing into or out of a wide Win32 call convert here.
+// Both directions replace input they cannot represent with U+FFFD instead of
+// reinterpreting it, and valid text is never altered (#106):
+//   - string16_from_string8 emits one U+FFFD per byte that neither begins nor
+//     completes a well-formed UTF-8 sequence, consuming exactly that one byte.
+//     Invalid leaders, overlong forms, sequences truncated by the end of the
+//     input, bad continuations, encoded UTF-16 surrogates and scalars above
+//     U+10FFFF are all ill-formed and replaced this way.
+//   - string8_from_string16 emits one U+FFFD per isolated surrogate, meaning a
+//     high surrogate not directly followed by a low surrogate, including one
+//     standing at the end of the input, and any low surrogate without a high
+//     surrogate in front of it.
+// Replacement is lossy and is not reversible byte preservation: converted text
+// cannot be restored to the original bytes or code units, and converting back
+// yields the replacement characters rather than the input. Callers that need
+// arbitrary bytes to survive must carry them outside these conversions.
+// null_terminate writes a terminator past the returned length; the result is
+// allocated contiguously from arena and the unused tail of the conservative
+// bound is returned to it.
 BUSTER_F_DECL String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate);
 BUSTER_F_DECL String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate);
 
