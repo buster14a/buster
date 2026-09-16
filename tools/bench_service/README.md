@@ -198,6 +198,17 @@ throughput, sanitizer and workflow gates are retained. `shared.c` is the same
 foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
+Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
+commands use explicit `exec` so the test retains an owned direct child rather
+than depending on PID 1 to reap an orphaned shell descendant. The observed
+`fork` PID identifies the group even when timeout precedes all output; a
+stopped-before-exec control covers that case. Separate owned live/zombie group
+members must prevent cleanup success until explicitly reaped. Failure
+diagnostics retain individual results, elapsed time, PID/group identity and
+process state before bounded cleanup. The 20 ms command deadline, 1,000 ms
+test bound and production cleanup policy are unchanged, including treating
+unreaped zombies as present group members.
+
 The normal native executable is `build/bench-service-tools/service` (`.exe` on
 Windows). The fixed-recipe self-test is a Linux build-driver command; it uses
 private disposable workspaces and short-lived local fixture helpers, while the
