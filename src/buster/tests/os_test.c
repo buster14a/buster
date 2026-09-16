@@ -1,6 +1,7 @@
 #include <buster/tests/os_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 
 // Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
@@ -394,6 +395,56 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 }
             }
             BUSTER_TEST(arguments, os_unreserve(reservation, size));
+        }
+    }
+
+    // Prefaulting is advisory, and os_commit reports commitment only. Not
+    // asking must issue no request at all; a refused request must leave a
+    // successful commit successful and its bytes usable; and a commit that
+    // really fails must fail without having issued the advisory request whose
+    // outcome could otherwise be mistaken for the reason.
+    {
+        u64 page_size = os_get_page_size();
+        u64 size = 2 * page_size;
+        u8* reservation = (u8*)os_reserve(0, size, (ProtectionFlags){0},
+                                          (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+        BUSTER_TEST(arguments, reservation != 0);
+        if (reservation)
+        {
+            OsPrefaultTestCounters before = os_prefault_test_counters();
+            bool quiet = os_commit(reservation, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+            BUSTER_TEST(arguments, quiet);
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == before.requests);
+
+            os_prefault_test_force_next(OS_PREFAULT_REFUSED);
+            bool refused = os_commit(reservation, size, (ProtectionFlags){.read = true, .write = true}, true);
+            OsPrefaultTestCounters after_refused = os_prefault_test_counters();
+            BUSTER_TEST(arguments, refused);
+            BUSTER_TEST(arguments, after_refused.requests == before.requests + 1);
+            BUSTER_TEST(arguments, after_refused.unpopulated == before.unpopulated + 1);
+            BUSTER_TEST(arguments, after_refused.last == OS_PREFAULT_REFUSED);
+            reservation[0] = 0x3c;
+            reservation[size - 1] = 0xc3;
+            BUSTER_TEST(arguments, reservation[0] == 0x3c && reservation[size - 1] == 0xc3);
+
+            // The override is one shot: the next request reaches the platform.
+            // Whichever of the three documented outcomes this host reports,
+            // the committed range is unchanged by asking.
+            OsPrefaultResult native = os_prefault(reservation, size);
+            BUSTER_TEST(arguments, native == OS_PREFAULT_POPULATED || native == OS_PREFAULT_REFUSED ||
+                                       native == OS_PREFAULT_UNAVAILABLE);
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == after_refused.requests + 1);
+            BUSTER_TEST(arguments, os_prefault_test_counters().last == native);
+            BUSTER_TEST(arguments, reservation[0] == 0x3c && reservation[size - 1] == 0xc3);
+
+            BUSTER_TEST(arguments, os_unreserve(reservation, size));
+
+            // Committing the range just released fails for a real reason, and
+            // must do so before any prefault request is issued.
+            OsPrefaultTestCounters before_failure = os_prefault_test_counters();
+            bool failed = os_commit(reservation, page_size, (ProtectionFlags){.read = true, .write = true}, true);
+            BUSTER_TEST(arguments, !failed);
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == before_failure.requests);
         }
     }
 

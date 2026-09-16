@@ -384,8 +384,34 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
+// Outcome of a best-effort prefault request. Prefaulting only populates the
+// page table entries of a range that is already committed. It is advisory on
+// every supported target: it is not residency, not protection from paging or
+// swap, not a lock of any kind, and not a latency guarantee. The operating
+// system may reclaim a populated page immediately afterwards, and nothing
+// here pins anything for any lifetime.
+typedef enum OsPrefaultResult
+{
+    // This build has no prefault facility for its target, so no request was
+    // issued and no page was populated.
+    OS_PREFAULT_UNAVAILABLE,
+    // The platform accepted the request for the whole range.
+    OS_PREFAULT_POPULATED,
+    // The platform rejected it: an older kernel, a privilege or resource
+    // limit, or a mapping it declines to populate. The range stays committed
+    // and usable exactly as it was.
+    OS_PREFAULT_REFUSED,
+} OsPrefaultResult;
+
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
-BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+// Commits `size` bytes at `address`; the result reports that commitment and
+// nothing else. `prefault` additionally requests best-effort prefaulting of
+// the committed range. That request is issued only after the commit itself
+// succeeded and its outcome is not folded into this result, so a refused or
+// unavailable prefault can neither fail a good commit nor stand in for a
+// failed one. Call os_prefault directly when the outcome matters.
+BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
+BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);

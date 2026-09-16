@@ -1,6 +1,7 @@
 #include <buster/tests/arena_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/os.h>
+#include <buster/lib/os_internal.h>
 
 UnitTestResult arena_tests(UnitTestArguments* arguments)
 {
@@ -66,7 +67,10 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
     String8 failure_mode = os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE"));
-    if (string_equal(failure_mode, S8("commit")) || string_equal(failure_mode, S8("bound")) ||
+    // Requesting prefaulting changes none of this: the commit is what the
+    // arena depends on, so its failure stays fatal and keeps its diagnostic.
+    bool prefaulting_mode = string_equal(failure_mode, S8("commit_prefault"));
+    if (string_equal(failure_mode, S8("commit")) || prefaulting_mode || string_equal(failure_mode, S8("bound")) ||
         string_equal(failure_mode, S8("alignment_zero")) || string_equal(failure_mode, S8("alignment_three")) ||
         string_equal(failure_mode, S8("alignment_huge")) || string_equal(failure_mode, S8("cursor_low")) ||
         string_equal(failure_mode, S8("cursor_high")) || string_equal(failure_mode, S8("decommit_low")) ||
@@ -75,10 +79,10 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         Arena* arena = arena_create((ArenaCreation){
             .reserved_size = BUSTER_MB(1),
             .initial_size = BUSTER_KB(64),
-            .flags = {.no_pool = 1},
+            .flags = {.no_pool = 1, .prefault_pages = prefaulting_mode},
         });
         BUSTER_VALIDATE(arena != 0);
-        if (string_equal(failure_mode, S8("commit")))
+        if (string_equal(failure_mode, S8("commit")) || prefaulting_mode)
         {
             arena_test_fail_next_commit();
             arena_allocate_bytes(arena, BUSTER_KB(128), 1);
@@ -366,6 +370,67 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         }
     }
 
+    // prefault_pages is advisory at the arena boundary too. An arena that did
+    // not ask must issue no request; an arena that asked gets one request per
+    // commitment, initial and incremental alike; and a refused request must
+    // leave the cursor, the committed high water and the handed-out bytes
+    // exactly as a granted one would.
+    {
+        OsPrefaultTestCounters quiet_before = os_prefault_test_counters();
+        Arena* quiet = arena_create((ArenaCreation){
+            .reserved_size = BUSTER_MB(1),
+            .initial_size = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        });
+        BUSTER_TEST(arguments, quiet != 0);
+        if (quiet)
+        {
+            memset(arena_allocate_bytes(quiet, BUSTER_KB(128), 16), 0x11, BUSTER_KB(128));
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == quiet_before.requests);
+            BUSTER_TEST(arguments, arena_destroy(quiet, 1));
+        }
+
+        OsPrefaultTestCounters before = os_prefault_test_counters();
+        os_prefault_test_force_next(OS_PREFAULT_REFUSED);
+        Arena* arena = arena_create((ArenaCreation){
+            .reserved_size = BUSTER_MB(1),
+            .initial_size = BUSTER_KB(64),
+            .granularity = BUSTER_KB(64),
+            .flags = {.prefault_pages = 1},
+        });
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            OsPrefaultTestCounters created = os_prefault_test_counters();
+            BUSTER_TEST(arguments, created.requests == before.requests + 1);
+            BUSTER_TEST(arguments, created.unpopulated == before.unpopulated + 1);
+            BUSTER_TEST(arguments, created.last == OS_PREFAULT_REFUSED);
+            BUSTER_TEST(arguments, arena->flags.prefault_pages);
+            BUSTER_TEST(arguments, arena->position == arena_minimum_position);
+            BUSTER_TEST(arguments, arena->os_position >= BUSTER_KB(64));
+
+            // Growing past the committed high water refuses its own request
+            // and still returns writable bytes at the expected cursor.
+            os_prefault_test_force_next(OS_PREFAULT_REFUSED);
+            u8* grown = (u8*)arena_allocate_bytes(arena, BUSTER_KB(128), 16);
+            OsPrefaultTestCounters after_growth = os_prefault_test_counters();
+            BUSTER_TEST(arguments, grown != 0);
+            BUSTER_TEST(arguments, after_growth.requests == created.requests + 1);
+            BUSTER_TEST(arguments, after_growth.last == OS_PREFAULT_REFUSED);
+            memset(grown, 0x5a, BUSTER_KB(128));
+            BUSTER_TEST(arguments, grown[0] == 0x5a && grown[BUSTER_KB(128) - 1] == 0x5a);
+            BUSTER_TEST(arguments, arena->position == arena_minimum_position + BUSTER_KB(128));
+            BUSTER_TEST(arguments, arena->os_position >= arena->position);
+            BUSTER_TEST(arguments, arena_dirty_position(arena) == arena->position);
+
+            // An arena that asked for prefaulting is never parked for reuse:
+            // the pool would hand it back without reissuing the request.
+            arena_pool_release_thread();
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
+            BUSTER_TEST(arguments, arena_pool_release_thread() == 0);
+        }
+    }
+
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
     // A failed recommit is reported at the allocation site instead of
     // returning a pointer into inaccessible memory. Run the fatal path in a
@@ -376,14 +441,15 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             S8("test"),
         };
         String8 modes[] = {
-            S8("commit"), S8("bound"), S8("alignment_zero"), S8("alignment_three"), S8("alignment_huge"),
-            S8("cursor_low"), S8("cursor_high"), S8("decommit_low"), S8("decommit_high"),
+            S8("commit"), S8("commit_prefault"), S8("bound"), S8("alignment_zero"), S8("alignment_three"),
+            S8("alignment_huge"), S8("cursor_low"), S8("cursor_high"), S8("decommit_low"), S8("decommit_high"),
         };
         String8 diagnostics[] = {
-            S8("arena commit failed"), S8("validation failed"), S8("validation failed"), S8("validation failed"),
+            S8("arena commit failed"), S8("arena commit failed"), S8("validation failed"), S8("validation failed"),
             S8("validation failed"), S8("validation failed"), S8("validation failed"), S8("validation failed"),
-            S8("validation failed"),
+            S8("validation failed"), S8("validation failed"),
         };
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(modes) == BUSTER_ARRAY_LENGTH(diagnostics));
         for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
         {
             String8 environment_keys[] = {S8("BUSTER_ARENA_FAILURE_MODE")};
