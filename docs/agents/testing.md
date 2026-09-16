@@ -109,7 +109,7 @@
   self-hosted defaults remain unchanged, and an explicit
   `BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS` is preserved for launcher validation.
   No signing retry or failure suppression is introduced. The policy and native
-  status propagation are covered by `python3 tests/ios_hosted_signing_budget_test.py`
+  status propagation are covered by `python3 ios/hosted_signing_budget_test.py`
   in the mobile lifecycle workflow; actual Apple signing and simulator tests
   remain a distinct native CI gate.
 - Android CI reports per-phase status lines that must be read together before
