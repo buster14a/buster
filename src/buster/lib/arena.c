@@ -73,7 +73,7 @@ void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
 #endif
     {
         commit_succeeded = os_commit(commit_pointer, size_to_commit,
-                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages);
+                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.prefault_pages);
     }
     if (!commit_succeeded)
     {
@@ -244,9 +244,12 @@ u64 arena_pool_release_thread(void)
     return result;
 }
 
+// A pooled arena is handed back with the pages it already had and without
+// reissuing the prefault request, so a creation that asked for prefaulting
+// must not be served from -- or parked in -- the pool.
 BUSTER_GLOBAL_LOCAL bool arena_pool_eligible(u64 reserved_size, u64 count, ArenaFlags flags)
 {
-    return count == 1 && !flags.execute && !flags.lock_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
+    return count == 1 && !flags.execute && !flags.prefault_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
@@ -347,7 +350,9 @@ Arena* arena_create(ArenaCreation original_creation)
             {
                 Arena* arena = (Arena*)(result + (individual_reserved_size * i));
 
-                bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.lock_pages);
+                // Only the commit decides whether this arena exists. The
+                // prefault request it carries is advisory and cannot fail it.
+                bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages);
                 if (commit_result)
                 {
                     *arena = (Arena){

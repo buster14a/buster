@@ -45,6 +45,58 @@
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
+## Virtual memory commitment and prefaulting
+
+`os_commit` reports commitment and nothing else. Its `prefault` argument asks
+for best-effort prefaulting of the committed range; that request is issued only
+after the commit itself succeeded, and its outcome never reaches the returned
+boolean, so an advisory refusal can neither fail a commit that worked nor stand
+in for one that did not. A caller that needs the outcome calls `os_prefault`
+directly and reads its three documented results: `OS_PREFAULT_POPULATED`,
+`OS_PREFAULT_REFUSED` (the platform rejected the request) and
+`OS_PREFAULT_UNAVAILABLE` (this build has no prefault facility for its target,
+so no request was issued at all).
+
+Prefaulting only populates page table entries for a range that is already
+committed. It is not residency, not a page lock, not protection from paging or
+swap, and not a latency guarantee; the OS may reclaim a populated page
+immediately afterwards. There is no lifetime page-locking option and no
+`lock_pages` alias that would imply one. Observed behavior differs per target
+and each one refuses for ordinary reasons:
+
+- **Linux** uses `madvise(MADV_POPULATE_WRITE)`, which states exactly this
+  intent and locks nothing. Kernels before 5.14 do not know the advice and
+  reject it with `EINVAL`, which is a refusal of the request.
+- **macOS** has no populate advice, so the range is `mlock`ed and immediately
+  `munlock`ed; the lock is only what forces the faults and is released before
+  returning. `RLIMIT_MEMLOCK` bounds an unprivileged process, so refusing a
+  large range is ordinary, and a failed release is reported as a refusal rather
+  than as a populated range.
+- **Windows** exposes no supported populate call, and `VirtualAlloc(MEM_COMMIT)`
+  has already charged the backing store. An MSVC build can force the faults by
+  registering the range as a Winsock Registered I/O buffer and deregistering it,
+  which requires both extension functions and a length that fits a `DWORD`;
+  that table exists only once the process obtained them, so the ordinary
+  Windows outcome is `OS_PREFAULT_UNAVAILABLE`.
+
+`ArenaFlags.prefault_pages` forwards that same advisory request for an arena's
+initial commitment and every later growth. Ordinary arenas are unaffected: they
+ask for nothing and issue no request. A refused or unavailable request still
+yields a fully committed, fully usable arena, so no allocation can observe the
+difference, while a genuine commit failure stays fatal at the allocation site
+with the `arena commit failed` diagnostic. An arena that asked for prefaulting
+is neither served from nor parked in the destroy-side reuse pool, because the
+pool hands an arena back without reissuing the request.
+
+Registered `arena_tests` and `os_tests` cover this through the `os_internal.h`
+prefault seam, which overrides the reported outcome of exactly one request on
+the calling thread and counts the requests actually issued. That proves a
+disabled flag issues nothing, a refusal leaves commitment and allocation state
+intact, and a real commit failure is reported without an advisory request
+having been made — none of which needs privileges or real memory exhaustion.
+The `commit_prefault` child-process failure mode asserts the fatal commit
+diagnostic with prefaulting requested.
+
 ## File transfer completion
 
 `os_file_open_checked`, `os_file_write_checked`, `os_file_close_checked` and

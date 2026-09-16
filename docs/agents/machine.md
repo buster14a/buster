@@ -73,6 +73,14 @@
   them as values and accept their pointer registers as address bases.
   Only instruction-defined locals take the frame-address path; an absent
   instruction definition is not a missing value.
+- AArch64 aggregate pointer/frame copies and indirect `va_arg` materialize
+  out-of-range or unaligned pointer offsets in reserved X16, matching the
+  existing frame-address policy. X17 (or X9 for `va_arg`) retains the copied
+  data, and the original pointer is preserved across chunks. Direct scaled
+  imm12 words are unchanged. Capacity reserves both expanded memory halves;
+  impossible X16/SP pointer aliases fail before writing a prefix. Registered
+  large-copy tests cross 32 KiB/64 KiB, both C forms and every allocator, with
+  native Unix AArch64 byte/guard verification in addition to encoding checks.
 - Native i128 block parameters expand to two general-register MIR parameters.
   The selector allocates pair mappings only for functions with wide joins and
   snapshots each incoming instruction result at its definition. Entry stores
@@ -196,8 +204,10 @@
   predicates and escaping block values reach eight-byte homes. Predicate edge
   copies capture all outgoing sources before publishing any destination, with
   fixed physical sources captured before reload scratch can overwrite them.
-  Unused predicate homes are removed, and zero/all-ones integer bridge values
-  rematerialize without a memory reload. Explicit MASK MIR is supported in
+  Unused predicate homes are removed, leaving `MACHINE_VIRTUAL_REGISTER_NO_HOME`
+  as the value's offset; debug-location recording reports such a value as
+  having no frame location rather than rejecting the function. Zero/all-ones
+  integer bridge values rematerialize without a memory reload. Explicit MASK MIR is supported in
   MIR_STACK, where it flushes after each row. Source MIR_STACK selection keeps
   its existing integer bridges because it cannot retain K values between rows;
   the selector's `predicate_residency` argument records that allocator policy.
