@@ -34203,9 +34203,11 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     }
 #if BUSTER_LINUX
     char driver_path[4096] = {0};
-    ssize_t driver_length = service ? readlink("/proc/self/exe", driver_path, sizeof(driver_path) - 1) : -1;
+    ssize_t driver_length = service && self_test ? readlink("/proc/self/exe", driver_path, sizeof(driver_path)) : -1;
     bool driver_resolved = driver_length > 0 && (size_t)driver_length < sizeof(driver_path);
     if (driver_resolved) driver_path[driver_length] = 0;
+    String8 service_test_driver = driver_resolved ?
+        string_duplicate_arena(arena, string_from_pointer(driver_path), true) : S8("/usr/bin/false");
 #endif
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
@@ -34252,7 +34254,7 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
 #if BUSTER_LINUX
         if (service)
         {
-            os_argument_builder_append(&builder, driver_resolved ? string_from_pointer(driver_path) : S8("/usr/bin/false"));
+            os_argument_builder_append(&builder, service_test_driver);
         }
 #endif
     }
