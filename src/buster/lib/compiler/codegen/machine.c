@@ -3213,7 +3213,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             u32 preserved_vector_count = 0;
             for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
             {
-                preserved_vector_count += (expected_preserved_vector_mask >> vector_register) & 1u;
+                preserved_vector_count += ((u32)expected_preserved_vector_mask >> vector_register) & 1u;
             }
             bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
             valid = valid && (assembly->clobber_mask & operand_register_mask) == operand_register_mask &&
@@ -4287,7 +4287,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         u32 push_count = 0;
         for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)
         {
-            push_count += (placement.callee_saved_mask >> physical_register) & 1u;
+            push_count += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
         }
         // The callee-saved save area sits below the frame pointer only when the
         // pushes follow it. Where they precede it — Win64 — the saves are at the
