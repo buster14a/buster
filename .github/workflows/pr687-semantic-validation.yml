@@ -1,0 +1,84 @@
+name: PR 687 semantic acceptance
+on:
+  push:
+    branches: [codex/pr687-semantic-validation]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: bd9bf5c8b566b6782cc9c7154164b053fa98ca0d
+          path: source
+          persist-credentials: false
+      - name: Construct and publish the exact tested source tree
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr687-semantic"
+          python3 - <<'PY'
+          import base64, hashlib, lzma, os
+          from pathlib import Path
+          parts = sorted(Path('../transport/.github/pr687-semantic').glob('part*.b64'))
+          assert len(parts) == 4
+          patch = lzma.decompress(base64.b64decode(''.join(p.read_text().strip() for p in parts), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'cf2fb71e0fe55b1e0f950a16e1e8f4654b020bdbbf2ce98c086d8c5ab52963f3'
+          Path(os.environ['RUNNER_TEMP'], 'pr687-semantic/repair.patch').write_bytes(patch)
+          PY
+          git apply --index "$RUNNER_TEMP/pr687-semantic/repair.patch"
+          git diff --cached --check
+          tree=$(git write-tree)
+          test "$tree" = b76102f0fe594e4d978bcd3ed46fd42b3060e0c8
+          git config user.name 'PR 687 semantic repair'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'c: preserve wide BF16 constant precision and check unused intrinsic calls'
+          commit=$(git rev-parse HEAD)
+          git -c credential.helper='!gh auth git-credential' push origin "$commit:refs/heads/codex/pr687-semantic-candidate"
+          printf 'commit=%s\ntree=%s\n' "$commit" "$tree" | tee "$RUNNER_TEMP/pr687-semantic/revision.txt"
+      - name: Bootstrap and configure the hosted compiler
+        working-directory: source
+        run: |
+          set -euo pipefail
+          clang --version | tee "$RUNNER_TEMP/pr687-semantic/clang-version.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/pr687-semantic/configure.log"
+      - name: Run the complete Release regression suite
+        working-directory: source
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/pr687-semantic/release-tests.log"
+      - name: Verify ordinary self-host fixed point
+        if: ${{ !cancelled() }}
+        working-directory: source
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/pr687-semantic/self-host.log"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: ${{ !cancelled() }}
+        with:
+          repository: llvm/llvm-project
+          ref: c13b7485b87909fcf739f62cfa382b55407433c0
+          path: llvm
+          sparse-checkout: clang/lib/Headers
+          persist-credentials: false
+      - name: Verify pristine BF16 headers and typed negative controls
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          python3 transport/.github/pr687-semantic/header-controls.py source/build/Release/ide llvm/clang/lib/Headers "$RUNNER_TEMP/pr687-semantic/header-controls" 2>&1 | tee "$RUNNER_TEMP/pr687-semantic/headers.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: pr687-semantic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr687-semantic
+          retention-days: 7
+          if-no-files-found: error
