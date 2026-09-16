@@ -5409,6 +5409,185 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     CParseResult aarch64_macos_builtins_parse = c_parse(arguments->arena, aarch64_macos_builtins);
     BUSTER_TEST(arguments, aarch64_macos_builtins_parse.diagnostic_count == 0);
 
+    // #640: __is_target_os answers for the selected compilation target. The
+    // conditions below use nothing but the target queries, so a wrong answer
+    // reaches #error instead of being masked by a target macro that happens to
+    // be defined; the probe declaration that follows proves the guarded region
+    // was actually preprocessed rather than skipped. Spellings and aliases are
+    // clang 18's, read back with -target and -E: Windows answers `win32` too,
+    // a Darwin target answers `darwin` beside its own name, and an Android
+    // target answers `linux` because its triple's OS is Linux and `android` is
+    // the environment, never an OS spelling.
+    typedef struct CTargetOsQueryCase CTargetOsQueryCase;
+    struct CTargetOsQueryCase
+    {
+        Target target;
+        String8 source;
+        String8 probe;
+    };
+    CTargetOsQueryCase target_os_cases[] = {
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            .source = S8("#if !__is_target_os(windows) || !__is_target_os(win32)\n"
+                         "#error windows target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(linux) || __is_target_os(macos) || __is_target_os(macosx) || "
+                         "__is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error windows target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_arch(x86_64) || __is_target_vendor(apple)\n"
+                         "#error windows target arch or vendor\n"
+                         "#endif\n"
+                         "int windows_os_probe;\n"),
+            .probe = S8("windows_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID, .os_version_major = 35},
+            .source = S8("#if !__is_target_os(linux)\n"
+                         "#error android target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(android) || __is_target_os(windows) || __is_target_os(win32) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi)\n"
+                         "#error android target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_arch(arm64) || !__is_target_arch(aarch64) || __is_target_vendor(apple)\n"
+                         "#error android target arch or vendor\n"
+                         "#endif\n"
+                         "int android_os_probe;\n"),
+            .probe = S8("android_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            .source = S8("#if !__is_target_os(linux)\n"
+                         "#error linux target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(windows) || __is_target_os(win32) || __is_target_os(macos) || "
+                         "__is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error linux target cross-OS\n"
+                         "#endif\n"
+                         "int linux_os_probe;\n"),
+            .probe = S8("linux_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+            .source = S8("#if !__is_target_os(macos) || !__is_target_os(macosx) || !__is_target_os(darwin)\n"
+                         "#error macos target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(ios) || __is_target_os(linux) || __is_target_os(windows) || "
+                         "__is_target_os(win32) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error macos target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_vendor(apple) || !__is_target_arch(arm64)\n"
+                         "#error macos target arch or vendor\n"
+                         "#endif\n"
+                         "int macos_os_probe;\n"),
+            .probe = S8("macos_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_IOS},
+            .source = S8("#if !__is_target_os(ios) || !__is_target_os(darwin)\n"
+                         "#error ios target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(macos) || __is_target_os(macosx) || __is_target_os(linux) || "
+                         "__is_target_os(windows) || __is_target_os(win32) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error ios target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_vendor(apple)\n"
+                         "#error ios target vendor\n"
+                         "#endif\n"
+                         "int ios_os_probe;\n"),
+            .probe = S8("ios_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_UEFI},
+            .source = S8("#if !__is_target_os(uefi)\n"
+                         "#error uefi target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(windows) || __is_target_os(win32) || __is_target_os(linux) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin)\n"
+                         "#error uefi target cross-OS\n"
+                         "#endif\n"
+                         "int uefi_os_probe;\n"),
+            .probe = S8("uefi_os_probe"),
+        },
+        {
+            // A freestanding target has no triple OS, so it answers nothing.
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_FREESTANDING},
+            .source = S8("#if __is_target_os(linux) || __is_target_os(windows) || __is_target_os(win32) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin) || "
+                         "__is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error freestanding target OS\n"
+                         "#endif\n"
+                         "int freestanding_os_probe;\n"),
+            .probe = S8("freestanding_os_probe"),
+        },
+    };
+    for (u32 os_case = 0; os_case < BUSTER_ARRAY_LENGTH(target_os_cases); os_case += 1)
+    {
+        CTargetOsQueryCase target_os_case = target_os_cases[os_case];
+        CPreprocessResult target_os_queries =
+            c_preprocess(arguments->arena, target_os_case.source, (CPreprocessOptions){.target = target_os_case.target});
+        BUSTER_TEST(arguments, target_os_queries.diagnostic_count == 0);
+        // `int <probe>;` plus the end-of-file token: the probe is only in the
+        // stream when the guarded region above was actually preprocessed.
+        BUSTER_TEST(arguments, target_os_queries.token_count == 4);
+        if (target_os_queries.token_count == 4)
+        {
+            c_test_preprocessed_token(arguments, &result, target_os_queries, 1, C_TOKEN_IDENTIFIER, target_os_case.probe);
+        }
+        CParseResult target_os_parse = c_parse(arguments->arena, target_os_queries);
+        BUSTER_TEST(arguments, target_os_parse.diagnostic_count == 0);
+    }
+
+    // #639: __has_attribute answers for the GNU attributes this frontend
+    // implements, in every spelling the parser accepts, and denies one it only
+    // steps over. `returns_twice` is the control for that: clang implements it
+    // and answers 1, this frontend skips it and must answer 0. The C attribute
+    // operator keeps its own namespace and answers 0 throughout, including for
+    // the bare GNU names the GNU operator answers 1 for and for a namespaced
+    // spelling, which clang 18 also answers 0 and 1 for respectively.
+    CPreprocessResult attribute_queries =
+        c_preprocess(arguments->arena,
+                     S8("#if !__has_attribute(packed) || !__has_attribute(__packed__) || !__has_attribute(__packed)\n"
+                        "#error packed attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(aligned) || !__has_attribute(__aligned__) || !__has_attribute(__aligned)\n"
+                        "#error aligned attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(vector_size) || !__has_attribute(__vector_size__) || !__has_attribute(__vector_size)\n"
+                        "#error vector_size attribute query\n"
+                        "#endif\n"
+                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(returns_twice) || __has_attribute(_Alignas)\n"
+                        "#error unimplemented attribute query\n"
+                        "#endif\n"
+                        "#if __has_c_attribute(packed) || __has_c_attribute(aligned) || __has_c_attribute(vector_size)\n"
+                        "#error C attribute query answered a GNU name\n"
+                        "#endif\n"
+                        "#if __has_c_attribute(nodiscard) || __has_c_attribute(deprecated) || __has_c_attribute(gnu::packed)\n"
+                        "#error C attribute query answered an unimplemented attribute\n"
+                        "#endif\n"
+
+                        "int attribute_query_probe;\n"),
+                     (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, attribute_queries.diagnostic_count == 0);
+    BUSTER_TEST(arguments, attribute_queries.token_count == 4);
+    if (attribute_queries.token_count == 4)
+    {
+        c_test_preprocessed_token(arguments, &result, attribute_queries, 1, C_TOKEN_IDENTIFIER, S8("attribute_query_probe"));
+    }
+    CParseResult attribute_queries_parse = c_parse(arguments->arena, attribute_queries);
+    BUSTER_TEST(arguments, attribute_queries_parse.diagnostic_count == 0);
+
+    // An empty argument list is malformed for both operators and still fails
+    // the directive; relaxing the argument shape for the namespaced C spelling
+    // must not turn that into a silent 0.
+    CPreprocessResult empty_attribute_argument = c_preprocess(arguments->arena,
+                                                              S8("#if __has_c_attribute()\n"
+                                                                 "int unreachable_probe;\n"
+                                                                 "#endif\n"),
+                                                              (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, empty_attribute_argument.diagnostic_count != 0);
+
     CPreprocessResult include = c_preprocess(arguments->arena,
                                              S8("#include \"basic_c_include.h\"\n"
                                                 "INCLUDED_VALUE\n"),
@@ -15082,6 +15261,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         BUSTER_TEST(arguments, function_pointer_type != 0 && function_pointer_type->kind == IR_TYPE_POINTER);
     }
     scratch_end(pointee_temporary);
+
+    // #639: the query is only correct if source that *selects* an attribute
+    // through it keeps the layout. Calling the predicate proves nothing a
+    // header cares about, so this witness conditionally defines the attribute
+    // and then asserts the resulting record, on an explicit target whose int
+    // is four bytes. Before the repair __has_attribute(packed) was 0, both
+    // macros expanded to nothing, and the structures silently took the
+    // default layout while still compiling.
+    {
+        String8 witness_source = S8("#if __has_attribute(packed)\n"
+                                    "#define WIRE_PACKED __attribute__((packed))\n"
+                                    "#else\n"
+                                    "#define WIRE_PACKED\n"
+                                    "#endif\n"
+                                    "#if __has_attribute(__aligned__)\n"
+                                    "#define BLOCK_ALIGNED __attribute__((__aligned__(32)))\n"
+                                    "#else\n"
+                                    "#define BLOCK_ALIGNED\n"
+                                    "#endif\n"
+                                    "#if __has_attribute(__vector_size__)\n"
+                                    "#define LANES_VECTOR __attribute__((__vector_size__(16)))\n"
+                                    "#else\n"
+                                    "#define LANES_VECTOR\n"
+                                    "#endif\n"
+                                    "struct WIRE_PACKED Wire { char tag; int value; };\n"
+                                    "struct BLOCK_ALIGNED Block { char value; };\n"
+                                    "typedef int LANES_VECTOR Lanes;\n"
+                                    "_Static_assert(sizeof(struct Wire) == 5, \"packed query lost layout\");\n"
+                                    "_Static_assert(_Alignof(struct Wire) == 1, \"packed query lost alignment\");\n"
+                                    "_Static_assert(_Alignof(struct Block) == 32, \"aligned query lost layout\");\n"
+                                    "_Static_assert(sizeof(Lanes) == 16, \"vector_size query lost width\");\n"
+                                    "struct Wire wire_object;\n"
+                                    "struct Block block_object;\n");
+        TargetParseResult witness_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        BUSTER_TEST(arguments, witness_target.error == TARGET_PARSE_ERROR_NONE);
+        TemporalArena witness_temporary = scratch_begin(0, 0);
+        CPreprocessResult witness_preprocess = {0};
+        CParseResult witness_parse = {0};
+        CIRLowerResult witness_lowered = c_test_lower_source(witness_temporary.arena, witness_source, S8("attribute-query-layout.c"),
+                                                             witness_target.target, &witness_preprocess, &witness_parse);
+        BUSTER_TEST(arguments, witness_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_lowered.program != 0);
+        if (witness_lowered.program)
+        {
+            IrModule* witness_module = witness_lowered.program->modules;
+            IrGlobal* wire = c_test_find_ir_global(witness_module, witness_lowered.program, S8("wire_object"));
+            IrType* wire_type = wire ? ir_type_from_id(&witness_lowered.program->types, wire->type) : 0;
+            BUSTER_TEST(arguments, wire_type != 0);
+            if (wire_type)
+            {
+                BUSTER_TEST(arguments, wire_type->layout.size == 5);
+                BUSTER_TEST(arguments, wire_type->layout.alignment == 1);
+            }
+            IrGlobal* block = c_test_find_ir_global(witness_module, witness_lowered.program, S8("block_object"));
+            IrType* block_type = block ? ir_type_from_id(&witness_lowered.program->types, block->type) : 0;
+            BUSTER_TEST(arguments, block_type != 0);
+            if (block_type)
+            {
+                BUSTER_TEST(arguments, block_type->layout.alignment == 32);
+            }
+        }
+        scratch_end(witness_temporary);
+    }
 
     return result;
 }
