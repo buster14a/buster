@@ -1,0 +1,115 @@
+name: Issue 36 AArch64 copy checkpoint
+on:
+  push:
+    branches: [work/36-recovered-integration-20260915]
+    paths: [.github/workflows/issue36-publish-a64.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.apply.outputs.revision }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+      - name: Apply exact tested source patch
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, pathlib, subprocess, zlib
+          payload = pathlib.Path('.github/issue36-a64-copy.zlib.b64').read_text().strip()
+          # Correct the known two-character transport insertion; the independent
+          # patch digest and complete source-tree digest remain mandatory.
+          payload = payload.replace('AeD6rDAi3u3yTFt', 'AeD6rDAi3yTFt')
+          patch = zlib.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '134d16bfea3be0830995ccca09838df6e98a2ab788147357b3288f1132e6f44c'
+          subprocess.run(['git', 'apply', '--check', '--unidiff-zero', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '-'], input=patch, check=True)
+          PY
+          git diff --cached --check
+          git rm .github/issue36-a64-copy.zlib.b64 .github/workflows/issue36-publish-a64.yml
+          test "$(git write-tree)" = b02cb484b2762f7db32828dae7ebc84593ca108c
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'aarch64: encode aggregate pointer copies beyond imm12' -m 'Materialize large or unaligned pointer offsets in reserved X16 while preserving copy data and base pointers. Keep direct scaled encodings unchanged. Register boundary, tail, guard and native AArch64 execution coverage across all modes and both C forms. Local Clang Debug non-unity: 2664569/2664569 assertions, 52/52 modules. All 15 frozen AArch64 Linux header/STB object replay cells pass with verification and zero fallback. Native platform and final retirement acceptance remain separate gates.'
+          git push origin HEAD:refs/heads/work/36-recovered-integration-20260915
+          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  native:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: x86_64
+          - runner: ubuntu-26.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.revision }}
+          persist-credentials: false
+      - name: Build and execute full registered native suite
+        shell: bash
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
+          BUSTER_TEST_JOBS: 2
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD HEAD^{tree} > evidence/source.txt
+          clang --version > evidence/clang.txt
+          node --version > evidence/node.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/issue36-build"
+          "$RUNNER_TEMP/issue36-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee evidence/generate.log
+          "$RUNNER_TEMP/issue36-build" build --config Debug -t test_all 2>&1 | tee evidence/test-all.log
+      - name: Preserve exact-revision native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue36-copy-native-${{ matrix.arch }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+  export:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.revision }}
+          fetch-depth: 1
+      - name: Export immutable integration source objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin \
+            +refs/heads/main:refs/heads/export/main \
+            +refs/heads/codex/36-service-recovery-20260915:refs/heads/export/service-current \
+            +refs/heads/codex/569-canonical-landing-20260914:refs/heads/export/correctness-current
+          git show-ref > source-identities.txt
+          mkdir source.git
+          cp -a .git/objects .git/refs source.git/
+          for f in shallow packed-refs; do
+            if test -f ".git/$f"; then cp ".git/$f" source.git/; fi
+          done
+          printf 'ref: refs/heads/export/main\n' > source.git/HEAD
+          printf '[core]\nrepositoryformatversion = 0\nbare = true\n' > source.git/config
+          git --git-dir=source.git fsck --connectivity-only
+          tar -czf issue36-current-objects.tar.gz source.git source-identities.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue36-current-objects-${{ github.run_id }}
+          path: issue36-current-objects.tar.gz
+          retention-days: 7
+          if-no-files-found: error
