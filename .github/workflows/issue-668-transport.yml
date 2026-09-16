@@ -1,0 +1,33 @@
+name: Issue 668 transport
+
+on:
+  push:
+    branches: [codex/issue-668-transport]
+    paths: [.github/workflows/issue-668-transport.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
+          persist-credentials: false
+      - name: Export tracked source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output="$RUNNER_TEMP/issue-668-source.tar.gz" HEAD
+          git rev-parse HEAD
+          sha256sum "$RUNNER_TEMP/issue-668-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-668-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-668-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
