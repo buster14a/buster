@@ -1,0 +1,27 @@
+name: Issue 685 source and validation
+on:
+  push:
+    branches: [codex/685-android-summary-validation]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Retain exact tracked source for local validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue-685"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/issue-685/identity.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/issue-685/source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-685-source
+          path: ${{ runner.temp }}/issue-685/
+          if-no-files-found: error
+          retention-days: 1
