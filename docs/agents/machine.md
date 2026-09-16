@@ -53,6 +53,16 @@
   switch-case target, even an unused row, because FAST consumes the whole table.
   Keep these checks at the existing verification boundary; selector-certified
   fresh functions continue directly to placement without another verifier pass.
+- Debug-enabled production selection publishes canonical-local identity in the
+  cold `MachineDebugValue` side table after virtual-register compaction. Its
+  source spans remain canonical instruction IDs and its references name final
+  virtual registers or stack slots, so scheduling shares the table unchanged;
+  scheduled line marks recover native ranges after encoding. Placement is the
+  authority for registers, spills and frame offsets. A range begins only at a
+  row boundary where the represented value is already available. Mutable
+  values are followed per row across definitions and allocator edits;
+  indirect/over-aligned and unrepresentable values publish UNAVAILABLE rather
+  than guessing. Selection without debug info allocates no table.
 - An ordinary machine virtual register has exactly one definition and every
   use, including an edge-copy source, is dominated by it. The temporary
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
@@ -63,6 +73,14 @@
   them as values and accept their pointer registers as address bases.
   Only instruction-defined locals take the frame-address path; an absent
   instruction definition is not a missing value.
+- AArch64 aggregate pointer/frame copies and indirect `va_arg` materialize
+  out-of-range or unaligned pointer offsets in reserved X16, matching the
+  existing frame-address policy. X17 (or X9 for `va_arg`) retains the copied
+  data, and the original pointer is preserved across chunks. Direct scaled
+  imm12 words are unchanged. Capacity reserves both expanded memory halves;
+  impossible X16/SP pointer aliases fail before writing a prefix. Registered
+  large-copy tests cross 32 KiB/64 KiB, both C forms and every allocator, with
+  native Unix AArch64 byte/guard verification in addition to encoding checks.
 - Native i128 block parameters expand to two general-register MIR parameters.
   The selector allocates pair mappings only for functions with wide joins and
   snapshots each incoming instruction result at its definition. Entry stores
@@ -186,8 +204,10 @@
   predicates and escaping block values reach eight-byte homes. Predicate edge
   copies capture all outgoing sources before publishing any destination, with
   fixed physical sources captured before reload scratch can overwrite them.
-  Unused predicate homes are removed, and zero/all-ones integer bridge values
-  rematerialize without a memory reload. Explicit MASK MIR is supported in
+  Unused predicate homes are removed, leaving `MACHINE_VIRTUAL_REGISTER_NO_HOME`
+  as the value's offset; debug-location recording reports such a value as
+  having no frame location rather than rejecting the function. Zero/all-ones
+  integer bridge values rematerialize without a memory reload. Explicit MASK MIR is supported in
   MIR_STACK, where it flushes after each row. Source MIR_STACK selection keeps
   its existing integer bridges because it cannot retain K values between rows;
   the selector's `predicate_residency` argument records that allocator policy.
@@ -242,10 +262,11 @@
   Its complete independent observer uses Clang: GCC 13 uses a different hidden
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
-  narrow signature and vector-load refusals are strict successes; the separate
-  `basic_c_machine_fallback_wide_signature.c` retains a Win64 baseline split-
-  reference signature refusal for telemetry and artifact-failure checks; its
-  System V and AVX-width signatures select through MIR.
+  narrow signature, vector-load and 32-byte Win64 baseline split-reference
+  refusals are strict successes. Fallback telemetry uses a valid canonical-only
+  inline-assembly transaction, while a malformed literal-register fixture owns
+  the artifact-preservation failure control; ABI retirement no longer doubles
+  as a negative test.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
@@ -253,8 +274,8 @@
   shifts. Comparison results expand to all-ones masks, and floating negation
   changes only the sign bit. ZMM operands/results use explicit owned frame
   snapshots around scalar expansion. Wide vector members store through their
-  exact subobject address. General assembly and the remaining model-dependent
-  wide ABI signatures are separate from this arithmetic lowering.
+  exact subobject address. General assembly remains separate from this
+  arithmetic lowering.
   `basic_c_vector.c` and `basic_c_vector_lane_edges.c` remain whole strict inputs.
   The registered matrix includes baseline/Haswell/Zen 5 object generation and
   executes matching host CPU profiles. `host_vector_arithmetic.c` independently
@@ -266,19 +287,31 @@
   its consecutive result pieces. An argument wider than one CPU register or
   exhausting the argument register file uses its aligned stack home. Unnamed
   wide vectors always use the overflow area; their MIR variadic reads retain
-  the target ABI alignment and advance by the complete value. Win64
-  32-byte arguments at AVX width use
-  the existing private-copy pointer transport; baseline split references
-  remain an unresolved retirement gap. The new part-width byte fits existing
-  padding in the 40-byte signature shape, with no additional per-value table.
+  the target ABI alignment and advance by the complete value. Win64 vector
+  arguments use one private, naturally aligned copy. A value wider than the
+  model's register width exposes one pointer per register-sized subobject: the
+  leading references occupy the remaining argument GPRs and the tail continues
+  in stack eightbytes. Callees capture every pointer before copying exact pieces
+  into their owned frame image, so exhaustion and a register/stack straddle
+  preserve both payload and by-value isolation. The part-width byte fits
+  existing padding in the 40-byte signature shape, with no additional
+  per-value table.
   XMM/YMM frame rows carry byte offsets checked against owned storage. YMM
   encodings use serially prepared AVX metadata tokens; a missing token remains
   an encoding failure. Return/call vector-live flags preserve upper lanes.
+  Direct Win64 results use up to four consecutive XMM/YMM/ZMM registers as the
+  CPU model permits and otherwise retain the hidden-pointer result; ZMM parts
+  reuse the ordinary pointer vector transfer through an explicit frame
+  subobject address.
   `basic_c_vector_argument_ymm.c` and `basic_c_wide_vector_argument.c` remain
   whole registered strict inputs. `basic_c_wide_vector_abi.c` adds indirect
   calls, a ninth vector argument, scalar expected lanes and sentinels. Its
   PROVIDER_ONLY/CONSUMER_ONLY configurations exchange 32-byte values, copied
-  variadic cursors and scalar tails with Clang and real GCC. Baseline Clang
+  variadic cursors and scalar tails with Clang and real GCC. The complete
+  `basic_c_vector_argument_wide.c` fixture adds 128/256-byte Win64 straddles,
+  exhaustion, indirect calls, private-copy mutation checks, sentinels, and
+  model-dependent direct/hidden returns. Its provider/consumer halves exchange
+  baseline objects with Clang under wine in both directions. Baseline Clang
   arguments use the same stack transport as Buster, with split XMM results;
   GCC uses a different hidden result pointer there. AVX-width results agree
   in all three compilers. An initial MIR baseline argument-placement defect

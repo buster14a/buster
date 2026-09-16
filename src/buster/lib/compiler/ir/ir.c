@@ -4482,6 +4482,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
     u32 capacity = 0;
     for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
         IrFunction* function = module->functions + function_index;
         if (function->state == IR_FUNCTION_LOWERED)
         {
@@ -4496,6 +4497,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
             {
                 if (function->published_cfg)
                 {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_PUBLISHED_CFG_CHECKS, 1);
                     result = ir_validate_published_cfg(function);
                 }
                 capacity = BUSTER_MAX(capacity, function->instruction_count);
@@ -4513,6 +4515,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
             {
                 continue;
             }
+            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
+            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
+            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
+            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(*owners) * function->instruction_count);
             IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
             if (ownership.error != IR_VALIDATION_NONE)
             {
@@ -4680,6 +4686,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             u64 pointer_size = program->data_layout.pointer.size;
             for (u32 relocation_index = 0; relocation_index < global->relocation_count && error == IR_VALIDATION_NONE; relocation_index += 1)
             {
+                IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATIONS, 1);
                 IrGlobalRelocation* relocation = global->relocations + relocation_index;
                 IrSymbol* relocation_symbol = ir_symbol_from_id(&program->symbols, relocation->symbol);
                 bool offset_valid = pointer_size != 0 && relocation->offset <= type->layout.size && pointer_size <= type->layout.size - relocation->offset;
@@ -4688,6 +4695,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                 bool overlap_free = true;
                 for (u32 previous_index = 0; previous_index < relocation_index; previous_index += 1)
                 {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
                     IrGlobalRelocation* previous = global->relocations + previous_index;
                     bool previous_end_valid = previous->offset <= UINT64_MAX - pointer_size;
                     bool relocation_end_valid = relocation->offset <= UINT64_MAX - pointer_size;
@@ -4723,11 +4731,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
     memset(parameter_definitions, 0, function->value_count);
     for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_BLOCKS, 1);
         IrBlock* block = function->blocks + block_index;
         IrPublishedCfg const* cfg = function->published_cfg;
         IrBlockParameter* builder_parameter = block->first_parameter;
         for (u32 index = 0; index < block->parameter_count && result.error == IR_VALIDATION_NONE; index += 1)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PARAMETERS, 1);
             IrValueId value = IR_VALUE_ID_INVALID;
             if (cfg)
             {
@@ -4754,6 +4764,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
     }
     for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_VALUES, 1);
         IrValue* value = function->values + value_index;
         IrValueId value_id = {.value = value_index};
         IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
@@ -4765,6 +4776,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
         }
         else
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
             IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
             bool transfer_valid = ir_label_metadata_transfer_valid(program, function, value_id);
             bool shape_valid = ir_label_metadata_shape_valid(program, function, value_id);
@@ -4777,6 +4789,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
             {
                 for (u32 label_index = 0; label_index < metadata.label_block_count && result.error == IR_VALIDATION_NONE; label_index += 1)
                 {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_BLOCKS, 1);
                     if (metadata.label_blocks[label_index].value >= function->block_count)
                     {
                         result = ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
@@ -4805,15 +4818,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
         IrCfgBlock const* published = cfg->blocks + block->id.value;
         for (u32 index = 0; index < published->parameter_count && result.error == IR_VALIDATION_NONE; index += 1)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETERS, 1);
             IrCfgParameter const* parameter = cfg->parameters + published->parameter_offset + index;
             bool valid = parameter->value.value < function->value_count &&
                          function->values[parameter->value.value].canonical_type.value == parameter->canonical_type.value;
             IrLabelIncomingValues incoming = {.cfg = cfg, .block = published, .parameter = index, .count = published->predecessor_count};
             for (u32 predecessor = 0; predecessor < incoming.count && valid; predecessor += 1)
             {
+                IR_CONSTRUCTION_RECORD(VALIDATION_INCOMING_VALUES, 1);
                 IrValueId value = ir_label_incoming_value(&incoming, predecessor);
                 valid = value.value < function->value_count && function->values[value.value].canonical_type.value == parameter->canonical_type.value;
             }
+            IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, valid);
             if (valid)
             {
                 valid = ir_label_parameter_provenance_values_valid(function, parameter->value, &incoming);
@@ -4828,6 +4844,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
     {
         for (IrBlockParameter* parameter = block->first_parameter; parameter && result.error == IR_VALIDATION_NONE; parameter = parameter->next)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETERS, 1);
             if (parameter->value.value >= function->value_count || parameter->incoming_count != block->predecessor_count ||
                 function->values[parameter->value.value].canonical_type.value != parameter->canonical_type.value)
             {
@@ -4839,6 +4856,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
                 IrPredecessor* predecessor = block->first_predecessor;
                 for (u32 index = 0; index < parameter->incoming_count && result.error == IR_VALIDATION_NONE; index += 1)
                 {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_INCOMING_VALUES, 1);
                     if (!incoming || !predecessor || incoming->predecessor.value != predecessor->block.value || incoming->value.value >= function->value_count ||
                         function->values[incoming->value.value].canonical_type.value != parameter->canonical_type.value)
                     {
@@ -4850,6 +4868,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
                         predecessor = predecessor->next;
                     }
                 }
+                IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS,
+                                       result.error == IR_VALIDATION_NONE && !incoming && !predecessor);
                 if (result.error == IR_VALIDATION_NONE && (incoming || predecessor || !ir_label_block_parameter_provenance_valid(function, parameter)))
                 {
                     result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
@@ -4893,6 +4913,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
                                                                         IrInstruction* instruction)
 {
     IrValidationError error = IR_VALIDATION_NONE;
+    IR_CONSTRUCTION_RECORD(VALIDATION_OPERATION_CHECKS, 1);
     if (instruction->opcode == IR_OPCODE_ARGUMENT)
     {
         u64 argument_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
@@ -5123,6 +5144,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_CALL)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_CALL_CHECKS, 1);
         IrValue* callee = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
         IrType* callee_type = callee ? ir_type_from_id(&program->types, callee->canonical_type) : 0;
         bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
@@ -5146,6 +5168,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         }
         for (u32 argument_index = 0; error == IR_VALIDATION_NONE && argument_index < signature_type->parameter_count; argument_index += 1)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_CALL_ARGUMENTS, 1);
             if (function->values[instruction->operands[argument_index + 1].value].canonical_type.value !=
                 signature_type->parameter_types[argument_index].value)
             {
@@ -5155,6 +5178,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_ADDRESS_OF)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, 1);
         IrValue* object = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
         IrValue* result_value = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
@@ -5168,6 +5192,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_DEREFERENCE)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, 1);
         IrValue* address = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* pointer = address ? ir_type_from_id(&program->types, address->canonical_type) : 0;
         IrValue* place = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
@@ -5260,6 +5285,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_CAST)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_CONVERSION_CHECKS, 1);
+        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, 1);
         IrType* destination = ir_type_from_id(&program->types, instruction->canonical_type);
         IrValue* operand_slot = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* source = operand_slot ? ir_type_from_id(&program->types, operand_slot->canonical_type) : 0;
@@ -5413,6 +5440,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, 1);
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
         bool result_in_range = instruction->result.value < function->value_count;
         IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
@@ -5457,6 +5485,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, 1);
         IrValue* target_slot = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
                                    ? function->values + instruction->operands[0].value
                                    : 0;
@@ -5532,6 +5561,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
     bool terminated = false;
     while (instruction_id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTIONS, 1);
+        IR_CONSTRUCTION_RECORD(VALIDATION_TERMINATOR_CHECKS, 1);
         IrInstruction* instruction = function->instructions + instruction_id.value;
         IrValidationError error = IR_VALIDATION_NONE;
         if (terminated || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
@@ -5547,6 +5578,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
         {
             for (u32 operand_index = 0; operand_index < instruction->operand_count && error == IR_VALIDATION_NONE; operand_index += 1)
             {
+                IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
                 if (instruction->operands[operand_index].value >= function->value_count)
                 {
                     error = IR_VALIDATION_INVALID_ID;
@@ -5554,6 +5586,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
             }
             for (u32 target_index = 0; target_index < instruction->target_count && error == IR_VALIDATION_NONE; target_index += 1)
             {
+                IR_CONSTRUCTION_RECORD(VALIDATION_TARGET_IDS, 1);
                 if (instruction->targets[target_index].value >= function->block_count)
                 {
                     error = IR_VALIDATION_BRANCH_TARGET;
@@ -5565,6 +5598,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
                  function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value))
             {
                 error = IR_VALIDATION_RESULT_TYPE;
+            }
+            if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
             }
             if (error == IR_VALIDATION_NONE)
             {
@@ -5595,6 +5632,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* pr
     IrValidationResult result = ir_validation_ok();
     for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
     {
+        IR_CONSTRUCTION_RECORD(VALIDATION_BLOCKS, 1);
         IrBlock* block = function->blocks + block_index;
         if (!block->terminated || !block->sealed)
         {
@@ -5667,6 +5705,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
 IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
+    IR_CONSTRUCTION_RECORD(VALIDATION_CALLS, 1);
     if (!program || !module || (program->module_count && !program->modules) ||
         (program->types.count && !program->types.types) || (program->symbols.count && !program->symbols.symbols) ||
         (module->function_count && !module->functions) || (module->global_count && !module->globals) ||
@@ -5679,14 +5718,17 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
         result = ir_validate_module_ownership(module);
         for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_GLOBALS, 1);
             result.error = ir_validate_global(program, module, module->globals + global_index);
         }
         for (u32 alias_index = 0; alias_index < module->alias_count && result.error == IR_VALIDATION_NONE; alias_index += 1)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_ALIASES, 1);
             result.error = ir_validate_alias(program, module, module->aliases[alias_index]);
         }
         for (u32 initializer_index = 0; initializer_index < module->initializer_count && result.error == IR_VALIDATION_NONE; initializer_index += 1)
         {
+            IR_CONSTRUCTION_RECORD(VALIDATION_INITIALIZERS, 1);
             result.error = ir_validate_initializer(program, module, module->initializers[initializer_index]);
         }
         for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
@@ -5696,6 +5738,7 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
             {
                 continue;
             }
+            IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
             IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
             if (!signature || signature->kind != IR_TYPE_FUNCTION ||
                 (signature->parameter_count && !signature->parameter_types) ||

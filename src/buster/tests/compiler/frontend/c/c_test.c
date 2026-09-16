@@ -4670,13 +4670,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
     };
     String8 constant_source = S8("_Static_assert(sizeof(__INT8_C(1)) == sizeof(int), \"promoted i8\");\n"
                                  "_Static_assert(sizeof(__UINT16_C(1)) == sizeof(int), \"promoted u16\");\n"
                                  "_Static_assert(__UINT32_C(1) - 2 > 0, \"unsigned u32\");\n"
                                  "_Static_assert(sizeof(__INT64_C(1)) == 8 && __INT64_C(1) - 2 < 0, \"signed i64\");\n"
                                  "_Static_assert(sizeof(__UINT64_C(1)) == 8 && (__UINT64_C(1) << 63) == 0x8000000000000000ULL, \"unsigned u64\");\n"
-                                 "_Static_assert(sizeof(__INTMAX_C(1)) == 8 && sizeof(__UINTMAX_C(1)) == 8, \"max widths\");\n");
+                                 "_Static_assert(sizeof(__INTMAX_C(1)) == 8 && sizeof(__UINTMAX_C(1)) == 8, \"max widths\");\n"
+                                 "__typeof__(__SCHAR_MAX__) *signed_char_maximum_type = (int *)0;\n"
+                                 "__typeof__(__SHRT_MAX__) *short_maximum_type = (int *)0;\n"
+                                 "__typeof__(__INT_MAX__) *int_maximum_type = (int *)0;\n"
+                                 "__typeof__(__LONG_MAX__) *long_maximum_type = (long *)0;\n"
+                                 "__typeof__(__LONG_LONG_MAX__) *long_long_maximum_type = (long long *)0;\n"
+                                 "#if __SCHAR_MAX__ != 127 || __SHRT_MAX__ != 32767 || __INT_MAX__ != 2147483647\n"
+                                 "#error invalid narrow integer maximum\n"
+                                 "#endif\n"
+                                 "#if __SIZEOF_LONG__ == 8\n"
+                                 "#if __LONG_MAX__ != 9223372036854775807L\n"
+                                 "#error invalid LP64 long maximum\n"
+                                 "#endif\n"
+                                 "#elif __SIZEOF_LONG__ == 4\n"
+                                 "#if __LONG_MAX__ != 2147483647L\n"
+                                 "#error invalid LLP64 long maximum\n"
+                                 "#endif\n"
+                                 "#else\n"
+                                 "#error unsupported long width\n"
+                                 "#endif\n"
+                                 "#if __LONG_LONG_MAX__ != 9223372036854775807LL\n"
+                                 "#error invalid long long maximum\n"
+                                 "#endif\n");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(constant_targets); index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -4687,6 +4711,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-constant-macros.c"), tokens, syntax, target);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0);
+
+        CPreprocessResult maximum_tokens = c_preprocess(
+            temporary.arena, S8("__SCHAR_MAX__ __SHRT_MAX__ __INT_MAX__ __LONG_MAX__ __LONG_LONG_MAX__\n"),
+            (CPreprocessOptions){.source_path = S8("integer-maximum-macros.c"), .target = target, .data_layout = target_data_layout(target)});
+        BUSTER_TEST(arguments, maximum_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, maximum_tokens.token_count == 6);
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("127"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 1, C_TOKEN_PREPROCESSING_NUMBER, S8("32767"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 2, C_TOKEN_PREPROCESSING_NUMBER, S8("2147483647"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 3, C_TOKEN_PREPROCESSING_NUMBER,
+                                  target_data_layout(target).long_integer.size == 8 ? S8("9223372036854775807L") : S8("2147483647L"));
+        c_test_preprocessed_token(arguments, &result, maximum_tokens, 4, C_TOKEN_PREPROCESSING_NUMBER, S8("9223372036854775807LL"));
         scratch_end(temporary);
     }
 
@@ -5408,6 +5444,185 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, aarch64_macos_builtins.diagnostic_count == 0);
     CParseResult aarch64_macos_builtins_parse = c_parse(arguments->arena, aarch64_macos_builtins);
     BUSTER_TEST(arguments, aarch64_macos_builtins_parse.diagnostic_count == 0);
+
+    // #640: __is_target_os answers for the selected compilation target. The
+    // conditions below use nothing but the target queries, so a wrong answer
+    // reaches #error instead of being masked by a target macro that happens to
+    // be defined; the probe declaration that follows proves the guarded region
+    // was actually preprocessed rather than skipped. Spellings and aliases are
+    // clang 18's, read back with -target and -E: Windows answers `win32` too,
+    // a Darwin target answers `darwin` beside its own name, and an Android
+    // target answers `linux` because its triple's OS is Linux and `android` is
+    // the environment, never an OS spelling.
+    typedef struct CTargetOsQueryCase CTargetOsQueryCase;
+    struct CTargetOsQueryCase
+    {
+        Target target;
+        String8 source;
+        String8 probe;
+    };
+    CTargetOsQueryCase target_os_cases[] = {
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            .source = S8("#if !__is_target_os(windows) || !__is_target_os(win32)\n"
+                         "#error windows target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(linux) || __is_target_os(macos) || __is_target_os(macosx) || "
+                         "__is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error windows target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_arch(x86_64) || __is_target_vendor(apple)\n"
+                         "#error windows target arch or vendor\n"
+                         "#endif\n"
+                         "int windows_os_probe;\n"),
+            .probe = S8("windows_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID, .os_version_major = 35},
+            .source = S8("#if !__is_target_os(linux)\n"
+                         "#error android target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(android) || __is_target_os(windows) || __is_target_os(win32) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi)\n"
+                         "#error android target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_arch(arm64) || !__is_target_arch(aarch64) || __is_target_vendor(apple)\n"
+                         "#error android target arch or vendor\n"
+                         "#endif\n"
+                         "int android_os_probe;\n"),
+            .probe = S8("android_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            .source = S8("#if !__is_target_os(linux)\n"
+                         "#error linux target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(windows) || __is_target_os(win32) || __is_target_os(macos) || "
+                         "__is_target_os(ios) || __is_target_os(darwin) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error linux target cross-OS\n"
+                         "#endif\n"
+                         "int linux_os_probe;\n"),
+            .probe = S8("linux_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+            .source = S8("#if !__is_target_os(macos) || !__is_target_os(macosx) || !__is_target_os(darwin)\n"
+                         "#error macos target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(ios) || __is_target_os(linux) || __is_target_os(windows) || "
+                         "__is_target_os(win32) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error macos target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_vendor(apple) || !__is_target_arch(arm64)\n"
+                         "#error macos target arch or vendor\n"
+                         "#endif\n"
+                         "int macos_os_probe;\n"),
+            .probe = S8("macos_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_IOS},
+            .source = S8("#if !__is_target_os(ios) || !__is_target_os(darwin)\n"
+                         "#error ios target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(macos) || __is_target_os(macosx) || __is_target_os(linux) || "
+                         "__is_target_os(windows) || __is_target_os(win32) || __is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error ios target cross-OS\n"
+                         "#endif\n"
+                         "#if !__is_target_vendor(apple)\n"
+                         "#error ios target vendor\n"
+                         "#endif\n"
+                         "int ios_os_probe;\n"),
+            .probe = S8("ios_os_probe"),
+        },
+        {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_UEFI},
+            .source = S8("#if !__is_target_os(uefi)\n"
+                         "#error uefi target OS\n"
+                         "#endif\n"
+                         "#if __is_target_os(windows) || __is_target_os(win32) || __is_target_os(linux) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin)\n"
+                         "#error uefi target cross-OS\n"
+                         "#endif\n"
+                         "int uefi_os_probe;\n"),
+            .probe = S8("uefi_os_probe"),
+        },
+        {
+            // A freestanding target has no triple OS, so it answers nothing.
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_FREESTANDING},
+            .source = S8("#if __is_target_os(linux) || __is_target_os(windows) || __is_target_os(win32) || "
+                         "__is_target_os(macos) || __is_target_os(ios) || __is_target_os(darwin) || "
+                         "__is_target_os(uefi) || __is_target_os(android)\n"
+                         "#error freestanding target OS\n"
+                         "#endif\n"
+                         "int freestanding_os_probe;\n"),
+            .probe = S8("freestanding_os_probe"),
+        },
+    };
+    for (u32 os_case = 0; os_case < BUSTER_ARRAY_LENGTH(target_os_cases); os_case += 1)
+    {
+        CTargetOsQueryCase target_os_case = target_os_cases[os_case];
+        CPreprocessResult target_os_queries =
+            c_preprocess(arguments->arena, target_os_case.source, (CPreprocessOptions){.target = target_os_case.target});
+        BUSTER_TEST(arguments, target_os_queries.diagnostic_count == 0);
+        // `int <probe>;` plus the end-of-file token: the probe is only in the
+        // stream when the guarded region above was actually preprocessed.
+        BUSTER_TEST(arguments, target_os_queries.token_count == 4);
+        if (target_os_queries.token_count == 4)
+        {
+            c_test_preprocessed_token(arguments, &result, target_os_queries, 1, C_TOKEN_IDENTIFIER, target_os_case.probe);
+        }
+        CParseResult target_os_parse = c_parse(arguments->arena, target_os_queries);
+        BUSTER_TEST(arguments, target_os_parse.diagnostic_count == 0);
+    }
+
+    // #639: __has_attribute answers for the GNU attributes this frontend
+    // implements, in every spelling the parser accepts, and denies one it only
+    // steps over. `returns_twice` is the control for that: clang implements it
+    // and answers 1, this frontend skips it and must answer 0. The C attribute
+    // operator keeps its own namespace and answers 0 throughout, including for
+    // the bare GNU names the GNU operator answers 1 for and for a namespaced
+    // spelling, which clang 18 also answers 0 and 1 for respectively.
+    CPreprocessResult attribute_queries =
+        c_preprocess(arguments->arena,
+                     S8("#if !__has_attribute(packed) || !__has_attribute(__packed__) || !__has_attribute(__packed)\n"
+                        "#error packed attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(aligned) || !__has_attribute(__aligned__) || !__has_attribute(__aligned)\n"
+                        "#error aligned attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(vector_size) || !__has_attribute(__vector_size__) || !__has_attribute(__vector_size)\n"
+                        "#error vector_size attribute query\n"
+                        "#endif\n"
+                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(returns_twice) || __has_attribute(_Alignas)\n"
+                        "#error unimplemented attribute query\n"
+                        "#endif\n"
+                        "#if __has_c_attribute(packed) || __has_c_attribute(aligned) || __has_c_attribute(vector_size)\n"
+                        "#error C attribute query answered a GNU name\n"
+                        "#endif\n"
+                        "#if __has_c_attribute(nodiscard) || __has_c_attribute(deprecated) || __has_c_attribute(gnu::packed)\n"
+                        "#error C attribute query answered an unimplemented attribute\n"
+                        "#endif\n"
+
+                        "int attribute_query_probe;\n"),
+                     (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, attribute_queries.diagnostic_count == 0);
+    BUSTER_TEST(arguments, attribute_queries.token_count == 4);
+    if (attribute_queries.token_count == 4)
+    {
+        c_test_preprocessed_token(arguments, &result, attribute_queries, 1, C_TOKEN_IDENTIFIER, S8("attribute_query_probe"));
+    }
+    CParseResult attribute_queries_parse = c_parse(arguments->arena, attribute_queries);
+    BUSTER_TEST(arguments, attribute_queries_parse.diagnostic_count == 0);
+
+    // An empty argument list is malformed for both operators and still fails
+    // the directive; relaxing the argument shape for the namespaced C spelling
+    // must not turn that into a silent 0.
+    CPreprocessResult empty_attribute_argument = c_preprocess(arguments->arena,
+                                                              S8("#if __has_c_attribute()\n"
+                                                                 "int unreachable_probe;\n"
+                                                                 "#endif\n"),
+                                                              (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, empty_attribute_argument.diagnostic_count != 0);
 
     CPreprocessResult include = c_preprocess(arguments->arena,
                                              S8("#include \"basic_c_include.h\"\n"
@@ -15083,6 +15298,468 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     }
     scratch_end(pointee_temporary);
 
+    // #639: the query is only correct if source that *selects* an attribute
+    // through it keeps the layout. Calling the predicate proves nothing a
+    // header cares about, so this witness conditionally defines the attribute
+    // and then asserts the resulting record, on an explicit target whose int
+    // is four bytes. Before the repair __has_attribute(packed) was 0, both
+    // macros expanded to nothing, and the structures silently took the
+    // default layout while still compiling.
+    {
+        String8 witness_source = S8("#if __has_attribute(packed)\n"
+                                    "#define WIRE_PACKED __attribute__((packed))\n"
+                                    "#else\n"
+                                    "#define WIRE_PACKED\n"
+                                    "#endif\n"
+                                    "#if __has_attribute(__aligned__)\n"
+                                    "#define BLOCK_ALIGNED __attribute__((__aligned__(32)))\n"
+                                    "#else\n"
+                                    "#define BLOCK_ALIGNED\n"
+                                    "#endif\n"
+                                    "#if __has_attribute(__vector_size__)\n"
+                                    "#define LANES_VECTOR __attribute__((__vector_size__(16)))\n"
+                                    "#else\n"
+                                    "#define LANES_VECTOR\n"
+                                    "#endif\n"
+                                    "struct WIRE_PACKED Wire { char tag; int value; };\n"
+                                    "struct BLOCK_ALIGNED Block { char value; };\n"
+                                    "typedef int LANES_VECTOR Lanes;\n"
+                                    "_Static_assert(sizeof(struct Wire) == 5, \"packed query lost layout\");\n"
+                                    "_Static_assert(_Alignof(struct Wire) == 1, \"packed query lost alignment\");\n"
+                                    "_Static_assert(_Alignof(struct Block) == 32, \"aligned query lost layout\");\n"
+                                    "_Static_assert(sizeof(Lanes) == 16, \"vector_size query lost width\");\n"
+                                    "struct Wire wire_object;\n"
+                                    "struct Block block_object;\n");
+        TargetParseResult witness_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        BUSTER_TEST(arguments, witness_target.error == TARGET_PARSE_ERROR_NONE);
+        TemporalArena witness_temporary = scratch_begin(0, 0);
+        CPreprocessResult witness_preprocess = {0};
+        CParseResult witness_parse = {0};
+        CIRLowerResult witness_lowered = c_test_lower_source(witness_temporary.arena, witness_source, S8("attribute-query-layout.c"),
+                                                             witness_target.target, &witness_preprocess, &witness_parse);
+        BUSTER_TEST(arguments, witness_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, witness_lowered.program != 0);
+        if (witness_lowered.program)
+        {
+            IrModule* witness_module = witness_lowered.program->modules;
+            IrGlobal* wire = c_test_find_ir_global(witness_module, witness_lowered.program, S8("wire_object"));
+            IrType* wire_type = wire ? ir_type_from_id(&witness_lowered.program->types, wire->type) : 0;
+            BUSTER_TEST(arguments, wire_type != 0);
+            if (wire_type)
+            {
+                BUSTER_TEST(arguments, wire_type->layout.size == 5);
+                BUSTER_TEST(arguments, wire_type->layout.alignment == 1);
+            }
+            IrGlobal* block = c_test_find_ir_global(witness_module, witness_lowered.program, S8("block_object"));
+            IrType* block_type = block ? ir_type_from_id(&witness_lowered.program->types, block->type) : 0;
+            BUSTER_TEST(arguments, block_type != 0);
+            if (block_type)
+            {
+                BUSTER_TEST(arguments, block_type->layout.alignment == 32);
+            }
+        }
+        scratch_end(witness_temporary);
+    }
+
+    return result;
+}
+
+// `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
+// only real floating type narrower than `float` this frontend has. The three
+// groups below are the contract: the layout every supported target gives it,
+// the binary16 encoding of its constants -- every expected byte string here
+// was taken from clang 18 compiling the same source -- and the specifier
+// combinations that are not a type at all.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    // The layout does not vary with the data model: binary16 is two naturally
+    // aligned bytes on LP64, LLP64 and Apple alike, and the complex and
+    // vector spellings are built out of it. The `long double` of each of
+    // these targets differs, which is what makes them worth asking.
+    String8 layout_targets[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("aarch64-apple-macos"),
+    };
+    String8 layout_source = S8("_Static_assert(sizeof(_Float16) == 2, \"size\");\n"
+                               "_Static_assert(_Alignof(_Float16) == 2, \"alignment\");\n"
+                               "_Static_assert(sizeof(_Float16 _Complex) == 4, \"complex size\");\n"
+                               "_Static_assert(_Alignof(_Float16 _Complex) == 2, \"complex alignment\");\n"
+                               "_Static_assert(sizeof(__SIZEOF_FLOAT16__ + 0) == sizeof(int), \"macro\");\n"
+                               "_Static_assert(__SIZEOF_FLOAT16__ == 2, \"sizeof macro\");\n"
+                               "_Static_assert(__FLT16_MANT_DIG__ == 11, \"mantissa digits\");\n"
+                               "_Static_assert(sizeof(__FLT16_MAX__) == 2, \"suffixed limit\");\n"
+                               "typedef _Float16 half32 __attribute__((__vector_size__(64), __aligned__(64)));\n"
+                               "_Static_assert(sizeof(half32) == 64, \"vector size\");\n"
+                               "_Static_assert(_Alignof(half32) == 64, \"vector alignment\");\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(layout_targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult parsed = target_parse_triple(layout_targets[target_index]);
+        BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed.error == TARGET_PARSE_ERROR_NONE)
+        {
+            TargetDataLayout layout = target_data_layout(parsed.target);
+            BUSTER_TEST(arguments, layout.float16_type.size == 2 && layout.float16_type.alignment == 2 && layout.float16_type.bit_width == 16);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, layout_source, S8("float16-layout.c"), parsed.target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        }
+        scratch_end(temporary);
+    }
+
+    // The two reductions issue #631 records: the scalar parameter whose body
+    // reported its own parameter undeclared, and the 32-lane vector the
+    // resource header builds `__m512h` out of. Both are `static __inline__`,
+    // so they are analyzed and then never emitted, which is exactly how the
+    // header's intrinsic bodies arrive.
+    String8 reductions[] = {
+        S8("static __inline__ _Float16 f(_Float16 a) { return a; }\n"),
+        S8("typedef _Float16 half32 __attribute__((__vector_size__(64), __aligned__(64)));\n"
+           "static __inline__ _Float16 g(half32 a) { return a[0]; }\n"),
+        S8("static __inline__ float h(_Float16 _Complex a) { return (float)__real__ a; }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(reductions); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, reductions[case_index], S8("float16-reduction.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+
+    // Constants, in the encoding clang writes for the same spellings. The
+    // interesting rows are the boundaries: the largest finite value, the
+    // first magnitude that rounds to infinity, the smallest subnormal, the
+    // exact half of it that ties to even and reaches zero, and a tie between
+    // two normals that rounds up to the even significand.
+    struct
+    {
+        String8 source;
+        String8 bytes;
+    } constants[] = {
+        {S8("_Float16 values[] = {0.0, -0.0, 1.0, -1.0, 0.5, 1.5};"), S8("\x00\x00\x00\x80\x00\x3c\x00\xbc\x00\x38\x00\x3e")},
+        {S8("_Float16 values[] = {0.1, 3.141592653589793, 0.333333333333};"), S8("\x66\x2e\x48\x42\x55\x35")},
+        {S8("_Float16 values[] = {65504.0, 65519.0, 65520.0, 1e10, -1e10};"), S8("\xff\x7b\xff\x7b\x00\x7c\x00\x7c\x00\xfc")},
+        {S8("_Float16 values[] = {6.103515625e-05, 6.0975551605224609e-05, 5.960464477539063e-08, 2.9802322387695312e-08};"),
+         S8("\x00\x04\xff\x03\x01\x00\x00\x00")},
+        {S8("_Float16 values[] = {2048.0, 2049.0, 2050.0, 2051.0};"), S8("\x00\x68\x00\x68\x01\x68\x02\x68")},
+        // The C23 suffix: the literal has the type, so no conversion stands
+        // between the spelling and these bytes.
+        {S8("_Float16 values[] = {1.5f16, 0.1f16, 65504.0F16, 65520.0f16, 1e-8f16, 0x1p-24f16};"),
+         S8("\x00\x3e\x66\x2e\xff\x7b\x00\x7c\x00\x00\x01\x00")},
+        // An integer source rounds at the destination's precision, and one
+        // past the largest finite half becomes an infinity.
+        {S8("_Float16 values[] = {1, -1, 100, 65504, 65505, 100000, -100000};"),
+         S8("\x00\x3c\x00\xbc\x40\x56\xff\x7b\xff\x7b\x00\x7c\x00\xfc")},
+        // A cast, a chain of conversions through wider types, and a const
+        // object read back all land on the same encoding.
+        {S8("const _Float16 seed = 3.5;\n_Float16 values[] = {(_Float16)(float)(double)0.1, seed, -0.0};"), S8("\x66\x2e\x00\x43\x00\x80")},
+    };
+    TargetParseResult constant_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, constant_target.error == TARGET_PARSE_ERROR_NONE);
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(constants); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, constants[case_index].source, S8("float16-constants.c"), constant_target.target,
+                                                     &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        IrGlobal* values = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("values")) : 0;
+        BUSTER_TEST(arguments, values && values->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+        BUSTER_TEST(arguments, values && values->bytes.length == constants[case_index].bytes.length);
+        if (values && values->bytes.pointer && values->bytes.length == constants[case_index].bytes.length)
+            BUSTER_TEST(arguments, memcmp(values->bytes.pointer, constants[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
+        scratch_end(temporary);
+    }
+
+    // A scalar global takes the FLOAT initializer rather than the byte one,
+    // so its encoding is checked where it is stored: as the sixteen bits, not
+    // the low two bytes of a binary64 the size rule would then truncate.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("_Float16 scalar = 1.5;"), S8("float16-scalar.c"), constant_target.target,
+                                                     &preprocess, &parse);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        IrGlobal* scalar = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("scalar")) : 0;
+        BUSTER_TEST(arguments, scalar && scalar->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+        BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3e00);
+        IrType* scalar_type = scalar && lowered.program ? ir_type_from_id(&lowered.program->types, scalar->type) : 0;
+        BUSTER_TEST(arguments, scalar_type && scalar_type->kind == IR_TYPE_FLOAT && scalar_type->bit_width == 16 && scalar_type->layout.size == 2);
+        scratch_end(temporary);
+    }
+
+    // The usual arithmetic conversions: `_Float16` ranks below every other
+    // real floating type and above every integer one, so only an operation
+    // with no wider float operand keeps the half type.
+    struct
+    {
+        String8 source;
+        u64 size;
+    } ranks[] = {
+        {S8("_Float16 a; _Float16 b; char rank[sizeof(a + b)];"), 2},
+        {S8("_Float16 a; int b; char rank[sizeof(a * b)];"), 2},
+        {S8("_Float16 a; unsigned long long b; char rank[sizeof(a - b)];"), 2},
+        {S8("_Float16 a; float b; char rank[sizeof(a + b)];"), 4},
+        {S8("_Float16 a; double b; char rank[sizeof(a + b)];"), 8},
+        {S8("_Float16 a; char rank[sizeof(+a)];"), 2},
+        {S8("_Float16 a; char rank[sizeof((_Float16)1.0)];"), 2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(ranks); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, ranks[case_index].source, S8("float16-rank.c"), constant_target.target, &preprocess,
+                                                     &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        IrGlobal* rank = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("rank")) : 0;
+        IrType* rank_type = rank && lowered.program ? ir_type_from_id(&lowered.program->types, rank->type) : 0;
+        BUSTER_TEST(arguments, rank_type && rank_type->kind == IR_TYPE_ARRAY && rank_type->layout.size == ranks[case_index].size);
+        scratch_end(temporary);
+    }
+
+    // `_Float16` combines with nothing but `_Complex`. Each of these names no
+    // type, so the specifier scan refuses it rather than silently dropping a
+    // word; a type name is where that refusal is observable, because a
+    // declaration whose specifiers name no type has its own recovery.
+    String8 invalid[] = {
+        S8("_Static_assert(sizeof(long _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(unsigned _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(signed _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 int) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 float) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 double) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(short _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 char) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(long _Float16 _Complex) == 4, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 _Complex float) == 4, \"x\");"),
+        S8("_Static_assert(_Alignof(unsigned _Float16) == 2, \"x\");"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index],
+                                                    (CPreprocessOptions){
+                                                        .target = constant_target.target,
+                                                        .data_layout = target_data_layout(constant_target.target),
+                                                    });
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
+// The exact-literal bignum defines only the limbs below `count`.  Every value
+// here starts with a sentinel in every other limb: a helper that reads a limb
+// it did not write folds the sentinel into its answer, and one that writes
+// past the limbs its work occupies leaves a sentinel missing.
+#define C_TEST_EXT80_STALE_LIMB UINT32_C(0xa5a5a5a5)
+
+BUSTER_GLOBAL_LOCAL void c_test_ext80_big_fill(CIrExt80Big* value, u32 const* limbs, u32 count)
+{
+    for (u32 index = 0; index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        value->limbs[index] = index < count ? limbs[index] : C_TEST_EXT80_STALE_LIMB;
+    }
+    value->count = count;
+}
+
+// Whether `value` holds exactly `limbs` below its count and the untouched
+// sentinel from `stale_from` up.  Limbs in between are ones the helper was
+// allowed to write while working.
+BUSTER_GLOBAL_LOCAL bool c_test_ext80_big_is(CIrExt80Big const* value, u32 const* limbs, u32 count, u32 stale_from)
+{
+    bool result = value->count == count;
+    for (u32 index = 0; result && index < count; index += 1)
+    {
+        result = value->limbs[index] == limbs[index];
+    }
+    for (u32 index = stale_from; result && index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        result = value->limbs[index] == C_TEST_EXT80_STALE_LIMB;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ext80_big_live_limbs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CIrExt80Big* value = arena_allocate(temporary.arena, CIrExt80Big, 1);
+    CIrExt80Big* other = arena_allocate(temporary.arena, CIrExt80Big, 1);
+    CIrExt80Big* product = arena_allocate(temporary.arena, CIrExt80Big, 1);
+    u32* limbs = arena_allocate(temporary.arena, u32, C_IR_EXT80_BIG_LIMBS);
+    u32* expected = arena_allocate(temporary.arena, u32, C_IR_EXT80_BIG_LIMBS);
+    u32 const top_limb_shift = (C_IR_EXT80_BIG_LIMBS - 1) * 32;
+
+    // Zero: nothing is read, written or refused.
+    c_test_ext80_big_fill(value, 0, 0);
+    c_test_ext80_big_fill(other, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 37));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, 0, 0, 0));
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, 5) == 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, -5) == 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_subtract_shifted(value, other, 9));
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, 0, 0, 0));
+
+    // One limb.  Four bits stay inside it, so the count must not grow from
+    // the sentinel above it; one more bit carries into a new limb.
+    c_test_ext80_big_fill(value, (u32[]){0x0000000f}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 4));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x000000f0}, 1, 1));
+    c_test_ext80_big_fill(value, (u32[]){0x80000001}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000002, 0x00000001}, 2, 2));
+
+    // Whole limbs and bits together raise the count past limbs that held only
+    // the sentinel: each is assigned, the vacated low limbs become zero, and
+    // the top limb's high bits carry into a fifth.
+    c_test_ext80_big_fill(value, (u32[]){0x00000001, 0xf0000002}, 2);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 2 * 32 + 4));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000000, 0x00000010, 0x00000020, 0x0000000f}, 5, 5));
+
+    // The largest counts the refusals admit, then each refusal, which leaves
+    // the value as it was.
+    for (u32 index = 0; index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        limbs[index] = index + 1;
+        expected[index] = index * 2;
+    }
+    c_test_ext80_big_fill(value, limbs, C_IR_EXT80_BIG_LIMBS - 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, 33));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, expected, C_IR_EXT80_BIG_LIMBS, C_IR_EXT80_BIG_LIMBS));
+    memset(expected, 0, C_IR_EXT80_BIG_LIMBS * sizeof(expected[0]));
+    expected[C_IR_EXT80_BIG_LIMBS - 1] = 0x80000000;
+    c_test_ext80_big_fill(value, (u32[]){0x40000000}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_shift_left(value, top_limb_shift + 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, expected, C_IR_EXT80_BIG_LIMBS, C_IR_EXT80_BIG_LIMBS));
+    c_test_ext80_big_fill(value, (u32[]){0x80000000}, 1);
+    BUSTER_TEST(arguments, !c_test_ext80_big_shift_left(value, top_limb_shift + 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x80000000}, 1, 1));
+    BUSTER_TEST(arguments, !c_test_ext80_big_shift_left(value, top_limb_shift + 32));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x80000000}, 1, 1));
+    c_test_ext80_big_fill(value, (u32[]){0x00000001, 0x00000001}, 2);
+    BUSTER_TEST(arguments, !c_test_ext80_big_shift_left(value, top_limb_shift));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000001, 0x00000001}, 2, 2));
+
+    // A shifted compare and subtraction read each operand only below its
+    // count, leave the shifted operand alone, and keep their refusal answers.
+    c_test_ext80_big_fill(value, (u32[]){0x00000005, 0x00000001}, 2);
+    c_test_ext80_big_fill(other, (u32[]){0x00000003}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, 1) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, 31) < 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, -30) < 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, -31) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, INT32_MIN) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(value, other, (s32)(top_limb_shift + 32)) < 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_compare_shifted(other, value, -(s32)(top_limb_shift + 32)) > 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000005, 0x00000001}, 2, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000003}, 1, 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_subtract_shifted(value, other, 1));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0xffffffff}, 1, 2));
+    BUSTER_TEST(arguments, !c_test_ext80_big_subtract_shifted(other, value, 0));
+    BUSTER_TEST(arguments, !c_test_ext80_big_subtract_shifted(value, other, top_limb_shift + 32));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0xffffffff}, 1, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000003}, 1, 1));
+
+    // Addends of different lengths: the shorter contributes nothing past its
+    // own count on either side, and a carry opens a new limb.
+    c_test_ext80_big_fill(value, (u32[]){0xffffffff}, 1);
+    c_test_ext80_big_fill(other, (u32[]){0x00000001, 0x00000001}, 2);
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000002}, 2, 2));
+    c_test_ext80_big_fill(value, (u32[]){0x00000001, 0x00000001}, 2);
+    c_test_ext80_big_fill(other, (u32[]){0xffffffff}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000002}, 2, 2));
+    c_test_ext80_big_fill(value, (u32[]){0xffffffff}, 1);
+    c_test_ext80_big_fill(other, (u32[]){0x00000001}, 1);
+    BUSTER_TEST(arguments, c_test_ext80_big_add(value, other));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000001}, 2, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    for (u32 index = 0; index < C_IR_EXT80_BIG_LIMBS; index += 1)
+    {
+        limbs[index] = 0xffffffff;
+    }
+    c_test_ext80_big_fill(value, limbs, C_IR_EXT80_BIG_LIMBS);
+    BUSTER_TEST(arguments, !c_test_ext80_big_add(value, other));
+
+    // The product clears only the limbs it accumulates into, including at the
+    // largest count its refusal admits.
+    c_test_ext80_big_fill(value, (u32[]){0xffffffff, 0x00000001}, 2);
+    c_test_ext80_big_fill(other, (u32[]){0xffffffff}, 1);
+    c_test_ext80_big_fill(product, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, (u32[]){0x00000001, 0xfffffffd, 0x00000001}, 3, 3));
+    c_test_ext80_big_fill(product, (u32[]){0x00000007}, 1);
+    c_test_ext80_big_fill(other, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, 0, 0, 1));
+    c_test_ext80_big_fill(value, limbs, C_IR_EXT80_BIG_LIMBS - 1);
+    c_test_ext80_big_fill(other, (u32[]){0x00000002}, 1);
+    c_test_ext80_big_fill(product, 0, 0);
+    memcpy(expected, limbs, C_IR_EXT80_BIG_LIMBS * sizeof(expected[0]));
+    expected[0] = 0xfffffffe;
+    expected[C_IR_EXT80_BIG_LIMBS - 1] = 0x00000001;
+    BUSTER_TEST(arguments, c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, expected, C_IR_EXT80_BIG_LIMBS, C_IR_EXT80_BIG_LIMBS));
+    c_test_ext80_big_fill(other, (u32[]){0xffffffff, 0xffffffff}, 2);
+    c_test_ext80_big_fill(product, (u32[]){0x00000007}, 1);
+    BUSTER_TEST(arguments, !c_test_ext80_big_multiply(value, other, product));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(product, 0, 0, 1));
+
+    // A literal's rational writes only the live limbs of either output, and a
+    // refused spelling writes neither.
+    s32 binary_exponent = 7;
+    c_test_ext80_big_fill(value, 0, 0);
+    c_test_ext80_big_fill(other, 0, 0);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("0.0"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, 0, 0, 0));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == 0);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("4294967296.25"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000019, 0x00000064}, 2, 2));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000019}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == -2);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("18446744073709551616e5"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000000, 0x00000000, 0x00000c35}, 3, 3));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == 5);
+    BUSTER_TEST(arguments, c_test_ext80_parse_rational_literal(S8("0x1.8p-3L"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000018}, 1, 3));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == -7);
+    BUSTER_TEST(arguments, !c_test_ext80_parse_rational_literal(S8("0x1.8"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, !c_test_ext80_parse_rational_literal(S8("1e20001"), value, other, &binary_exponent));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(value, (u32[]){0x00000018}, 1, 3));
+    BUSTER_TEST(arguments, c_test_ext80_big_is(other, (u32[]){0x00000001}, 1, 1));
+    BUSTER_TEST(arguments, binary_exponent == -7);
+
+    scratch_end(temporary);
     return result;
 }
 
@@ -16492,6 +17169,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
+    BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);

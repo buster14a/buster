@@ -234,6 +234,74 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_section_find(ByteSlice image, String8 nam
     return false;
 }
 
+typedef struct LinkTestElfSymbol LinkTestElfSymbol;
+struct LinkTestElfSymbol
+{
+    u64 value;
+    u64 size;
+    u32 index;
+    u16 section;
+    u8 info;
+    u8 other;
+};
+
+// One ordinary (non-dynamic) symbol of a linked ELF image, by name.  The
+// section table itself supplies the relationship between .symtab and .strtab;
+// a same-named string in an unrelated table cannot satisfy this lookup.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_symbol(ByteSlice image, String8 name, LinkTestElfSymbol* symbol)
+{
+    bool result = false;
+    u32 string_index = 0;
+    u64 symbol_header = 0;
+    u64 string_header = 0;
+    if (link_test_elf_section_find(image, S8(".symtab"), 0, &symbol_header) &&
+        link_test_elf_section_find(image, S8(".strtab"), &string_index, &string_header) &&
+        link_read_u32(image.pointer, symbol_header + 4) == 2 && link_read_u32(image.pointer, symbol_header + 40) == string_index &&
+        link_read_u64(image.pointer, symbol_header + 56) == 24)
+    {
+        u64 table_offset = link_read_u64(image.pointer, symbol_header + 24);
+        u64 table_size = link_read_u64(image.pointer, symbol_header + 32);
+        u64 string_offset = link_read_u64(image.pointer, string_header + 24);
+        u64 string_size = link_read_u64(image.pointer, string_header + 32);
+        if (table_offset <= image.length && table_size <= image.length - table_offset && table_size % 24 == 0 && string_offset <= image.length &&
+            string_size <= image.length - string_offset)
+        {
+            for (u64 entry = 24; !result && entry + 24 <= table_size; entry += 24)
+            {
+                u32 name_offset = link_read_u32(image.pointer, table_offset + entry);
+                if (!name_offset || name_offset >= string_size)
+                {
+                    continue;
+                }
+                u64 length = 0;
+                while ((u64)name_offset + length < string_size && image.pointer[string_offset + name_offset + length])
+                {
+                    length += 1;
+                }
+                if ((u64)name_offset + length < string_size && string_equal(
+                                                                      (String8){
+                                                                          .pointer = (char8*)image.pointer + string_offset + name_offset,
+                                                                          .length = length,
+                                                                      },
+                                                                      name))
+                {
+                    *symbol = (LinkTestElfSymbol){
+                        .value = link_read_u64(image.pointer, table_offset + entry + 8),
+                        .size = link_read_u64(image.pointer, table_offset + entry + 16),
+                        .index = (u32)(entry / 24),
+                        .info = image.pointer[table_offset + entry + 4],
+                        .other = image.pointer[table_offset + entry + 5],
+                    };
+                    memcpy(&symbol->section, image.pointer + table_offset + entry + 6, sizeof(symbol->section));
+                    result = true;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 // One dynamic symbol of a linked ELF image, by name.  Copy relocations are
 // checked through this: the alias set they define is a set of dynamic symbols
 // at one address, which is not visible anywhere else in the image.
@@ -2287,6 +2355,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* argume
         }
     }
 
+    if (aarch64)
+    {
+        u32 page_text[] = {UINT32_C(0x90000008), UINT32_C(0x91000100), UINT32_C(0x90000009), UINT32_C(0xfd400120), UINT32_C(0xd65f03c0)};
+        u8 page_data[256] = {0};
+        ObjectSymbol page_symbols[] = {
+            {.name = S8("UefiMain"), .size = sizeof(page_text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("page_data"), .value = 104, .size = 8, .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation page_relocations[] = {
+            {.addend = 7, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.addend = 7, .offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L},
+        };
+        ByteSlice page_text_bytes = {.pointer = (u8*)page_text, .length = sizeof(page_text)};
+        ObjectFile page_object = link_test_object_make(arguments->arena, target, page_text_bytes, page_symbols, BUSTER_ARRAY_LENGTH(page_symbols),
+                                                       page_relocations, BUSTER_ARRAY_LENGTH(page_relocations));
+        page_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(page_data);
+        page_object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(page_data);
+        NativeExecutableLinkResult page_linked = link_native_executable(arguments->arena, &page_object, (NativeExecutableLinkOptions){0});
+        LinkTestUefiPeSection page_text_section = {0};
+        LinkTestUefiPeSection page_data_section = {0};
+        bool page_valid = page_linked.error == LINK_ERROR_NONE &&
+                          link_test_uefi_pe_section_find(page_linked.executable, S8(".text"), &page_text_section) &&
+                          link_test_uefi_pe_section_find(page_linked.executable, S8(".data"), &page_data_section);
+        BUSTER_TEST(arguments, page_valid);
+        if (page_valid)
+        {
+            A64MCInst page = {0};
+            A64MCInst load_page = {0};
+            u32 low = 0;
+            BUSTER_TEST(arguments, a64_mc_decode(link_read_u32(page_linked.executable.pointer, page_text_section.raw_offset), &page) &&
+                                       page.opcode == A64_OPCODE_ADRP);
+            BUSTER_TEST(arguments, a64_add_lo12_read(link_read_u32(page_linked.executable.pointer, page_text_section.raw_offset + 4), &low));
+            u64 actual = ((u64)page_text_section.virtual_address & ~UINT64_C(0xfff)) + (u64)page.operands[1].value + low;
+            BUSTER_TEST(arguments, actual == (u64)page_data_section.virtual_address + 111 && low == 111);
+            u32 load_word = link_read_u32(page_linked.executable.pointer, page_text_section.raw_offset + 12);
+            BUSTER_TEST(arguments, a64_mc_decode(link_read_u32(page_linked.executable.pointer, page_text_section.raw_offset + 8), &load_page) &&
+                                       load_page.opcode == A64_OPCODE_ADRP);
+            u64 load_actual = ((u64)page_text_section.virtual_address & ~UINT64_C(0xfff)) + (u64)load_page.operands[1].value +
+                              (((load_word >> 10) & A64_IMM12_MAX) << 3);
+            BUSTER_TEST(arguments, load_actual == (u64)page_data_section.virtual_address + 104 &&
+                                       (load_word & ~(A64_IMM12_MAX << 10)) == UINT32_C(0xfd400120));
+        }
+        page_text[1] = UINT32_C(0x91400100);
+        NativeExecutableLinkResult malformed = link_native_executable(arguments->arena, &page_object, (NativeExecutableLinkOptions){0});
+        BUSTER_TEST(arguments, malformed.error == LINK_ERROR_RELOCATION && !malformed.executable.length);
+        page_text[1] = UINT32_C(0x91000100);
+        page_text[3] = UINT32_C(0xfc400120);
+        malformed = link_native_executable(arguments->arena, &page_object, (NativeExecutableLinkOptions){0});
+        BUSTER_TEST(arguments, malformed.error == LINK_ERROR_RELOCATION && !malformed.executable.length);
+    }
+
     NativeExecutableLinkResult missing_entry =
         link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){.entry_symbol = S8("MissingEntry")});
     BUSTER_TEST(arguments, missing_entry.error == LINK_ERROR_ENTRY_SYMBOL);
@@ -2504,6 +2625,725 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
                 BUSTER_TEST(arguments, arena_destroy(arena, 1));
             }
         }
+    }
+    return result;
+}
+
+// Places a synthetic image at the start of `arena` and appends the production
+// ELF section table to it. Unless `dirty_tail` is UINT64_MAX, the arena bytes
+// below that offset into the appended tail are poisoned and rewound first, so
+// on a fresh arena the dirty high-water mark lies exactly there and the storage
+// above it has never been written. `copy` allocates one byte after the image,
+// so the append cannot grow the image in place and takes its copying path.
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_section_table_place(Arena* arena, ByteSlice prefix, ObjectFile* object, u64 dirty_tail, u8 poison,
+                                                                             bool copy, u8** image)
+{
+    arena_reset_to_start(arena);
+    if (dirty_tail != UINT64_MAX)
+    {
+        u64 dirty = (copy ? prefix.length * 2 + 1 : prefix.length) + dirty_tail;
+        memset(arena_allocate(arena, u8, dirty), poison, dirty);
+        arena_reset_to_start(arena);
+    }
+    *image = arena_allocate(arena, u8, prefix.length);
+    memcpy(*image, prefix.pointer, prefix.length);
+    if (copy)
+    {
+        *arena_allocate(arena, u8, 1) = 0xee;
+    }
+    return link_elf_test_section_table_append(arena, (ByteSlice){.pointer = *image, .length = prefix.length}, object);
+}
+
+// A copy-relocated definition must be discoverable from the ordinary table
+// without loading a DSO. Its actual address and size come from .dynsym, but its
+// ordinary section index must name allocated NOBITS storage that contains it.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_copy_symbol(ByteSlice image, String8 name, u8 info)
+{
+    LinkTestElfSymbol symbol = {0};
+    u64 dynamic_value = 0;
+    u64 dynamic_size = 0;
+    u32 zero_section = 0;
+    u64 zero_header = 0;
+    u64 symbol_header = 0;
+    bool result = link_test_elf_symbol(image, name, &symbol) &&
+                  link_test_elf_dynamic_symbol(image, name, &dynamic_value, &dynamic_size, 0) &&
+                  link_test_elf_section_find(image, S8(".bss"), &zero_section, &zero_header) &&
+                  link_test_elf_section_find(image, S8(".symtab"), 0, &symbol_header);
+    if (result)
+    {
+        u64 zero_address = link_read_u64(image.pointer, zero_header + 16);
+        u64 zero_size = link_read_u64(image.pointer, zero_header + 32);
+        result = symbol.value == dynamic_value && symbol.size == dynamic_size && symbol.section == zero_section &&
+                 symbol.info == info && symbol.other == 0 && symbol.index >= link_read_u32(image.pointer, symbol_header + 44) &&
+                 link_read_u32(image.pointer, zero_header + 4) == 8 && link_read_u64(image.pointer, zero_header + 8) == 3 &&
+                 symbol.value >= zero_address && symbol.value - zero_address <= zero_size &&
+                 symbol.size <= zero_size - (symbol.value - zero_address);
+    }
+    return result;
+}
+
+// Cover the shared hosted layout and both overlays, including aliases already
+// imported, duplicate library aliases, an executable-owned name, weak imports,
+// true undefined symbols, and copy slots following nonempty ordinary BSS.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_ANDROID};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    NativeDynamicDataSymbol exports[] = {
+        {.name = S8("copy_data"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_pair"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_alias"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_alias"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_shadow"), .address = 0x1000, .size = 32},
+        {.name = S8("weak_copy"), .address = 0x2000, .size = 16},
+        {.name = S8("weak_alias"), .address = 0x2000, .size = 16},
+        {.name = S8("unused_data"), .address = 0x3000, .size = 8},
+    };
+    String8 linker_argument = S8("--export-dynamic");
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                             ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                             : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            ObjectSymbol symbols[] = {
+                {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("local_zero"), .value = 1, .size = 4, .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA},
+                {.name = S8("copy_data"), .size = 1, .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+                {.name = S8("copy_pair"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+                {.name = S8("weak_copy"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+                {.name = S8("missing"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true, .hidden = true},
+                {.name = S8("function_import"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("copy_shadow"), .value = 5, .size = 4, .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            };
+            ObjectFile object = link_test_object_make(arguments->arena,
+                (Target){.cpu_arch = architectures[architecture], .os = systems[system]}, text, symbols, BUSTER_ARRAY_LENGTH(symbols), 0, 0);
+            object.sections[OBJECT_SECTION_ZERO].virtual_size = 9;
+            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object,
+                (NativeExecutableLinkOptions){
+                    .entry_symbol = S8("main"),
+                    .runtime_data_symbols = exports,
+                    .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(exports),
+                    .linker_arguments = &linker_argument,
+                    .linker_argument_count = 1,
+                });
+            if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("copy_data"), 0x11));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("copy_pair"), 0x11));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("copy_alias"), 0x11));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("weak_copy"), 0x21));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("weak_alias"), 0x11));
+                LinkTestElfSymbol data_symbol = {0};
+                LinkTestElfSymbol pair_symbol = {0};
+                LinkTestElfSymbol alias_symbol = {0};
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_data"), &data_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_pair"), &pair_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_alias"), &alias_symbol));
+                BUSTER_TEST(arguments, data_symbol.value == pair_symbol.value && data_symbol.value == alias_symbol.value && data_symbol.size == 32);
+                LinkTestElfSymbol missing_symbol = {0};
+                LinkTestElfSymbol function_symbol = {0};
+                LinkTestElfSymbol unused_symbol = {0};
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("missing"), &missing_symbol));
+                BUSTER_TEST(arguments, missing_symbol.section == 0 && missing_symbol.value == 0 && missing_symbol.size == 0 &&
+                                           missing_symbol.info == 0x21 && missing_symbol.other == 2);
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("function_import"), &function_symbol));
+                BUSTER_TEST(arguments, function_symbol.section == 0 && function_symbol.value == 0 && function_symbol.info == 0x12);
+                BUSTER_TEST(arguments, !link_test_elf_symbol(linked.executable, S8("unused_data"), &unused_symbol));
+                u64 zero_header = 0;
+                u64 symbol_header = 0;
+                u32 zero_section = 0;
+                if (BUSTER_REQUIRE(arguments, link_test_elf_section_find(linked.executable, S8(".bss"), &zero_section, &zero_header) &&
+                                              link_test_elf_section_find(linked.executable, S8(".symtab"), 0, &symbol_header)))
+                {
+                    LinkTestElfSymbol local_symbol = {0};
+                    LinkTestElfSymbol shadow_symbol = {0};
+                    BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("local_zero"), &local_symbol));
+                    BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_shadow"), &shadow_symbol));
+                    u64 zero_address = link_read_u64(linked.executable.pointer, zero_header + 16);
+                    BUSTER_TEST(arguments, local_symbol.section == zero_section && local_symbol.value == zero_address + 1 &&
+                                               local_symbol.size == 4 && local_symbol.info == 0x01 && local_symbol.index == 1);
+                    BUSTER_TEST(arguments, shadow_symbol.section == zero_section && shadow_symbol.value == zero_address + 5 &&
+                                               shadow_symbol.size == 4 && shadow_symbol.value != data_symbol.value);
+                    // Eight inputs, two hosted imports, two generated aliases,
+                    // and the null entry. Neither a repeated library alias nor
+                    // an already retained name may produce a duplicate entry.
+                    BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, symbol_header + 32) == 13 * 24 &&
+                                               link_read_u32(linked.executable.pointer, symbol_header + 44) == 2);
+                }
+            }
+            BUSTER_TEST(arguments, symbols[2].section == OBJECT_SECTION_UNDEFINED && symbols[2].size == 1 && symbols[2].value == 0 &&
+                                       symbols[3].section == OBJECT_SECTION_UNDEFINED && symbols[4].section == OBJECT_SECTION_UNDEFINED &&
+                                       object.sections[OBJECT_SECTION_ZERO].virtual_size == 9);
+        }
+    }
+    return result;
+}
+
+// Every ELF executable form carries the same non-loaded static-symbol
+// contract.  Exercise both instruction sets, static and hosted layouts, and
+// Linux and Android policy over interleaved local/global symbols, aliases,
+// zero-fill, TLS, visibility and an unresolved weak definition.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_symbol_table(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_ANDROID};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    u8 data[] = {0x91, 0x37, 0xc4, 0x5a};
+    u8 thread_local_data[] = {0x4d, 0x22, 0xe1};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                             ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                             : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        u64 local_function_value = architectures[architecture] == CPU_ARCH_X86_64 ? 2 : 4;
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            for (u32 hosted = 0; hosted < 2; hosted += 1)
+            {
+                ObjectSymbol symbols[] = {
+                    {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                    {.name = S8("local_data"), .value = 1, .size = 2, .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+                    {.name = S8("weak_hidden"), .value = local_function_value, .size = text.length - local_function_value,
+                     .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .weak = true, .hidden = true},
+                    {.name = S8("local_function"), .value = local_function_value, .size = text.length - local_function_value,
+                     .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+                    {.name = S8("global_zero"), .value = 3, .size = 5, .section = OBJECT_SECTION_ZERO,
+                     .kind = OBJECT_SYMBOL_DATA, .global = true},
+                    // An uninspected DSO may define a default-visible weak
+                    // name. Hidden weak stays genuinely unresolved instead.
+                    {.name = S8("missing_weak"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA,
+                     .global = true, .weak = true, .hidden = true},
+                    // Initializer arrays are transformed into entry-stub code and
+                    // have no output section, so their input-only symbols cannot
+                    // be published with a false section index.
+                    {.name = S8("input_only_initializer"), .section = OBJECT_SECTION_INIT_ARRAY, .kind = OBJECT_SYMBOL_DATA},
+                    {.name = S8("exit"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                    {.name = S8("__cxa_atexit"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                    {.name = S8("tls_data"), .value = 1, .size = 1, .section = OBJECT_SECTION_THREAD_LOCAL_DATA,
+                     .kind = OBJECT_SYMBOL_DATA, .global = true},
+                    {.name = S8("tls_zero"), .value = 2, .size = 3, .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA},
+                };
+                u32 symbol_count = hosted ? BUSTER_ARRAY_LENGTH(symbols) : BUSTER_ARRAY_LENGTH(symbols) - 2;
+                ObjectFile object = link_test_object_make(arguments->arena,
+                    (Target){.cpu_arch = architectures[architecture], .os = systems[system]}, text, symbols, symbol_count, 0, 0);
+                object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+                object.sections[OBJECT_SECTION_ZERO].virtual_size = 16;
+                if (hosted)
+                {
+                    object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(thread_local_data);
+                    object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = 9;
+                    object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment = 8;
+                }
+                NativeDynamicLibrary library = {.name = S8("libsymbol-probe.so")};
+                NativeExecutableLinkOptions options = {
+                    .entry_symbol = S8("main"),
+                    .dynamic_libraries = &library,
+                    .dynamic_library_count = hosted,
+                };
+                NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, options);
+                if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+                {
+                    u32 symbol_section = 0;
+                    u32 string_section = 0;
+                    u64 symbol_header = 0;
+                    u64 string_header = 0;
+                    BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".symtab"), &symbol_section, &symbol_header));
+                    BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".strtab"), &string_section, &string_header));
+                    if (BUSTER_REQUIRE(arguments, symbol_header && string_header))
+                    {
+                        u64 symbol_offset = link_read_u64(linked.executable.pointer, symbol_header + 24);
+                        u64 symbol_size = link_read_u64(linked.executable.pointer, symbol_header + 32);
+                        u64 string_offset = link_read_u64(linked.executable.pointer, string_header + 24);
+                        u64 string_size = link_read_u64(linked.executable.pointer, string_header + 32);
+                        u32 first_global = link_read_u32(linked.executable.pointer, symbol_header + 44);
+                        u32 expected_first_global = hosted ? 4 : 3;
+                        u32 expected_symbol_count = hosted ? 11 : 9;
+                        BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, symbol_header + 4) == 2 &&
+                                                   link_read_u64(linked.executable.pointer, symbol_header + 8) == 0 &&
+                                                   link_read_u64(linked.executable.pointer, symbol_header + 16) == 0 &&
+                                                   link_read_u32(linked.executable.pointer, symbol_header + 40) == string_section &&
+                                                   first_global == expected_first_global &&
+                                                   link_read_u64(linked.executable.pointer, symbol_header + 48) == 8 &&
+                                                   link_read_u64(linked.executable.pointer, symbol_header + 56) == 24);
+                        BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, string_header + 4) == 3 &&
+                                                   link_read_u64(linked.executable.pointer, string_header + 8) == 0 &&
+                                                   link_read_u64(linked.executable.pointer, string_header + 16) == 0 &&
+                                                   link_read_u64(linked.executable.pointer, string_header + 48) == 1);
+                        BUSTER_TEST(arguments, symbol_offset % 8 == 0 && symbol_size == (u64)expected_symbol_count * 24 &&
+                                                   string_offset == symbol_offset + symbol_size && string_size > 1 &&
+                                                   string_offset <= linked.executable.length && string_size <= linked.executable.length - string_offset);
+                        u64 null_nonzero = 0;
+                        for (u32 byte = 0; byte < 24; byte += 1)
+                        {
+                            null_nonzero += linked.executable.pointer[symbol_offset + byte] != 0;
+                        }
+                        BUSTER_TEST(arguments, null_nonzero == 0);
+                        for (u32 index = 1; index < expected_symbol_count; index += 1)
+                        {
+                            u8 binding = linked.executable.pointer[symbol_offset + (u64)index * 24 + 4] >> 4;
+                            BUSTER_TEST(arguments, index < first_global ? binding == 0 : binding == 1 || binding == 2);
+                        }
+                        u32 text_section = 0;
+                        u32 data_section = 0;
+                        u32 zero_section = 0;
+                        u64 text_header = 0;
+                        u64 data_header = 0;
+                        u64 zero_header = 0;
+                        BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".text"), &text_section, &text_header));
+                        BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".data"), &data_section, &data_header));
+                        BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".bss"), &zero_section, &zero_header));
+                        u64 text_address = link_read_u64(linked.executable.pointer, text_header + 16);
+                        u64 data_address = link_read_u64(linked.executable.pointer, data_header + 16);
+                        u64 zero_address = link_read_u64(linked.executable.pointer, zero_header + 16);
+                        u64 text_offset = link_read_u64(linked.executable.pointer, text_header + 24);
+                        u64 data_offset = link_read_u64(linked.executable.pointer, data_header + 24);
+                        BUSTER_TEST(arguments, text_offset <= linked.executable.length && text.length <= linked.executable.length - text_offset &&
+                                                   memcmp(linked.executable.pointer + text_offset, text.pointer, text.length) == 0);
+                        BUSTER_TEST(arguments, data_offset <= linked.executable.length && sizeof(data) <= linked.executable.length - data_offset &&
+                                                   memcmp(linked.executable.pointer + data_offset, data, sizeof(data)) == 0);
+                        LinkTestElfSymbol main_symbol = {0};
+                        LinkTestElfSymbol local_data_symbol = {0};
+                        LinkTestElfSymbol weak_hidden_symbol = {0};
+                        LinkTestElfSymbol local_function_symbol = {0};
+                        LinkTestElfSymbol global_zero_symbol = {0};
+                        LinkTestElfSymbol missing_weak_symbol = {0};
+                        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("main"), &main_symbol));
+                        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("local_data"), &local_data_symbol));
+                        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("weak_hidden"), &weak_hidden_symbol));
+                        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("local_function"), &local_function_symbol));
+                        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("global_zero"), &global_zero_symbol));
+                        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("missing_weak"), &missing_weak_symbol));
+                        LinkTestElfSymbol omitted_symbol = {0};
+                        BUSTER_TEST(arguments, !link_test_elf_symbol(linked.executable, S8("input_only_initializer"), &omitted_symbol));
+                        BUSTER_TEST(arguments, main_symbol.value == text_address && main_symbol.size == text.length &&
+                                                   main_symbol.index == first_global && main_symbol.section == text_section && main_symbol.info == 0x12 &&
+                                                   main_symbol.other == 0);
+                        BUSTER_TEST(arguments, local_data_symbol.value == data_address + 1 && local_data_symbol.size == 2 &&
+                                                   local_data_symbol.index == 1 && local_data_symbol.section == data_section &&
+                                                   local_data_symbol.info == 0x01 && local_data_symbol.other == 0);
+                        BUSTER_TEST(arguments, weak_hidden_symbol.value == text_address + local_function_value &&
+                                                   weak_hidden_symbol.size == text.length - local_function_value &&
+                                                   weak_hidden_symbol.index == first_global + 1 && weak_hidden_symbol.section == text_section &&
+                                                   weak_hidden_symbol.info == 0x22 && weak_hidden_symbol.other == 2);
+                        BUSTER_TEST(arguments, local_function_symbol.value == text_address + local_function_value &&
+                                                   local_function_symbol.size == text.length - local_function_value && local_function_symbol.index == 2 &&
+                                                   local_function_symbol.section == text_section && local_function_symbol.info == 0x02 &&
+                                                   local_function_symbol.other == 0);
+                        BUSTER_TEST(arguments, global_zero_symbol.value == zero_address + 3 && global_zero_symbol.size == 5 &&
+                                                   global_zero_symbol.index == first_global + 2 && global_zero_symbol.section == zero_section &&
+                                                   global_zero_symbol.info == 0x11 && global_zero_symbol.other == 0);
+                        BUSTER_TEST(arguments, missing_weak_symbol.value == 0 && missing_weak_symbol.size == 0 &&
+                                                   missing_weak_symbol.index == first_global + 3 && missing_weak_symbol.section == 0 &&
+                                                   missing_weak_symbol.info == 0x21 && missing_weak_symbol.other == 2);
+                        if (hosted)
+                        {
+                            u32 thread_local_data_section = 0;
+                            u32 thread_local_zero_section = 0;
+                            u64 thread_local_data_header = 0;
+                            u64 thread_local_zero_header = 0;
+                            BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".tdata"), &thread_local_data_section,
+                                                                             &thread_local_data_header));
+                            BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".tbss"), &thread_local_zero_section,
+                                                                             &thread_local_zero_header));
+                            LinkTestElfSymbol thread_local_data_symbol = {0};
+                            LinkTestElfSymbol thread_local_zero_symbol = {0};
+                            BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("tls_data"), &thread_local_data_symbol));
+                            BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("tls_zero"), &thread_local_zero_symbol));
+                            u64 thread_local_data_address = link_read_u64(linked.executable.pointer, thread_local_data_header + 16);
+                            u64 thread_local_zero_address = link_read_u64(linked.executable.pointer, thread_local_zero_header + 16);
+                            BUSTER_TEST(arguments, thread_local_data_symbol.value == 1 && thread_local_data_symbol.size == 1 &&
+                                                       thread_local_data_symbol.index == first_global + 6 &&
+                                                       thread_local_data_symbol.section == thread_local_data_section &&
+                                                       thread_local_data_symbol.info == 0x16 && thread_local_data_symbol.other == 0);
+                            BUSTER_TEST(arguments, thread_local_zero_address >= thread_local_data_address &&
+                                                       thread_local_zero_symbol.value == thread_local_zero_address - thread_local_data_address + 2 &&
+                                                       thread_local_zero_symbol.size == 3 && thread_local_zero_symbol.index == 3 &&
+                                                       thread_local_zero_symbol.section == thread_local_zero_section &&
+                                                       thread_local_zero_symbol.info == 0x06 && thread_local_zero_symbol.other == 0);
+                        }
+                        u64 program_header_offset = link_read_u64(linked.executable.pointer, 32);
+                        u16 program_header_size = 0;
+                        u16 program_header_count = 0;
+                        memcpy(&program_header_size, linked.executable.pointer + 54, sizeof(program_header_size));
+                        memcpy(&program_header_count, linked.executable.pointer + 56, sizeof(program_header_count));
+                        BUSTER_TEST(arguments, program_header_size == 56 && program_header_offset <= symbol_offset &&
+                                                   (u64)program_header_count <= (symbol_offset - program_header_offset) / program_header_size);
+                        for (u32 index = 0; index < program_header_count; index += 1)
+                        {
+                            u64 header = program_header_offset + (u64)index * program_header_size;
+                            u64 file_offset = link_read_u64(linked.executable.pointer, header + 8);
+                            u64 file_size = link_read_u64(linked.executable.pointer, header + 32);
+                            BUSTER_TEST(arguments, file_offset <= symbol_offset && file_size <= symbol_offset - file_offset);
+                        }
+                        if (hosted)
+                        {
+                            u32 dynamic_symbol_section = 0;
+                            BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".dynsym"), &dynamic_symbol_section, 0));
+                            BUSTER_TEST(arguments, dynamic_symbol_section != symbol_section);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+// A final executable names addresses in the merged ObjectFile, not the
+// per-input offsets.  Use two independently aligned inputs and symbols in
+// loaded, unwind and non-loaded sections so a table copied from either input
+// cannot satisfy the expected values.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_merged_symbol_table(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u8 first_text[] = {0x31, 0xc0, 0xc3};
+    u8 second_text[] = {0x90, 0x31, 0xc0, 0xc3};
+    u8 first_read_only[] = {0x13, 0x27, 0x51};
+    u8 second_read_only[] = {0x7b, 0x91};
+    u8 first_debug[] = {0x49, 0x21, 0x68, 0x33, 0xa5};
+    u8 second_debug[] = {0xc7, 0x18, 0xe2};
+    ObjectSymbol first_symbols[] = {
+        {.name = S8("main"), .size = sizeof(first_text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("first_rodata"), .value = 1, .size = 2, .section = OBJECT_SECTION_READ_ONLY_DATA, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("first_unwind"), .section = OBJECT_SECTION_UNWIND, .kind = OBJECT_SYMBOL_DATA},
+    };
+    ObjectSymbol second_symbols[] = {
+        {.name = S8("second_function"), .value = 1, .size = 3, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("second_rodata"), .value = 1, .size = 1, .section = OBJECT_SECTION_READ_ONLY_DATA, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("second_unwind"), .section = OBJECT_SECTION_UNWIND, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("second_debug"), .value = 1, .size = 2, .section = OBJECT_SECTION_DEBUG_INFO, .kind = OBJECT_SYMBOL_DATA},
+    };
+    CodegenFunctionDescriptor first_descriptor = {.code_size = sizeof(first_text)};
+    CodegenFunctionDescriptor second_descriptor = {.code_size = sizeof(second_text)};
+    DwarfCfiResult first_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                     .functions = &first_descriptor,
+                                                                     .target = target,
+                                                                     .function_count = 1,
+                                                                 });
+    DwarfCfiResult second_cfi = dwarf_cfi_build(arguments->arena, (DwarfCfiInput){
+                                                                      .functions = &second_descriptor,
+                                                                      .target = target,
+                                                                      .function_count = 1,
+                                                                  });
+    if (BUSTER_REQUIRE(arguments, first_cfi.valid && first_cfi.relocation_count == 1 && second_cfi.valid && second_cfi.relocation_count == 1))
+    {
+        first_symbols[2].size = first_cfi.bytes.length;
+        second_symbols[2].size = second_cfi.bytes.length;
+        ObjectRelocation first_relocation = {
+            .offset = first_cfi.relocations[0].offset,
+            .section = OBJECT_SECTION_UNWIND,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_X86_64_PC32,
+        };
+        ObjectRelocation second_relocation = {
+            .offset = second_cfi.relocations[0].offset,
+            .section = OBJECT_SECTION_UNWIND,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_X86_64_PC32,
+        };
+        ObjectFile objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_text), first_symbols,
+                                  BUSTER_ARRAY_LENGTH(first_symbols), &first_relocation, 1),
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_text), second_symbols,
+                                  BUSTER_ARRAY_LENGTH(second_symbols), &second_relocation, 1),
+        };
+        objects[0].sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_read_only);
+        objects[1].sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_read_only);
+        objects[0].sections[OBJECT_SECTION_UNWIND].data = first_cfi.bytes;
+        objects[1].sections[OBJECT_SECTION_UNWIND].data = second_cfi.bytes;
+        objects[0].sections[OBJECT_SECTION_DEBUG_INFO].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_debug);
+        objects[1].sections[OBJECT_SECTION_DEBUG_INFO].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_debug);
+        LinkObjectResult merged = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+        if (BUSTER_REQUIRE(arguments, merged.error == LINK_ERROR_NONE))
+        {
+            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &merged.object,
+                                                                       (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+            if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+            {
+                u32 text_section = 0;
+                u32 read_only_section = 0;
+                u32 unwind_section = 0;
+                u32 debug_section = 0;
+                u64 text_header = 0;
+                u64 read_only_header = 0;
+                u64 unwind_header = 0;
+                u64 debug_header = 0;
+                BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".text"), &text_section, &text_header));
+                BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".rodata"), &read_only_section, &read_only_header));
+                BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".eh_frame"), &unwind_section, &unwind_header));
+                BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".debug_info"), &debug_section, &debug_header));
+                LinkTestElfSymbol main_symbol = {0};
+                LinkTestElfSymbol second_function_symbol = {0};
+                LinkTestElfSymbol first_read_only_symbol = {0};
+                LinkTestElfSymbol second_read_only_symbol = {0};
+                LinkTestElfSymbol first_unwind_symbol = {0};
+                LinkTestElfSymbol second_unwind_symbol = {0};
+                LinkTestElfSymbol second_debug_symbol = {0};
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("main"), &main_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("second_function"), &second_function_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("first_rodata"), &first_read_only_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("second_rodata"), &second_read_only_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("first_unwind"), &first_unwind_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("second_unwind"), &second_unwind_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("second_debug"), &second_debug_symbol));
+                u64 text_address = link_read_u64(linked.executable.pointer, text_header + 16);
+                u64 read_only_address = link_read_u64(linked.executable.pointer, read_only_header + 16);
+                u64 unwind_address = link_read_u64(linked.executable.pointer, unwind_header + 16);
+                u64 second_text_offset = align_forward(sizeof(first_text), object_section_default_alignment(OBJECT_SECTION_TEXT));
+                u64 second_read_only_offset = align_forward(sizeof(first_read_only), object_section_default_alignment(OBJECT_SECTION_READ_ONLY_DATA));
+                u64 second_unwind_offset = align_forward(first_cfi.bytes.length, object_section_default_alignment(OBJECT_SECTION_UNWIND));
+                u64 second_debug_offset = align_forward(sizeof(first_debug), object_section_default_alignment(OBJECT_SECTION_DEBUG_INFO));
+                BUSTER_TEST(arguments, main_symbol.value == text_address && main_symbol.section == text_section && main_symbol.info == 0x12);
+                BUSTER_TEST(arguments, second_function_symbol.value == text_address + second_text_offset + 1 &&
+                                           second_function_symbol.size == 3 && second_function_symbol.section == text_section &&
+                                           second_function_symbol.info == 0x12);
+                BUSTER_TEST(arguments, first_read_only_symbol.value == read_only_address + 1 && first_read_only_symbol.size == 2 &&
+                                           first_read_only_symbol.section == read_only_section && first_read_only_symbol.info == 0x01);
+                BUSTER_TEST(arguments, second_read_only_symbol.value == read_only_address + second_read_only_offset + 1 &&
+                                           second_read_only_symbol.size == 1 && second_read_only_symbol.section == read_only_section &&
+                                           second_read_only_symbol.info == 0x01);
+                BUSTER_TEST(arguments, first_unwind_symbol.value == unwind_address && first_unwind_symbol.size == first_cfi.bytes.length &&
+                                           first_unwind_symbol.section == unwind_section && first_unwind_symbol.info == 0x01);
+                BUSTER_TEST(arguments, second_unwind_symbol.value == unwind_address + second_unwind_offset &&
+                                           second_unwind_symbol.size == second_cfi.bytes.length && second_unwind_symbol.section == unwind_section &&
+                                           second_unwind_symbol.info == 0x01);
+                BUSTER_TEST(arguments, second_debug_symbol.value == second_debug_offset + 1 && second_debug_symbol.size == 2 &&
+                                           second_debug_symbol.section == debug_section && second_debug_symbol.info == 0x01);
+            }
+        }
+    }
+    return result;
+}
+
+// The ELF section-table append zeroes its tail through the arena's dirty-aware
+// allocation, so no byte of its image may depend on what the arena held. A
+// fresh mapping, a dirty high-water mark at each boundary inside the tail, the
+// copying growth path and repeated reuse all reproduce the fresh bump's image;
+// the image prefix survives, and the bytes nothing writes are zero.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_section_table_tail(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Every link_elf_debug_kinds entry, in its order.
+    ObjectSectionKind debug_kinds[] = {
+        OBJECT_SECTION_DEBUG_INFO,     OBJECT_SECTION_DEBUG_ABBREV,   OBJECT_SECTION_DEBUG_LINE,     OBJECT_SECTION_DEBUG_STR,
+        OBJECT_SECTION_DEBUG_LOC,      OBJECT_SECTION_DEBUG_RANGES,   OBJECT_SECTION_DEBUG_ADDR,     OBJECT_SECTION_DEBUG_STR_OFFSETS,
+        OBJECT_SECTION_DEBUG_LINE_STR, OBJECT_SECTION_DEBUG_RNGLISTS, OBJECT_SECTION_DEBUG_LOCLISTS,
+    };
+    // Neither pattern contains a zero byte, so a cleared byte cannot pass for
+    // a preserved one.
+    u8 debug_bytes[64] = {0};
+    for (u32 index = 0; index < sizeof(debug_bytes); index += 1)
+    {
+        debug_bytes[index] = (u8)(0x41 + index * 7);
+    }
+    u8 prefix_bytes[136] = {0};
+    for (u32 index = 0; index < sizeof(prefix_bytes); index += 1)
+    {
+        prefix_bytes[index] = (u8)(0x80 | index);
+    }
+    // link_test_elf_section_find reads only an image with the ELF magic.
+    memcpy(prefix_bytes, "\x7f" "ELF", 4);
+    u8 poisons[] = {0xa5, 0x5a};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    ArenaCreation creation = {.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}};
+    // One arena for every repeated append: each is handed the poison and the
+    // images of every earlier shape and length as its dirty storage.
+    Arena* reused = arena_create(creation);
+    if (BUSTER_REQUIRE(arguments, reused != 0))
+    {
+        memset(arena_allocate(reused, u8, BUSTER_KB(16)), 0xc3, BUSTER_KB(16));
+        arena_reset_to_start(reused);
+        for (u32 shape = 0; shape < 2; shape += 1)
+        {
+            ObjectFile object = link_test_object_make(arguments->arena, target, (ByteSlice){0}, 0, 0, 0, 0);
+            for (u32 index = 0; shape && index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+            {
+                object.sections[debug_kinds[index]].data = (ByteSlice){.pointer = debug_bytes + index, .length = (u64)index * 3 + 1};
+            }
+            // Eight prefix lengths give the padding before the section table
+            // every width from none to seven bytes.
+            for (u64 length = 128; length < sizeof(prefix_bytes); length += 1)
+            {
+                ByteSlice prefix = {.pointer = prefix_bytes, .length = length};
+                Arena* fresh = arena_create(creation);
+                if (BUSTER_REQUIRE(arguments, fresh != 0))
+                {
+                    u8* image = 0;
+                    NativeExecutableLinkResult reference = link_test_section_table_place(fresh, prefix, &object, UINT64_MAX, 0, false, &image);
+                    ByteSlice expected = reference.executable;
+                    if (BUSTER_REQUIRE(arguments, reference.error == LINK_ERROR_NONE && expected.pointer == image && expected.length > length + 64))
+                    {
+                        u64 table = link_read_u64(expected.pointer, 40);
+                        u16 section_count = 0;
+                        u16 string_index = 0;
+                        memcpy(&section_count, expected.pointer + 60, sizeof(section_count));
+                        memcpy(&string_index, expected.pointer + 62, sizeof(string_index));
+                        if (BUSTER_REQUIRE(arguments, table >= length && table <= expected.length && (u32)string_index + 1 == (u32)section_count &&
+                                                          expected.length - table == (u64)section_count * 64))
+                        {
+                            u64 string_header = table + (u64)string_index * 64;
+                            u64 string_offset = link_read_u64(expected.pointer, string_header + 24);
+                            u64 string_size = link_read_u64(expected.pointer, string_header + 32);
+                            if (BUSTER_REQUIRE(arguments,
+                                               string_offset >= length && string_size != 0 && string_offset <= table && string_size <= table - string_offset))
+                            {
+                                u64 string_end = string_offset + string_size;
+                                // The prefix survives except for the ELF header's section-table fields.
+                                BUSTER_TEST(arguments, memcmp(expected.pointer, prefix.pointer, 40) == 0);
+                                BUSTER_TEST(arguments, memcmp(expected.pointer + 48, prefix.pointer + 48, 10) == 0);
+                                BUSTER_TEST(arguments, memcmp(expected.pointer + 64, prefix.pointer + 64, length - 64) == 0);
+                                // Nothing writes the padding, the null section header, the
+                                // string separators or the string table header's unused fields.
+                                u64 nonzero = 0;
+                                u32 separators = 0;
+                                for (u64 offset = string_end; offset < table + 64; offset += 1)
+                                {
+                                    nonzero += expected.pointer[offset] != 0;
+                                }
+                                for (u64 offset = string_offset; offset < string_end; offset += 1)
+                                {
+                                    separators += expected.pointer[offset] == 0;
+                                }
+                                BUSTER_TEST(arguments, table == align_forward(string_end, 8));
+                                BUSTER_TEST(arguments, nonzero == 0);
+                                BUSTER_TEST(arguments, expected.pointer[string_offset] == 0 && separators == (u32)section_count);
+                                BUSTER_TEST(arguments, link_read_u64(expected.pointer, string_header + 8) == 0 &&
+                                                           link_read_u64(expected.pointer, string_header + 16) == 0 &&
+                                                           link_read_u32(expected.pointer, string_header + 40) == 0 &&
+                                                           link_read_u32(expected.pointer, string_header + 44) == 0 &&
+                                                           link_read_u64(expected.pointer, string_header + 56) == 0);
+                                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+                                {
+                                    ByteSlice data = object.sections[debug_kinds[index]].data;
+                                    u64 header = 0;
+                                    bool found = link_test_elf_section_find(expected, object_section_name_for_kind(debug_kinds[index]), 0, &header);
+                                    // Without input bytes only the DWARF 4 family keeps its empty section.
+                                    BUSTER_TEST(arguments, found == (shape != 0 || debug_kinds[index] < OBJECT_SECTION_DEBUG_ADDR));
+                                    if (found)
+                                    {
+                                        u64 offset = link_read_u64(expected.pointer, header + 24);
+                                        u64 size = link_read_u64(expected.pointer, header + 32);
+                                        BUSTER_TEST(arguments, size == data.length && offset >= length && offset <= string_offset &&
+                                                                   size <= string_offset - offset &&
+                                                                   (size == 0 || memcmp(expected.pointer + offset, data.pointer, size) == 0));
+                                    }
+                                }
+                                u64 tail = expected.length - length;
+                                u64 boundaries[] = {
+                                    0, 1, string_end - length, string_end - length + 1, table - length + 1, tail - 1, tail, tail + BUSTER_KB(4),
+                                };
+                                for (u32 copy = 0; copy < 2; copy += 1)
+                                {
+                                    for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(boundaries); boundary += 1)
+                                    {
+                                        Arena* dirty = arena_create(creation);
+                                        if (BUSTER_REQUIRE(arguments, dirty != 0))
+                                        {
+                                            u8* placed = 0;
+                                            NativeExecutableLinkResult linked = link_test_section_table_place(dirty, prefix, &object, boundaries[boundary],
+                                                                                                              poisons[boundary % 2], copy != 0, &placed);
+                                            u8* grown = copy ? placed + length + 1 : placed;
+                                            BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE && linked.executable.pointer == grown &&
+                                                                       linked.executable.length == expected.length &&
+                                                                       memcmp(linked.executable.pointer, expected.pointer, expected.length) == 0);
+                                            // Copying leaves the original image and the allocation after it alone.
+                                            BUSTER_TEST(arguments, !copy || (memcmp(placed, prefix.pointer, length) == 0 && placed[length] == 0xee));
+                                            BUSTER_TEST(arguments, arena_destroy(dirty, 1));
+                                        }
+                                    }
+                                }
+                                for (u32 copy = 0; copy < 2; copy += 1)
+                                {
+                                    BUSTER_TEST(arguments, arena_dirty_position(reused) >= arena_minimum_position + length * 2 + 1 + tail);
+                                    u8* placed = 0;
+                                    NativeExecutableLinkResult linked =
+                                        link_test_section_table_place(reused, prefix, &object, UINT64_MAX, 0, copy != 0, &placed);
+                                    u8* grown = copy ? placed + length + 1 : placed;
+                                    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE && linked.executable.pointer == grown &&
+                                                               linked.executable.length == expected.length &&
+                                                               memcmp(linked.executable.pointer, expected.pointer, expected.length) == 0);
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, arena_destroy(fresh, 1));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(reused, 1));
+    }
+
+    // The production writers reach the append on its bump path. Every debug
+    // section survives into their images, and relinking over a poisoned output
+    // arena reproduces the fresh image exactly.
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u8 aarch64_text[] = {0x00, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ByteSlice text =
+            architectures[architecture] == CPU_ARCH_AARCH64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text) : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text);
+        ObjectSymbol symbols[] = {
+            {.name = S8("main"), .kind = OBJECT_SYMBOL_FUNCTION, .section = OBJECT_SECTION_TEXT, .size = text.length, .global = true},
+        };
+        Target writer_target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        ObjectFile object = link_test_object_make(arguments->arena, writer_target, text, symbols, BUSTER_ARRAY_LENGTH(symbols), 0, 0);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+        {
+            object.sections[debug_kinds[index]].data = (ByteSlice){.pointer = debug_bytes + index, .length = (u64)index * 3 + 1};
+        }
+        Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = 1}});
+        Arena* temporary = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = 1}});
+        if (BUSTER_REQUIRE(arguments, output != 0 && temporary != 0))
+        {
+            ByteSlice first = {0};
+            for (u32 iteration = 0; iteration < 1 + BUSTER_ARRAY_LENGTH(poisons); iteration += 1)
+            {
+                if (iteration)
+                {
+                    u64 poisoned = arena_dirty_position(output) - arena_minimum_position + BUSTER_KB(64);
+                    memset(arena_allocate(output, u8, poisoned), poisons[iteration - 1], poisoned);
+                    arena_reset_to_start(output);
+                }
+                NativeExecutableLinkOptions options = {.entry_symbol = S8("main")};
+                NativeExecutableLinkResult linked = link_elf_test_executable(output, temporary, &object, options);
+                if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+                {
+                    if (!iteration)
+                    {
+                        first.length = linked.executable.length;
+                        first.pointer = arena_allocate(arguments->arena, u8, first.length);
+                        memcpy(first.pointer, linked.executable.pointer, first.length);
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(debug_kinds); index += 1)
+                        {
+                            ByteSlice data = object.sections[debug_kinds[index]].data;
+                            u64 header = 0;
+                            BUSTER_TEST(arguments, link_test_elf_section_find(first, object_section_name_for_kind(debug_kinds[index]), 0, &header));
+                            u64 offset = link_read_u64(first.pointer, header + 24);
+                            u64 size = link_read_u64(first.pointer, header + 32);
+                            BUSTER_TEST(arguments, header != 0 && size == data.length && offset <= first.length && size <= first.length - offset &&
+                                                       memcmp(first.pointer + offset, data.pointer, size) == 0);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, linked.executable.length == first.length && memcmp(linked.executable.pointer, first.pointer, first.length) == 0);
+                    }
+                }
+                arena_reset_to_start(output);
+            }
+        }
+        BUSTER_TEST(arguments, !output || arena_destroy(output, 1));
+        BUSTER_TEST(arguments, !temporary || arena_destroy(temporary, 1));
     }
     return result;
 }
@@ -2805,6 +3645,18 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult initialized = link_test_merged_section_initialization(arguments);
     result.succeeded_test_count += initialized.succeeded_test_count;
     result.test_count += initialized.test_count;
+    UnitTestResult copy_symbol_table = link_test_elf_copy_symbol_table(arguments);
+    result.succeeded_test_count += copy_symbol_table.succeeded_test_count;
+    result.test_count += copy_symbol_table.test_count;
+    UnitTestResult symbol_table = link_test_elf_symbol_table(arguments);
+    result.succeeded_test_count += symbol_table.succeeded_test_count;
+    result.test_count += symbol_table.test_count;
+    UnitTestResult merged_symbol_table = link_test_elf_merged_symbol_table(arguments);
+    result.succeeded_test_count += merged_symbol_table.succeeded_test_count;
+    result.test_count += merged_symbol_table.test_count;
+    UnitTestResult section_table_tail = link_test_elf_section_table_tail(arguments);
+    result.succeeded_test_count += section_table_tail.succeeded_test_count;
+    result.test_count += section_table_tail.test_count;
     UnitTestResult alignment = link_test_elf_data_alignment(arguments);
     result.succeeded_test_count += alignment.succeeded_test_count;
     result.test_count += alignment.test_count;
@@ -2856,6 +3708,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 .kind = OBJECT_RELOCATION_COFF_SECREL32,
             };
             relocations[index * 2 + 1] = (ObjectRelocation){
+                .addend = index,
                 .offset = (u64)index * 8 + 4,
                 .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
                 .symbol = index,
@@ -2887,10 +3740,14 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 s64 addend = (s64)index - 2;
                 u32 expected_section_offset = (u32)((s64)symbols[index].value + (s64)expected_section_offsets[index] + addend);
                 BUSTER_TEST(arguments, section_offset == expected_section_offset);
-                BUSTER_TEST(arguments, section_number == expected_output_sections[index] + 1);
+                BUSTER_TEST(arguments, section_number == expected_output_sections[index] + 1 + index);
             }
         }
         object_output_sections[OBJECT_SECTION_DATA] = UINT32_MAX;
+        BUSTER_TEST(arguments,
+                    link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
+        object_output_sections[OBJECT_SECTION_DATA] = expected_output_sections[2];
+        relocations[1].addend = UINT16_MAX;
         BUSTER_TEST(arguments,
                     link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
     }
@@ -3615,6 +4472,271 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                    a64_pe_executable.executable.pointer[a64_xdata_raw + 5] == 0xcc &&
                                    a64_pe_executable.executable.pointer[a64_xdata_raw + 6] == 0x01 &&
                                    a64_pe_executable.executable.pointer[a64_xdata_raw + 7] == 0xe4);
+    }
+    {
+        u32 page_code[] = {
+            0x90000008, // adrp x8, target
+            0x91000100, // add x0, x8, :lo12:target
+            0x52800000, // mov w0, #0
+            0xd65f03c0, // ret
+        };
+        u8 page_data[8192] = {0};
+        u8 page_marker[] = {0x71, 0x4b, 0x29, 0xd3, 0x5e, 0x86, 0xa1, 0x0c};
+        memcpy(page_data + 4093, page_marker, sizeof(page_marker));
+        ObjectSymbol page_symbols[] = {
+            {.name = S8("main"), .size = sizeof(page_code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("page_data"), .value = 4093, .size = sizeof(page_marker), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation page_relocations[] = {
+            {.addend = 0x7000, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.addend = 7, .offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A},
+        };
+        ByteSlice page_code_bytes = {.pointer = (u8*)page_code, .length = sizeof(page_code)};
+        ObjectFile page_object = link_test_object_make(arguments->arena, a64_pe_target, page_code_bytes, page_symbols,
+                                                       BUSTER_ARRAY_LENGTH(page_symbols), page_relocations, BUSTER_ARRAY_LENGTH(page_relocations));
+        page_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(page_data);
+        page_object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(page_data);
+        NativeExecutableLinkResult page_linked = link_native_executable(arguments->arena, &page_object,
+                                                                        (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, page_linked.error == LINK_ERROR_NONE);
+        u32 text_rva = 0;
+        u32 text_raw = 0;
+        u32 data_rva = 0;
+        u32 data_raw = 0;
+        bool sections_found = page_linked.error == LINK_ERROR_NONE &&
+                              link_test_pe_section_find(page_linked.executable, S8(".text"), &text_rva, &text_raw) &&
+                              link_test_pe_section_find(page_linked.executable, S8(".data"), &data_rva, &data_raw);
+        BUSTER_TEST(arguments, sections_found);
+        if (sections_found)
+        {
+            u32 code_raw = UINT32_MAX;
+            for (u32 offset = text_raw; offset + 16 <= page_linked.executable.length; offset += 4)
+            {
+                u32 candidate_page = link_read_u32(page_linked.executable.pointer, offset);
+                u32 candidate_low = link_read_u32(page_linked.executable.pointer, offset + 4);
+                if ((candidate_page & UINT32_C(0x9f00001f)) == UINT32_C(0x90000008) &&
+                    (candidate_low & UINT32_C(0xffc003ff)) == UINT32_C(0x91000100) &&
+                    link_read_u32(page_linked.executable.pointer, offset + 8) == UINT32_C(0x52800000) &&
+                    link_read_u32(page_linked.executable.pointer, offset + 12) == UINT32_C(0xd65f03c0))
+                {
+                    code_raw = offset;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, code_raw != UINT32_MAX);
+            u32 page_word = code_raw != UINT32_MAX ? link_read_u32(page_linked.executable.pointer, code_raw) : 0;
+            u32 low_word = code_raw != UINT32_MAX ? link_read_u32(page_linked.executable.pointer, code_raw + 4) : 0;
+            A64MCInst page_instruction = {0};
+            u32 low = 0;
+            bool decoded = a64_mc_decode(page_word, &page_instruction) && page_instruction.opcode == A64_OPCODE_ADRP &&
+                           a64_add_lo12_read(low_word, &low);
+            BUSTER_TEST(arguments, decoded);
+            if (decoded)
+            {
+                u64 place_rva = (u64)text_rva + code_raw - text_raw;
+                u64 actual = (place_rva & ~UINT64_C(0xfff)) + (u64)page_instruction.operands[1].value + low;
+                String8 data_contents = {(char8*)page_linked.executable.pointer + data_raw, page_linked.executable.length - data_raw};
+                String8 marker = {(char8*)page_marker, sizeof(page_marker)};
+                u64 marker_raw = string_first_sequence(data_contents, marker);
+                BUSTER_TEST(arguments, marker_raw != BUSTER_STRING_NO_MATCH);
+                if (marker_raw != BUSTER_STRING_NO_MATCH)
+                {
+                    u64 target_address = (u64)data_rva + marker_raw;
+                    u64 expected = ((target_address + 0x7000) & ~UINT64_C(0xfff)) + ((target_address + 7) & UINT64_C(0xfff));
+                    BUSTER_TEST(arguments, actual == expected);
+                    BUSTER_TEST(arguments, (page_word & 31) == 8 && (low_word & 31) == 0 && ((low_word >> 5) & 31) == 8 &&
+                                               low == (((u64)data_rva + marker_raw + 7) & A64_IMM12_MAX));
+                }
+            }
+        }
+
+        u32 helper_word = 0;
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, UINT32_C(0x90000008), 0x1000,
+                                                      UINT64_C(0x100001000), 0, &helper_word));
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, UINT32_C(0x90000008), 1, 0x1000, 0,
+                                                      &helper_word));
+        BUSTER_TEST(arguments,
+                    object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, UINT32_C(0x90000008), 0x1000, 0x2fff, 1,
+                                                     &helper_word));
+        BUSTER_TEST(arguments,
+                    !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, UINT32_C(0x91000100), 0, 0, -1,
+                                                      &helper_word));
+        BUSTER_TEST(arguments,
+                    object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, UINT32_C(0x91000100), 0, 0xfff, 1,
+                                                     &helper_word) &&
+                        a64_add_lo12_read(helper_word, &text_rva) && text_rva == 0);
+
+        page_code[1] = UINT32_C(0x91400100);
+        String8 failed_output = link_test_temporary_executable_path(arguments->arena, S8("buster-arm64-page-failure"), S8(".exe"));
+        String8 sentinel_text = S8("existing output survives ARM64 relocation failure");
+        ByteSlice sentinel = {.pointer = (u8*)sentinel_text.pointer, .length = sentinel_text.length};
+        BUSTER_TEST(arguments, file_write(failed_output, sentinel));
+        NativeExecutableLinkResult malformed = link_native_executable(arguments->arena, &page_object,
+                                                                       (NativeExecutableLinkOptions){
+                                                                           .output_path = failed_output,
+                                                                           .entry_symbol = S8("main"),
+                                                                       });
+        BUSTER_TEST(arguments, malformed.error == LINK_ERROR_RELOCATION && !malformed.executable.length);
+        ByteSlice retained = file_read(arguments->arena, failed_output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, retained.length == sentinel.length && memory_compare(retained.pointer, sentinel.pointer, sentinel.length));
+        page_code[1] = UINT32_C(0x91000100);
+        page_symbols[1].section = OBJECT_SECTION_UNDEFINED;
+        page_symbols[1].global = true;
+        NativeExecutableLinkResult undefined = link_native_executable(arguments->arena, &page_object,
+                                                                       (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, undefined.error == LINK_ERROR_RELOCATION && !undefined.executable.length);
+
+        u32 load_code[] = {UINT32_C(0x90000009), UINT32_C(0xfd400123), UINT32_C(0x9000000a), UINT32_C(0x3d800144),
+                           UINT32_C(0x9000000b), UINT32_C(0xf9800160), UINT32_C(0xd65f03c0)};
+        u8 load_data[4096] = {0};
+        u8 load_marker[] = {0xc3, 0x28, 0x7a, 0x4f, 0x95, 0xe1, 0x06, 0xbd, 0x37, 0x62, 0xaa, 0x18, 0x40, 0xd9, 0x5e, 0xf1};
+        memcpy(load_data + 4080, load_marker, sizeof(load_marker));
+        ObjectSymbol load_symbols[] = {
+            {.name = S8("main"), .size = sizeof(load_code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("load_data"), .value = 4080, .size = sizeof(load_marker), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation load_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L},
+            {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21},
+            {.offset = 20, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L},
+        };
+        ObjectFile load_object = link_test_object_make(arguments->arena, a64_pe_target,
+                                                       (ByteSlice){.pointer = (u8*)load_code, .length = sizeof(load_code)}, load_symbols,
+                                                       BUSTER_ARRAY_LENGTH(load_symbols), load_relocations, BUSTER_ARRAY_LENGTH(load_relocations));
+        load_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(load_data);
+        load_object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(load_data);
+        String8 load_output = link_test_temporary_executable_path(arguments->arena, S8("buster-arm64-page-load"), S8(".exe"));
+        NativeExecutableLinkOptions load_options = {.output_path = load_output, .entry_symbol = S8("main")};
+        NativeExecutableLinkResult load_linked = link_native_executable(arguments->arena, &load_object, load_options);
+        u32 load_text_rva = 0;
+        u32 load_text_raw = 0;
+        u32 load_data_rva = 0;
+        u32 load_data_raw = 0;
+        bool load_sections = load_linked.error == LINK_ERROR_NONE &&
+                             link_test_pe_section_find(load_linked.executable, S8(".text"), &load_text_rva, &load_text_raw) &&
+                             link_test_pe_section_find(load_linked.executable, S8(".data"), &load_data_rva, &load_data_raw);
+        BUSTER_TEST(arguments, load_sections);
+        if (load_sections)
+        {
+            u32 code_raw = UINT32_MAX;
+            for (u32 offset = load_text_raw; offset + 28 <= load_linked.executable.length; offset += 4)
+            {
+                u32 candidate_load_page = link_read_u32(load_linked.executable.pointer, offset);
+                u32 candidate_load = link_read_u32(load_linked.executable.pointer, offset + 4);
+                u32 candidate_store_page = link_read_u32(load_linked.executable.pointer, offset + 8);
+                u32 candidate_store = link_read_u32(load_linked.executable.pointer, offset + 12);
+                u32 candidate_prefetch_page = link_read_u32(load_linked.executable.pointer, offset + 16);
+                u32 candidate_prefetch = link_read_u32(load_linked.executable.pointer, offset + 20);
+                if ((candidate_load_page & UINT32_C(0x9f00001f)) == UINT32_C(0x90000009) &&
+                    (candidate_load & ~(A64_IMM12_MAX << 10)) == UINT32_C(0xfd400123) &&
+                    (candidate_store_page & UINT32_C(0x9f00001f)) == UINT32_C(0x9000000a) &&
+                    (candidate_store & ~(A64_IMM12_MAX << 10)) == UINT32_C(0x3d800144) &&
+                    (candidate_prefetch_page & UINT32_C(0x9f00001f)) == UINT32_C(0x9000000b) &&
+                    (candidate_prefetch & ~(A64_IMM12_MAX << 10)) == UINT32_C(0xf9800160) &&
+                    link_read_u32(load_linked.executable.pointer, offset + 24) == UINT32_C(0xd65f03c0))
+                {
+                    code_raw = offset;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, code_raw != UINT32_MAX);
+            A64MCInst load_page = {0};
+            A64MCInst store_page = {0};
+            A64MCInst prefetch_page = {0};
+            u32 load_word = code_raw != UINT32_MAX ? link_read_u32(load_linked.executable.pointer, code_raw + 4) : 0;
+            u32 store_word = code_raw != UINT32_MAX ? link_read_u32(load_linked.executable.pointer, code_raw + 12) : 0;
+            u32 prefetch_word = code_raw != UINT32_MAX ? link_read_u32(load_linked.executable.pointer, code_raw + 20) : 0;
+            String8 load_contents = {(char8*)load_linked.executable.pointer + load_data_raw, load_linked.executable.length - load_data_raw};
+            u64 marker_raw = string_first_sequence(load_contents, (String8){(char8*)load_marker, sizeof(load_marker)});
+            bool load_page_decoded = code_raw != UINT32_MAX && a64_mc_decode(link_read_u32(load_linked.executable.pointer, code_raw), &load_page) &&
+                                     load_page.opcode == A64_OPCODE_ADRP;
+            bool store_page_decoded = code_raw != UINT32_MAX && a64_mc_decode(link_read_u32(load_linked.executable.pointer, code_raw + 8), &store_page) &&
+                                      store_page.opcode == A64_OPCODE_ADRP;
+            bool prefetch_page_decoded = code_raw != UINT32_MAX &&
+                                         a64_mc_decode(link_read_u32(load_linked.executable.pointer, code_raw + 16), &prefetch_page) &&
+                                         prefetch_page.opcode == A64_OPCODE_ADRP;
+            bool marker_found = marker_raw != BUSTER_STRING_NO_MATCH;
+            bool load_decoded = load_page_decoded && store_page_decoded && prefetch_page_decoded && marker_found;
+            BUSTER_TEST(arguments, load_page_decoded);
+            BUSTER_TEST(arguments, store_page_decoded);
+            BUSTER_TEST(arguments, prefetch_page_decoded);
+            BUSTER_TEST(arguments, marker_found);
+            BUSTER_TEST(arguments, load_decoded);
+            if (load_decoded)
+            {
+                u64 load_place_rva = (u64)load_text_rva + code_raw - load_text_raw;
+                u64 store_place_rva = load_place_rva + 8;
+                u64 prefetch_place_rva = load_place_rva + 16;
+                u64 actual = (load_place_rva & ~UINT64_C(0xfff)) + (u64)load_page.operands[1].value +
+                             (((load_word >> 10) & A64_IMM12_MAX) << 3);
+                u64 store_actual = (store_place_rva & ~UINT64_C(0xfff)) + (u64)store_page.operands[1].value +
+                                   (((store_word >> 10) & A64_IMM12_MAX) << 4);
+                u64 prefetch_actual = (prefetch_place_rva & ~UINT64_C(0xfff)) + (u64)prefetch_page.operands[1].value +
+                                      (((prefetch_word >> 10) & A64_IMM12_MAX) << 3);
+                BUSTER_TEST(arguments, actual == (u64)load_data_rva + marker_raw &&
+                                           store_actual == (u64)load_data_rva + marker_raw &&
+                                           prefetch_actual == (u64)load_data_rva + marker_raw &&
+                                           (load_word & ~(A64_IMM12_MAX << 10)) == UINT32_C(0xfd400123) &&
+                                           (store_word & ~(A64_IMM12_MAX << 10)) == UINT32_C(0x3d800144) &&
+                                           (prefetch_word & ~(A64_IMM12_MAX << 10)) == UINT32_C(0xf9800160));
+            }
+        }
+        load_code[1] = UINT32_C(0xfc400123);
+        ByteSlice load_sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("existing output survives malformed PAGEOFFSET_12L"));
+        BUSTER_TEST(arguments, file_write(load_output, load_sentinel));
+        NativeExecutableLinkResult malformed_load = link_native_executable(arguments->arena, &load_object, load_options);
+        ByteSlice retained_load = file_read(arguments->arena, load_output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, malformed_load.error == LINK_ERROR_RELOCATION && !malformed_load.executable.length &&
+                                   retained_load.length == load_sentinel.length &&
+                                   memory_compare(retained_load.pointer, load_sentinel.pointer, load_sentinel.length));
+        load_code[1] = UINT32_C(0xfd400123);
+        load_symbols[1].value = 4081;
+        malformed_load = link_native_executable(arguments->arena, &load_object, load_options);
+        BUSTER_TEST(arguments, malformed_load.error == LINK_ERROR_RELOCATION && !malformed_load.executable.length);
+        load_symbols[1].value = 4080;
+        load_symbols[1].section = OBJECT_SECTION_UNDEFINED;
+        load_symbols[1].global = true;
+        malformed_load = link_native_executable(arguments->arena, &load_object, load_options);
+        BUSTER_TEST(arguments, malformed_load.error == LINK_ERROR_RELOCATION && !malformed_load.executable.length);
+
+        u32 tls_code[] = {
+            UINT32_C(0x90000009), UINT32_C(0xb9400129), UINT32_C(0xf9402e4a), UINT32_C(0xf8697949),
+            UINT32_C(0x91000129), UINT32_C(0x52800000), UINT32_C(0xd65f03c0),
+        };
+        u32 tls_value = 1;
+        ObjectSymbol tls_symbols[] = {
+            {.name = S8("main"), .size = sizeof(tls_code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("tls_value"), .size = sizeof(tls_value), .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectRelocation tls_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP},
+            {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12},
+            {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12},
+        };
+        ByteSlice tls_code_bytes = {.pointer = (u8*)tls_code, .length = sizeof(tls_code)};
+        ObjectFile tls_object = link_test_object_make(arguments->arena, a64_pe_target, tls_code_bytes, tls_symbols, BUSTER_ARRAY_LENGTH(tls_symbols),
+                                                      tls_relocations, BUSTER_ARRAY_LENGTH(tls_relocations));
+        tls_object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = (u8*)&tls_value, .length = sizeof(tls_value)};
+        tls_object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_value);
+        ObjectArtifact tls_artifact = object_write(arguments->arena, &tls_object, OBJECT_FORMAT_COFF);
+        ObjectFile tls_roundtrip = object_read(arguments->arena, tls_artifact.bytes, a64_pe_target);
+        bool tls_bound = tls_artifact.error == OBJECT_ERROR_NONE && tls_roundtrip.error == OBJECT_ERROR_NONE &&
+                         tls_roundtrip.relocation_count == 3 &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[0].symbol].name, S8("__tls_index")) &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[1].symbol].name, S8("__tls_index")) &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[2].symbol].name, S8("tls_value"));
+        BUSTER_TEST(arguments, tls_bound);
+        if (tls_bound)
+        {
+            NativeExecutableLinkResult tls_linked = link_native_executable(arguments->arena, &tls_roundtrip,
+                                                                            (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+            BUSTER_TEST(arguments, tls_linked.error == LINK_ERROR_NONE && tls_linked.executable.length);
+        }
     }
 #endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
@@ -4467,6 +5589,13 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("tzname"), &copy_alias_tzname, &copy_alias_tzname_size, 0));
     BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("__tzname"), &copy_alias_tzname_alias, 0, 0));
     BUSTER_TEST(arguments, copy_alias_tzname && copy_alias_tzname == copy_alias_tzname_alias && copy_alias_tzname_size == 16);
+    // Ordinary symbols describe final copy-slot definitions, including the
+    // aliases synthesized by the writer, even when the input BSS was empty.
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("environ"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("_environ"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("__environ"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("tzname"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("__tzname"), 0x11));
     // A name the library exports but this program does not reference, and
     // whose address no import names, stays out of the image.
     BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("stdout"), 0, 0, 0));

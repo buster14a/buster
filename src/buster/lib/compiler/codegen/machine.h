@@ -849,6 +849,37 @@ struct MachineLineMark
     u32 row;
     u32 instruction;
 };
+
+typedef enum MachineDebugValueKind
+{
+    MACHINE_DEBUG_VALUE_UNAVAILABLE,
+    MACHINE_DEBUG_VALUE_REFERENCE,
+    MACHINE_DEBUG_VALUE_CONSTANT,
+    MACHINE_DEBUG_VALUE_PIECEWISE,
+    MACHINE_DEBUG_VALUE_KIND_COUNT,
+} MachineDebugValueKind;
+
+// Debug-only canonical-local identity carried through selection. Instruction
+// spans remain canonical IDs, while references name finished MIR identities;
+// scheduling therefore neither copies nor rewrites this cold side table.
+typedef struct MachineDebugValue MachineDebugValue;
+struct MachineDebugValue
+{
+    MachineRef pieces[2];
+    u64 constant;
+    IrLocalId local;
+    u32 first_instruction;
+    u32 instruction_count;
+    u8 kind;
+    u8 piece_count;
+    u8 piece_sizes[2];
+    // Logical byte width. Register mappings reject architectural aliases
+    // which cannot describe the whole value (notably an x86 ZMM as XMM).
+    u8 value_size;
+    u8 reserved[3];
+};
+
+BUSTER_CT_CHECK(sizeof(MachineDebugValue) == 40);
 BUSTER_CT_CHECK(sizeof(MachineLineMark) == 8);
 
 typedef struct MachineSwitchCase MachineSwitchCase;
@@ -1293,6 +1324,7 @@ struct MachineFunction
     u8* call_target_references;
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
+    MachineDebugValue* debug_values;
     MachineVaArg* va_args;
     MachineInlineAssembly* inline_assemblies;
     MachineInlineAssemblyOperand* inline_assembly_operands;
@@ -1311,6 +1343,7 @@ struct MachineFunction
     u32 call_target_count;
     u32 switch_case_count;
     u32 line_mark_count;
+    u32 debug_value_count;
     u32 va_arg_count;
     u32 inline_assembly_count;
     u32 inline_assembly_operand_count;
@@ -1527,6 +1560,11 @@ struct MachineScheduleResult
     u8 reserved[7];
 };
 
+// A virtual register offset naming no frame home. The predicate bank drops the
+// home of every MASK value no predicate SPILL or RELOAD names; such a value
+// lives only in a k register, so it has no frame location.
+#define MACHINE_VIRTUAL_REGISTER_NO_HOME UINT32_MAX
+
 // MIR_STACK placement: every virtual register owns one 8-byte frame slot and
 // every operand round-trips through a fixed scratch register. This is the
 // selector/encoder verification mode, not an allocator.
@@ -1535,7 +1573,8 @@ struct MachineStackPlacement
 {
     MachineEdit* edits;
     // Frame offsets (positive displacements below the frame base) per vreg
-    // slot and per selector stack slot.
+    // slot and per selector stack slot. A vreg offset may be
+    // MACHINE_VIRTUAL_REGISTER_NO_HOME.
     u32* virtual_register_offsets;
     u32* stack_slot_offsets;
     u32 edit_count;
@@ -1842,11 +1881,13 @@ BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena
 // retain registers across rows. Stack-only source selection keeps its existing
 // integer bridges; explicit MASK MIR remains valid in every machine allocator.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                             bool position_independent, bool predicate_residency, MachineSelectionModule* module);
+                                                                               bool position_independent, bool predicate_residency,
+                                                                               bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent, bool assume_validated, bool predicate_residency, MachineSelectionModule* module);
+                                                                            bool position_independent, bool assume_validated, bool predicate_residency,
+                                                                            bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                            bool assume_validated);
+                                                                            bool assume_validated, bool preserve_debug_values);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
@@ -1960,6 +2001,14 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFun
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
+                                                    MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                    u32 const* value_indirect_slots);
+// Two-pass whole-array selection, for differential comparison against the
+// indexed builder the compiler actually runs.
+BUSTER_F_DECL bool machine_test_debug_values_build_dense(Arena* arena, IrProgram* program, IrFunction* function,
+                                                          MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                          u32 const* value_indirect_slots);
 BUSTER_F_DECL bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
 BUSTER_F_DECL bool machine_a64_test_expand_inline_short_branch(u8 kind, u32 word, u32 words[2]);
 BUSTER_F_DECL bool machine_a64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);

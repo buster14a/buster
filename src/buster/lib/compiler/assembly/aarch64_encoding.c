@@ -10,6 +10,9 @@
 // decoders that recover operands from words for the differential tests.
 // Encoders validate operands and constraints before emitting; an
 // unencodable request returns false rather than a wrong word.
+// Test-only seams (buster_aarch64_metadata_test_*) expose the fail-closed
+// predicate bit, the packed-access counter, and a probe over the generated
+// counted blob readers.
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
@@ -19,8 +22,6 @@
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Woverlength-strings"
-#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
-#pragma clang diagnostic ignored "-Wsign-conversion"
 #elif BUSTER_COMPILER_GCC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Woverlength-strings"
@@ -1845,6 +1846,48 @@ bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target targ
     };
     return !a64_metadata_form_predicates_supported(malformed, target);
 }
+
+// One case per generated blob, expanded from the blob's own generated symbol
+// names so the probe calls the production readers rather than a copy of them.
+#define A64_GENERATED_BLOB_PROBE_CASE(INDEX, BLOB)                              \
+    case (INDEX):                                                               \
+        probe.name = S8(#BLOB);                                                 \
+        probe.byte_count = BLOB##_BYTE_COUNT;                                   \
+        probe.value = BLOB##_u16_counted(BLOB##_BYTE_COUNT, offset);            \
+        probe.truncated = BLOB##_u16_counted(offset + 1u, offset);              \
+        probe.past_end = BLOB##_u16_counted(offset, offset);                    \
+        probe.low = BLOB##_u8_counted(BLOB##_BYTE_COUNT, offset);               \
+        probe.high = BLOB##_u8_counted(BLOB##_BYTE_COUNT, offset + 1u);         \
+        supported = true;                                                       \
+        break
+
+bool buster_aarch64_metadata_test_generated_blob_probe(u32 blob, u64 offset, BusterAarch64GeneratedBlobProbe* result)
+{
+    BusterAarch64GeneratedBlobProbe probe = {0};
+    bool supported = false;
+    switch (blob)
+    {
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_STRING_POOL, buster_aarch64_generated_string_pool);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_SEGMENTS, buster_aarch64_generated_segments_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_FIELDS, buster_aarch64_generated_fields_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_OPERANDS, buster_aarch64_generated_operands_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_PREDICATES, buster_aarch64_generated_predicates_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_FORMS, buster_aarch64_generated_forms_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_MNEMONIC_RANGES, buster_aarch64_generated_mnemonic_ranges_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_MNEMONIC_CANDIDATES, buster_aarch64_generated_mnemonic_candidates_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_SIGNATURE_RANGES, buster_aarch64_generated_signature_ranges_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_SIGNATURE_CANDIDATES, buster_aarch64_generated_signature_candidates_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, buster_aarch64_generated_coverage_blob);
+        default:
+            break;
+    }
+    if (supported)
+    {
+        *result = probe;
+    }
+    return supported;
+}
+#undef A64_GENERATED_BLOB_PROBE_CASE
 #endif
 
 bool a64_generated_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)

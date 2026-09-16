@@ -50,7 +50,11 @@
 // names for one object one slot; see link_elf_index_initialize. Defining
 // only the referenced name leaves the library binding its own post-startup
 // stores — glibc's `__environ = ev` — to its own storage while the program
-// reads a copy taken before startup ran.
+// reads a copy taken before startup ran. The ordinary ELF symbol table must
+// describe those final copy-slot definitions too: link_elf_output_symbol uses
+// the writer's import indices and emitted dynamic values without changing the
+// input ObjectFile. The .bss section header includes the slots already covered
+// by the writable segment; no loaded bytes or program headers move.
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
 // address zero rather than a dynamic import, which is what a startup object
@@ -104,11 +108,12 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
 };
 
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
+#define BUSTER_LINK_ELF_SYMBOL_SIZE 24
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_NEED 0x6ffffffe
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_SYMBOLS 0x6fffffff
 #define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 10
 #define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
-    (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
+    (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds) + 2)
 
 typedef struct LinkElfSectionTableLayout LinkElfSectionTableLayout;
 struct LinkElfSectionTableLayout
@@ -135,6 +140,11 @@ struct LinkElfSectionTableLayout
     u64 got_size;
     u64 dynamic_offset;
     u64 dynamic_size;
+    u32 const* import_indices;
+    String8 const* copy_alias_names;
+    u64 copy_alias_symbol_offset;
+    u64 copy_zero_size;
+    u32 copy_alias_count;
     u32 version_need_count;
     bool dynamic;
     u8 reserved[3];
@@ -1499,8 +1509,8 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             }
             u32 alignment = section->alignment;
             u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
-            u64 aligned = align_forward(section_sizes[section->kind], alignment);
-            if (aligned < section_sizes[section->kind] || section_size > UINT64_MAX - aligned)
+            u64 aligned = 0;
+            if (!align_forward_checked(section_sizes[section->kind], alignment, &aligned) || section_size > UINT64_MAX - aligned)
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
@@ -2141,13 +2151,7 @@ BUSTER_GLOBAL_LOCAL bool link_u64_add(u64 left, u64 right, u64* result)
 
 BUSTER_GLOBAL_LOCAL bool link_u64_align_forward(u64 value, u64 alignment, u64* result)
 {
-    bool valid = result && alignment && BUSTER_IS_POWER_OF_TWO(alignment) && value <= UINT64_MAX - (alignment - 1);
-    if (valid)
-    {
-        *result = align_forward(value, alignment);
-    }
-
-    return valid;
+    return align_forward_checked(value, alignment, result);
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
@@ -2634,6 +2638,110 @@ struct LinkElfSectionDescriptor
     u32 reserved;
 };
 
+// The input symbol stays undefined after a dynamic writer reserves its copy
+// slot. Resolve that symbol and the writer-generated aliases from the same
+// .dynsym entries the loader sees. This is a transient, section-relative view
+// for .symtab only: no extra symbol search, allocation, or input mutation, and
+// the image remains on top of the arena for the zero-copy tail append.
+BUSTER_GLOBAL_LOCAL ObjectSymbol link_elf_output_symbol(ObjectFile* object, u64 index, u8 const* bytes, u64 image_base,
+                                                        u64 const* section_offsets, LinkElfSectionTableLayout const* layout)
+{
+    ObjectSymbol result;
+    u64 dynamic_symbol_offset = 0;
+    if (index < object->symbol_count)
+    {
+        result = object->symbols[index];
+        if (result.section == OBJECT_SECTION_UNDEFINED && result.kind == OBJECT_SYMBOL_DATA && layout->import_indices &&
+            layout->import_indices[index] != UINT32_MAX)
+        {
+            dynamic_symbol_offset = layout->dynamic_symbol_offset + ((u64)layout->import_indices[index] + 1) * BUSTER_LINK_ELF_SYMBOL_SIZE;
+        }
+    }
+    else
+    {
+        u64 alias_index = index - object->symbol_count;
+        result = (ObjectSymbol){
+            .name = layout->copy_alias_names[alias_index],
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        };
+        dynamic_symbol_offset = layout->copy_alias_symbol_offset + alias_index * BUSTER_LINK_ELF_SYMBOL_SIZE;
+    }
+    if (dynamic_symbol_offset)
+    {
+        result.section = OBJECT_SECTION_ZERO;
+        result.value = link_read_u64(bytes, dynamic_symbol_offset + 8) - image_base - section_offsets[OBJECT_SECTION_ZERO];
+        result.size = link_read_u64(bytes, dynamic_symbol_offset + 16);
+    }
+    return result;
+}
+
+typedef struct LinkElfSymbolTableLayout LinkElfSymbolTableLayout;
+struct LinkElfSymbolTableLayout
+{
+    u64 symbol_offset;
+    u64 symbol_size;
+    u64 string_offset;
+    u64 string_size;
+    u64 symbol_count;
+    u32 local_symbol_count;
+};
+
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_table_layout(ObjectFile* object, u64 image_base, u64 const* section_offsets,
+                                                      u32 const* output_section_indices, u8 const* bytes, LinkElfSectionTableLayout const* section_layout,
+                                                      u64 cursor, LinkElfSymbolTableLayout* layout)
+{
+    bool result = cursor <= UINT64_MAX - 7;
+    *layout = (LinkElfSymbolTableLayout){.string_size = 1};
+    for (u64 index = 0; index < (u64)object->symbol_count + section_layout->copy_alias_count && result; index += 1)
+    {
+        ObjectSymbol output_symbol = link_elf_output_symbol(object, index, bytes, image_base, section_offsets, section_layout);
+        ObjectSymbol* symbol = &output_symbol;
+        bool emitted = symbol->section == OBJECT_SECTION_UNDEFINED ||
+                       (symbol->section < OBJECT_SECTION_COUNT && output_section_indices[symbol->section]);
+        if (emitted)
+        {
+            layout->symbol_count += 1;
+            layout->local_symbol_count += !symbol->global;
+            u64 value = 0;
+            bool thread_local_symbol = symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            if (symbol->section != OBJECT_SECTION_UNDEFINED && thread_local_symbol)
+            {
+                result = section_offsets[symbol->section] >= section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] &&
+                         link_u64_add(section_offsets[symbol->section] - section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], symbol->value, &value);
+            }
+            else if (symbol->section != OBJECT_SECTION_UNDEFINED && !object_section_kind_is_debug((ObjectSectionKind)symbol->section))
+            {
+                result = link_u64_add(image_base, section_offsets[symbol->section], &value) && link_u64_add(value, symbol->value, &value);
+            }
+            if (result && symbol->name.length)
+            {
+                result = symbol->name.length <= UINT32_MAX - 1 && layout->string_size <= UINT32_MAX - symbol->name.length - 1;
+                if (result)
+                {
+                    layout->string_size += symbol->name.length + 1;
+                }
+            }
+        }
+    }
+    if (result)
+    {
+        result = layout->local_symbol_count < UINT32_MAX;
+    }
+    if (result)
+    {
+        layout->symbol_offset = align_forward(cursor, 8);
+        result = layout->symbol_count + 1 <= (UINT64_MAX - layout->symbol_offset) / BUSTER_LINK_ELF_SYMBOL_SIZE;
+    }
+    if (result)
+    {
+        layout->symbol_size = (layout->symbol_count + 1) * BUSTER_LINK_ELF_SYMBOL_SIZE;
+        layout->string_offset = layout->symbol_offset + layout->symbol_size;
+        result = layout->string_size <= UINT64_MAX - layout->string_offset;
+    }
+    return result;
+}
+
 // Appends merged DWARF data and an ELF section table to a finished image.
 // Loaded bytes retain their program-header layout, while zero-fill and debug
 // sections preserve their virtual and non-loaded representations. Debug
@@ -2653,15 +2761,21 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
     if (result->error == LINK_ERROR_NONE && object->section_count >= OBJECT_SECTION_COUNT)
     {
         LinkElfSectionDescriptor descriptors[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY] = {0};
+        u32 output_section_indices[OBJECT_SECTION_COUNT] = {0};
         u32 descriptor_count = 0;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
         {
             ObjectSectionKind kind = link_elf_loaded_kinds[index];
             ObjectSection* section = &object->sections[kind];
             u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
+            if (kind == OBJECT_SECTION_ZERO)
+            {
+                size = BUSTER_MAX(size, layout.copy_zero_size);
+            }
             u64 offset = section_offsets[kind];
             bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
+            output_section_indices[kind] = descriptor_count + 1;
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
                 .name = object_section_name_for_kind(kind),
                 .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
@@ -2824,8 +2938,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 result->error = LINK_ERROR_INVALID_INPUT;
                 return;
             }
+            ObjectSectionKind kind = link_elf_debug_kinds[index];
+            output_section_indices[kind] = descriptor_count + 1;
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-                .name = object_section_name_for_kind(link_elf_debug_kinds[index]),
+                .name = object_section_name_for_kind(kind),
                 .offset = cursor,
                 .size = section->data.length,
                 .alignment = section->alignment,
@@ -2833,29 +2949,59 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             };
             cursor += section->data.length;
         }
-        u64 string_offset = cursor;
+        LinkElfSymbolTableLayout symbol_layout = {0};
+        bool symbol_layout_valid = link_elf_symbol_table_layout(object, image_base, section_offsets, output_section_indices, result->executable.pointer,
+                                                               &layout, cursor, &symbol_layout);
+        if (!symbol_layout_valid)
+        {
+            result->error = LINK_ERROR_INVALID_INPUT;
+        }
+        if (symbol_layout_valid)
+        {
+            cursor = symbol_layout.string_offset + symbol_layout.string_size;
+            u32 symbol_table_index = descriptor_count + 1;
+            u32 symbol_string_table_index = symbol_table_index + 1;
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".symtab"),
+                .offset = symbol_layout.symbol_offset,
+                .size = symbol_layout.symbol_size,
+                .alignment = 8,
+                .entry_size = BUSTER_LINK_ELF_SYMBOL_SIZE,
+                .type = 2,
+                .link = symbol_string_table_index,
+                .info = symbol_layout.local_symbol_count + 1,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".strtab"),
+                .offset = symbol_layout.string_offset,
+                .size = symbol_layout.string_size,
+                .alignment = 1,
+                .type = 3,
+            };
+        }
+        u64 section_string_offset = cursor;
         u64 name_offsets[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY + 2] = {0};
-        u64 string_size = 1;
+        u64 section_string_size = 1;
         for (u32 index = 0; index < descriptor_count; index += 1)
         {
-            name_offsets[index + 1] = string_size;
-            if (descriptors[index].name.length > UINT64_MAX - string_size - 1)
+            name_offsets[index + 1] = section_string_size;
+            if (descriptors[index].name.length > UINT64_MAX - section_string_size - 1)
             {
                 result->error = LINK_ERROR_INVALID_INPUT;
                 return;
             }
-            string_size += descriptors[index].name.length + 1;
+            section_string_size += descriptors[index].name.length + 1;
         }
-        u32 string_table_index = descriptor_count + 1;
-        u32 section_count = string_table_index + 1;
-        name_offsets[string_table_index] = string_size;
-        string_size += sizeof(".shstrtab");
-        if (string_size > UINT64_MAX - string_offset)
+        u32 section_string_table_index = descriptor_count + 1;
+        u32 section_count = section_string_table_index + 1;
+        name_offsets[section_string_table_index] = section_string_size;
+        section_string_size += sizeof(".shstrtab");
+        if (section_string_offset > UINT64_MAX - 7 || section_string_size > UINT64_MAX - section_string_offset - 7)
         {
             result->error = LINK_ERROR_INVALID_INPUT;
             return;
         }
-        cursor = align_forward(string_offset + string_size, 8);
+        cursor = align_forward(section_string_offset + section_string_size, 8);
         u64 header_offset = cursor;
         if ((u64)section_count > (UINT64_MAX - header_offset) / BUSTER_LINK_ELF_SECTION_HEADER_SIZE)
         {
@@ -2871,18 +3017,24 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         // 35 MB per self-host link and was 3,03% of the compile's fills from DRAM
         // (audit 2026-08-22T084855Z). The copying form stays for the case where
         // something else has allocated since — it is the same block either way.
+        //
+        // The tail's own allocation zeroes it. A reused arena can hand back old
+        // bytes only below its dirty high-water mark, and arena_allocate_zeroed
+        // clears exactly that part of the tail; above the mark the storage is
+        // still the operating system's zero. The copying form takes the prefix
+        // unzeroed and then the tail as a second byte-aligned allocation directly
+        // after it, so the prefix memcpy overwrites is never cleared first.
+        // Nothing below writes the padding before the section table, the null
+        // section header, the string table's separators or the unused fields of
+        // its header; they are zero from here.
         u8* bytes = result->executable.pointer;
-        if (link_arena_block_on_top(arena, bytes, result->executable.length))
+        if (!link_arena_block_on_top(arena, bytes, result->executable.length))
         {
-            arena_allocate(arena, u8, total_size - result->executable.length);
-        }
-        else
-        {
-            bytes = arena_allocate(arena, u8, total_size);
+            bytes = arena_allocate(arena, u8, result->executable.length);
             memcpy(bytes, result->executable.pointer, result->executable.length);
         }
-        // The tail is arena bytes, which a reused arena hands back dirty.
-        memset(bytes + result->executable.length, 0, total_size - result->executable.length);
+        u8* tail = arena_allocate_zeroed(arena, u8, total_size - result->executable.length);
+        BUSTER_CHECK(tail == bytes + result->executable.length);
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
         {
             ByteSlice data = object->sections[link_elf_debug_kinds[index]].data;
@@ -2970,7 +3122,59 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 return;
             }
         }
-        u64 name_cursor = string_offset + 1;
+        if (symbol_layout_valid)
+        {
+            u64 symbol_entry = 1;
+            u64 symbol_name_cursor = symbol_layout.string_offset + 1;
+            for (u32 pass = 0; pass < 2; pass += 1)
+            {
+                bool global = pass != 0;
+                for (u64 index = 0; index < (u64)object->symbol_count + layout.copy_alias_count; index += 1)
+                {
+                    ObjectSymbol output_symbol = link_elf_output_symbol(object, index, bytes, image_base, section_offsets, &layout);
+                    ObjectSymbol* symbol = &output_symbol;
+                    bool emitted = symbol->section == OBJECT_SECTION_UNDEFINED ||
+                                   (symbol->section < OBJECT_SECTION_COUNT && output_section_indices[symbol->section]);
+                    if (!emitted || symbol->global != global)
+                    {
+                        continue;
+                    }
+                    u64 output = symbol_layout.symbol_offset + symbol_entry * BUSTER_LINK_ELF_SYMBOL_SIZE;
+                    if (symbol->name.length)
+                    {
+                        link_write_u32(bytes, output, (u32)(symbol_name_cursor - symbol_layout.string_offset));
+                        memcpy(bytes + symbol_name_cursor, symbol->name.pointer, symbol->name.length);
+                        symbol_name_cursor += symbol->name.length + 1;
+                    }
+                    bool thread_local_symbol = symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+                    u8 binding = symbol->global ? (symbol->weak ? 0x20 : 0x10) : 0;
+                    bytes[output + 4] = (u8)(binding | (thread_local_symbol ? 6 : symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1));
+                    bytes[output + 5] = symbol->hidden ? 2 : 0;
+                    u64 value = 0;
+                    if (symbol->section != OBJECT_SECTION_UNDEFINED)
+                    {
+                        link_write_u16(bytes, output + 6, (u16)output_section_indices[symbol->section]);
+                        if (thread_local_symbol)
+                        {
+                            value = section_offsets[symbol->section] - section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + symbol->value;
+                        }
+                        else if (object_section_kind_is_debug((ObjectSectionKind)symbol->section))
+                        {
+                            value = symbol->value;
+                        }
+                        else
+                        {
+                            value = image_base + section_offsets[symbol->section] + symbol->value;
+                        }
+                    }
+                    link_write_u64(bytes, output + 8, value);
+                    link_write_u64(bytes, output + 16, symbol->size);
+                    symbol_entry += 1;
+                }
+            }
+            BUSTER_CHECK(symbol_entry == symbol_layout.symbol_count + 1 && symbol_name_cursor == symbol_layout.string_offset + symbol_layout.string_size);
+        }
+        u64 name_cursor = section_string_offset + 1;
         for (u32 index = 0; index < descriptor_count; index += 1)
         {
             String8 name = descriptors[index].name;
@@ -2994,20 +3198,23 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             link_write_u64(bytes, offset + 48, descriptor->alignment);
             link_write_u64(bytes, offset + 56, descriptor->entry_size);
         }
-        u64 string_header = header_offset + (u64)string_table_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
-        link_write_u32(bytes, string_header, (u32)name_offsets[string_table_index]);
+        u64 string_header = header_offset + (u64)section_string_table_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
+        link_write_u32(bytes, string_header, (u32)name_offsets[section_string_table_index]);
         link_write_u32(bytes, string_header + 4, 3);
-        link_write_u64(bytes, string_header + 24, string_offset);
-        link_write_u64(bytes, string_header + 32, string_size);
+        link_write_u64(bytes, string_header + 24, section_string_offset);
+        link_write_u64(bytes, string_header + 32, section_string_size);
         link_write_u64(bytes, string_header + 48, 1);
         link_write_u64(bytes, 40, header_offset);
         link_write_u16(bytes, 58, BUSTER_LINK_ELF_SECTION_HEADER_SIZE);
         link_write_u16(bytes, 60, (u16)section_count);
-        link_write_u16(bytes, 62, (u16)string_table_index);
-        result->executable = (ByteSlice){
-            .pointer = bytes,
-            .length = total_size,
-        };
+        link_write_u16(bytes, 62, (u16)section_string_table_index);
+        if (result->error == LINK_ERROR_NONE)
+        {
+            result->executable = (ByteSlice){
+                .pointer = bytes,
+                .length = total_size,
+            };
+        }
     }
 }
 
@@ -4913,6 +5120,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .got_size = got_size,
                                       .dynamic_offset = dynamic_offset,
                                       .dynamic_size = dynamic_size,
+                                      .import_indices = import_indices,
+                                      .copy_alias_names = alias_names,
+                                      .copy_alias_symbol_offset = dynamic_symbol_offset + ((u64)import_count + 1) * ELF_SYMBOL_SIZE,
+                                      .copy_alias_count = alias_count,
+                                      .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                       .dynamic = true,
                                   });
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
@@ -5836,18 +6048,57 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
             }
             else if (relocation->kind == OBJECT_RELOCATION_COFF_SECTION16)
             {
-                if (offset + 2 > debug_module->symbols_size)
+                u64 section = (u64)object_output_sections[symbol->section] + 1;
+                if (offset + 2 > debug_module->symbols_size || relocation->addend < 0 ||
+                    (u64)relocation->addend > UINT16_MAX - section)
                 {
                     return (ByteSlice){0};
                 }
-                u16 section = (u16)(object_output_sections[symbol->section] + 1);
-                memcpy(bytes + offset, &section, sizeof(section));
+                u16 resolved_section = (u16)(section + (u64)relocation->addend);
+                memcpy(bytes + offset, &resolved_section, sizeof(resolved_section));
             }
         }
         result = (ByteSlice){.pointer = bytes, .length = debug_module->symbols_size};
     }
 
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_pe_aarch64_tls_index_symbol(ObjectFile* object, u32 symbol_index)
+{
+    if (!object || symbol_index >= object->symbol_count)
+    {
+        return false;
+    }
+    ObjectSymbol* symbol = object->symbols + symbol_index;
+    if (symbol->section != OBJECT_SECTION_UNDEFINED || !symbol->global || symbol->kind != OBJECT_SYMBOL_DATA ||
+        !string_equal(symbol->name, S8("__tls_index")))
+    {
+        return false;
+    }
+    u32 page_count = 0;
+    u32 low_count = 0;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + index;
+        if (relocation->symbol != symbol_index)
+        {
+            continue;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
+        {
+            page_count += 1;
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+        {
+            low_count += 1;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return page_count && page_count == low_count;
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
@@ -6027,6 +6278,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             import_groups[symbol_index] = UINT32_MAX;
             ObjectSymbol* symbol = &object->symbols[symbol_index];
             if (symbol->section != OBJECT_SECTION_UNDEFINED)
+            {
+                continue;
+            }
+            if (aarch64 && link_pe_aarch64_tls_index_symbol(object, symbol_index))
             {
                 continue;
             }
@@ -7094,45 +7349,57 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 data_import = false;
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    u32 import_index = import_indices[relocation->symbol];
-                    bool call_relocation = (!aarch64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
-                                           (aarch64 && (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
-                                                        relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26));
-                    if (import_index == UINT32_MAX)
+                    if (aarch64 && link_pe_aarch64_tls_index_symbol(object, relocation->symbol))
                     {
-                        result.error = LINK_ERROR_RELOCATION;
-                        result.symbol = symbol->name;
+                        // __tls_index is owned by the PE loader rather than an
+                        // import library.  The two relocation handlers below
+                        // resolve it to this image's synthesized index slot.
+                        symbol_rva = 0;
                     }
-                    if (result.error == LINK_ERROR_NONE)
+                    else
                     {
-                        if (symbol->kind == OBJECT_SYMBOL_DATA)
+                        u32 import_index = import_indices[relocation->symbol];
+                        bool call_relocation = (!aarch64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
+                                               (aarch64 && (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
+                                                            relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26));
+                        if (import_index == UINT32_MAX)
                         {
-                            if ((!aarch64 && relocation->kind != OBJECT_RELOCATION_X86_64_PC32) ||
-                                (aarch64 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
-                            {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
-                            }
-                            u64 import_slot = (u64)import_slots[relocation->symbol] * sizeof(u64);
-                            if (!link_u64_add(import_section_rva, runtime_address_offset, &symbol_rva) || !link_u64_add(symbol_rva, import_slot, &symbol_rva))
-                            {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
-                            }
-                            data_import = true;
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
                         }
-                        else
+                        if (result.error == LINK_ERROR_NONE)
                         {
-                            if (!call_relocation)
+                            if (symbol->kind == OBJECT_SYMBOL_DATA)
                             {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
+                                if ((!aarch64 && relocation->kind != OBJECT_RELOCATION_X86_64_PC32) ||
+                                    (aarch64 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
+                                u64 import_slot = (u64)import_slots[relocation->symbol] * sizeof(u64);
+                                if (!link_u64_add(import_section_rva, runtime_address_offset, &symbol_rva) ||
+                                    !link_u64_add(symbol_rva, import_slot, &symbol_rva))
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
+                                data_import = true;
                             }
-                            u64 thunk_delta = (u64)import_index * thunk_entry_size;
-                            if (!link_u64_add(section_rvas[PE_SECTION_TEXT], thunk_offset, &symbol_rva) || !link_u64_add(symbol_rva, thunk_delta, &symbol_rva))
+                            else
                             {
-                                result.error = LINK_ERROR_RELOCATION;
-                                result.symbol = symbol->name;
+                                if (!call_relocation)
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
+                                u64 thunk_delta = (u64)import_index * thunk_entry_size;
+                                if (!link_u64_add(section_rvas[PE_SECTION_TEXT], thunk_offset, &symbol_rva) ||
+                                    !link_u64_add(symbol_rva, thunk_delta, &symbol_rva))
+                                {
+                                    result.error = LINK_ERROR_RELOCATION;
+                                    result.symbol = symbol->name;
+                                }
                             }
                         }
                     }
@@ -7239,9 +7506,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 {
                     u64 target_address = pe_image_base + import_section_rva + tls_index_offset;
                     u64 place_address = pe_image_base + place_rva;
-                    bool valid_adrp = true;
-                    u32 encoded = link_aarch64_adrp(9, place_address, target_address, &valid_adrp);
-                    if (!valid_adrp)
+                    u32 instruction = link_read_u32(bytes, output_offset);
+                    u32 encoded = 0;
+                    if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, instruction, place_address,
+                                                          target_address, relocation->addend, &encoded))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                     }
@@ -7252,14 +7520,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
                 {
-                    u32 page_offset = (u32)((import_section_rva + tls_index_offset) & 0xfff);
-                    if (page_offset % 4)
+                    u64 target_address = pe_image_base + import_section_rva + tls_index_offset;
+                    u32 instruction = link_read_u32(bytes, output_offset);
+                    u32 encoded = 0;
+                    if (!object_aarch64_pe_tls_index_lo12_relocate(instruction, target_address, relocation->addend, &encoded))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                     }
                     if (result.error == LINK_ERROR_NONE)
                     {
-                        link_write_u32(bytes, output_offset, 0xb9400129 | ((page_offset / 4) << 10));
+                        link_write_u32(bytes, output_offset, encoded);
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
@@ -7270,18 +7540,41 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         result.symbol = symbol->name;
                     }
                     u64 tls_offset = 0;
-                    if (result.error == LINK_ERROR_NONE)
+                    if (result.error == LINK_ERROR_NONE && !link_u64_add(object_section_offsets[symbol->section], symbol->value, &tls_offset))
                     {
-                        tls_offset = 0;
-                        if (!link_u64_add(object_section_offsets[symbol->section], symbol->value, &tls_offset) ||
-                            !link_address_addend(tls_offset, relocation->addend, &tls_offset) || tls_offset > 4095)
-                        {
-                            result.error = LINK_ERROR_RELOCATION;
-                        }
+                        result.error = LINK_ERROR_RELOCATION;
                     }
                     if (result.error == LINK_ERROR_NONE)
                     {
-                        link_write_u32(bytes, output_offset, 0x91000129 | ((u32)tls_offset << 10));
+                        u32 instruction = link_read_u32(bytes, output_offset);
+                        u32 encoded = 0;
+                        if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, instruction, output_offset, tls_offset,
+                                                              relocation->addend, &encoded))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                        }
+                        else
+                        {
+                            link_write_u32(bytes, output_offset, encoded);
+                        }
+                    }
+                }
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
+                {
+                    u32 instruction = link_read_u32(bytes, output_offset);
+                    u32 encoded = 0;
+                    if (symbol->section == OBJECT_SECTION_UNDEFINED ||
+                        !object_aarch64_pe_page_relocate(relocation->kind, instruction, pe_image_base + place_rva,
+                                                          pe_image_base + symbol_rva, relocation->addend, &encoded))
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    if (result.error == LINK_ERROR_NONE)
+                    {
+                        link_write_u32(bytes, output_offset, encoded);
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
@@ -7712,6 +8005,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             result.error = LINK_ERROR_FILE_WRITE;
         }
+    }
+    if (result.error != LINK_ERROR_NONE)
+    {
+        // A failed relocation or artifact write must not look like a usable
+        // in-memory image to callers.  Disk publication happens only above,
+        // after every relocation and debug record has been finalized.
+        result.executable = (ByteSlice){0};
+        result.pdb = (ByteSlice){0};
     }
     return result;
 }
@@ -8484,6 +8785,36 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                         link_write_u32(bytes, output_offset, (u32)(s32)value);
                     }
                 }
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
+                {
+                    u32 instruction = 0;
+                    u32 patched = 0;
+                    u64 place_address = 0;
+                    u64 symbol_address = 0;
+                    if (!aarch64 || relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u32) ||
+                        output_offset > file_size || sizeof(u32) > file_size - output_offset || !link_u64_add(image_base, place_rva, &place_address) ||
+                        !link_u64_add(image_base, symbol_rva, &symbol_address))
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    if (result.error == LINK_ERROR_NONE)
+                    {
+                        instruction = link_read_u32(bytes, output_offset);
+                        if (!object_aarch64_pe_page_relocate(relocation->kind, instruction, place_address, symbol_address, relocation->addend,
+                                                              &patched))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
+                        }
+                    }
+                    if (result.error == LINK_ERROR_NONE)
+                    {
+                        link_write_u32(bytes, output_offset, patched);
+                    }
+                }
                 else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
                 {
                     u64 address = 0;
@@ -8869,6 +9200,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
         {
             result.error = LINK_ERROR_FILE_WRITE;
         }
+    }
+    if (result.error != LINK_ERROR_NONE)
+    {
+        result.executable = (ByteSlice){0};
+        result.pdb = (ByteSlice){0};
     }
     return result;
 }
@@ -10978,6 +11314,14 @@ NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* tempora
     TemporalArena scope = arena_begin_temporal(temporary);
     NativeExecutableLinkResult result = link_native_executable_with_scratch(arena, temporary, object, options);
     scratch_end(scope);
+    return result;
+}
+
+NativeExecutableLinkResult link_elf_test_section_table_append(Arena* arena, ByteSlice image, ObjectFile* object)
+{
+    NativeExecutableLinkResult result = {.executable = image};
+    u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+    link_elf_section_table_append(arena, &result, object, ELF_IMAGE_BASE, section_offsets, (LinkElfSectionTableLayout){0});
     return result;
 }
 #endif

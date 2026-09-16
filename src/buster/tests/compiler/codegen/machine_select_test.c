@@ -396,7 +396,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(Unit
             if (reversed) { machine_selection_test_reverse_storage(arguments->arena, function); }
             BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE);
             MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
-            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, 0);
+            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, false, 0);
             BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&original, &checked));
             BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&checked, &validated));
             BUSTER_TEST(arguments, checked.supported && machine_verify_function(&checked.function).error == MACHINE_VERIFY_NONE);
@@ -621,6 +621,139 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_address_targets(UnitTe
     return result;
 }
 
+// Aggregate loads copy into the result slot from exactly one source: a direct
+// local's own frame slot, or the address virtual register the operand helper
+// reported for an address-shaped place. Cover both branches feeding that
+// source payload plus the special f80 copy width, assert the reference kind
+// and payload each branch actually emits, and prove a place carrying no
+// address register is rejected instead of copying from an undefined source.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_aggregate_load_sources(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct Blob { long a; long b; long c; };\n"
+                         "struct Blob blob_global;\n"
+                         "struct Blob aggregate_frame(long seed)\n"
+                         "{ struct Blob local; local.a = seed; local.b = seed; local.c = seed; struct Blob out = local; return out; }\n"
+                         "struct Blob aggregate_pointer(struct Blob *p) { struct Blob out = *p; return out; }\n"
+                         "struct Blob aggregate_global(void) { struct Blob out = blob_global; return out; }\n"
+                         "long double aggregate_f80(long double *p) { long double out = *p; return out; }\n");
+    struct
+    {
+        String8 name;
+        u16 opcode;
+        MachineRefKind source_kind;
+        u32 copy_width;
+    } expected[] = {
+        {S8_INITIALIZER("aggregate_frame"), MACHINE_X64_COPY_FRAME_FROM_FRAME, MACHINE_REF_STACK_SLOT, 24},
+        {S8_INITIALIZER("aggregate_pointer"), MACHINE_X64_COPY_FRAME_FROM_PTR, MACHINE_REF_VIRTUAL_REGISTER, 24},
+        {S8_INITIALIZER("aggregate_global"), MACHINE_X64_COPY_FRAME_FROM_PTR, MACHINE_REF_VIRTUAL_REGISTER, 24},
+        {S8_INITIALIZER("aggregate_f80"), MACHINE_X64_COPY_FRAME_FROM_PTR, MACHINE_REF_VIRTUAL_REGISTER, 10},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+    BUSTER_TEST(arguments, program != 0);
+    for (u32 fixture = 0; program && fixture < BUSTER_ARRAY_LENGTH(expected); fixture += 1)
+    {
+        IrFunction* function = machine_selection_test_find(program, expected[fixture].name);
+        BUSTER_TEST(arguments, function != 0);
+        if (!function)
+        {
+            continue;
+        }
+        MachineSelectResult selection = machine_select_canonical_function(arguments->arena, program, function, target);
+        BUSTER_TEST(arguments, selection.supported && machine_verify_function(&selection.function).error == MACHINE_VERIFY_NONE);
+        if (!selection.supported)
+        {
+            continue;
+        }
+        u32 matching_copies = 0;
+        for (u32 row = 0; row < selection.function.instruction_count; row += 1)
+        {
+            MachineInstruction* instruction = selection.function.instructions + row;
+            if (instruction->opcode != MACHINE_X64_COPY_FRAME_FROM_FRAME && instruction->opcode != MACHINE_X64_COPY_FRAME_FROM_PTR)
+            {
+                continue;
+            }
+            MachineRef destination = instruction->operands[0];
+            MachineRef aggregate_source = instruction->operands[1];
+            // The copy always lands in a frame slot; only the source branch
+            // is under test here.
+            BUSTER_TEST(arguments, machine_ref_kind(destination) == MACHINE_REF_STACK_SLOT &&
+                                       machine_ref_payload(destination) < selection.function.stack_slot_count);
+            if (instruction->opcode != expected[fixture].opcode)
+            {
+                continue;
+            }
+            u32 source_payload = machine_ref_payload(aggregate_source);
+            BUSTER_TEST(arguments, machine_ref_kind(aggregate_source) == expected[fixture].source_kind);
+            if (expected[fixture].source_kind == MACHINE_REF_STACK_SLOT)
+            {
+                // A frame-backed aggregate names a real slot and never
+                // consults an address register.
+                BUSTER_TEST(arguments, source_payload < selection.function.stack_slot_count &&
+                                           selection.function.stack_slot_sizes[source_payload] >= expected[fixture].copy_width);
+            }
+            else
+            {
+                // The address register must be a register the selector
+                // actually produced for the loaded place: defined before the
+                // copy reads it, and carrying that place's typed origin.
+                BUSTER_TEST(arguments, source_payload < selection.function.virtual_register_count);
+                if (source_payload < selection.function.virtual_register_count)
+                {
+                    MachineVirtualRegister* address = selection.function.virtual_registers + source_payload;
+                    BUSTER_TEST(arguments, address->definition_point != MACHINE_POINT_INVALID &&
+                                               address->typed_origin != IR_ID_UNDERLYING_INVALID &&
+                                               address->register_class == MACHINE_REGISTER_CLASS_GENERAL);
+                }
+            }
+            BUSTER_TEST(arguments, instruction->payload == expected[fixture].copy_width);
+            matching_copies += 1;
+        }
+        BUSTER_TEST(arguments, matching_copies != 0);
+    }
+
+    // A place that is neither frame-backed nor address-shaped carries no
+    // address register, and the aggregate branch must reject the load rather
+    // than copy from an undefined source. Retarget the pointer fixture's
+    // aggregate load at its own parameter value, which the selector
+    // classifies as a plain register result with no place address.
+    IrFunction* pointer = machine_selection_test_find(program, S8("aggregate_pointer"));
+    BUSTER_TEST(arguments, pointer != 0);
+    if (pointer)
+    {
+        IrInstruction* load = 0;
+        IrInstruction* argument = 0;
+        for (u32 row = 0; row < pointer->instruction_count; row += 1)
+        {
+            IrInstruction* instruction = pointer->instructions + row;
+            if (instruction->opcode == IR_OPCODE_ARGUMENT && !argument)
+            {
+                argument = instruction;
+            }
+            if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count && !load)
+            {
+                load = instruction;
+            }
+        }
+        BUSTER_TEST(arguments, load != 0 && argument != 0);
+        if (load && argument)
+        {
+            IrValueId saved_place = load->operands[0];
+            load->operands[0] = argument->result;
+            ir_function_invalidate_cfg(pointer);
+            MachineSelectResult rejected = machine_select_canonical_function(arguments->arena, program, pointer, target);
+            BUSTER_TEST(arguments, !rejected.supported && rejected.failed_opcode == IR_OPCODE_LOAD);
+            load->operands[0] = saved_place;
+            ir_function_invalidate_cfg(pointer);
+            MachineSelectResult restored = machine_select_canonical_function(arguments->arena, program, pointer, target);
+            BUSTER_TEST(arguments, restored.supported);
+        }
+    }
+
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -633,6 +766,9 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
     UnitTestResult target_address_result = machine_selection_test_address_targets(arguments);
     result.test_count += target_address_result.test_count;
     result.succeeded_test_count += target_address_result.succeeded_test_count;
+    UnitTestResult aggregate_load_result = machine_selection_test_aggregate_load_sources(arguments);
+    result.test_count += aggregate_load_result.test_count;
+    result.succeeded_test_count += aggregate_load_result.succeeded_test_count;
     String8 source = S8("int selection_add(int a, int b) { int local = 7; return a + local + b; }\n"
                          "int selection_memory(int *p) { *p += 1; return *p; }\n"
                          "int selection_order(void) { return 1 + 2; }\n");
@@ -657,7 +793,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
                 // discarded u32 fact arrays and the old visited-row array.
                 BUSTER_TEST(arguments, arguments->arena->position - before == (u64)function->instruction_count + function->value_count);
                 MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
-                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, 0);
+                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, false, 0);
                 BUSTER_TEST(arguments, checked.supported && validated.supported);
                 BUSTER_TEST(arguments, checked.failed_opcode == validated.failed_opcode);
                 BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked, &validated));

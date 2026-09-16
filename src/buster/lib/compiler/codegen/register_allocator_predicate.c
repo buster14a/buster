@@ -389,7 +389,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
             if (function->virtual_registers[value].register_class == MACHINE_REGISTER_CLASS_MASK)
             {
                 if (needed[value]) placement.virtual_register_offsets[value] -= removed;
-                else { removed += 8; placement.virtual_register_offsets[value] = UINT32_MAX; }
+                else { removed += 8; placement.virtual_register_offsets[value] = MACHINE_VIRTUAL_REGISTER_NO_HOME; }
             }
         }
         if (temporary_slot != UINT32_MAX) placement.stack_slot_offsets[temporary_slot] -= removed;

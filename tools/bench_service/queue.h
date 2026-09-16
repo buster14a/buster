@@ -1,5 +1,5 @@
-/* First software slice of #437. No host execution, transport or benchmark
- * qualification lives here. queue.c owns persistence and all state changes;
+/* Queue/materializer/supervisor software for #437. No recipe execution,
+ * transport or benchmark qualification lives here. queue.c owns persistence and all state changes;
  * protocol.c is the bounded control boundary. See README.md before extending.
  */
 #ifndef BUSTER_BENCH_SERVICE_QUEUE_H
@@ -12,20 +12,29 @@
 #include <string.h>
 #include <errno.h>
 
-#define BQ_SCHEMA 1u
+#define BQ_SCHEMA_LEGACY 1u
+#define BQ_SCHEMA_MATERIALIZATION 2u
+#define BQ_SCHEMA 3u
+#define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 #define BQ_JOB_CAP 64u
 #define BQ_EVENT_CAP (BQ_JOB_CAP * 16u)
 #define BQ_REQUEST_CAP 320u
 #define BQ_HEADER_SIZE 160u
-#define BQ_RECORD_CAP (BQ_HEADER_SIZE + BQ_REQUEST_CAP)
+#define BQ_JOURNAL_BODY_CAP 512u
+#define BQ_RECORD_CAP (BQ_HEADER_SIZE + BQ_JOURNAL_BODY_CAP)
 #define BQ_FIELD_COUNT 5u
+#define BQ_PATH_CAP 192u
 
 typedef enum BqError
 {
     BQ_OK, BQ_BAD_REQUEST, BQ_CONFLICT, BQ_FULL, BQ_BUSY, BQ_IO,
     BQ_CORRUPT, BQ_RECONCILIATION_REQUIRED, BQ_NOT_FOUND,
-    BQ_UNSUPPORTED, BQ_INVALID_TRANSITION
+    BQ_UNSUPPORTED, BQ_INVALID_TRANSITION, BQ_RECIPE_MISMATCH,
+    BQ_SOURCE_MISMATCH, BQ_WORKSPACE_MISMATCH, BQ_CLEANUP_FAILED,
+    BQ_CONFIGURATION_MISMATCH, BQ_WORKER_MISMATCH, BQ_RESOURCE_MISMATCH,
+    BQ_WORKER_FAILED, BQ_WORKER_OOM_FAILURE, BQ_WORKER_TIMEOUT,
+    BQ_WORKER_INTERRUPTED, BQ_BOOT_INTERRUPTED, BQ_WORKER_CANCEL_SIGNAL
 } BqError;
 
 typedef enum BqPhase
@@ -46,7 +55,7 @@ typedef enum BqValidity
 
 typedef enum BqRecordKind
 {
-    BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE
+    BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE, BQ_RESULT_BIND
 } BqRecordKind;
 
 typedef struct BqRequest
@@ -58,8 +67,8 @@ typedef struct BqRequest
 typedef struct BqJob
 {
     u64 id;
-    /* Reservation sequence is the immutable fake attempt/ownership token.
-     * It is NOT a PID, boot identity, real worker lease or exactly-once proof. */
+    /* Reservation sequence is the immutable attempt/ownership token. It is
+     * NOT a PID, boot identity, host lease or exactly-once proof. */
     u64 token;
     BqPhase phase;
     BqOutcome outcome;
@@ -67,6 +76,11 @@ typedef struct BqJob
     bool cancel_requested;
     BqRequest request;
     char8 digest[SHA256_HEX_CAPACITY];
+    bool result_bound;
+    char result_root[BQ_PATH_CAP + 1];
+    char result_manifest_digest[SHA256_HEX_CAPACITY];
+    char result_bundle_digest[SHA256_HEX_CAPACITY];
+    char result_full_digest[SHA256_HEX_CAPACITY];
 } BqJob;
 
 typedef struct BqEvent
@@ -82,6 +96,7 @@ typedef struct BqState
 {
     u64 sequence;
     u64 active_id;
+    u32 journal_schema;
     u32 job_count;
     u32 event_count;
     BqJob jobs[BQ_JOB_CAP];
@@ -106,6 +121,7 @@ typedef struct BqQueue
     int directory_fd;
     int lock_fd;
     int journal_fd;
+    char directory_path[BQ_PATH_CAP + 1];
     u64 bytes;
     u64 recovered_tail_bytes;
     bool poisoned;
@@ -130,5 +146,15 @@ BUSTER_F_DECL BqError bq_cancel(BqQueue* queue, u64 id);
 BUSTER_F_DECL BqError bq_fake_step(BqQueue* queue, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_fake_run(BqQueue* queue, u64* id);
 BUSTER_F_DECL BqError bq_fake_reconcile(BqQueue* queue, u64 id, u64 token);
+BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);
+BUSTER_F_DECL bool bq_recipe_real(BqRequest const* request);
+BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
+BUSTER_F_DECL BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token);
+BUSTER_F_DECL bool bq_workspace_name(char result[64], u64 id, u64 token);
+BUSTER_F_DECL BqError bq_failure_evidence(BqQueue* queue, BqJob const* job);
+BUSTER_F_DECL BqError bq_result_bind(BqQueue* queue, BqJob const* job, String8 result_root,
+                                     char const manifest_digest[SHA256_HEX_CAPACITY],
+                                     char const bundle_digest[SHA256_HEX_CAPACITY],
+                                     char const full_digest[SHA256_HEX_CAPACITY]);
 BUSTER_F_DECL char const* bq_error_name(BqError error);
 #endif

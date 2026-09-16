@@ -60,15 +60,175 @@ struct DSettings
     String8 include;
     FILE* report;
     FILE* log;
+    FILE* evidence;
+    String8 evidence_directory;
+    u64* evidence_path_hashes;
+    u32 evidence_path_capacity;
+    u32 evidence_count;
     OsMutexHandle* spawn_mutex;
+    SliceString8 environment_keys;
+    SliceString8 environment_values;
     u32 rows;
     u32 timeout_seconds;
     u32 reduce_limit;
     bool verify;
     bool sanitize_oracle;
     bool strict_mir;
+    bool explicit_environment;
     bool io_failed;
+    bool self_test_cancel_before_reap;
 };
+
+typedef ProcessControlAtomic DCancellationAtomic;
+#if !BUSTER_SINGLE_THREADED && !BUSTER_COMPILER_MSVC
+BUSTER_CT_CHECK(__atomic_always_lock_free(sizeof(DCancellationAtomic), 0));
+#endif
+BUSTER_GLOBAL_LOCAL DCancellationAtomic d_cancellation_signal;
+BUSTER_GLOBAL_LOCAL DCancellationAtomic d_cancellation_escalated;
+BUSTER_GLOBAL_LOCAL DCancellationAtomic d_spawn_admission_in_flight;
+
+BUSTER_GLOBAL_LOCAL u64 d_atomic_load(DCancellationAtomic* value)
+{
+    u64 result = process_control_atomic_load(value);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void d_atomic_store(DCancellationAtomic* value, u64 stored)
+{
+    process_control_atomic_store(value, stored);
+}
+
+BUSTER_GLOBAL_LOCAL bool d_atomic_set_if_zero(DCancellationAtomic* value, u64 stored)
+{
+    bool result = process_control_atomic_set_if_zero(value, stored);
+    return result;
+}
+
+typedef struct DCancellationHandlers DCancellationHandlers;
+struct DCancellationHandlers
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct sigaction previous_interrupt;
+    struct sigaction previous_terminate;
+    struct sigaction previous_alarm;
+#endif
+    bool installed;
+};
+
+#if BUSTER_LINUX || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL void d_cancellation_handler(int signal_number)
+{
+    if (signal_number == SIGALRM)
+    {
+        d_atomic_store(&d_cancellation_escalated, 1);
+    }
+    else
+    {
+        bool first_signal = d_atomic_set_if_zero(&d_cancellation_signal, (u64)signal_number);
+        // Cooperative children get a bounded cleanup interval. SIGALRM only
+        // publishes escalation; ordinary wait lanes own every group syscall.
+        if (first_signal) { alarm(2); }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool d_cancellation_begin(DCancellationHandlers* handlers)
+{
+    bool result = true;
+    d_atomic_store(&d_cancellation_signal, 0);
+    d_atomic_store(&d_cancellation_escalated, 0);
+    d_atomic_store(&d_spawn_admission_in_flight, 0);
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct sigaction action = {0};
+    action.sa_handler = d_cancellation_handler;
+    sigemptyset(&action.sa_mask);
+    sigaddset(&action.sa_mask, SIGINT);
+    sigaddset(&action.sa_mask, SIGTERM);
+    sigaddset(&action.sa_mask, SIGALRM);
+    result = sigaction(SIGALRM, &action, &handlers->previous_alarm) == 0;
+    if (result)
+    {
+        result = sigaction(SIGTERM, &action, &handlers->previous_terminate) == 0;
+        if (result)
+        {
+            result = sigaction(SIGINT, &action, &handlers->previous_interrupt) == 0;
+            if (!result) { sigaction(SIGTERM, &handlers->previous_terminate, 0); }
+        }
+        if (!result) { sigaction(SIGALRM, &handlers->previous_alarm, 0); }
+    }
+#endif
+    handlers->installed = result;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_spawn_admission_begin(void)
+{
+    // The caller holds spawn_mutex, so one slot describes the complete
+    // check/spawn/control-publication transaction. A concurrent signal either
+    // closes admission first or observes an already admitted transaction whose
+    // child will be published to the ordinary wait lane before this clears.
+    d_atomic_store(&d_spawn_admission_in_flight, 1);
+    bool result = !d_atomic_load(&d_cancellation_signal);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void d_spawn_admission_end(void)
+{
+    d_atomic_store(&d_spawn_admission_in_flight, 0);
+}
+
+#if BUSTER_LINUX || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL void d_cancel_admission(DSettings* settings)
+{
+    // Serialize the stop flag with the admission check. The ordinary wait
+    // lane, never this helper or an async handler, owns group operations.
+    if (settings->spawn_mutex) { os_mutex_lock(settings->spawn_mutex); }
+    d_atomic_set_if_zero(&d_cancellation_signal, SIGTERM);
+    d_atomic_store(&d_cancellation_escalated, 1);
+    if (settings->spawn_mutex) { os_mutex_unlock(settings->spawn_mutex); }
+}
+
+BUSTER_GLOBAL_LOCAL bool d_process_group_control_self_test(void)
+{
+    DSettings settings = {0};
+    bool result = !d_atomic_load(&d_cancellation_signal) && !d_atomic_load(&d_cancellation_escalated);
+    result = d_spawn_admission_begin() && d_atomic_load(&d_spawn_admission_in_flight) == 1 && result;
+    d_cancellation_handler(SIGTERM);
+    d_cancellation_handler(SIGINT);
+    d_spawn_admission_end();
+    result = d_atomic_load(&d_cancellation_signal) == SIGTERM && !d_atomic_load(&d_cancellation_escalated) &&
+        !d_atomic_load(&d_spawn_admission_in_flight) && result;
+    result = !d_spawn_admission_begin() && result;
+    d_spawn_admission_end();
+    alarm(0);
+    d_cancellation_handler(SIGALRM);
+    result = d_atomic_load(&d_cancellation_escalated) == 1 && result;
+    d_atomic_store(&d_cancellation_signal, 0);
+    d_atomic_store(&d_cancellation_escalated, 0);
+    d_cancel_admission(&settings);
+    result = d_atomic_load(&d_cancellation_signal) == SIGTERM && d_atomic_load(&d_cancellation_escalated) == 1 && result;
+    d_atomic_store(&d_cancellation_signal, 0);
+    d_atomic_store(&d_cancellation_escalated, 0);
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u32 d_cancellation_end(DCancellationHandlers* handlers)
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    if (handlers->installed)
+    {
+        alarm(0);
+        sigaction(SIGINT, &handlers->previous_interrupt, 0);
+        sigaction(SIGTERM, &handlers->previous_terminate, 0);
+        sigaction(SIGALRM, &handlers->previous_alarm, 0);
+    }
+#else
+    BUSTER_UNUSED(handlers);
+#endif
+    u32 result = (u32)d_atomic_load(&d_cancellation_signal);
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL bool d_mir_config(DConfig config)
 {
@@ -124,6 +284,70 @@ BUSTER_GLOBAL_LOCAL void d_write(DSettings* settings, String8 path, String8 text
     {
         if (text.length) { settings->io_failed |= fwrite(text.pointer, 1, (size_t)text.length, file) != text.length; }
         settings->io_failed |= fclose(file) != 0;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_evidence_relative_path(String8 directory, String8 path, bool* valid)
+{
+    *valid = path.length > directory.length + 1 &&
+        memcmp(path.pointer, directory.pointer, (size_t)directory.length) == 0 &&
+        path_is_separator(path.pointer[directory.length]);
+    String8 result = *valid ? string_slice(path, directory.length + 1, path.length) : (String8){0};
+    u64 component = 0;
+    for (u64 index = 0; *valid && index <= result.length; index += 1)
+    {
+        if (index == result.length || path_is_separator(result.pointer[index]))
+        {
+            u64 length = index - component;
+            *valid = length > 0 && !(length == 1 && result.pointer[component] == '.') &&
+                !(length == 2 && result.pointer[component] == '.' && result.pointer[component + 1] == '.');
+            component = index + 1;
+        }
+        else if (result.pointer[index] == '\t' || result.pointer[index] == '\n' || result.pointer[index] == '\r')
+        {
+            *valid = false;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_evidence_path_insert(u64* slots, u32 capacity, String8 path)
+{
+    u64 hash = buster_hash_64(path.pointer ? (u8*)path.pointer : (u8*)"", path.length);
+    bool result = slots && capacity && !(capacity & (capacity - 1));
+    u32 index = result ? (u32)hash & (capacity - 1) : 0;
+    u32 probes = 0;
+    while (result && slots[index] && slots[index] != hash && probes < capacity)
+    {
+        index = (index + 1) & (capacity - 1);
+        probes += 1;
+    }
+    result = result && probes < capacity && !slots[index];
+    if (result) { slots[index] = hash; }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void d_write_evidence(DSettings* settings, String8 path, String8 text)
+{
+    if (!settings->evidence) { d_write(settings, path, text); }
+    else
+    {
+        bool valid = false;
+        String8 relative = d_evidence_relative_path(settings->evidence_directory, path, &valid);
+        valid = valid && d_evidence_path_insert(settings->evidence_path_hashes, settings->evidence_path_capacity, relative);
+        if (!valid) { settings->io_failed = true; }
+        else
+        {
+            d_write(settings, path, text);
+            if (!settings->io_failed)
+            {
+                u64 hash = buster_hash_64(text.pointer ? (u8*)text.pointer : (u8*)"", text.length);
+                int written = fprintf(settings->evidence, "%llu\t%llu\t%.*s\n", (unsigned long long)hash,
+                    (unsigned long long)text.length, (int)relative.length, relative.pointer);
+                settings->io_failed |= written < 0;
+                settings->evidence_count += written >= 0;
+            }
+        }
     }
 }
 
@@ -195,23 +419,57 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
         at += arg.length;
         bytes[at++] = 0;
     }
-    d_write(settings, string_format(arena, S8("{S8}.argv"), prefix), (String8){.pointer = bytes, .length = size});
+    d_write_evidence(settings, string_format(arena, S8("{S8}.argv"), prefix), (String8){.pointer = bytes, .length = size});
     u64 start = os_now_microseconds();
     // Serialize pipe creation through closing each child's pipe ends. Otherwise
     // a concurrent child can inherit another child's writer and delay its EOF.
     // Child execution and deadline waits remain concurrent.
     if (settings->spawn_mutex) { os_mutex_lock(settings->spawn_mutex); }
-    ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    ProcessSpawnResult spawn = {0};
+#if BUSTER_LINUX || BUSTER_MACOS
+    ProcessGroupControlState process_group_control = {
+        .cancellation_signal = &d_cancellation_signal,
+        .cancellation_escalated = &d_cancellation_escalated,
+        .admission_mutex = settings->spawn_mutex,
+        .test_cancel_before_reap = settings->self_test_cancel_before_reap,
+    };
+#endif
+    if (d_spawn_admission_begin())
+    {
+        spawn = os_process_spawn(command, settings->environment_keys, settings->environment_values,
+            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                  .use_process_environment = !settings->explicit_environment,
+                                  .new_process_group = !BUSTER_WINDOWS});
+#if BUSTER_LINUX || BUSTER_MACOS
+        if (spawn.handle)
+        {
+            spawn.process_group_control = &process_group_control;
+        }
+#endif
+    }
+    d_spawn_admission_end();
     if (settings->spawn_mutex) { os_mutex_unlock(settings->spawn_mutex); }
     DObservation observation = {.kind = D_SPAWN};
     if (spawn.handle)
     {
         ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, (u64)settings->timeout_seconds * 1000000);
         observation = d_wait_observation(wait);
+#if BUSTER_LINUX || BUSTER_MACOS
+        if (wait.process_group_reservation_retained)
+        {
+            // The wait deliberately retained an uncertain leader/PGID. Stop
+            // all later admission without publishing that raw identity. The
+            // OS owner already issued this notification; repeat it only as an
+            // idempotent fail-safe for an unclassified platform failure.
+            if (!d_atomic_load(&d_cancellation_signal))
+            {
+                d_cancel_admission(settings);
+            }
+        }
+#endif
     }
-    d_write(settings, string_format(arena, S8("{S8}.stdout"), prefix), observation.output);
-    d_write(settings, string_format(arena, S8("{S8}.stderr"), prefix), observation.error);
+    d_write_evidence(settings, string_format(arena, S8("{S8}.stdout"), prefix), observation.output);
+    d_write_evidence(settings, string_format(arena, S8("{S8}.stderr"), prefix), observation.error);
     u64 elapsed = os_now_microseconds() - start;
     if (settings->report)
     {
@@ -364,7 +622,7 @@ BUSTER_GLOBAL_LOCAL String8 d_prepare_caller(DSettings* settings, DCase test, St
             ready = build_artifact_fanout_hash_file(arena, object, &hash, &size) && size > 0;
             if (ready)
             {
-                d_write(settings, path_join(arena, caller_directory, S8("manifest.txt")),
+                d_write_evidence(settings, path_join(arena, caller_directory, S8("manifest.txt")),
                     string_format(arena, S8("version=1\nsource={S8}\nhash_algorithm=buster_hash_64\nobject_hash={u64} object_bytes={u64}\nsanitize_oracle={u32}\n"),
                         test.host, hash, size, (u32)settings->sanitize_oracle));
                 ready = !settings->io_failed;
@@ -505,7 +763,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
     u32 trials = 0;
     u64 granularity = 2;
     bool exhausted = false;
-    while (!exhausted && trials < settings->reduce_limit && best.length)
+    while (!exhausted && trials < settings->reduce_limit && best.length && !d_atomic_load(&d_cancellation_signal))
     {
         u64 lines = 0;
         boundaries[lines++] = 0;
@@ -517,7 +775,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
         if (granularity > lines) { granularity = lines; }
         u64 chunk = (lines + granularity - 1) / granularity;
         bool changed = false;
-        for (u64 line = 0; !changed && line < lines && trials < settings->reduce_limit; line += chunk)
+        for (u64 line = 0; !changed && line < lines && trials < settings->reduce_limit && !d_atomic_load(&d_cancellation_signal); line += chunk)
         {
             u64 from = boundaries[line];
             u64 to = boundaries[BUSTER_MIN(line + chunk, lines)];
@@ -543,13 +801,13 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
         else { granularity = BUSTER_MIN(lines, granularity * 2); }
     }
     String8 final_source = path_join(arena, directory, S8("minimized.c"));
-    d_write(settings, final_source, best);
+    d_write_evidence(settings, final_source, best);
     reduced.source = final_source;
     DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, directory, S8("final-host-o0")), (String8){0});
     DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, directory, S8("final-host-o2")), (String8){0});
     DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, directory, S8("final-buster")), (String8){0});
     bool confirmed = d_oracle_valid(o0, o2, reduced) && d_classify(actual, o0, false) == signature;
-    d_write(settings, path_join(arena, directory, S8("reduction.txt")),
+    d_write_evidence(settings, path_join(arena, directory, S8("reduction.txt")),
         string_format(arena, S8("version=1 original_bytes={u64} reduced_bytes={u64} trials={u32} signature={u32} confirmed={u32}\n"),
             input.length, best.length, trials, signature, (u32)confirmed));
     settings->io_failed |= !confirmed;
@@ -570,11 +828,11 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
     String8 directory = path_join(arena, settings->out, test.name);
     make_directory_recursive(arena, directory);
     ByteSlice input = file_read(arena, test.source, (FileReadOptions){0});
-    d_write(settings, path_join(arena, directory, S8("input.c")), (String8){.pointer = (char8*)input.pointer, .length = input.length});
+    d_write_evidence(settings, path_join(arena, directory, S8("input.c")), (String8){.pointer = (char8*)input.pointer, .length = input.length});
     if (test.host.length)
     {
         ByteSlice fixed = file_read(arena, test.host, (FileReadOptions){0});
-        d_write(settings, path_join(arena, directory, S8("host.c")), (String8){.pointer = (char8*)fixed.pointer, .length = fixed.length});
+        d_write_evidence(settings, path_join(arena, directory, S8("host.c")), (String8){.pointer = (char8*)fixed.pointer, .length = fixed.length});
     }
     DResult o0 = d_execute(settings, test, configs[0], true, false, path_join(arena, directory, S8("host-o0")), (String8){0});
     DResult o2 = d_execute(settings, test, configs[0], true, true, path_join(arena, directory, S8("host-o2")), (String8){0});
@@ -597,7 +855,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
             d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name));
         }
     }
-    for (u32 index = 0; ready && index < config_count; index += 1)
+    for (u32 index = 0; ready && index < config_count && !d_atomic_load(&d_cancellation_signal); index += 1)
     {
         u64 scratch = arena->position;
         DConfig config = configs[index];
@@ -611,7 +869,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         if (failure)
         {
             failures += 1;
-            d_write(settings, path_join(arena, path_join(arena, directory, config.name), S8("failure.txt")),
+            d_write_evidence(settings, path_join(arena, path_join(arena, directory, config.name), S8("failure.txt")),
                 string_format(arena, S8("version=1 signature={u32} oracle_exit={u32} candidate_exit={u32}\n"), failure, o0.run.status, actual.run.status));
             d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} config={S8} signature={u32}\n"), test.name, config.name, failure));
             if (!reduced && !test.reject && failure < 32 && settings->reduce_limit)
@@ -630,7 +888,36 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
 
 // Explicit test children exercise the real capture/status/deadline path. They
 // never compile arbitrary source and run only on the private self-test command.
-BUSTER_GLOBAL_LOCAL void d_self_test_child(String8 mode)
+#if BUSTER_LINUX || BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t d_cancel_tree_stop;
+BUSTER_GLOBAL_LOCAL void d_cancel_tree_handler(int signal_number)
+{
+    BUSTER_UNUSED(signal_number);
+    d_cancel_tree_stop = 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_cancel_tree_marker_create(String8 path)
+{
+    int descriptor;
+    do
+    {
+        descriptor = open((char*)path.pointer, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    } while (descriptor < 0 && errno == EINTR);
+    bool result = descriptor >= 0;
+    if (result)
+    {
+        ssize_t written;
+        do
+        {
+            written = write(descriptor, "1", 1);
+        } while (written < 0 && errno == EINTR);
+        result = written == 1 && close(descriptor) == 0;
+    }
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void d_self_test_child(Arena* arena, String8 mode, String8 path, u32 child_index, u32 child_count)
 {
     if (string_equal(mode, S8("exit")))
     {
@@ -665,6 +952,177 @@ BUSTER_GLOBAL_LOCAL void d_self_test_child(String8 mode)
 #endif
         exit(2);
     }
+#if BUSTER_LINUX || BUSTER_MACOS
+    else if (string_equal(mode, S8("cancel-tree")))
+    {
+        bool detached_leaf = child_count && child_index + 1 == child_count;
+        String8 leaf_ready = detached_leaf ? string_format_z(arena, S8("{S8}.{u32}.leaf-ready"), path, child_index) : (String8){0};
+        String8 leaf_release = detached_leaf ? string_format_z(arena, S8("{S8}.{u32}.leaf-release"), path, child_index) : (String8){0};
+        String8 leaf_escaped = detached_leaf ? string_format_z(arena, S8("{S8}.{u32}.leaf-escaped"), path, child_index) : (String8){0};
+        pid_t leaf = fork();
+        if (leaf == 0)
+        {
+            if (detached_leaf)
+            {
+                signal(SIGTERM, SIG_IGN);
+                close(STDOUT_FILENO);
+                close(STDERR_FILENO);
+                if (d_cancel_tree_marker_create(leaf_ready))
+                {
+                    while (access((char*)leaf_release.pointer, F_OK) != 0)
+                    {
+                        struct timespec delay = {.tv_nsec = 1000000};
+                        nanosleep(&delay, 0);
+                    }
+                    d_cancel_tree_marker_create(leaf_escaped);
+                }
+                exit(0);
+            }
+            for (;;) { pause(); }
+        }
+        if (leaf > 0 && path.length)
+        {
+            struct sigaction action = {0};
+            action.sa_handler = d_cancel_tree_handler;
+            sigemptyset(&action.sa_mask);
+            bool handler_ready = sigaction(SIGTERM, &action, 0) == 0;
+            String8 marker = string_format_z(arena, S8("{S8}.{u32}"), path, child_index);
+            FILE* file = d_file_open((char*)marker.pointer, true, false);
+            if (file)
+            {
+                bool written = fprintf(file, "%ld\n", (long)getpid()) > 0 && fclose(file) == 0;
+                bool ready = handler_ready && written && child_count > 0;
+                bool all_ready = false;
+                u64 deadline = os_now_microseconds() + 5000000;
+                while (ready && !all_ready && os_now_microseconds() < deadline)
+                {
+                    all_ready = !detached_leaf || access((char*)leaf_ready.pointer, F_OK) == 0;
+                    for (u32 index = 0; all_ready && index < child_count; index += 1)
+                    {
+                        all_ready = path_exists(arena, string_format(arena, S8("{S8}.{u32}"), path, index));
+                    }
+                    if (!all_ready)
+                    {
+                        struct timespec delay = {.tv_nsec = 10000000};
+                        nanosleep(&delay, 0);
+                    }
+                }
+                ready &= all_ready;
+                if (ready)
+                {
+                    if (detached_leaf) { exit(0); }
+                    else
+                    {
+                        while (!d_cancel_tree_stop) { pause(); }
+                        kill(leaf, SIGTERM);
+                        while (waitpid(leaf, 0, 0) < 0 && errno == EINTR) {}
+                        signal(SIGTERM, SIG_DFL);
+                        raise(SIGTERM);
+                    }
+                }
+            }
+            kill(leaf, SIGKILL);
+            waitpid(leaf, 0, 0);
+        }
+        exit(1);
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(path);
+#endif
+}
+
+typedef struct DCancellationSelfTestWork DCancellationSelfTestWork;
+struct DCancellationSelfTestWork
+{
+    DSettings settings;
+    String8 marker;
+    DObservation observations[4];
+    u32 jobs;
+};
+
+BUSTER_GLOBAL_LOCAL void d_cancellation_self_test_lane(void* argument)
+{
+    DCancellationSelfTestWork* work = argument;
+    u32 index = lane_index();
+    DSettings settings = work->settings;
+    settings.arena = arena_create((ArenaCreation){0});
+    settings.self_test_cancel_before_reap = index + 1 == work->jobs;
+    String8 index_text = string_format(settings.arena, S8("{u32}"), index);
+    String8 count_text = string_format(settings.arena, S8("{u32}"), work->jobs);
+    String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"),
+                     S8("--self-test-child"), S8("cancel-tree"), S8("--self-test-path"), work->marker,
+                     S8("--self-test-index"), index_text, S8("--self-test-count"), count_text};
+    work->observations[index] = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
+        string_format(settings.arena, S8("{S8}.{u32}.observation"), work->marker, index));
+    BUSTER_CHECK(arena_destroy(settings.arena, 1));
+}
+
+BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32* jobs);
+
+// Run only as a nested self-test process: its child creates a grandchild and
+// then cancels this runner. The production handlers must terminate the whole
+// private process group, reap the direct child, and finally preserve SIGTERM
+// as this process's externally visible status.
+BUSTER_GLOBAL_LOCAL u32 d_cancellation_self_test(Arena* arena, String8 marker)
+{
+    u32 errors = 0;
+#if BUSTER_LINUX || BUSTER_MACOS
+    DCancellationHandlers handlers = {0};
+    errors += !d_cancellation_begin(&handlers);
+    errors += !d_process_group_control_self_test();
+    if (!errors)
+    {
+        DCancellationSelfTestWork work = {.settings = {.arena = arena, .timeout_seconds = 10}, .marker = marker};
+        errors += !d_jobs(BUSTER_ARRAY_LENGTH(work.observations), os_get_logical_thread_count(),
+            os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &work.jobs);
+        work.settings.spawn_mutex = os_mutex_create();
+        errors += !work.settings.spawn_mutex;
+        if (work.settings.spawn_mutex && work.jobs) { lane_run(work.jobs, &d_cancellation_self_test_lane, &work); }
+        if (work.jobs)
+        {
+            u32 detached_index = work.jobs - 1;
+            String8 leaf_release = string_format_z(arena, S8("{S8}.{u32}.leaf-release"), marker, detached_index);
+            errors += !d_cancel_tree_marker_create(leaf_release);
+            struct timespec delay = {.tv_nsec = 300000000};
+            while (nanosleep(&delay, &delay) != 0 && errno == EINTR)
+            {
+            }
+        }
+        for (u32 index = 0; index < work.jobs; index += 1)
+        {
+            DObservation observation = work.observations[index];
+            if (index + 1 == work.jobs) { errors += observation.kind != D_EXIT || observation.status != 0; }
+            else { errors += observation.kind != D_SIGNAL || (observation.status != SIGTERM && observation.status != SIGKILL); }
+            errors += !path_exists(arena, string_format(arena, S8("{S8}.{u32}"), marker, index));
+            if (index + 1 == work.jobs)
+            {
+                String8 leaf_ready = string_format_z(arena, S8("{S8}.{u32}.leaf-ready"), marker, index);
+                String8 leaf_release = string_format_z(arena, S8("{S8}.{u32}.leaf-release"), marker, index);
+                String8 leaf_escaped = string_format_z(arena, S8("{S8}.{u32}.leaf-escaped"), marker, index);
+                bool escaped = path_exists(arena, leaf_escaped);
+                errors += !path_exists(arena, leaf_ready);
+                errors += escaped;
+                errors += !os_file_delete(leaf_ready);
+                errors += !os_file_delete(leaf_release);
+                if (escaped) { errors += !os_file_delete(leaf_escaped); }
+            }
+        }
+        if (work.settings.spawn_mutex) { os_mutex_destroy(work.settings.spawn_mutex); }
+    }
+    u32 signal_number = d_cancellation_end(&handlers);
+    errors += signal_number != SIGTERM;
+    if (!errors)
+    {
+        fflush(0);
+        raise((int)signal_number);
+        errors = 1;
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(marker);
+#endif
+    return errors;
 }
 
 BUSTER_GLOBAL_LOCAL bool d_create_output(Arena* arena, String8 path)
@@ -694,6 +1152,9 @@ struct DCaseRecord
     u64 report_size;
     u64 log_hash;
     u64 log_size;
+    u64 evidence_hash;
+    u64 evidence_size;
+    u32 evidence_count;
 };
 typedef struct DCaseWork DCaseWork;
 struct DCaseWork
@@ -737,8 +1198,23 @@ BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32
 
 BUSTER_GLOBAL_LOCAL String8 d_case_record_text(Arena* arena, DCase test, DCaseRecord record, u32 count)
 {
-    return string_format(arena, S8("version=1 case={S8} configurations={u32} rows={u32} failures={u32} io_failed={u32} completed={u32}\n"),
-        test.name, count, record.rows, record.failures, (u32)record.io_failed, record.completed);
+    return string_format(arena, S8("version=2 case={S8} configurations={u32} rows={u32} failures={u32} io_failed={u32} completed={u32} evidence_files={u32}\n"),
+        test.name, count, record.rows, record.failures, (u32)record.io_failed, record.completed, record.evidence_count);
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_evidence_hash_capacity(u64 entries)
+{
+    u64 capacity = 1;
+    while (capacity < entries * 2 && capacity <= UINT32_MAX / 2) { capacity *= 2; }
+    u32 result = capacity >= entries * 2 && capacity <= UINT32_MAX ? (u32)capacity : 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_evidence_path_capacity(u32 config_count, u32 reduce_limit)
+{
+    u64 entries = 128 + (u64)config_count * 16 + (u64)reduce_limit * 32;
+    u32 result = d_evidence_hash_capacity(entries);
+    return result;
 }
 
 // Admit an initial full cohort before releasing its short cases. Case zero
@@ -791,6 +1267,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
     }
     for (;;)
     {
+        if (d_atomic_load(&d_cancellation_signal)) { break; }
         u64 index = atomic_u64_increment(&work->next);
         if (index >= work->count) { break; }
         DCase test = work->tests[index];
@@ -800,6 +1277,11 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
         settings.arena = arena;
         settings.report = 0;
         settings.log = 0;
+        settings.evidence = 0;
+        settings.evidence_directory = (String8){0};
+        settings.evidence_path_hashes = 0;
+        settings.evidence_path_capacity = 0;
+        settings.evidence_count = 0;
         settings.rows = 0;
         String8 directory = path_join(arena, settings.out, test.name);
         bool claimed = d_create_output(arena, directory);
@@ -808,9 +1290,24 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
         {
             String8 report_path = string_format_z(arena, S8("{S8}/processes.tsv"), directory);
             String8 log_path = string_format_z(arena, S8("{S8}/case.log"), directory);
+            String8 evidence_path = string_format_z(arena, S8("{S8}/evidence.tsv"), directory);
+            settings.evidence_directory = directory;
+            settings.evidence_path_capacity = d_evidence_path_capacity(work->config_count, settings.reduce_limit);
+            if (settings.evidence_path_capacity)
+            {
+                settings.evidence_path_hashes = arena_allocate_zeroed(arena, u64, settings.evidence_path_capacity);
+            }
             settings.report = d_file_open((char*)report_path.pointer, true, false);
             settings.log = d_file_open((char*)log_path.pointer, true, false);
-            if (!settings.report || !settings.log) { settings.io_failed = true; }
+            settings.evidence = d_file_open((char*)evidence_path.pointer, true, true);
+            if (!settings.report || !settings.log || !settings.evidence || !settings.evidence_path_capacity)
+            {
+                settings.io_failed = true;
+            }
+            if (settings.evidence)
+            {
+                settings.io_failed |= fprintf(settings.evidence, "version=1 files=0000000000\n") != 27;
+            }
             if (!settings.io_failed)
             {
                 if (work->self_test)
@@ -827,10 +1324,18 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
             }
             if (settings.report) { settings.io_failed |= fclose(settings.report) != 0; }
             if (settings.log) { settings.io_failed |= fclose(settings.log) != 0; }
+            if (settings.evidence)
+            {
+                settings.io_failed |= fseek(settings.evidence, 0, SEEK_SET) != 0;
+                settings.io_failed |= fprintf(settings.evidence, "version=1 files=%010u\n", settings.evidence_count) != 27;
+                settings.io_failed |= fclose(settings.evidence) != 0;
+            }
             settings.io_failed |= !build_artifact_fanout_hash_file(arena, report_path, &record->report_hash, &record->report_size);
             settings.io_failed |= !build_artifact_fanout_hash_file(arena, log_path, &record->log_hash, &record->log_size);
+            settings.io_failed |= !build_artifact_fanout_hash_file(arena, evidence_path, &record->evidence_hash, &record->evidence_size);
         }
         record->rows = settings.rows;
+        record->evidence_count = settings.evidence_count;
         record->io_failed = settings.io_failed;
         record->completed += 1;
         if (claimed)
@@ -888,6 +1393,77 @@ BUSTER_GLOBAL_LOCAL bool d_case_stream(DSettings* settings, String8 path, u64 ex
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool d_evidence_line_valid(DSettings* settings, String8 directory, String8 line,
+                                                u64* path_hashes, u32 path_capacity)
+{
+    u64 first_tab = UINT64_MAX, second_tab = UINT64_MAX;
+    bool valid = line.length > 0;
+    for (u64 index = 0; valid && index < line.length; index += 1)
+    {
+        if (line.pointer[index] == '\t')
+        {
+            if (first_tab == UINT64_MAX) { first_tab = index; }
+            else if (second_tab == UINT64_MAX) { second_tab = index; }
+            else { valid = false; }
+        }
+    }
+    valid = valid && first_tab != UINT64_MAX && second_tab != UINT64_MAX &&
+        first_tab > 0 && second_tab > first_tab + 1 && second_tab + 1 < line.length;
+    String8 hash_text = valid ? string_slice(line, 0, first_tab) : (String8){0};
+    String8 size_text = valid ? string_slice(line, first_tab + 1, second_tab) : (String8){0};
+    String8 relative = valid ? string_slice(line, second_tab + 1, line.length) : (String8){0};
+    IntegerParsingU64 hash = string8_parse_u64_decimal(hash_text);
+    IntegerParsingU64 size = string8_parse_u64_decimal(size_text);
+    valid = valid && hash.status == INTEGER_PARSING_SUCCESS && hash.length == hash_text.length &&
+        size.status == INTEGER_PARSING_SUCCESS && size.length == size_text.length;
+    String8 path = valid ? path_join(settings->arena, directory, relative) : (String8){0};
+    bool relative_valid = false;
+    String8 checked = valid ? d_evidence_relative_path(directory, path, &relative_valid) : (String8){0};
+    valid = valid && relative_valid && string_equal(relative, checked) &&
+        d_evidence_path_insert(path_hashes, path_capacity, relative);
+    if (valid)
+    {
+        FileReadResult read = file_read_checked(settings->arena, path, (FileReadOptions){0});
+        valid = read.bytes.pointer && read.bytes.length == size.value &&
+            buster_hash_64(read.bytes.pointer, read.bytes.length) == hash.value;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_evidence_manifest_valid(DSettings* settings, String8 directory, DCaseRecord record)
+{
+    String8 path = path_join(settings->arena, directory, S8("evidence.tsv"));
+    FileReadResult read = file_read_checked(settings->arena, path, (FileReadOptions){0});
+    bool valid = read.bytes.pointer && read.bytes.length == record.evidence_size &&
+        buster_hash_64(read.bytes.pointer, read.bytes.length) == record.evidence_hash;
+    String8 text = valid ? (String8){.pointer = (char8*)read.bytes.pointer, .length = read.bytes.length} : (String8){0};
+    String8 prefix = S8("version=1 files=");
+    u64 newline = 0;
+    while (valid && newline < text.length && text.pointer[newline] != '\n') { newline += 1; }
+    valid = valid && newline == prefix.length + 10 && newline < text.length &&
+        memcmp(text.pointer, prefix.pointer, (size_t)prefix.length) == 0;
+    String8 count_text = valid ? string_slice(text, prefix.length, newline) : (String8){0};
+    IntegerParsingU64 count = string8_parse_u64_decimal(count_text);
+    valid = valid && count.status == INTEGER_PARSING_SUCCESS && count.length == count_text.length &&
+        count.value == record.evidence_count;
+    u32 path_capacity = valid ? d_evidence_hash_capacity((u64)record.evidence_count + 1) : 0;
+    valid = valid && path_capacity;
+    u64* path_hashes = valid ? arena_allocate_zeroed(settings->arena, u64, path_capacity) : 0;
+    u64 row_scratch = settings->arena->position;
+    u64 at = newline + 1;
+    for (u32 index = 0; valid && index < record.evidence_count; index += 1)
+    {
+        u64 end = at;
+        while (end < text.length && text.pointer[end] != '\n') { end += 1; }
+        valid = end < text.length && d_evidence_line_valid(settings, directory, string_slice(text, at, end),
+            path_hashes, path_capacity);
+        at = end + 1;
+        arena_set_position(settings->arena, row_scratch);
+    }
+    valid = valid && at == text.length;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL u32 d_cases_collect(DCaseWork* work)
 {
     DSettings* settings = &work->settings;
@@ -911,6 +1487,7 @@ BUSTER_GLOBAL_LOCAL u32 d_cases_collect(DCaseWork* work)
         // Inspect both streams even when the case failed; preserve its evidence.
         valid &= d_case_stream(settings, path_join(arena, directory, S8("processes.tsv")), record.report_hash, record.report_size, settings->report);
         valid &= d_case_stream(settings, path_join(arena, directory, S8("case.log")), record.log_hash, record.log_size, settings->log ? settings->log : stdout);
+        valid &= d_evidence_manifest_valid(settings, directory, record);
         failures += record.failures + !valid;
         arena_set_position(arena, scratch);
     }
@@ -987,8 +1564,9 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
             {
                 for (u32 index = 0; index < work.count; index += 1)
                 {
-                    string_print(S8("DIFFERENTIAL_SELF_TEST_RECORD pass={u32} case={S8} rows={u32} failures={u32} io_failed={u32} report_bytes={u64} log_bytes={u64}\n"),
-                        pass, tests[index].name, records[index].rows, records[index].failures, (u32)records[index].io_failed, records[index].report_size, records[index].log_size);
+                    string_print(S8("DIFFERENTIAL_SELF_TEST_RECORD pass={u32} case={S8} rows={u32} failures={u32} io_failed={u32} report_bytes={u64} log_bytes={u64} evidence_files={u32} evidence_bytes={u64}\n"),
+                        pass, tests[index].name, records[index].rows, records[index].failures, (u32)records[index].io_failed,
+                        records[index].report_size, records[index].log_size, records[index].evidence_count, records[index].evidence_size);
                 }
             }
             for (u32 index = 0; index < work.count; index += 1)
@@ -1021,6 +1599,19 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
                 errors += d_cases_collect(&work) == 0;
                 records[0].rows = 1;
                 String8 first = path_join(arena, work.settings.out, tests[0].name);
+                String8 child_stdout = path_join(arena, first, S8("child.stdout"));
+                d_write(&work.settings, child_stdout, S8("truncated"));
+                errors += d_cases_collect(&work) == 0;
+                d_write(&work.settings, child_stdout, S8("a\0b"));
+                errors += d_cases_collect(&work) != 0;
+                String8 child_argv = path_join(arena, first, S8("child.argv"));
+                FileReadResult saved_argv = file_read_checked(arena, child_argv, (FileReadOptions){0});
+                errors += !saved_argv.bytes.pointer;
+                errors += !os_file_delete(child_argv);
+                errors += d_cases_collect(&work) == 0;
+                d_write(&work.settings, child_argv,
+                    (String8){.pointer = (char8*)saved_argv.bytes.pointer, .length = saved_argv.bytes.length});
+                errors += d_cases_collect(&work) != 0;
                 d_write(&work.settings, path_join(arena, first, S8("case.log")), S8("truncated"));
                 errors += d_cases_collect(&work) == 0;
                 errors += !os_file_delete(path_join(arena, first, S8("result.txt")));
@@ -1066,6 +1657,12 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     errors += d_number(S8("4294967296"), &number);
     errors += d_number(S8("-1"), &number);
     errors += d_number(S8(""), &number);
+    u64 evidence_paths[8] = {0};
+    errors += !d_evidence_path_insert(evidence_paths, BUSTER_ARRAY_LENGTH(evidence_paths), S8("child.stdout"));
+    errors += d_evidence_path_insert(evidence_paths, BUSTER_ARRAY_LENGTH(evidence_paths), S8("child.stdout"));
+    bool evidence_path_valid = false;
+    d_evidence_relative_path(S8("case"), S8("case/../escape"), &evidence_path_valid);
+    errors += evidence_path_valid;
     DResult result = {.compile = {.kind = D_EXIT}, .ran = true, .verified = true, .run = {.kind = D_SIGNAL, .status = 11}};
     errors += d_classify(result, result, false) == 0; // Two equal crashes still fail.
     result.run.kind = D_EXIT; result.run.status = 0; result.run.sanitizer = true;
@@ -1163,6 +1760,25 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
                 string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL child={S8} kind={u32} status={u32} raw={u32}\n"), modes[index], (u32)child.kind, child.status, child.raw_status);
             }
         }
+#if BUSTER_LINUX || BUSTER_MACOS
+        {
+            u32 before_child = errors;
+            String8 marker = path_join(arena, directory, S8("cancellation.pid"));
+            String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"),
+                             S8("--self-test-cancellation"), marker};
+            DSettings cancellation_settings = settings;
+            cancellation_settings.timeout_seconds = 10;
+            DObservation child = d_observe(&cancellation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
+                path_join(arena, directory, S8("cancellation")));
+            settings.io_failed |= cancellation_settings.io_failed;
+            errors += child.kind != D_SIGNAL || child.status != SIGTERM;
+            if (errors != before_child)
+            {
+                string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL cancellation kind={u32} status={u32} raw={u32}\n"),
+                    (u32)child.kind, child.status, child.raw_status);
+            }
+        }
+#endif
         DConfig config = {.allocator = 0};
         DObservation telemetry = {.output = S8("warning\nCODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n")};
         errors += !d_verification(&settings, &telemetry, config) || !string_equal(telemetry.output, S8("warning\n"));
@@ -1219,8 +1835,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         .out = S8("build/differential"), .timeout_seconds = 10, .reduce_limit = 64, .verify = true};
     DCase custom = {.name = S8("custom")};
     bool list = false, self_test = false, valid = true;
-    String8 child_mode = {0};
-    u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1;
+    String8 child_mode = {0}, self_test_path = {0}, cancellation_test = {0};
+    u32 cancellation_signal = 0;
+    u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1, self_test_index = 0, self_test_count = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 arg = arguments.pointer[index];
@@ -1235,6 +1852,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         {
             String8 value = arguments.pointer[++index];
             if (string_equal(arg, S8("--self-test-child"))) { child_mode = value; }
+            else if (string_equal(arg, S8("--self-test-path"))) { self_test_path = value; }
+            else if (string_equal(arg, S8("--self-test-cancellation"))) { cancellation_test = value; }
+            else if (string_equal(arg, S8("--self-test-index"))) { valid &= d_number(value, &self_test_index); }
+            else if (string_equal(arg, S8("--self-test-count"))) { valid &= d_number(value, &self_test_count); }
             else if (string_equal(arg, S8("--ide"))) { settings.ide = value; }
             else if (string_equal(arg, S8("--cc"))) { settings.cc = value; }
             else if (string_equal(arg, S8("--out"))) { settings.out = value; }
@@ -1249,7 +1870,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             else { valid = false; }
         }
     }
-    if (child_mode.length) { d_self_test_child(child_mode); valid = false; }
+    if (child_mode.length) { d_self_test_child(arena, child_mode, self_test_path, self_test_index, self_test_count); valid = false; }
     valid &= !(custom.host.length && custom.reject) && (!(custom.host.length || custom.reject) || custom.source.length);
     valid &= d_jobs(requested_jobs, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &jobs);
     u32 total_cases = custom.source.length ? 1 : (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
@@ -1258,7 +1879,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     DConfig* configs = arena_allocate(arena, DConfig, count);
     d_matrix(configs, count);
     u32 failures = 0;
-    if (!valid)
+    if (cancellation_test.length) { failures = d_cancellation_self_test(arena, cancellation_test); }
+    else if (!valid)
     {
         string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
@@ -1290,6 +1912,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                 if (!settings.report) { failures = 1; }
                 else
                 {
+                    DCancellationHandlers cancellation_handlers = {0};
+                    bool cancellation_ready = d_cancellation_begin(&cancellation_handlers);
+                    if (!cancellation_ready)
+                    {
+                        string_print(S8("error: failed to install differential cancellation handlers\n"));
+                        failures += 1;
+                    }
                     settings.io_failed |= fprintf(settings.report, "prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us\n") < 0;
                     String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\nstrict_mir={u32}\n"),
                         settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated,
@@ -1309,13 +1938,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                     }
                     d_write(&settings, path_join(arena, settings.out, S8("configurations.txt")),
                         string_join_arena(arena, (SliceString8){.pointer = config_names, .length = count * 2}, false));
-                    if (custom.source.length)
+                    if (cancellation_ready && custom.source.length)
                     {
                         custom.source = os_path_absolute(arena, custom.source, true);
                         if (custom.host.length) { custom.host = os_path_absolute(arena, custom.host, true); }
                         failures += d_cases_run(&settings, &custom, 1, configs, count, jobs);
                     }
-                    else
+                    else if (cancellation_ready)
                     {
                         u32 case_count = (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
                         DCase* cases = arena_allocate(arena, DCase, case_count);
@@ -1337,11 +1966,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                     settings.io_failed |= fclose(settings.report) != 0;
                     d_write(&settings, path_join(arena, settings.out, S8("summary.txt")),
                         string_format(arena, S8("version=1 failures={u32} io_failed={u32} configurations={u32}\n"), failures, (u32)settings.io_failed, count));
+                    cancellation_signal = d_cancellation_end(&cancellation_handlers);
                 }
             }
         }
     }
     failures += settings.io_failed;
     string_print(S8("DIFFERENTIAL_SUMMARY failures={u32} configurations={u32}\n"), failures, count);
+    if (cancellation_signal)
+    {
+        fflush(0);
+        raise((int)cancellation_signal);
+        failures = 1;
+    }
     return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }

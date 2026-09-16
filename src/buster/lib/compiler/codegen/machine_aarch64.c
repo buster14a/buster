@@ -5345,13 +5345,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_assembly_identity(MachineA64Selector
     u32 values[MACHINE_ASSEMBLY_IDENTITY_MAX_OPERANDS];
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
-        if ((plan.matching_inputs >> index) & 1u)
+        if (((u32)plan.matching_inputs >> index) & 1u)
         {
             continue;
         }
         IrValueId source = instruction->operands[plan.source_operands[index]];
         u32 source_register;
-        if ((plan.read_write >> index) & 1u)
+        if (((u32)plan.read_write >> index) & 1u)
         {
             MachineSelectionAddress address = machine_a64_address(selector, source);
             source_register = machine_a64_synthesize_register(selector);
@@ -5375,7 +5375,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_assembly_identity(MachineA64Selector
     }
     for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
     {
-        if ((plan.outputs >> index) & 1u)
+        if (((u32)plan.outputs >> index) & 1u)
         {
             IrValueId place = instruction->operands[index];
             MachineSelectionAddress address = machine_a64_address(selector, place);
@@ -5901,7 +5901,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                               bool assume_validated)
+                                                               bool assume_validated, bool preserve_debug_values)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
@@ -7197,6 +7197,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
+        if (preserve_debug_values &&
+            !machine_debug_values_build(arena, program, function, &result.function, selector.value_stack_slots, selector.value_indirect_slots))
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+        }
         result.supported = true;
         result.selector_certified = true;
         result.returns_value = returns_value;
@@ -7843,18 +7848,37 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_vector_frame_memory_sized(MachineA64En
     machine_a64_emit(encoder, word | ((offset / scale) << 10) | (base_register << 5) | vector_register);
 }
 
-// Sized memory operation through a pointer register with a scaled unsigned
-// immediate offset, for the aggregate copy loops; an offset outside the
-// imm12 form is an encode error, which falls the function back whole.
+// Sized pointer memory operation for aggregate copies and va_arg. Like the
+// frame sibling, use reserved X16 when an offset cannot use scaled imm12;
+// otherwise copying an object past byte 32767 fails even with a valid frame.
+// The copy data remains in X17 (or X9 for va_arg), never the address scratch.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_pointer_memory(MachineA64Encoder* encoder, u32 register_number, u32 base_register, u32 offset, u32 size, bool store)
 {
-    u32 scale = size;
-    if ((size != 1 && size != 2 && size != 4 && size != 8) || offset % scale || offset / scale > A64_IMM12_MAX)
+    bool valid = (size == 1 || size == 2 || size == 4 || size == 8) && register_number <= 31u && base_register <= 31u;
+    if (valid && (offset % size || offset / size > A64_IMM12_MAX))
+    {
+        // Production pointer rows use allocated general registers, not SP or
+        // X16. Refuse impossible scratch aliases before emitting anything;
+        // ADD's shifted-register form reads register 31 as ZR, not SP.
+        valid = base_register != MACHINE_A64_X16 && base_register != MACHINE_A64_SP &&
+                !(store && register_number == MACHINE_A64_X16);
+        if (valid)
+        {
+            machine_a64_emit_immediate(encoder, MACHINE_A64_X16, offset);
+            u32 fields[] = {MACHINE_A64_X16, base_register, 0, MACHINE_A64_X16};
+            machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+            base_register = MACHINE_A64_X16;
+            offset = 0;
+        }
+    }
+    if (valid)
+    {
+        machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
+    }
+    else
     {
         encoder->error = true;
-        return;
     }
-    machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
 }
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_store(MachineA64Encoder* encoder, u32 register_number, u32 offset)
@@ -8655,7 +8679,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     u32 push_count = 0;
     for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
     {
-        push_count += (placement->callee_saved_mask >> saved_register) & 1u;
+        push_count += (u32)((placement->callee_saved_mask >> saved_register) & 1u);
     }
     // Stack layout: [sp .. sp+frame_area) holds the placement's slots with
     // the callee-saved save area at the top (the offsets the shared
@@ -8715,8 +8739,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         case MACHINE_A64_COPY_FRAME_FROM_FRAME:
         case MACHINE_A64_COPY_FRAME_FROM_PTR:
         case MACHINE_A64_COPY_PTR_FROM_FRAME:
-            // One load/store word pair per eight-byte chunk, plus sized
-            // tail accesses that may each take the large-offset form.
+            // Both pointer and frame halves can require materialize/add
+            // prefixes; reserve each half, including all three sized tails.
             capacity64 += ((u64)capacity_row->payload / 8) * (large_save_offset ? 32u : 8u) + (large_save_offset ? 96u : 48u);
             break;
         case MACHINE_A64_VA_SAVE:

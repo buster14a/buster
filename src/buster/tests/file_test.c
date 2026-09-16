@@ -855,7 +855,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_faults(UnitTestArguments* argu
         {.source = true, .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
         {.source = true, .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}}, .step_count = 2, .error = 12345},
         {.source = true,
-         .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_READ, OS_FILE_TEST_READ, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}},
+         .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}},
          .step_count = 3,
          .status = FILE_COPY_PUBLISHED},
         {.source = true, .steps = {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}}, .step_count = 1, .error = 23456},

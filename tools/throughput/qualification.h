@@ -1,7 +1,7 @@
 /* Dedicated Linux host admission, outside all measured intervals.
  * Ownership: main holds the cooperative lease; tp_metadata seals the captured
  * observations. No governor, firmware, cgroup or other system policy is changed.
- * Map: tp_host_lock_acquire/release, tp_host_capture, tp_host_json.
+ * Map: tp_host_lock_acquire/adopt/release, tp_host_capture, tp_host_json.
  * A lease and readable topology DO NOT prove idle SMT siblings or bare metal.
  */
 #ifndef BUSTER_THROUGHPUT_QUALIFICATION_H
@@ -55,12 +55,65 @@ static int tp_host_lock_acquire(char const* path, TpHostLock* lock)
         struct stat info;
         if (!error && fstat(descriptor, &info) != 0) error = errno;
         if (!error && !S_ISREG(info.st_mode)) error = EINVAL;
+        if (!error && info.st_nlink != 1) error = EINVAL;
+        if (!error && info.st_uid != geteuid()) error = EACCES;
+        if (!error && (info.st_mode & 077) != 0) error = EACCES;
         if (!error && flock(descriptor, LOCK_EX | LOCK_NB) != 0) error = errno;
         if (!error) lock->descriptor = descriptor;
         else if (descriptor >= 0) close(descriptor);
     }
 #else
     (void)path;
+#endif
+    return error;
+}
+
+/* Adopt a supervisor's inherited descriptor without replacing its open file
+ * description. Reasserting LOCK_EX is atomic and does not unlock a lease that
+ * this description already owns. The independently opened path proves that
+ * the supplied descriptor still names the exact private inode selected by the
+ * service. Only the harness copy is close-on-exec; the supervisor's copy is a
+ * distinct descriptor in its process and continues to hold the same lease. */
+static int tp_host_lock_adopt(char const* path, int descriptor, TpHostLock* lock)
+{
+    int error = ENOSYS;
+    lock->descriptor = -1;
+#ifdef __linux__
+    int inspection = -1;
+    struct stat inherited, selected;
+    if (!path || path[0] != '/' || descriptor < 3) error = EINVAL;
+    else
+    {
+        int descriptor_flags = fcntl(descriptor, F_GETFD);
+        error = descriptor_flags < 0 ? errno : 0;
+        if (!error && fstat(descriptor, &inherited) != 0) error = errno;
+        if (!error && !S_ISREG(inherited.st_mode)) error = EINVAL;
+        if (!error && inherited.st_nlink != 1) error = EINVAL;
+        if (!error && inherited.st_uid != geteuid()) error = EACCES;
+        if (!error && (inherited.st_mode & 077) != 0) error = EACCES;
+        if (!error)
+        {
+            inspection = open(path, O_RDWR | O_NOFOLLOW | O_NONBLOCK);
+            error = inspection < 0 ? errno : 0;
+        }
+        if (!error && fstat(inspection, &selected) != 0) error = errno;
+        if (!error && (!S_ISREG(selected.st_mode) || selected.st_nlink != 1)) error = EINVAL;
+        if (!error && (selected.st_dev != inherited.st_dev || selected.st_ino != inherited.st_ino)) error = EINVAL;
+        if (!error)
+        {
+            int probe = flock(inspection, LOCK_SH | LOCK_NB);
+            if (probe == 0) error = EINVAL;
+            else if (errno != EWOULDBLOCK && errno != EAGAIN) error = errno;
+        }
+        if (!error && flock(descriptor, LOCK_EX | LOCK_NB) != 0) error = errno;
+        if (!error && fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0) error = errno;
+        if (inspection >= 0) close(inspection);
+        if (!error) lock->descriptor = descriptor;
+        else close(descriptor);
+    }
+#else
+    (void)path;
+    (void)descriptor;
 #endif
     return error;
 }

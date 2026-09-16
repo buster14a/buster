@@ -84,7 +84,9 @@
 #endif
 #include <buster/lib/time.c>
 #include <buster/lib/float.c>
+#if BUSTER_INCLUDE_TESTS
 #include <buster/lib/truetype.c>
+#endif
 #include <buster/lib/compiler/frontend/c/c.c>
 #include <buster/lib/compiler/assembly/aarch64_encoding.c>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.c>

@@ -13,6 +13,15 @@
   `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
   and preserve the default CI corpus. Their counts/hashes and full job-capacity
   cross product are covered by the native harness tests.
+  `check-workload` provides a separate, non-timing preflight for the pinned
+  cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
+  staged tree plus compiler and oracle evidence, but always reports
+  `admitted=false` and requires fresh admission. The branch-only real-source
+  workflow may additionally emit a hosted functional receipt for each fresh
+  passing oracle after parsed closure verification, separate object and
+  compile-link operations, and an exact runtime transcript. That receipt covers
+  only its one direct-SSA/non-PIC/fast cell; it is not timing, dedicated-host,
+  A/A or A/B performance admission.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
@@ -492,9 +501,12 @@ data exports, 2N data imports, N function imports and N unrelated globals.
 Shape 1 has one data object, N aliases, N+1 data imports and one function
 import. N is 4, 128, 256, 512, 1,024, 2,048 or 4,096. Construction and the
 system-linker reference are outside the one-warmup/seven-sample driver timer.
-The AArch64 reference compiles the same C as PIC and links a PIE, so its
-alias identity comes directly from the DSO, independently of system-linker
-COPY-slot allocation. Buster still links and executes the non-PIC object.
+On both architectures the reference compiles the same C as PIC and links a
+PIE, so its alias identity comes directly from the DSO, independently of
+system-linker COPY-slot allocation. Relinking the x86-64 `-fPIE` object with
+`-no-pie` does not provide that under GCC: its direct imported-data references
+give each strong alias a separate COPY slot (GitHub #594). Buster still links
+and executes the host-compiled `-fPIE` or non-PIC object.
 The timed invocation reads the object and DSOs, links and writes its image;
 `retained` measures the invocation arena after that work. Both native images
 execute afterward, verifying shared addresses and writes visible through the

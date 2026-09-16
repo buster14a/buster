@@ -8,6 +8,7 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
+BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool arena_fail_next_commit;
 
@@ -25,7 +26,10 @@ BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 re
     // page. Track that usable boundary so a later incremental commit also
     // starts page-aligned. A sub-page logical reservation ends at its exact
     // bound and cannot grow again, so clamping it is both accurate and safe.
-    return BUSTER_MIN(align_forward(requested_end, page_size), reserved_size);
+    // arena_allocate_commit validates requested_end against a reservation
+    // capped at ARENA_MAX_RESERVATION, which proves the rounding add cannot
+    // overflow here.
+    return BUSTER_MIN(align_forward_unchecked(requested_end, page_size), reserved_size);
 }
 
 void arena_allocation_overflow(void)
@@ -38,16 +42,11 @@ void arena_allocation_overflow(void)
 // fail loudly instead. Callers never check for null, so allocation must not
 // return one.
 //
-// Bounding the operand in the inline bump is what makes that bound hold for
-// every `size` rather than only for the ones that happen not to wrap: with
-// `size` and `position` both under ARENA_MAX_RESERVATION (the second enforced
-// in arena_create), the sum cannot carry past 2^64, so the comparison against
-// `reserved_size` is exact instead of bypassable by a large enough `size`.
-// The remaining-space form `size <= reserved_size - aligned_offset` needs one
-// compare fewer, but only if reservations are alignment-granular, and they are
-// not — the rendering boundary tests reserve 256 bytes on purpose. Rounding
-// up to the commit granularity and clamping the final partial granule live
-// here, in the branch that needs them; the bump never loads `granularity`.
+// The inline bump validates its live cursor before rounding, then validates
+// the rounded offset and remaining capacity before publishing a new position.
+// That subtraction form keeps `aligned_offset + size` within the reservation
+// even for a final partial granule; the commit path below handles granularity
+// rounding without adding any of that state to the hot bump.
 void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
 {
     BUSTER_VALIDATE(aligned_size_after <= arena->reserved_size);
@@ -74,7 +73,7 @@ void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
 #endif
     {
         commit_succeeded = os_commit(commit_pointer, size_to_commit,
-                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages);
+                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.prefault_pages);
     }
     if (!commit_succeeded)
     {
@@ -117,6 +116,12 @@ void arena_reset_to_start(Arena* arena)
 
 void arena_set_position(Arena* arena, u64 position)
 {
+    BUSTER_VALIDATE(arena && position >= arena_minimum_position && position <= arena->reserved_size);
+    arena_set_position_unchecked(arena, position);
+}
+
+BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position)
+{
 #if BUSTER_INCLUDE_TESTS
     arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
 #endif
@@ -126,7 +131,7 @@ void arena_set_position(Arena* arena, u64 position)
 
 bool arena_set_position_and_decommit(Arena* arena, u64 position)
 {
-    BUSTER_CHECK(position >= arena_minimum_position && position <= arena->position);
+    BUSTER_VALIDATE(arena && arena->position <= arena->reserved_size && position >= arena_minimum_position && position <= arena->position);
 #if BUSTER_INCLUDE_TESTS
     arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
 #endif
@@ -136,8 +141,10 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     // the next boundary that satisfies both contracts, and stop before any
     // partial native page at the old high-water mark. If no complete page is
     // available, resetting the logical position is still useful and safe.
+    // The checked cursor and reservation bounds above keep this operand well
+    // below UINT64_MAX, so the local unchecked rounding is safe.
     u64 decommit_alignment = BUSTER_MAX(arena->granularity, page_size);
-    u64 decommit_start = align_forward(position, decommit_alignment);
+    u64 decommit_start = align_forward_unchecked(position, decommit_alignment);
     u64 decommit_end = arena->os_position & ~(page_size - 1);
     bool result = true;
     if (decommit_start < decommit_end)
@@ -156,7 +163,7 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
 #if defined(__APPLE__)
         // Darwin's MADV_DONTNEED is a paging hint, not a zero-fill contract.
         // Recommit can expose the old contents, including earlier rewinds.
-        arena_set_position(arena, position);
+        arena_set_position_unchecked(arena, position);
 #else
         // Bytes beyond the native decommit boundary are freshly zeroed if
         // they are committed again; retain the prefix that can still carry
@@ -237,9 +244,12 @@ u64 arena_pool_release_thread(void)
     return result;
 }
 
+// A pooled arena is handed back with the pages it already had and without
+// reissuing the prefault request, so a creation that asked for prefaulting
+// must not be served from -- or parked in -- the pool.
 BUSTER_GLOBAL_LOCAL bool arena_pool_eligible(u64 reserved_size, u64 count, ArenaFlags flags)
 {
-    return count == 1 && !flags.execute && !flags.lock_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
+    return count == 1 && !flags.execute && !flags.prefault_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
@@ -340,7 +350,9 @@ Arena* arena_create(ArenaCreation original_creation)
             {
                 Arena* arena = (Arena*)(result + (individual_reserved_size * i));
 
-                bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.lock_pages);
+                // Only the commit decides whether this arena exists. The
+                // prefault request it carries is advisory and cannot fail it.
+                bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages);
                 if (commit_result)
                 {
                     *arena = (Arena){

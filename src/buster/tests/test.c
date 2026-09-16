@@ -50,6 +50,7 @@
 
 #include <buster/tests/byte_writer_test.h>
 #include <buster/tests/arena_test.h>
+#include <buster/tests/integer_test.h>
 #include <buster/tests/sanitizer_test.h>
 #include <buster/tests/hash_test.h>
 #include <buster/tests/simd_test.h>
@@ -60,6 +61,8 @@
 #include <buster/tests/truetype_test.h>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
+#include <buster/tests/compiler/frontend/c/once_test.h>
+#include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.h>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.h>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.h>
@@ -105,6 +108,7 @@
 #if BUSTER_UNITY_BUILD
 #include <buster/tests/byte_writer_test.c>
 #include <buster/tests/arena_test.c>
+#include <buster/tests/integer_test.c>
 #include <buster/tests/sanitizer_test.c>
 #include <buster/tests/hash_test.c>
 #include <buster/tests/simd_test.c>
@@ -115,6 +119,8 @@
 #include <buster/tests/truetype_test.c>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
+#include <buster/tests/compiler/frontend/c/once_test.c>
+#include <buster/tests/compiler/frontend/c/macro_conditional_test.c>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.c>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.c>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.c>
@@ -365,6 +371,7 @@ typedef enum TestId
 {
     TEST_ID_BYTE_WRITER,
     TEST_ID_ARENA,
+    TEST_ID_INTEGER,
     TEST_ID_SANITIZER,
     TEST_ID_HASH,
     TEST_ID_SIMD,
@@ -374,6 +381,8 @@ typedef enum TestId
     TEST_ID_TARGET,
     TEST_ID_TRUETYPE,
     TEST_ID_C_FRONTEND,
+    TEST_ID_C_ONCE,
+    TEST_ID_C_MACRO_CONDITIONAL,
     TEST_ID_METAMORPHIC,
     TEST_ID_AARCH64_ENCODING,
     TEST_ID_AARCH64_EXACT_BRIDGE,
@@ -423,6 +432,7 @@ typedef enum TestId
 BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_BYTE_WRITER] = {S8_INITIALIZER("byte_writer_tests"), &byte_writer_tests},
     [TEST_ID_ARENA] = {S8_INITIALIZER("arena_tests"), &arena_tests},
+    [TEST_ID_INTEGER] = {S8_INITIALIZER("integer_tests"), &integer_tests},
     [TEST_ID_SANITIZER] = {S8_INITIALIZER("sanitizer_tests"), &sanitizer_tests},
     [TEST_ID_HASH] = {S8_INITIALIZER("hash_tests"), &hash_tests},
     [TEST_ID_SIMD] = {S8_INITIALIZER("simd_tests"), &simd_tests},
@@ -433,6 +443,8 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_TRUETYPE] = {S8_INITIALIZER("truetype_tests"), &truetype_tests},
     [TEST_ID_METAMORPHIC] = {S8_INITIALIZER("metamorphic_tests"), &metamorphic_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
+    [TEST_ID_C_ONCE] = {S8_INITIALIZER("c_once_tests"), &c_once_tests, true},
+    [TEST_ID_C_MACRO_CONDITIONAL] = {S8_INITIALIZER("c_macro_conditional_tests"), &c_macro_conditional_tests, true},
     [TEST_ID_AARCH64_ENCODING] = {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
     [TEST_ID_AARCH64_EXACT_BRIDGE] = {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
     [TEST_ID_AARCH64_CONTROL_SEMANTICS] = {S8_INITIALIZER("aarch64_control_semantics_tests"), &aarch64_control_semantics_tests},

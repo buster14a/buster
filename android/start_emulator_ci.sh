@@ -198,6 +198,25 @@ read_emulator_pid() {
     return 0
 }
 
+emulator_pid_is_running() {
+    local pid=$1
+    local process_state
+    local running=1
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        running=0
+        # kill -0 also succeeds for a terminated child awaiting reaping. Such
+        # a PID cannot handle adb or signals and must not fail cleanup. Query
+        # only the recorded owned PID; an unavailable ps result stays live.
+        if process_state=$(ps -o stat= -p "$pid" 2>/dev/null); then
+            process_state=${process_state//[[:space:]]/}
+            if [[ $process_state == Z* || $process_state == X* ]]; then
+                running=1
+            fi
+        fi
+    fi
+    return "$running"
+}
+
 stop_owned_emulator() {
     local status=0
     local pid=
@@ -214,7 +233,7 @@ stop_owned_emulator() {
 
     # Ask the emulator through adb first so it can release its device state.
     # The PID fallback handles adb outages and fake/test emulators.
-    if [[ -n $pid ]] && kill -0 "$pid" >/dev/null 2>&1; then
+    if [[ -n $pid ]] && emulator_pid_is_running "$pid"; then
         if timed_command "$cleanup_timeout_seconds" "adb emulator shutdown" adb emu kill; then
             :
         else
@@ -223,15 +242,15 @@ stop_owned_emulator() {
         fi
 
         stop_deadline=$((SECONDS + cleanup_timeout_seconds))
-        while kill -0 "$pid" >/dev/null 2>&1 && (( SECONDS < stop_deadline )); do
+        while emulator_pid_is_running "$pid" && (( SECONDS < stop_deadline )); do
             sleep 1
         done
-        if kill -0 "$pid" >/dev/null 2>&1; then
+        if emulator_pid_is_running "$pid"; then
             echo "warning: Android emulator PID $pid did not exit; sending SIGTERM" >&2
             kill "$pid" >/dev/null 2>&1 || true
             sleep 1
         fi
-        if kill -0 "$pid" >/dev/null 2>&1; then
+        if emulator_pid_is_running "$pid"; then
             echo "warning: Android emulator PID $pid still exists; sending SIGKILL" >&2
             kill -KILL "$pid" >/dev/null 2>&1 || true
             status=1

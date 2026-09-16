@@ -571,6 +571,10 @@ BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relo
 // defined over; the AArch64 machine selector's VA_START mirrors the
 // canonical emitter's simulation through this exact walk.
 BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
+// Target-dependent wide-vector transport is shared by the canonical and MIR
+// x86-64 emitters so their register pieces cannot drift.
+BUSTER_F_DECL u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size);
+BUSTER_F_DECL u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size);
 // The System V argument-area slot alignment the canonical layout gives one
 // stack argument; the x86-64 machine placement rounds its stack cursor by
 // this exact clamp so both emitters count the same padding eightbytes.
