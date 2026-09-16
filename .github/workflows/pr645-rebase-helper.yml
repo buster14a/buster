@@ -6,140 +6,57 @@ on:
 permissions:
   contents: write
 jobs:
-  rebase:
+  publish:
     if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/pr645-rebase-helper-20260916'
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     env:
       ORIGINAL: e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b
-      VERIFIED_MAIN: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
-      UPDATED_MAIN: 43a2299211a239c6eeaff5d4b5813e2acdce0c7d
-      EXPECTED_TREE: 319a5c96636deb444b0b53d62f6219c23caa982d
+      CANDIDATE: 64b19fcf55430bedefcb29bb4b375df0aacbb5a7
+      CANDIDATE_TREE: af382bdd6641eb19b526d781a4639609ebe7593a
+      REBASED_MAIN: 43a2299211a239c6eeaff5d4b5813e2acdce0c7d
       DESTINATION: refs/heads/codex/569-canonical-landing-20260914
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: codex/pr645-rebased-validated-20260916
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare pinned original and external closure
+      - name: Verify exact validated and authorized candidate
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'David'
-          git config user.email '39247043+davidgmbb@users.noreply.github.com'
-          git worktree add --detach "$RUNNER_TEMP/pr645-candidate" "$ORIGINAL"
-          mkdir -p "$RUNNER_TEMP/pr645-validation"
-          cd "$RUNNER_TEMP/pr645-candidate"
-          python3 - <<'PY' > "$RUNNER_TEMP/pr645-validation/original-external.log" 2>&1
-          import json, pathlib, subprocess, sys
-          sys.path.insert(0, 'tools')
-          import native_retirement_external as external
-          root = pathlib.Path.cwd()
-          descriptor = root / 'docs/native-retirement-dependencies-v1.json'
-          manifest = json.loads(descriptor.read_text())
-          for item in manifest['external_checkouts']:
-              checkout = root / item['path']
-              checkout.mkdir(parents=True)
-              def git(*args):
-                  subprocess.run(['git', '-C', str(checkout), *args], check=True)
-              git('init', '-q')
-              git('remote', 'add', 'origin', 'https://github.com/' + item['repository'] + '.git')
-              git('fetch', '--depth=1', 'origin', item['revision'])
-              git('checkout', '--detach', 'FETCH_HEAD')
-          print(json.dumps(external.prepare(descriptor, root), sort_keys=True))
-          PY
-      - name: Reproduce the independently verified conflict resolutions
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/pr645-candidate"
-          python3 "$GITHUB_WORKSPACE/pr645_rebase_replay.py" > "$RUNNER_TEMP/pr645-validation/rebase.log" 2>&1
-          python3 "$GITHUB_WORKSPACE/pr645_post_rebase.py" > "$RUNNER_TEMP/pr645-validation/rebind.jsonl"
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tools/native_retirement_evidence_upload_test.py')
-          s = p.read_text()
-          old = '    "candidate/evidence/",\n'
-          assert s.count(old) == 1
-          p.write_text(s.replace(old, old + '    "candidate/evidence-candidate.txt",\n'))
-          PY
-          git add -u
-          test "$(git write-tree)" = "$EXPECTED_TREE"
-          git diff --cached --check
-          git commit -m 'ci: reconcile retirement evidence after PR645 rebase' \
-            -m 'Preserve current-main inputs and regressions, remove duplicate replayed test methods, and bind the integrated dependency and applicability bytes. Retain all acceptance classifications and the historical gap ledger. Reconcile the exact upload allowlist with the candidate identity file.'
-          git diff --unified=0 "$VERIFIED_MAIN" HEAD | git patch-id --stable | cut -d ' ' -f 1 > "$RUNNER_TEMP/pr645-validation/pr.patch-id"
-          git fetch origin "$UPDATED_MAIN"
-          git diff --name-only "$VERIFIED_MAIN" "$UPDATED_MAIN" > "$RUNNER_TEMP/pr645-validation/main-advance-files.txt"
-          python3 - <<'PY'
-          import os, pathlib
-          actual = set((pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr645-validation/main-advance-files.txt').read_text().splitlines())
-          assert actual == {'android/ci_summary_test.py', 'android/run_tests.sh', 'android/run_tests_test.sh',
-                            'docs/agents/testing.md', 'docs/ci-github-actions.md', 'tools/ci_summary.py',
-                            'src/buster/lib/compiler/frontend/c/c_gen.c',
-                            'src/buster/tests/compiler/driver/driver_test.c',
-                            'src/buster/tests/compiler/frontend/c/c_test.c'}, actual
-          PY
-          GIT_EDITOR=true git rebase "$UPDATED_MAIN" > "$RUNNER_TEMP/pr645-validation/main-advance-rebase.log" 2>&1
-          git diff --unified=0 "$UPDATED_MAIN" HEAD | git patch-id --stable | cut -d ' ' -f 1 > "$RUNNER_TEMP/pr645-validation/final.patch-id"
-          cmp "$RUNNER_TEMP/pr645-validation/pr.patch-id" "$RUNNER_TEMP/pr645-validation/final.patch-id"
-          test "$(git merge-base HEAD "$UPDATED_MAIN")" = "$UPDATED_MAIN"
-          test -z "$(git diff --name-only --diff-filter=U)"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          git diff --check "$UPDATED_MAIN"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr645-validation/final-identities.txt"
-          git diff --stat "$UPDATED_MAIN" > "$RUNNER_TEMP/pr645-validation/final-diff-stat.txt"
-      - name: Validate integrated contracts and native manifest producer
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/pr645-candidate"
-          out="$RUNNER_TEMP/pr645-validation"
-          trap 's=$?; if [ "$s" -ne 0 ]; then tail -n 35 "$out"/*tests.log; fi' EXIT
-          python3 tools/native_retirement_external.py prepare --manifest docs/native-retirement-dependencies-v1.json --source-root "$PWD" > "$out/integrated-external.json"
-          python3 tools/native_retirement_contract_test.py -v > "$out/contract-tests.log" 2>&1
-          python3 tools/native_retirement_materializer_test.py -v > "$out/materializer-tests.log" 2>&1
-          python3 tools/native_retirement_external_test.py -v > "$out/external-tests.log" 2>&1
-          python3 tests/ci_tools_test.py -v > "$out/ci-tools-tests.log" 2>&1
-          python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v > "$out/result-input-tests.log" 2>&1
-          python3 tools/native_retirement_evidence_upload_test.py -v > "$out/evidence-upload-tests.log" 2>&1
-          python3 android/ci_summary_test.py -v > "$out/android-summary-tests.log" 2>&1
-          clang --version > "$out/compiler-version.txt"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/pr645-build"
-          "$RUNNER_TEMP/pr645-build" native_retirement_census --self-test > "$out/census-self-test.log" 2>&1
-          "$RUNNER_TEMP/pr645-build" native_retirement_census --manifest-only --shard-count 4 --out "$RUNNER_TEMP/pr645-manifest" > "$out/census-manifest.log" 2>&1
-          grep -Fx 'io_failed=0' "$RUNNER_TEMP/pr645-manifest/summary.txt"
-          grep -Fx 'groups=19344' "$RUNNER_TEMP/pr645-manifest/summary.txt"
-          cp "$RUNNER_TEMP/pr645-manifest/summary.txt" "$out/manifest-summary.txt"
-          cp "$RUNNER_TEMP/pr645-manifest/manifest.txt" "$out/manifest.txt"
-          git branch pr645-published-candidate HEAD
-          git bundle create "$out/rebased.bundle" pr645-published-candidate ^"$VERIFIED_MAIN"
-      - name: Publish only PR645 with an explicit expected-head lease
+          mkdir -p "$RUNNER_TEMP/pr645-publication"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git ls-remote origin refs/heads/codex/pr645-rebased-validated-20260916 | cut -f1)" = "$CANDIDATE"
+          test "$(git ls-remote origin refs/heads/backup/pr645-before-rebase-e6ed9e0a-20260916 | cut -f1)" = "$ORIGINAL"
+          test "$(git merge-base HEAD "$REBASED_MAIN")" = "$REBASED_MAIN"
+          git diff --check "$REBASED_MAIN"
+          git fetch origin refs/heads/main
+          main="$(git rev-parse FETCH_HEAD)"
+          git merge-base --is-ancestor "$REBASED_MAIN" "$main"
+          git merge-tree --write-tree HEAD "$main" > "$RUNNER_TEMP/pr645-publication/main-merge-preview.txt"
+          printf '%s\n' "$main" > "$RUNNER_TEMP/pr645-publication/main-at-publication.txt"
+      - name: Publish existing candidate using expected-head lease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/pr645-candidate"
-          actual="$(git ls-remote origin "$DESTINATION" | cut -f1)"
-          test "$actual" = "$ORIGINAL"
-          git fetch origin refs/heads/main
-          main="$(git rev-parse FETCH_HEAD)"
-          git merge-base --is-ancestor "$UPDATED_MAIN" "$main"
-          # A concurrent main advance is not overwritten. Reject any new merge conflict;
-          # ordinary pull-request CI will validate the resulting merge revision.
-          git merge-tree --write-tree HEAD "$main" > "$RUNNER_TEMP/pr645-validation/current-main-merge-preview.txt"
-          printf '%s\n' "$main" > "$RUNNER_TEMP/pr645-validation/main-at-publication.txt"
+          test "$(git ls-remote origin "$DESTINATION" | cut -f1)" = "$ORIGINAL"
           authorization="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$authorization"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
             push "--force-with-lease=$DESTINATION:$ORIGINAL" origin "HEAD:$DESTINATION"
-          git rev-parse HEAD > "$RUNNER_TEMP/pr645-validation/published-head.txt"
-          printf 'Published PR645 head: '; cat "$RUNNER_TEMP/pr645-validation/published-head.txt"
-      - name: Retain exact rebase and validation evidence
+          test "$(git ls-remote origin "$DESTINATION" | cut -f1)" = "$CANDIDATE"
+          printf '%s\n' "$CANDIDATE" > "$RUNNER_TEMP/pr645-publication/published-head.txt"
+          printf 'Published PR645 head: %s\n' "$CANDIDATE"
+      - name: Retain publication evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr645-rebase-validation
-          path: ${{ runner.temp }}/pr645-validation/
+          name: pr645-rebase-publication
+          path: ${{ runner.temp }}/pr645-publication/
           retention-days: 7
           if-no-files-found: error
