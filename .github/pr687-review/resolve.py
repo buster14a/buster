@@ -1,6 +1,5 @@
 from pathlib import Path
 import json
-import re
 import subprocess
 import tempfile
 
@@ -10,49 +9,32 @@ EXPECTED = 'a0459b827c05cf288727c99a2563897eb79bfd36'
 def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 assert git('rev-parse', 'HEAD') == HEAD
-assert git('merge-base', HEAD, MAIN) == 'e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf'
+name = 'src/buster/tests/compiler/frontend/c/c_test.c'
 files = git('diff', '--name-only', '--diff-filter=U').splitlines()
-assert len(files) == 10, files
-pattern = re.compile(r'^<<<<<<< HEAD\n(.*?)^=======\n(.*?)^>>>>>>>[^\n]*\n', re.M | re.S)
-report = []
-for name in files:
-    p = Path(name)
-    index = [0]
-    def resolve(m):
-        index[0] += 1
-        ours, theirs = m.group(1), m.group(2)
-        if name.endswith('/c_gen.c') and index[0] in (4, 5, 6, 7, 8):
-            selected = theirs
-            reason = 'Preserve main live-limb and pointer rational API; avoid duplicate half literal branch'
-        elif name.endswith('/c_test.c'):
-            assert index[0] == 1
-            selected = ours + theirs
-            reason = 'Retain bfloat16 and live-limb regression registrations'
-        else:
-            selected = ours
-            reason = 'Retain BF16 additions over already-landed Float16 predecessor'
-        report.append({'file': name, 'conflict': index[0], 'reason': reason})
-        return selected
-    p.write_text(pattern.sub(resolve, p.read_text()))
-assert len(report) == 42, len(report)
-p = Path('src/buster/tests/compiler/frontend/c/c_test.c')
-s = p.read_text()
-marker = '// `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the\n'
-starts = [m.start() for m in re.finditer(re.escape(marker), s)]
-assert len(starts) == 2
-end = s.index('BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type', starts[1])
-s = s[:starts[1]] + s[end:]
-a = s.index('BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type')
-b = s.index('BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants', a)
+assert files == [name], files
+# The real history has multiple merge bases; Git's virtual base already
+# reconciles the landed binary16 predecessor. Preserve main's entire fixture
+# file and insert only the independently reviewed BF16 fixture/registration.
+main = subprocess.check_output(['git', 'show', MAIN + ':' + name], text=True)
+head = subprocess.check_output(['git', 'show', HEAD + ':' + name], text=True)
+start = 'BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type'
+end = 'BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants'
+a = head.index(start)
+b = head.index(end, a)
+assert start not in main
 with tempfile.TemporaryDirectory() as directory:
     function = Path(directory) / 'function.c'
-    function.write_text(s[a:b])
+    function.write_text(head[a:b])
     subprocess.run(['patch', '--fuzz=0', str(function), str(Path(__file__).with_name('numeric.patch'))], check=True)
-    s = s[:a] + function.read_text() + s[b:]
-p.write_text(s)
+    at = main.index(end)
+    main = main[:at] + function.read_text() + main[at:]
+registration = '    BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);\n'
+assert main.count(registration) == 1
+main = main.replace(registration, registration + '    BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_type);\n')
+Path(name).write_text(main)
 subprocess.run(['git', 'add', '-A'], check=True)
 assert not git('ls-files', '-u')
 subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
 actual = git('write-tree')
+print(json.dumps({'head': HEAD, 'main': MAIN, 'tree': actual, 'expected_tree': EXPECTED, 'resolution': 'Preserve all main fixtures and splice BF16 fixture plus numeric expansion'}, indent=2))
 assert actual == EXPECTED, (actual, EXPECTED)
-print(json.dumps({'head': HEAD, 'main': MAIN, 'tree': actual, 'resolutions': report}, indent=2))
