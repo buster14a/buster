@@ -1571,66 +1571,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_protocol_mutations(void)
 }
 
 #ifdef __linux__
-BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_alarm_count;
-
-BUSTER_GLOBAL_LOCAL void bq_test_alarm_handler(int signal_number)
-{
-    (void)signal_number;
-    bq_test_alarm_count += 1;
-}
-
-BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
-{
-    struct sigaction action = {0}, prior = {0};
-    action.sa_handler = bq_test_alarm_handler;
-    sigemptyset(&action.sa_mask);
-    struct itimerval timer = {{0, 100}, {0, 100}}, stopped = {{0, 0}, {0, 0}};
-    u64 before = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(sigaction(SIGALRM, &action, &prior) == 0 && setitimer(ITIMER_REAL, &timer, NULL) == 0);
-    BQ_CHECK(bq_worker_sleep_until(bq_worker_deadline(before, 10)) == BQ_OK);
-    u64 after = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(setitimer(ITIMER_REAL, &stopped, NULL) == 0 && sigaction(SIGALRM, &prior, NULL) == 0 &&
-             bq_test_alarm_count > 0 && after >= before + 10 && after - before < 1000);
-
-    char output[64];
-    int status = 0;
-    char const* blocked_pipe[] = {"/bin/sh", "-c", "echo $$; sleep 10", NULL};
-    before = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(bq_worker_exec_capture(blocked_pipe, output, sizeof(output), &status, 20) == BQ_IO);
-    after = bq_worker_monotonic_milliseconds();
-    pid_t timed_group = (pid_t)strtol(output, NULL, 10);
-    errno = 0;
-    BQ_CHECK(after - before < 1000 && timed_group > 1 &&
-             kill(-timed_group, 0) != 0 && errno == ESRCH);
-    char const* blocked_wait[] = {"/bin/sh", "-c", "exec 1>&- 2>&-; sleep 10", NULL};
-    before = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(bq_worker_exec_capture(blocked_wait, output, sizeof(output), &status, 20) == BQ_IO);
-    after = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(after - before < 1000);
-
-    bq_worker_test_setpgid_failure = true;
-    char const* harmless[] = {"/bin/true", NULL};
-    before = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(bq_worker_exec_capture(harmless, output, sizeof(output), &status, 1000) == BQ_CLEANUP_FAILED);
-    after = bq_worker_monotonic_milliseconds();
-    bq_worker_test_setpgid_failure = false;
-    BQ_CHECK(after - before < 1000);
-
-    BqSystemdContext context = {0};
-    context.pid = fork();
-    if (!context.pid) for (;;) pause();
-    BqWorkerBackend backend = {&context, NULL, NULL, NULL, bq_systemd_join, bq_systemd_cleanup_launcher,
-                               bq_systemd_delay, bq_systemd_clock};
-    before = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(context.pid > 0 && backend.join(&backend, &status, bq_worker_deadline(before, 20)) == BQ_WORKER_TIMEOUT);
-    after = bq_worker_monotonic_milliseconds();
-    BQ_CHECK(after - before < 1000);
-    if (context.pid > 0)
-    {
-        BQ_CHECK(backend.cleanup_launcher(&backend,
-                 bq_worker_deadline(bq_worker_monotonic_milliseconds(), 1000)) == BQ_OK && context.pid < 0);
-    }
-}
+#include "worker_deadline_tests.c"
 
 typedef struct BqWorkerFake
 {

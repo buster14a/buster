@@ -110,8 +110,18 @@ foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
 The normal native executable is `build/bench-service-tools/service` (`.exe` on
-Windows). Tests use private, disposable directories with deterministic source manifests;
-no sleeps, timing assertions, external workers or network access are involved.
+Windows). Storage tests use private, disposable directories with deterministic
+source manifests and require no external workers or network access. Linux
+supervisor tests additionally launch bounded local helper processes and check
+monotonic deadlines. `worker_deadline_tests.c` keeps timed commands as direct
+children with explicit `exec`, so their cleanup does not depend on PID 1 reaping
+an orphaned shell descendant. The observed `fork` PID identifies the process
+group even when a timeout precedes all captured output. A stopped-before-exec
+control covers that case; separate owned live/zombie group members must prevent
+a cleanup-success verdict until explicitly reaped. Failure diagnostics preserve
+individual results, elapsed time, PID/group identity and process state. These
+tests retain the 20 ms command deadline, the 1,000 ms test bound and the production
+cleanup policy, including treating an unreaped zombie as a present group member.
 Windows validates the portable codec and rejects durable queue opening as
 unsupported. **Journal durability and fake execution are POSIX-only in this
 slice**; native Linux/macOS test evidence must not be described as Windows
