@@ -1,0 +1,42 @@
+name: PR 687 pinned repair tools
+on:
+  push:
+    branches: [codex/pr687-repair-tools]
+permissions:
+  contents: read
+jobs:
+  sources:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: tinycc
+          persist-credentials: false
+      - name: Preserve pinned compiler source
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr687-tools"
+          git -C tinycc archive --format=tar.gz --output="$RUNNER_TEMP/pr687-tools/tinycc.tar.gz" HEAD
+          git -C tinycc rev-parse HEAD > "$RUNNER_TEMP/pr687-tools/tinycc-revision.txt"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: llvm/llvm-project
+          ref: c13b7485b87909fcf739f62cfa382b55407433c0
+          path: llvm
+          sparse-checkout: |
+            clang/lib/Headers
+            clang/include/clang/Basic
+          persist-credentials: false
+      - name: Preserve pristine reference headers and signatures
+        run: |
+          git -C llvm archive --format=tar.gz --output="$RUNNER_TEMP/pr687-tools/llvm-headers.tar.gz" HEAD clang/lib/Headers clang/include/clang/Basic/BuiltinsX86.def
+          git -C llvm rev-parse HEAD > "$RUNNER_TEMP/pr687-tools/llvm-revision.txt"
+          sha256sum "$RUNNER_TEMP/pr687-tools/"*.tar.gz > "$RUNNER_TEMP/pr687-tools/sha256.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr687-pinned-tools-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr687-tools
+          retention-days: 7
+          if-no-files-found: error
