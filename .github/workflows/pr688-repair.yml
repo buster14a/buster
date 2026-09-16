@@ -1,0 +1,79 @@
+name: PR 688 repair workbench
+
+on:
+  push:
+    branches: [codex/repair-688-hosted-20260916]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Inspect pinned merge and normalized symbol contract
+        env:
+          PR_HEAD: cf0107cc74b6e04304cb8a3dc2a065b2c3a8030c
+          BASE: e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf
+          MAIN: 2142bf4b520cd82ca2dd3aeba5941cfd16ac48fd
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$PR_HEAD" "$BASE" "$MAIN"
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess
+          head, base, main = (os.environ[k] for k in ('PR_HEAD', 'BASE', 'MAIN'))
+          out = pathlib.Path('.pr688-inspect')
+          out.mkdir()
+          merged = subprocess.run(['git', 'merge-tree', '--write-tree', '--merge-base=' + base, head, main], text=True, capture_output=True)
+          assert merged.returncode in (0, 1), merged.stderr
+          (out / 'merge.txt').write_text(merged.stdout + merged.stderr)
+          print(merged.stdout)
+          tree = merged.stdout.splitlines()[0]
+          assert re.fullmatch('[0-9a-f]{40}', tree)
+          conflicts = sorted(set(re.findall(r'^\d{6} [0-9a-f]{40} [123]\t(.+)$', merged.stdout, re.M)))
+          for path in conflicts:
+              content = subprocess.check_output(['git', 'show', tree + ':' + path], text=True)
+              dest = out / 'conflicts' / path
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              dest.write_text(content)
+              lines = content.splitlines()
+              print('CONFLICT FILE:', path)
+              indices = set()
+              for i, line in enumerate(lines):
+                  if line.startswith(('<<<<<<<', '=======', '>>>>>>>')):
+                      indices.update(range(max(0, i - 15), min(len(lines), i + 16)))
+              for i in sorted(indices):
+                  print(f'{i+1}: {lines[i]}')
+          changed = subprocess.check_output(['git', 'diff', '--name-only', base, head], text=True).splitlines()
+          diff = subprocess.check_output(['git', 'diff', '--no-color', base, main, '--', *changed], text=True)
+          (out / 'base-main.patch').write_text(diff)
+          print('BASE-TO-MAIN OVERLAP DIFF:')
+          print('\n'.join(diff.splitlines()[:700]))
+          paths = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', head], text=True).splitlines()
+          for path in paths:
+              if path.endswith('/object.c'):
+                  content = subprocess.check_output(['git', 'show', head + ':' + path], text=True)
+                  lines = content.splitlines()
+                  selected = set()
+                  for i, line in enumerate(lines):
+                      if "data[0] == '_'" in line or 'strip' in line.lower() and 'underscore' in line.lower():
+                          selected.update(range(max(0, i - 8), min(len(lines), i + 12)))
+                  if selected:
+                      text = path + '\n' + '\n'.join(f'{i+1}: {lines[i]}' for i in sorted(selected))
+                      print('SYMBOL NORMALIZATION:', text)
+                      (out / 'symbols.txt').write_text(text)
+          for path in ['docs/agents/driver.md', 'docs/agents/frontend.md', 'docs/agents/workflow.md']:
+              content = subprocess.check_output(['git', 'show', main + ':' + path], text=True)
+              (out / pathlib.Path(path).name).write_text(content)
+          PY
+      - name: Preserve inspection evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr688-inspection-${{ github.run_id }}
+          path: .pr688-inspect/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
