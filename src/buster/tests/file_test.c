@@ -700,31 +700,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_aliases(UnitTestArguments* arg
             BUSTER_TEST(arguments, file_test_entries_are(arena, directory, names, 3, 0));
         }
 
-        // A case alias names the source only on a case-insensitive filesystem;
-        // elsewhere it is an ordinary new destination.
+        // Lookup case sensitivity and name creation are different capabilities.
+        // Darwin can force case-sensitive lookup on a case-insensitive volume:
+        // the alternate spelling is ENOENT to lookup but EEXIST to creation or
+        // rename. Probe that reserved-name case independently of file_copy.
         String8 case_alias = file_test_child(arena, directory, S8("alias-source.BIN"));
-        OsFileDescriptor* case_file = os_file_open(case_alias, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-        bool case_insensitive = case_file != 0;
-        if (case_file)
+        OsFileOpenResult case_probe = os_file_open_checked(case_alias, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        bool case_insensitive = case_probe.file != 0;
+        u32 case_create_error = 0;
+        if (case_probe.file)
         {
-            BUSTER_TEST(arguments, os_file_close(case_file));
+            BUSTER_TEST(arguments, !case_probe.error.v);
+            BUSTER_TEST(arguments, os_file_close(case_probe.file));
         }
 #if BUSTER_WINDOWS
         BUSTER_TEST(arguments, case_insensitive);
+#else
+        if (!case_insensitive)
+        {
+            // Never interpret an access, resource or I/O failure as absence.
+            BUSTER_TEST(arguments, case_probe.error.v == (u32)ENOENT);
+            if (case_probe.error.v == (u32)ENOENT)
+            {
+                int probe_fd;
+                do
+                {
+                    // Exclusive creation cannot truncate the source even when
+                    // the volume reserves this case-folded spelling.
+                    probe_fd = open((const char*)case_alias.pointer, O_WRONLY | O_CREAT | O_EXCL, 0600);
+                } while (probe_fd < 0 && errno == EINTR);
+                if (probe_fd >= 0)
+                {
+                    BUSTER_TEST(arguments, close(probe_fd) == 0);
+                    BUSTER_TEST(arguments, unlink((const char*)case_alias.pointer) == 0);
+                }
+                else
+                {
+                    case_create_error = (u32)errno;
+                    BUSTER_TEST(arguments, case_create_error == (u32)EEXIST);
+                }
+            }
+        }
 #endif
         FileCopyResult case_copy = file_copy_checked((CopyFileArguments){.original_path = source, .new_path = case_alias});
-        arguments->show(arguments, S8("FILE_COPY_ALIAS kind=case case_insensitive={u32} status={u32}\n"), (u32)case_insensitive, (u32)case_copy.status);
+        arguments->show(arguments,
+                        S8("FILE_COPY_ALIAS kind=case case_insensitive={u32} lookup_error={u32} create_error={u32} status={u32} error={u32} cleanup={u32}\n"),
+                        (u32)case_insensitive, case_probe.error.v, case_create_error, (u32)case_copy.status, case_copy.error.v, case_copy.cleanup_error.v);
         if (case_insensitive)
         {
             BUSTER_TEST(arguments, case_copy.status == FILE_COPY_SAME_FILE && !case_copy.error.v);
-            BUSTER_TEST(arguments, file_test_entries_are(arena, directory, names, 3, 0));
         }
+#if !BUSTER_WINDOWS
+        else if (case_probe.error.v == (u32)ENOENT && case_create_error == (u32)EEXIST)
+        {
+            // This is a checked refusal, not a platform skip: only the native
+            // reserved-name error is accepted, with no publication or debris.
+            BUSTER_TEST(arguments, case_copy.status == FILE_COPY_FAILED && case_copy.error.v == (u32)EEXIST);
+            BUSTER_TEST(arguments, file_test_path_missing(arena, case_alias));
+        }
+#endif
         else
         {
-            BUSTER_TEST(arguments, case_copy.status == FILE_COPY_PUBLISHED && file_test_bytes_are(arena, case_alias, content));
+            BUSTER_TEST(arguments, case_copy.status == FILE_COPY_PUBLISHED && !case_copy.error.v && file_test_bytes_are(arena, case_alias, content));
             BUSTER_TEST(arguments, os_file_delete(case_alias));
         }
-        BUSTER_TEST(arguments, file_test_bytes_are(arena, source, content));
+        BUSTER_TEST(arguments, !case_copy.cleanup_error.v);
+        BUSTER_TEST(arguments, file_test_bytes_are(arena, source, content) && file_test_bytes_are(arena, other, other_content));
+        BUSTER_TEST(arguments, file_test_entries_are(arena, directory, names, 3, 0));
 
         FileTestLink hard = file_test_link(arguments, false, directory, names[0], names[3]);
         arguments->show(arguments, S8("FILE_COPY_ALIAS kind=hard_link link_status={u32}\n"), (u32)hard);
@@ -813,7 +855,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_faults(UnitTestArguments* argu
         {.source = true, .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
         {.source = true, .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}}, .step_count = 2, .error = 12345},
         {.source = true,
-         .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}},
+         .steps = {{OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}, {OS_FILE_TEST_READ, OS_FILE_TEST_READ, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_INTERRUPT, 0}},
          .step_count = 3,
          .status = FILE_COPY_PUBLISHED},
         {.source = true, .steps = {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}}, .step_count = 1, .error = 23456},
