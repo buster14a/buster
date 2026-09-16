@@ -2601,6 +2601,136 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_section_table_place(Are
     return link_elf_test_section_table_append(arena, (ByteSlice){.pointer = *image, .length = prefix.length}, object);
 }
 
+// A copy-relocated definition must be discoverable from the ordinary table
+// without loading a DSO. Its actual address and size come from .dynsym, but its
+// ordinary section index must name allocated NOBITS storage that contains it.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_copy_symbol(ByteSlice image, String8 name, u8 info)
+{
+    LinkTestElfSymbol symbol = {0};
+    u64 dynamic_value = 0;
+    u64 dynamic_size = 0;
+    u32 zero_section = 0;
+    u64 zero_header = 0;
+    u64 symbol_header = 0;
+    bool result = link_test_elf_symbol(image, name, &symbol) &&
+                  link_test_elf_dynamic_symbol(image, name, &dynamic_value, &dynamic_size, 0) &&
+                  link_test_elf_section_find(image, S8(".bss"), &zero_section, &zero_header) &&
+                  link_test_elf_section_find(image, S8(".symtab"), 0, &symbol_header);
+    if (result)
+    {
+        u64 zero_address = link_read_u64(image.pointer, zero_header + 16);
+        u64 zero_size = link_read_u64(image.pointer, zero_header + 32);
+        result = symbol.value == dynamic_value && symbol.size == dynamic_size && symbol.section == zero_section &&
+                 symbol.info == info && symbol.other == 0 && symbol.index >= link_read_u32(image.pointer, symbol_header + 44) &&
+                 link_read_u32(image.pointer, zero_header + 4) == 8 && link_read_u64(image.pointer, zero_header + 8) == 3 &&
+                 symbol.value >= zero_address && symbol.value - zero_address <= zero_size &&
+                 symbol.size <= zero_size - (symbol.value - zero_address);
+    }
+    return result;
+}
+
+// Cover the shared hosted layout and both overlays, including aliases already
+// imported, duplicate library aliases, an executable-owned name, weak imports,
+// true undefined symbols, and copy slots following nonempty ordinary BSS.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_ANDROID};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    NativeDynamicDataSymbol exports[] = {
+        {.name = S8("copy_data"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_pair"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_alias"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_alias"), .address = 0x1000, .size = 32},
+        {.name = S8("copy_shadow"), .address = 0x1000, .size = 32},
+        {.name = S8("weak_copy"), .address = 0x2000, .size = 16},
+        {.name = S8("weak_alias"), .address = 0x2000, .size = 16},
+        {.name = S8("unused_data"), .address = 0x3000, .size = 8},
+    };
+    String8 linker_argument = S8("--export-dynamic");
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                             ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                             : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            ObjectSymbol symbols[] = {
+                {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("local_zero"), .value = 1, .size = 4, .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA},
+                {.name = S8("copy_data"), .size = 1, .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+                {.name = S8("copy_pair"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+                {.name = S8("weak_copy"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+                {.name = S8("missing"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true, .hidden = true},
+                {.name = S8("function_import"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("copy_shadow"), .value = 5, .size = 4, .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            };
+            ObjectFile object = link_test_object_make(arguments->arena,
+                (Target){.cpu_arch = architectures[architecture], .os = systems[system]}, text, symbols, BUSTER_ARRAY_LENGTH(symbols), 0, 0);
+            object.sections[OBJECT_SECTION_ZERO].virtual_size = 9;
+            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object,
+                (NativeExecutableLinkOptions){
+                    .entry_symbol = S8("main"),
+                    .runtime_data_symbols = exports,
+                    .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(exports),
+                    .linker_arguments = &linker_argument,
+                    .linker_argument_count = 1,
+                });
+            if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("copy_data"), 0x11));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("copy_pair"), 0x11));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("copy_alias"), 0x11));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("weak_copy"), 0x21));
+                BUSTER_TEST(arguments, link_test_elf_copy_symbol(linked.executable, S8("weak_alias"), 0x11));
+                LinkTestElfSymbol data_symbol = {0};
+                LinkTestElfSymbol pair_symbol = {0};
+                LinkTestElfSymbol alias_symbol = {0};
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_data"), &data_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_pair"), &pair_symbol));
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_alias"), &alias_symbol));
+                BUSTER_TEST(arguments, data_symbol.value == pair_symbol.value && data_symbol.value == alias_symbol.value && data_symbol.size == 32);
+                LinkTestElfSymbol missing_symbol = {0};
+                LinkTestElfSymbol function_symbol = {0};
+                LinkTestElfSymbol unused_symbol = {0};
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("missing"), &missing_symbol));
+                BUSTER_TEST(arguments, missing_symbol.section == 0 && missing_symbol.value == 0 && missing_symbol.size == 0 &&
+                                           missing_symbol.info == 0x21 && missing_symbol.other == 2);
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("function_import"), &function_symbol));
+                BUSTER_TEST(arguments, function_symbol.section == 0 && function_symbol.value == 0 && function_symbol.info == 0x12);
+                BUSTER_TEST(arguments, !link_test_elf_symbol(linked.executable, S8("unused_data"), &unused_symbol));
+                u64 zero_header = 0;
+                u64 symbol_header = 0;
+                u32 zero_section = 0;
+                if (BUSTER_REQUIRE(arguments, link_test_elf_section_find(linked.executable, S8(".bss"), &zero_section, &zero_header) &&
+                                              link_test_elf_section_find(linked.executable, S8(".symtab"), 0, &symbol_header)))
+                {
+                    LinkTestElfSymbol local_symbol = {0};
+                    LinkTestElfSymbol shadow_symbol = {0};
+                    BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("local_zero"), &local_symbol));
+                    BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("copy_shadow"), &shadow_symbol));
+                    u64 zero_address = link_read_u64(linked.executable.pointer, zero_header + 16);
+                    BUSTER_TEST(arguments, local_symbol.section == zero_section && local_symbol.value == zero_address + 1 &&
+                                               local_symbol.size == 4 && local_symbol.info == 0x01 && local_symbol.index == 1);
+                    BUSTER_TEST(arguments, shadow_symbol.section == zero_section && shadow_symbol.value == zero_address + 5 &&
+                                               shadow_symbol.size == 4 && shadow_symbol.value != data_symbol.value);
+                    // Eight inputs, two hosted imports, two generated aliases,
+                    // and the null entry. Neither a repeated library alias nor
+                    // an already retained name may produce a duplicate entry.
+                    BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, symbol_header + 32) == 13 * 24 &&
+                                               link_read_u32(linked.executable.pointer, symbol_header + 44) == 2);
+                }
+            }
+            BUSTER_TEST(arguments, symbols[2].section == OBJECT_SECTION_UNDEFINED && symbols[2].size == 1 && symbols[2].value == 0 &&
+                                       symbols[3].section == OBJECT_SECTION_UNDEFINED && symbols[4].section == OBJECT_SECTION_UNDEFINED &&
+                                       object.sections[OBJECT_SECTION_ZERO].virtual_size == 9);
+        }
+    }
+    return result;
+}
+
 // Every ELF executable form carries the same non-loaded static-symbol
 // contract.  Exercise both instruction sets, static and hosted layouts, and
 // Linux and Android policy over interleaved local/global symbols, aliases,
@@ -2633,7 +2763,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_symbol_table(UnitTestArguments*
                      .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
                     {.name = S8("global_zero"), .value = 3, .size = 5, .section = OBJECT_SECTION_ZERO,
                      .kind = OBJECT_SYMBOL_DATA, .global = true},
-                    {.name = S8("missing_weak"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+                    // An uninspected DSO may define a default-visible weak
+                    // name. Hidden weak stays genuinely unresolved instead.
+                    {.name = S8("missing_weak"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA,
+                     .global = true, .weak = true, .hidden = true},
                     // Initializer arrays are transformed into entry-stub code and
                     // have no output section, so their input-only symbols cannot
                     // be published with a false section index.
@@ -2755,7 +2888,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_symbol_table(UnitTestArguments*
                                                    global_zero_symbol.info == 0x11 && global_zero_symbol.other == 0);
                         BUSTER_TEST(arguments, missing_weak_symbol.value == 0 && missing_weak_symbol.size == 0 &&
                                                    missing_weak_symbol.index == first_global + 3 && missing_weak_symbol.section == 0 &&
-                                                   missing_weak_symbol.info == 0x21 && missing_weak_symbol.other == 0);
+                                                   missing_weak_symbol.info == 0x21 && missing_weak_symbol.other == 2);
                         if (hosted)
                         {
                             u32 thread_local_data_section = 0;
@@ -3459,6 +3592,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult initialized = link_test_merged_section_initialization(arguments);
     result.succeeded_test_count += initialized.succeeded_test_count;
     result.test_count += initialized.test_count;
+    UnitTestResult copy_symbol_table = link_test_elf_copy_symbol_table(arguments);
+    result.succeeded_test_count += copy_symbol_table.succeeded_test_count;
+    result.test_count += copy_symbol_table.test_count;
     UnitTestResult symbol_table = link_test_elf_symbol_table(arguments);
     result.succeeded_test_count += symbol_table.succeeded_test_count;
     result.test_count += symbol_table.test_count;
@@ -5130,16 +5266,13 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("tzname"), &copy_alias_tzname, &copy_alias_tzname_size, 0));
     BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("__tzname"), &copy_alias_tzname_alias, 0, 0));
     BUSTER_TEST(arguments, copy_alias_tzname && copy_alias_tzname == copy_alias_tzname_alias && copy_alias_tzname_size == 16);
-    // .symtab describes the merged input ObjectFile: its imported data names
-    // remain undefined there, while the writer-generated copy-slot definitions
-    // and library aliases belong only to .dynsym.  Publishing an alias such as
-    // __environ in .symtab would invent an ObjectSymbol that no input retained.
-    LinkTestElfSymbol static_environ = {0};
-    LinkTestElfSymbol static_alias = {0};
-    BUSTER_TEST(arguments, link_test_elf_symbol(copy_alias_executable.executable, S8("environ"), &static_environ));
-    BUSTER_TEST(arguments, static_environ.value == 0 && static_environ.size == 0 && static_environ.section == 0 && static_environ.info == 0x11 &&
-                               static_environ.other == 0);
-    BUSTER_TEST(arguments, !link_test_elf_symbol(copy_alias_executable.executable, S8("__environ"), &static_alias));
+    // Ordinary symbols describe final copy-slot definitions, including the
+    // aliases synthesized by the writer, even when the input BSS was empty.
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("environ"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("_environ"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("__environ"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("tzname"), 0x11));
+    BUSTER_TEST(arguments, link_test_elf_copy_symbol(copy_alias_executable.executable, S8("__tzname"), 0x11));
     // A name the library exports but this program does not reference, and
     // whose address no import names, stays out of the image.
     BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("stdout"), 0, 0, 0));

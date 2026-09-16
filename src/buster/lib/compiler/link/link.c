@@ -50,7 +50,11 @@
 // names for one object one slot; see link_elf_index_initialize. Defining
 // only the referenced name leaves the library binding its own post-startup
 // stores — glibc's `__environ = ev` — to its own storage while the program
-// reads a copy taken before startup ran.
+// reads a copy taken before startup ran. The ordinary ELF symbol table must
+// describe those final copy-slot definitions too: link_elf_output_symbol uses
+// the writer's import indices and emitted dynamic values without changing the
+// input ObjectFile. The .bss section header includes the slots already covered
+// by the writable segment; no loaded bytes or program headers move.
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
 // address zero rather than a dynamic import, which is what a startup object
@@ -136,6 +140,11 @@ struct LinkElfSectionTableLayout
     u64 got_size;
     u64 dynamic_offset;
     u64 dynamic_size;
+    u32 const* import_indices;
+    String8 const* copy_alias_names;
+    u64 copy_alias_symbol_offset;
+    u64 copy_zero_size;
+    u32 copy_alias_count;
     u32 version_need_count;
     bool dynamic;
     u8 reserved[3];
@@ -2629,6 +2638,44 @@ struct LinkElfSectionDescriptor
     u32 reserved;
 };
 
+// The input symbol stays undefined after a dynamic writer reserves its copy
+// slot. Resolve that symbol and the writer-generated aliases from the same
+// .dynsym entries the loader sees. This is a transient, section-relative view
+// for .symtab only: no extra symbol search, allocation, or input mutation, and
+// the image remains on top of the arena for the zero-copy tail append.
+BUSTER_GLOBAL_LOCAL ObjectSymbol link_elf_output_symbol(ObjectFile* object, u64 index, u8 const* bytes, u64 image_base,
+                                                        u64 const* section_offsets, LinkElfSectionTableLayout const* layout)
+{
+    ObjectSymbol result;
+    u64 dynamic_symbol_offset = 0;
+    if (index < object->symbol_count)
+    {
+        result = object->symbols[index];
+        if (result.section == OBJECT_SECTION_UNDEFINED && result.kind == OBJECT_SYMBOL_DATA && layout->import_indices &&
+            layout->import_indices[index] != UINT32_MAX)
+        {
+            dynamic_symbol_offset = layout->dynamic_symbol_offset + ((u64)layout->import_indices[index] + 1) * BUSTER_LINK_ELF_SYMBOL_SIZE;
+        }
+    }
+    else
+    {
+        u64 alias_index = index - object->symbol_count;
+        result = (ObjectSymbol){
+            .name = layout->copy_alias_names[alias_index],
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        };
+        dynamic_symbol_offset = layout->copy_alias_symbol_offset + alias_index * BUSTER_LINK_ELF_SYMBOL_SIZE;
+    }
+    if (dynamic_symbol_offset)
+    {
+        result.section = OBJECT_SECTION_ZERO;
+        result.value = link_read_u64(bytes, dynamic_symbol_offset + 8) - image_base - section_offsets[OBJECT_SECTION_ZERO];
+        result.size = link_read_u64(bytes, dynamic_symbol_offset + 16);
+    }
+    return result;
+}
+
 typedef struct LinkElfSymbolTableLayout LinkElfSymbolTableLayout;
 struct LinkElfSymbolTableLayout
 {
@@ -2641,13 +2688,15 @@ struct LinkElfSymbolTableLayout
 };
 
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_table_layout(ObjectFile* object, u64 image_base, u64 const* section_offsets,
-                                                      u32 const* output_section_indices, u64 cursor, LinkElfSymbolTableLayout* layout)
+                                                      u32 const* output_section_indices, u8 const* bytes, LinkElfSectionTableLayout const* section_layout,
+                                                      u64 cursor, LinkElfSymbolTableLayout* layout)
 {
     bool result = cursor <= UINT64_MAX - 7;
     *layout = (LinkElfSymbolTableLayout){.string_size = 1};
-    for (u32 index = 0; index < object->symbol_count && result; index += 1)
+    for (u64 index = 0; index < (u64)object->symbol_count + section_layout->copy_alias_count && result; index += 1)
     {
-        ObjectSymbol* symbol = object->symbols + index;
+        ObjectSymbol output_symbol = link_elf_output_symbol(object, index, bytes, image_base, section_offsets, section_layout);
+        ObjectSymbol* symbol = &output_symbol;
         bool emitted = symbol->section == OBJECT_SECTION_UNDEFINED ||
                        (symbol->section < OBJECT_SECTION_COUNT && output_section_indices[symbol->section]);
         if (emitted)
@@ -2719,6 +2768,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             ObjectSectionKind kind = link_elf_loaded_kinds[index];
             ObjectSection* section = &object->sections[kind];
             u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
+            if (kind == OBJECT_SECTION_ZERO)
+            {
+                size = BUSTER_MAX(size, layout.copy_zero_size);
+            }
             u64 offset = section_offsets[kind];
             bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
@@ -2897,7 +2950,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             cursor += section->data.length;
         }
         LinkElfSymbolTableLayout symbol_layout = {0};
-        bool symbol_layout_valid = link_elf_symbol_table_layout(object, image_base, section_offsets, output_section_indices, cursor, &symbol_layout);
+        bool symbol_layout_valid = link_elf_symbol_table_layout(object, image_base, section_offsets, output_section_indices, result->executable.pointer,
+                                                               &layout, cursor, &symbol_layout);
         if (!symbol_layout_valid)
         {
             result->error = LINK_ERROR_INVALID_INPUT;
@@ -3075,9 +3129,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             for (u32 pass = 0; pass < 2; pass += 1)
             {
                 bool global = pass != 0;
-                for (u32 index = 0; index < object->symbol_count; index += 1)
+                for (u64 index = 0; index < (u64)object->symbol_count + layout.copy_alias_count; index += 1)
                 {
-                    ObjectSymbol* symbol = object->symbols + index;
+                    ObjectSymbol output_symbol = link_elf_output_symbol(object, index, bytes, image_base, section_offsets, &layout);
+                    ObjectSymbol* symbol = &output_symbol;
                     bool emitted = symbol->section == OBJECT_SECTION_UNDEFINED ||
                                    (symbol->section < OBJECT_SECTION_COUNT && output_section_indices[symbol->section]);
                     if (!emitted || symbol->global != global)
@@ -5065,6 +5120,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .got_size = got_size,
                                       .dynamic_offset = dynamic_offset,
                                       .dynamic_size = dynamic_size,
+                                      .import_indices = import_indices,
+                                      .copy_alias_names = alias_names,
+                                      .copy_alias_symbol_offset = dynamic_symbol_offset + ((u64)import_count + 1) * ELF_SYMBOL_SIZE,
+                                      .copy_alias_count = alias_count,
+                                      .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                       .dynamic = true,
                                   });
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
