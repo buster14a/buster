@@ -234,8 +234,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_mir_source_authority(UnitTestArg
     UnitTestResult result = {0};
     ByteSlice codegen_bytes = file_read(arguments->arena, S8("src/buster/lib/compiler/codegen/codegen.c"), (FileReadOptions){0});
     ByteSlice internal_bytes = file_read(arguments->arena, S8("src/buster/lib/compiler/codegen/codegen_internal.h"), (FileReadOptions){0});
-    String8 codegen_source = {.pointer = codegen_bytes.pointer, .length = codegen_bytes.length};
-    String8 internal_source = {.pointer = internal_bytes.pointer, .length = internal_bytes.length};
+    String8 codegen_source = BYTE_SLICE_TO_STRING(8, codegen_bytes);
+    String8 internal_source = BYTE_SLICE_TO_STRING(8, internal_bytes);
     // Packaged runtimes can omit repository sources.  The inventory is strict
     // when this source tree is present, but it is inapplicable when the files
     // are not shipped with the test binary.

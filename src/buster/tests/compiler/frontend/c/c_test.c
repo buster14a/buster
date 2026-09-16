@@ -158,6 +158,75 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 sou
     return result;
 }
 
+// The macro, repeated libc typedef, character constant and wide-string
+// element must agree with the platform ABI, independently of compiler host.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wchar_target_contract(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        CpuArch arch;
+        OperatingSystem os;
+        String8 type;
+        u32 width;
+        bool is_unsigned;
+    } cases[] = {
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_LINUX, S8("int"), 32, false},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_ANDROID, S8("int"), 32, false},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_MACOS, S8("int"), 32, false},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_WINDOWS, S8("unsigned short"), 16, true},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_UEFI, S8("unsigned short"), 16, true},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_LINUX, S8("unsigned int"), 32, true},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_ANDROID, S8("unsigned int"), 32, true},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_FREESTANDING, S8("unsigned int"), 32, true},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_MACOS, S8("int"), 32, false},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_IOS, S8("int"), 32, false},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_WINDOWS, S8("unsigned short"), 16, true},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_UEFI, S8("unsigned short"), 16, true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        Target target = {.cpu_arch = cases[index].arch, .cpu_model = CPU_MODEL_BASELINE, .os = cases[index].os};
+        BUSTER_TEST(arguments, target_uses_unsigned_wchar(target) == cases[index].is_unsigned);
+        BUSTER_TEST(arguments, target_uses_16_bit_wchar(target) == (cases[index].width == 16));
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena,
+                S8("typedef {S8} expected_wchar;\n"
+                   "typedef expected_wchar wchar_t;\n"
+                   "typedef __WCHAR_TYPE__ wchar_t;\n"
+                   "#if __WCHAR_WIDTH__ != {u32} || defined(__WCHAR_UNSIGNED__) != {u32}\n"
+                   "#error wchar macro ABI mismatch\n"
+                   "#endif\n"
+                   "_Static_assert(__WCHAR_MAX__ == {u64}ULL, \"wchar max\");\n"
+                   "_Static_assert(sizeof(wchar_t) * 8 == __WCHAR_WIDTH__, \"wchar width\");\n"
+                   "typedef __typeof__(L'a') expected_wchar;\n"
+                   "typedef __typeof__(L\"abc\"[0]) expected_wchar;\n"
+                   "expected_wchar text[] = L\"abc\";\n"
+                   "expected_wchar value(void) {{ return L'a'; }}\n"
+                   "int signedness(void) {{ expected_wchar x = (expected_wchar)-1; return x < 0; }}\n"),
+                cases[index].type, cases[index].width, (u32)cases[index].is_unsigned,
+                cases[index].width == 16 ? (u64)65535 : cases[index].is_unsigned ? (u64)4294967295 : (u64)2147483647);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target,
+                .data_layout = target_data_layout(target),
+            });
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            if (tokens.diagnostic_count == 0 && parse.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("wchar-target-contract.c"), tokens, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_append_source(char8* destination, u64 capacity, u64* length, String8 source)
 {
     if (!destination || !length || *length > capacity || source.length > capacity - *length)
@@ -16795,6 +16864,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
 
+    BUSTER_TEST_FIXTURE(arguments, c_test_wchar_target_contract);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);

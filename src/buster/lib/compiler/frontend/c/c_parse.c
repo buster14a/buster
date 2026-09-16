@@ -3005,7 +3005,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     }
     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
     {
-        return c_parse_expression_scalar_type(result, C_TYPE_INT);
+        u64 value = 0;
+        CTypeKind kind = C_TYPE_INVALID;
+        bool decoded = c_ir_decode_character_value(arena, preprocess.spelling_base, first, preprocess.target, &value, &kind);
+        return decoded ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
     {

@@ -199,6 +199,14 @@ bool target_uses_16_bit_wchar(Target target)
     return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI;
 }
 
+bool target_uses_unsigned_wchar(Target target)
+{
+    // AAPCS64 uses unsigned wchar_t; Darwin retains its signed int ABI.
+    bool aapcs64 = target.cpu_arch == CPU_ARCH_AARCH64 &&
+                   target.os != OPERATING_SYSTEM_MACOS && target.os != OPERATING_SYSTEM_IOS;
+    return target_uses_16_bit_wchar(target) || aapcs64;
+}
+
 bool target_uses_pe_unwind(Target target)
 {
     return (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI) &&

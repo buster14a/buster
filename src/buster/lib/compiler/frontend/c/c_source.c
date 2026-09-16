@@ -7947,6 +7947,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool llp64_target = target_uses_llp64_data_model(options.target);
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
+    bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
@@ -7964,7 +7965,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
@@ -8117,6 +8118,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_MAX__", short_wchar_target ? S8("65535") : unsigned_wchar_target ? S8("4294967295U") : S8("2147483647"));
+    if (unsigned_wchar_target)
+    {
+        C_DEFINE_TYPE_MACRO("__WCHAR_UNSIGNED__", S8("1"));
+    }
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));

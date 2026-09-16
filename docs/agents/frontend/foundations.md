@@ -4,6 +4,18 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Wide-character target ABI
+
+`target_uses_16_bit_wchar` and `target_uses_unsigned_wchar` are the shared
+platform facts for predefined `__WCHAR_TYPE__`, `__WCHAR_WIDTH__`,
+`__WCHAR_MAX__`, `__WCHAR_UNSIGNED__`, and wide-literal typing. Windows and
+UEFI use unsigned 16-bit wchar_t. Other AAPCS64 targets use unsigned 32-bit
+wchar_t; Darwin and x86-64 Unix retain signed 32-bit wchar_t. Literal decoding,
+unevaluated type queries and ordinary expression inference must agree with
+these macros, including when a target libc repeats the wchar_t typedef.
+`c_test_wchar_target_contract` checks this independently of the build host in
+both C lowering configurations.
+
 ## Direct local SSA (GitHub #34)
 
 `c_ir_ssa_*` in `c_gen.c` constructs pruned canonical block-argument SSA for

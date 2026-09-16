@@ -11543,6 +11543,11 @@ BUSTER_C_INTERNAL bool c_ir_string_encoding(String8 spelling, CIrStringEncoding*
     }
 }
 
+BUSTER_C_INTERNAL CTypeKind c_ir_wchar_type_kind(Target target)
+{
+    return target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT : target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+}
+
 BUSTER_C_INTERNAL bool c_ir_append_wide_unit(u8* bytes, u64 capacity, u64* byte_count, u64* element_count, u32 width, u32 codepoint)
 {
     if (codepoint > UINT32_C(0x10ffff) || (codepoint >= UINT32_C(0xd800) && codepoint <= UINT32_C(0xdfff)))
@@ -11766,7 +11771,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
     {
         bool short_wchar = target_uses_16_bit_wchar(target);
         width = short_wchar ? 2 : 4;
-        element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        element_kind = c_ir_wchar_type_kind(target);
     }
     *shape_out = (CIrDecodedString){
         .element_width = width,
@@ -11941,7 +11946,7 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
         break;
     case 'L':
         width = target_uses_16_bit_wchar(target) ? 2 : 4;
-        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        kind = c_ir_wchar_type_kind(target);
         break;
     default:
         return false;
@@ -25125,8 +25130,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         {
             kind = c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                    : c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
-                   : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
-                                                               : C_TYPE_INT;
+                   : c_ir_wchar_type_kind(builder->target);
         }
         *type_out = builder->scalar_types[kind];
         return true;
@@ -29616,8 +29620,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             {
                 kind = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                        : c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
-                       : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
-                                                                   : C_TYPE_INT;
+                       : c_ir_wchar_type_kind(builder->target);
             }
             result = builder->scalar_types[kind];
             continue;

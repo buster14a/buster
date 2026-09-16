@@ -5220,6 +5220,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // statistics. A failed machine transaction restores exactly this
         // prefix, leaving no partial artifact for the caller to observe.
         CodegenStatistics function_statistics_start = result.statistics;
+        CodegenError transaction_error;
         u32 function_entry_start = result.entry_count;
         u32 function_descriptor_start = result.function_count;
         u32 function_relocation_start = result.relocation_count;
@@ -6001,7 +6002,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // line marks, debug locations, and relocations may all have staged
         // data before the last validation closes; none of that data may be
         // observable when the function is refused.
-        CodegenError transaction_error = result.error;
+        transaction_error = result.error;
         result.relocation_count = function_relocation_start;
         result.line_entry_count = function_line_start;
         result.debug_location_count = function_debug_start;
@@ -6108,7 +6109,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL CodegenModule codegen_test_generate_canonical_module_attempt(Arena* arena, IrProgram* program, IrModule* module,
+CodegenModule codegen_test_generate_canonical_module_attempt(Arena* arena, IrProgram* program, IrModule* module,
                                                                                   Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                                   bool* code_buffer_exhausted)
 {
