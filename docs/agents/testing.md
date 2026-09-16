@@ -102,7 +102,10 @@
   `tests/mobile_ci_scripts_test.sh`. The Android and iOS fixture suites include
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
-  compilation and device/simulator execution remain separate CI gates.
+  compilation and device/simulator execution remain separate CI gates. Android
+  resolves safe `.` and `..` segments inside the rooted APK asset namespace so
+  nested quoted includes consume the same fixture bytes as desktop tests;
+  traversal above the asset root is rejected.
 
 ## Throughput runner integration
 
