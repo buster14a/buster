@@ -2,6 +2,12 @@ name: Real-source throughput qualification
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      qualify_pinned_inputs:
+        description: Run existing admission after pinned-input qualification
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     paths:
@@ -22,7 +28,7 @@ concurrency:
 
 jobs:
   compatibility:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.head_ref == 'bench/423-real-source-admission-20260914') }}
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || inputs.qualify_pinned_inputs || github.head_ref == 'bench/423-real-source-admission-20260914') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     env:

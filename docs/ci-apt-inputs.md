@@ -88,11 +88,16 @@ consumer identities. The readline job also runs the real header/link/loader
 probe on each pass. This establishes repeatability within that runner; it does
 not claim the entire hosted environment is immutable across image updates.
 
-The existing GPU workflow must still pass all four Linux profiles. Run the
-existing `Real-source throughput qualification` workflow with `workflow_dispatch`
-on the exact candidate branch and require the native Lua oracle and workload
-admission receipts, not just the provisioning probe. Its existing expensive-job
-opt-in policy is unchanged. A skipped or queued workflow is not validation.
+The existing GPU workflow must still pass all four Linux profiles. After both
+apt profile jobs pass, the path-filtered workflow calls the existing
+`Real-source throughput qualification` through a same-commit reusable workflow
+with `qualify_pinned_inputs: true`. This reuses its source staging, native
+oracles and admission checks rather than copying them into another harness.
+The new input defaults to false, preserving direct PR/dispatch opt-in behavior;
+only apt-related changes gain this additional automatic functional gate.
+Require the native Lua oracle and workload admission receipts, not just the
+provisioning probe. An explicit `workflow_dispatch` on the candidate branch
+remains available for reproduction. A skipped or queued workflow is not validation.
 
 For a security or correctness update, deliberately advance the UTC snapshot
 and exact package builds together in a reviewed PR. Check the Ubuntu binary

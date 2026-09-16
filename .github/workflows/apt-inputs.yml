@@ -63,3 +63,10 @@ jobs:
             ${{ runner.temp }}/apt-second
           if-no-files-found: warn
           retention-days: 14
+
+  real-source:
+    needs: inputs
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    uses: ./.github/workflows/throughput-real-source.yml
+    with:
+      qualify_pinned_inputs: true

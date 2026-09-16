@@ -13,6 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import ci_apt
+import check_action_pins
 
 
 class AptInputTests(unittest.TestCase):
@@ -224,6 +225,34 @@ class AptInputTests(unittest.TestCase):
             ci_apt.inspect("gpu", {"p": "1"}, run, output)
         self.assertFalse((output / "pinned.identity.json").exists())
         self.assertFalse((output / "selected.identity.json").exists())
+
+    def test_real_source_reuse_is_explicit_and_same_commit(self):
+        real = (ROOT / ".github/workflows/throughput-real-source.yml").read_text()
+        qualification = (ROOT / ".github/workflows/apt-inputs.yml").read_text()
+        self.assertIn("workflow_call:", real)
+        self.assertIn("qualify_pinned_inputs:", real)
+        self.assertIn("type: boolean\n        default: false", real)
+        self.assertIn("|| inputs.qualify_pinned_inputs ||", real)
+        self.assertIn("github.head_ref == 'bench/423-real-source-admission-20260914'", real)
+        self.assertIn("real-source:\n    needs: inputs", qualification)
+        self.assertIn("uses: ./.github/workflows/throughput-real-source.yml", qualification)
+        self.assertIn("qualify_pinned_inputs: true", qualification)
+        self.assertNotIn("secrets: inherit", qualification)
+        self.assertNotIn("actions: write", qualification)
+
+    def test_only_reviewed_same_commit_local_workflow_is_allowed(self):
+        allowed = "./.github/workflows/throughput-real-source.yml"
+        self.assertEqual(check_action_pins.APPROVED_LOCAL_WORKFLOWS, {allowed})
+        self.assertEqual(check_action_pins.check_text("uses: " + allowed, "case.yml"), [])
+        for value in (allowed + "@main", allowed + "@" + "a" * 40,
+                      "./local-action", "./.github/workflows/other.yml",
+                      "./.github/workflows/../throughput-real-source.yml",
+                      "${{ inputs.workflow }}", "actions/checkout@main",
+                      "buster14a/buster/.github/workflows/throughput-real-source.yml@main"):
+            with self.subTest(value=value):
+                self.assertTrue(check_action_pins.check_text("uses: " + value, "case.yml"))
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            self.assertEqual(check_action_pins.check_text(path.read_text(), path), [])
 
     def test_workflows_use_lock_preserve_authentication_and_gate_admission(self):
         gpu = (ROOT / ".github/workflows/gpu-toolchains.yml").read_text()
