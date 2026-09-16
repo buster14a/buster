@@ -6,28 +6,109 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
-    name: Pinned source snapshot
+  validate:
+    name: Verify exact issue 333 candidate
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Read candidate payload
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: payload
+          persist-credentials: false
+      - name: Read pinned production base
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
+          path: source
           persist-credentials: false
-      - name: Retain exact tracked source for local validation
+      - name: Verify and apply exact patch
+        working-directory: source
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/source-revision.txt"
-          git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/buster-source.tar.gz"
-          sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          mkdir -p "$RUNNER_TEMP/issue-333" build
+          python3 - <<'PY'
+          import base64, hashlib, lzma, os, pathlib, subprocess
+          payload = pathlib.Path('../payload/.github/issue-333-payload')
+          encoded = ''.join((payload / f'part{i}.b64').read_text().strip() for i in range(4))
+          compressed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == '94d574b8f54235819009e559cd04baf2665492e21f10b9e0ffcc5f3ba67d73af', 'compressed payload mismatch'
+          patch = lzma.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest() == '59a9f168f8681675532a010f2fad83e0d83ecade3e4fbe98dd236203c1e4707b', 'patch mismatch'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == 'b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f'
+          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          actual = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          expected = ['.github/workflows/ci.yml', 'build.c', 'docs/ci-combination-shards.md', 'docs/ci-github-actions.md', 'docs/ci-suite-partition.md', 'docs/ci-workflow-audit.md', 'tools/ci_summary.py', 'tools/github_ci_time.py', 'tools/matrix_shard_test.py']
+          assert sorted(actual) == sorted(expected), actual
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'candidate.patch').write_bytes(patch)
+          print('Exact base and patch verified; changed files:', len(actual))
+          PY
+          git diff --cached --check
+      - name: Native driver and six-platform policy self-test
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version | tee "$RUNNER_TEMP/issue-333/clang-version.log"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build 2>&1 | tee "$RUNNER_TEMP/issue-333/clang-driver.log"
+          BUSTER_CI_COVERAGE_OUTPUT="$RUNNER_TEMP/issue-333/coverage-self-test.json" ./build/build coverage_manifest_self_test 2>&1 | tee "$RUNNER_TEMP/issue-333/native-self-test.log"
+      - name: Policy and workflow regressions
+        working-directory: source
+        shell: bash
+        env:
+          BUSTER_MATRIX_SHARD: release
+        run: |
+          set -euo pipefail
+          python3 tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/matrix-shard.log"
+          python3 tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/coverage-manifest.log"
+          python3 tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/ci-tools.log"
+          python3 tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/analyzer-selection.log"
+          python3 tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/differential-policy.log"
+          python3 tools/check_action_pins.py 2>&1 | tee "$RUNNER_TEMP/issue-333/action-pins.log"
+      - name: Lint all candidate workflows
+        working-directory: source
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOSUMDB: sum.golang.org
+        run: |
+          set -euo pipefail
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/issue-333/actionlint.log"
+      - name: Publish verified immutable blobs only
+        working-directory: source
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          repository = os.environ['GITHUB_REPOSITORY']
+          assert repository == 'buster14a/buster'
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          entries = []
+          for path in paths:
+              data = pathlib.Path(path).read_bytes()
+              expected = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              body = json.dumps({'content': base64.b64encode(data).decode('ascii'), 'encoding': 'base64'}).encode('utf-8')
+              request = urllib.request.Request(f'https://api.github.com/repos/{repository}/git/blobs', data=body, method='POST', headers={'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  actual = json.load(response)['sha']
+              assert actual == expected, (path, expected, actual)
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': actual, 'sha256': hashlib.sha256(data).hexdigest()})
+          result = {'base': 'b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f', 'patch_sha256': '59a9f168f8681675532a010f2fad83e0d83ecade3e4fbe98dd236203c1e4707b', 'entries': entries}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'verified-blobs.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Retain exact validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-333-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/buster-source.tar.gz
-            ${{ runner.temp }}/source-revision.txt
+          name: issue-333-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-333/
           if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
+          retention-days: 7
