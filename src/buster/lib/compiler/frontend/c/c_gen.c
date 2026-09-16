@@ -902,6 +902,41 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     return ir_program_add_type(program, qualified);
 }
 
+// GNU `__atomic_*` accepts an ordinary pointer, so qualifying its pointee for
+// the canonical atomic instruction must not change the object's layout.  The
+// C `_Atomic T` type constructor intentionally promotes small/odd layouts;
+// that promotion would make an ordinary GNU object access bytes beyond the
+// object. Reuse the ordinary qualified type when its layout is unchanged and
+// otherwise make an exact-layout atomic access view.
+BUSTER_C_INTERNAL IrTypeId c_ir_add_atomic_access_type(IrProgram* program, IrTypeId unqualified, bool is_volatile)
+{
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    IrType* base = ir_type_from_id(&program->types, unqualified);
+    if (base && !base->is_atomic && !base->is_volatile && base->kind != IR_TYPE_FUNCTION && base->kind != IR_TYPE_VOID && base->kind != IR_TYPE_ARRAY &&
+        base->layout.resolved)
+    {
+        u64 size = base->layout.size;
+        u32 alignment = base->layout.alignment;
+        result = c_ir_add_qualified_type(program, unqualified, true, is_volatile);
+        IrType* qualified = ir_type_from_id(&program->types, result);
+        if (!qualified || qualified->layout.size != size || qualified->layout.alignment != alignment)
+        {
+            base = ir_type_from_id(&program->types, unqualified);
+            if (base)
+            {
+                IrType exact = *base;
+                exact.name = S8("GNU atomic access");
+                exact.id = IR_TYPE_ID_INVALID;
+                exact.unqualified_type = unqualified;
+                exact.is_atomic = true;
+                exact.is_volatile = is_volatile;
+                result = ir_program_add_type(program, exact);
+            }
+        }
+    }
+    return result;
+}
+
 // A parameter's value type does not carry its object's top-level volatile
 // qualifier. Keep pointee/member qualifiers and the settled atomic ABI shape;
 // the definition still materializes the separately qualified parameter object.
@@ -6125,26 +6160,29 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
 }
 
 /* Whether an atomic load or store of `type` -- the `_Atomic`-qualified type a
-   place carries -- is one this toolchain can lower.
+   place carries -- has a canonical IR representation.
 
    An atomic aggregate is read and written as a single integer access of its
    *promoted* width, which is what c_atomic_promoted_layout pads the type up to
    (#731): a three-byte record is four bytes aligned four so that one four-byte
-   access covers it.  The widths the backends implement that access at are one,
-   two, four and eight bytes everywhere, plus sixteen on x86-64 when `cx16`
-   gives them CMPXCHG16B and on AArch64 always, through the LDXP/STXP
-   exclusive-pair loops -- see the IR_OPCODE_ATOMIC_LOAD and
-   IR_OPCODE_ATOMIC_STORE branches in codegen.c, which are where the aggregate
-   forms are emitted; the machine selectors refuse the aggregate shapes and fall
-   back to those.  Anything wider would need a `libatomic` lock, and there is
-   none here, so refusing in lowering is what turns an internal code generation
-   failure into a diagnostic that names the type (#762).
+   access covers it.  The widths represented in canonical IR are one, two,
+   four and eight bytes everywhere, plus sixteen on x86-64 and AArch64.
+   The x86-64 machine admission still requires `cx16` for CMPXCHG16B, while
+   AArch64 uses the LDXP/STXP exclusive-pair loops -- see the
+   IR_OPCODE_ATOMIC_LOAD and IR_OPCODE_ATOMIC_STORE branches in codegen.c,
+   which are where the aggregate forms are emitted; the machine selectors
+   refuse the aggregate shapes and fall back to those.  Keeping the sixteen-
+   byte representation in canonical IR on baseline x86-64 lets that downstream
+   admission report its own unsupported-instruction result.  Anything wider
+   would need a `libatomic` lock, and there is none here, so refusing in
+   lowering is what turns an internal code generation failure into a diagnostic
+   that names the type (#762).
 
    Only aggregates are asked about.  Every atomic scalar this frontend builds is
    already a lock-free width or is refused nearer its own kind -- an atomic wide
    float by the c_ir_type_contains_wide_float guards beside the callers -- so
    widening the question here would change behaviour that is not this one's. */
-BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_supported(CIntegerIrBuilder* builder, IrTypeId type)
+BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_representable(CIntegerIrBuilder* builder, IrTypeId type)
 {
     IrType* qualified = ir_type_from_id(&builder->program->types, type);
     IrType* unqualified = qualified && qualified->is_atomic ? ir_type_from_id(&builder->program->types, qualified->unqualified_type) : 0;
@@ -6152,16 +6190,15 @@ BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_supported(CIntegerIrBuilder*
     if (unqualified && (unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION) && qualified->layout.resolved)
     {
         u64 width = qualified->layout.size;
-        bool wide_pair = width == 16 && ((builder->target.cpu_arch == CPU_ARCH_X86_64 &&
-                                          target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16)) ||
-                                         builder->target.cpu_arch == CPU_ARCH_AARCH64);
+        bool wide_pair = width == 16 && (builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64);
         result = width == 1 || width == 2 || width == 4 || width == 8 || wide_pair;
     }
 
     return result;
 }
 
-/* Whether every atomic access the lowered body kept is one the backends emit.
+/* Whether every atomic access the lowered body kept has a canonical IR
+   representation the backend can inspect.
 
    Asked here, over the finished body, rather than where the access is built:
    an operand is lowered as a value first, and an expression that only wanted
@@ -6197,7 +6234,7 @@ BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_accesses_lowerable(CIntegerIrBuilde
             if (atomic_access && instruction->operand_count && instruction->operands[0].value < function->value_count)
             {
                 IrTypeId place_type = function->values[instruction->operands[0].value].canonical_type;
-                if (!c_ir_atomic_aggregate_access_supported(builder, place_type))
+                if (!c_ir_atomic_aggregate_access_representable(builder, place_type))
                 {
                     IrType* qualified = ir_type_from_id(&builder->program->types, place_type);
                     builder->failure_message = string_format(
@@ -6383,6 +6420,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId element_type, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
+BUSTER_C_INTERNAL bool c_ir_pointer_assignment_compatible(CIntegerIrBuilder* builder, IrTypeId target, IrTypeId source);
+BUSTER_C_INTERNAL bool c_ir_transparent_union_member_qualifiers_compatible(CIntegerIrBuilder* builder, IrTypeId union_type, u32 field_index,
+                                                                           bool source_points_to_read_only);
+BUSTER_C_INTERNAL u32 c_ir_implicit_conversion_rank(CIntegerIrBuilder* builder, IrTypeId source_id, IrTypeId destination_id);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* builder, IrValueId pointer, IrSourceRange source);
@@ -6962,6 +7003,83 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vector_alias_conversion(CIntegerIrBuilder*
     return result;
 }
 
+// GCC's transparent-union attribute is an ABI promise, not a request to
+// accept every member-sized value.  The union is passed in the machine mode
+// of its first member; the target ABI classifier is the source of truth for
+// that mode, including the fact that pointers share the integer register
+// class on the ABIs supported by this frontend.
+BUSTER_C_INTERNAL IrAbiClass c_ir_transparent_union_machine_class(IrAbiClass abi_class)
+{
+    IrAbiClass result = abi_class;
+    if (abi_class == IR_ABI_CLASS_POINTER)
+    {
+        result = IR_ABI_CLASS_INTEGER;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL u64 c_ir_transparent_union_machine_mode(IrAbiPart part)
+{
+    u64 result = ((u64)c_ir_transparent_union_machine_class(part.abi_class) << 32) | part.size;
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_transparent_union_machine_mode_is_scalar_float(IrType* type)
+{
+    bool result = type && type->kind == IR_TYPE_FLOAT;
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_transparent_union_member_qualifiers_compatible(CIntegerIrBuilder* builder, IrTypeId union_type, u32 field_index,
+                                                                             bool source_points_to_read_only)
+{
+    bool result = true;
+    if (source_points_to_read_only)
+    {
+        result = false;
+        for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+        {
+            CType* c_type = &builder->parse.types[type_index];
+            if (c_type->kind == C_TYPE_UNION && builder->c_type_ir_map[type_index].value == union_type.value && field_index < c_type->member_count)
+            {
+                CMember* member = &builder->parse.members[c_type->member_start + field_index];
+                result = c_ir_c_type_points_to_read_only(builder, member->type);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_transparent_union_representation(CIntegerIrBuilder* builder, IrTypeId union_type)
+{
+    bool result = false;
+    IrType* value = builder ? ir_type_from_id(&builder->program->types, union_type) : 0;
+    if (value && value->kind == IR_TYPE_UNION && value->layout.resolved && value->field_count != 0)
+    {
+        IrType* first = ir_type_from_id(&builder->program->types, value->fields[0].type);
+        if (first && first->layout.resolved)
+        {
+            IrAbiConvention convention = ir_abi_convention_for_target(builder->target);
+            IrAbiValue union_abi = ir_type_abi_value(builder->program, union_type, convention, IR_ABI_USE_ARGUMENT);
+            IrAbiValue first_abi = ir_type_abi_value(builder->program, value->fields[0].type, convention, IR_ABI_USE_ARGUMENT);
+            result = !union_abi.memory && !union_abi.indirect && union_abi.part_count == 1 && !first_abi.memory && !first_abi.indirect &&
+                     first_abi.part_count == 1 && union_abi.parts[0].value_offset == 0 && first_abi.parts[0].value_offset == 0 &&
+                     union_abi.parts[0].size == value->layout.size && first_abi.parts[0].size == first->layout.size &&
+                     value->layout.size == first->layout.size &&
+                     c_ir_transparent_union_machine_mode(union_abi.parts[0]) == c_ir_transparent_union_machine_mode(first_abi.parts[0]) &&
+                     !c_ir_transparent_union_machine_mode_is_scalar_float(first);
+            for (u32 field_index = 0; result && field_index < value->field_count; field_index += 1)
+            {
+                IrType* member = ir_type_from_id(&builder->program->types, value->fields[field_index].type);
+                result = member && member->layout.resolved && member->layout.size <= first->layout.size &&
+                         member->layout.alignment <= value->layout.alignment;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
 {
     if (value.value >= builder->function->value_count)
@@ -7045,34 +7163,91 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     {
         return c_ir_emit_atomic_aggregate_conversion(builder, value, atomic_aggregate_type, atomic_aggregate_type.value == target_type.value, source);
     }
-    // GNU's transparent_union: an argument of any member's type converts to
-    // the union by becoming its bits -- glibc's accept4 takes __SOCKADDR_ARG
-    // and CPython's socketmodule hands it a struct sockaddr*.  The same
-    // store-and-reload bridge the atomic aggregates use carries the value:
-    // the member starts at offset zero, so the raw store lays the argument
-    // exactly where the union's ABI reads it.
-    if (target_value->kind == IR_TYPE_UNION && target_value->is_transparent_union && target_value->layout.resolved)
+    // GNU's transparent_union: an argument of a member-compatible type
+    // converts to the union by becoming its bits.  GCC first checks that the
+    // union's target-ABI machine mode is the first member's mode; later
+    // members may be smaller (the integer-first { int, float } case is the
+    // important mixed-class example).  The conversion candidate is selected
+    // with the same assignment-conversion ladder used by ordinary C stores,
+    // so pointer qualifiers, void pointers, and null pointer constants do not
+    // depend on canonical type IDs being identical.
+    bool transparent_union_representation = target_value->kind == IR_TYPE_UNION && target_value->is_transparent_union &&
+                                             c_ir_transparent_union_representation(builder, target_type) && target_value->layout.resolved &&
+                                             source_value->layout.resolved && source_value->layout.size <= target_value->layout.size &&
+                                             source_value->layout.alignment <= target_value->layout.alignment;
+    if (transparent_union_representation)
     {
-        bool member_matches = false;
-        for (u32 field_index = 0; field_index < target_value->field_count && !member_matches; field_index += 1)
+        bool source_integer_domain = source_value->kind == IR_TYPE_BOOLEAN || source_value->kind == IR_TYPE_INTEGER || source_value->kind == IR_TYPE_ENUM;
+        bool source_points_to_read_only = source_value->kind == IR_TYPE_POINTER && value.value < builder->function->value_count &&
+                                          builder->function->values[value.value].points_to_read_only;
+        u64 source_integer_constant = 0;
+        bool source_null_pointer_constant = source_integer_domain && c_ir_value_integer_constant_evaluate(builder, value, &source_integer_constant) &&
+                                            source_integer_constant == 0;
+        u32 member_rank = UINT32_MAX;
+        IrTypeId member_type = IR_TYPE_ID_INVALID;
+        for (u32 field_index = 0; field_index < target_value->field_count; field_index += 1)
         {
-            member_matches = target_value->fields[field_index].type.value == source_type.value;
+            IrTypeId candidate_type = target_value->fields[field_index].type;
+            IrType* candidate_value = ir_type_from_id(&builder->program->types, candidate_type);
+            u32 candidate_rank = c_ir_implicit_conversion_rank(builder, source_type, candidate_type);
+            bool source_pointer_to_integer = source_value->kind == IR_TYPE_POINTER && candidate_value &&
+                                             (candidate_value->kind == IR_TYPE_BOOLEAN || candidate_value->kind == IR_TYPE_INTEGER ||
+                                              candidate_value->kind == IR_TYPE_ENUM);
+            bool nonnull_integer_to_pointer = source_integer_domain && candidate_value && candidate_value->kind == IR_TYPE_POINTER &&
+                                              !source_null_pointer_constant;
+            if (source_pointer_to_integer || nonnull_integer_to_pointer)
+            {
+                candidate_rank = UINT32_MAX;
+            }
+            bool pointer_qualifier_drop = source_points_to_read_only && candidate_value && candidate_value->kind == IR_TYPE_POINTER &&
+                                          !c_ir_transparent_union_member_qualifiers_compatible(builder, target_type, field_index,
+                                                                                               source_points_to_read_only);
+            if (pointer_qualifier_drop)
+            {
+                candidate_rank = UINT32_MAX;
+            }
+            if (candidate_rank != UINT32_MAX && candidate_rank < member_rank &&
+                c_ir_pointer_assignment_compatible(builder, candidate_type, source_type))
+            {
+                member_rank = candidate_rank;
+                member_type = candidate_type;
+            }
         }
-        if (member_matches)
+        if (member_type.value != IR_ID_UNDERLYING_INVALID)
         {
+            // Allocate the union's complete object, then address it through
+            // the selected member type.  A source-sized temporary is not
+            // sufficient: a smaller transparent member would leave the
+            // target union load reading beyond the allocation.
             IrValueId slot = c_ir_emit_temporary(builder, target_type, source);
             if (slot.value == IR_ID_UNDERLYING_INVALID)
             {
                 return IR_VALUE_ID_INVALID;
             }
-            IrValueId* store_operands = arena_allocate(builder->arena, IrValueId, 2);
-            store_operands[0] = slot;
-            store_operands[1] = value;
-            IrInstruction store = c_ir_instruction_initialize(IR_OPCODE_STORE, builder->void_type);
-            store.operands = store_operands;
-            store.operand_count = 2;
-            c_ir_append_instruction(builder, store, source);
-            return c_ir_emit_load_place_raw(builder, slot, target_type, source);
+            IrValueId converted = member_type.value == source_type.value ? value : c_ir_emit_cast(builder, value, member_type, source);
+            IrValueId result = IR_VALUE_ID_INVALID;
+            if (converted.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrValueId address = c_ir_emit_address_of_place(builder, slot, target_type, source);
+                IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, member_type);
+                if (address.value != IR_ID_UNDERLYING_INVALID && pointer_type.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    IrValueId pointer = c_ir_emit_cast_instruction(builder, address, pointer_type, IR_CONVERSION_POINTER_REINTERPRET, source);
+                    IrValueId place = pointer.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, pointer, source) : IR_VALUE_ID_INVALID;
+                    if (place.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        IrValueId* store_operands = arena_allocate(builder->arena, IrValueId, 2);
+                        store_operands[0] = place;
+                        store_operands[1] = converted;
+                        IrInstruction store = c_ir_instruction_initialize(IR_OPCODE_STORE, builder->void_type);
+                        store.operands = store_operands;
+                        store.operand_count = 2;
+                        c_ir_append_instruction(builder, store, source);
+                        result = c_ir_emit_load_place_raw(builder, slot, target_type, source);
+                    }
+                }
+            }
+            return result;
         }
     }
     // A complex type on either end converts half by half, and the halves are
@@ -12083,7 +12258,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
         return IR_VALUE_ID_INVALID;
     }
     IrFunction* target = builder->declaration_functions[declaration_index];
-    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, target->canonical_type);
+    // The function instruction names the symbol, so its pointer element must
+    // use the symbol's canonical type rather than a later compatible
+    // declaration's type.  In particular, an old-style `f()` declaration and
+    // a later `f(void)` definition are compatible at calls, but a pointer to
+    // the latter function type does not satisfy the IR symbol/reference
+    // contract.  Keep the reference's identity anchored to the symbol.
+    IrSymbol* target_symbol = ir_symbol_from_id(&builder->program->symbols, target->symbol);
+    IrTypeId function_type = target_symbol && target_symbol->kind == IR_SYMBOL_FUNCTION ? target_symbol->type : target->canonical_type;
+    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
     IrValueId result = c_ir_add_result(builder, pointer_type);
     IrSourceRange reference_source = c_ir_token_source_range(builder, token);
     IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, pointer_type);
@@ -14142,6 +14325,89 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_builtin_float_bits(CIntegerIrBuilder* buil
     ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
     builder->function->values[result.value].definition = id;
     return result;
+}
+
+// Windows Arm64 does not permit hosted code to execute the DC CVAU / IC IVAU
+// maintenance sequence directly. Clang's builtin therefore crosses the
+// compiler-rt __clear_cache boundary, whose Windows implementation calls
+// FlushInstructionCache. Preserve that ABI instead of selecting the inline
+// AArch64 machine opcode used by freestanding and Unix targets.
+BUSTER_C_INTERNAL bool c_ir_emit_clear_cache_runtime_call(CIntegerIrBuilder* builder, CToken token, IrValueId first, IrValueId second)
+{
+    String8 link_name = S8("__clear_cache");
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId void_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+    IrValueId arguments[2] = {first, second};
+    bool emitted = void_pointer_type.value != IR_ID_UNDERLYING_INVALID;
+    for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(arguments) && emitted; argument_index += 1)
+    {
+        arguments[argument_index] = c_ir_decay_array(builder, arguments[argument_index], void_pointer_type, source);
+        arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], void_pointer_type, source);
+        emitted = arguments[argument_index].value != IR_ID_UNDERLYING_INVALID;
+    }
+    IrTypeId function_type = IR_TYPE_ID_INVALID;
+    IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+    for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count && symbol.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)
+    {
+        IrSymbol* candidate = &builder->program->symbols.symbols[symbol_index];
+        if (candidate->kind == IR_SYMBOL_FUNCTION && string_equal(candidate->link_name, link_name))
+        {
+            symbol = candidate->id;
+            function_type = candidate->type;
+        }
+    }
+    if (emitted && symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, BUSTER_ARRAY_LENGTH(arguments));
+        parameter_types[0] = void_pointer_type;
+        parameter_types[1] = void_pointer_type;
+        function_type = ir_program_add_type(builder->program, (IrType){
+            .name = S8("C clear cache function"),
+            .parameter_types = parameter_types,
+            .element_type = IR_TYPE_ID_INVALID,
+            .return_type = builder->void_type,
+            .layout = {
+                .size = builder->program->data_layout.pointer.size,
+                .alignment = builder->program->data_layout.pointer.alignment,
+                .resolved = true,
+            },
+            .kind = IR_TYPE_FUNCTION,
+            .calling_convention = IR_CALLING_CONVENTION_C,
+            .parameter_count = BUSTER_ARRAY_LENGTH(arguments),
+        });
+        symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+            .name = link_name,
+            .link_name = link_name,
+            .source = source,
+            .type = function_type,
+            .kind = IR_SYMBOL_FUNCTION,
+            .linkage = IR_LINKAGE_IMPORT,
+        });
+    }
+    emitted &= symbol.value != IR_ID_UNDERLYING_INVALID && function_type.value != IR_ID_UNDERLYING_INVALID;
+    if (emitted)
+    {
+        IrValueId reference_result = c_ir_add_result(builder, function_type);
+        IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
+        reference.symbol = symbol;
+        reference.result = reference_result;
+        IrInstructionId reference_id = c_ir_append_instruction(builder, reference, source);
+        emitted = reference_result.value != IR_ID_UNDERLYING_INVALID && reference_id.value != IR_ID_UNDERLYING_INVALID;
+        if (emitted)
+        {
+            builder->function->values[reference_result.value].definition = reference_id;
+            IrValueId* operands = arena_allocate(builder->arena, IrValueId, BUSTER_ARRAY_LENGTH(arguments) + 1);
+            operands[0] = reference_result;
+            operands[1] = arguments[0];
+            operands[2] = arguments[1];
+            IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, builder->void_type);
+            call.operands = operands;
+            call.operand_count = BUSTER_ARRAY_LENGTH(arguments) + 1;
+            call.symbol = symbol;
+            emitted = c_ir_append_instruction(builder, call, source).value != IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    return emitted;
 }
 
 /* Lowers one `__builtin_mem*` call to the library function it names. Clang
@@ -17435,6 +17701,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
+    CIrPreparedCallStepResult finished_result = C_IR_PREPARED_CALL_STEP_FINISHED;
     u32 call_index = frame->as.prepared_call.call_index;
     bool child_success = frame->stage == C_IR_LOWER_STAGE_CHILD && machine->child_result.success;
     IrValueId child_value = machine->child_result.value;
@@ -17742,6 +18009,37 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             // reads the value type out of it; the GNU one takes an ordinary
             // pointer, so the object's own type *is* the value type. A GNU call
             // on an `_Atomic` object is still accepted, and still strips.
+            if (selected->builtin_atomic_gnu && atomic && !atomic->is_atomic)
+            {
+                // Canonical atomic operations carry an atomic place even for
+                // GNU's ordinary-pointer builtins.  Reinterpret the caller's
+                // pointer through the qualified view of the same object;
+                // keeping the original place would make an otherwise valid
+                // GNU store/load fail the IR atomic-place contract.
+                IrTypeId unqualified_type = atomic->is_volatile ? atomic->unqualified_type : atomic_type;
+                IrTypeId qualified_type = c_ir_add_atomic_access_type(builder->program, unqualified_type, atomic->is_volatile);
+                IrTypeId pointer_type = qualified_type.value != IR_ID_UNDERLYING_INVALID
+                                            ? c_ir_add_pointer_type(builder->program, builder->pointer_types, qualified_type)
+                                            : IR_TYPE_ID_INVALID;
+                IrValueId address = pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                        ? c_ir_emit_address_of_place(builder, place, atomic_type, source)
+                                        : IR_VALUE_ID_INVALID;
+                IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_emit_cast(builder, address, pointer_type, source)
+                                     : IR_VALUE_ID_INVALID;
+                place = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+                if (place.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    frame->as.prepared_call.state->place = place;
+                    atomic_type = qualified_type;
+                    atomic = ir_type_from_id(&builder->program->types, atomic_type);
+                }
+                else
+                {
+                    atomic_type = IR_TYPE_ID_INVALID;
+                    atomic = 0;
+                }
+            }
             IrTypeId value_type_id = atomic && atomic->is_atomic ? atomic->unqualified_type : atomic_type;
             IrType* unqualified = ir_type_from_id(&builder->program->types, value_type_id);
             if (!atomic || (!atomic->is_atomic && !selected->builtin_atomic_gnu) || !unqualified)
@@ -17834,7 +18132,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrValueId comparison_desired = desired;
                 if (aggregate_value)
                 {
-                    if (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_supported(builder, atomic_type))
+                    if (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_representable(builder, atomic_type))
                     {
                         builder->failure_message = S8("C IR lowering does not support this atomic aggregate compare-exchange width");
                         return false;
@@ -17968,7 +18266,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // two *bytes* in clang and gcc alike, measured 2026-08-30, so
                 // the GNU spelling deliberately skips the scaling below and
                 // recomputes its answer as an integer.
-                bool pointer_arithmetic = pointer_value && !selected->builtin_atomic_gnu &&
+                bool pointer_arithmetic = pointer_value &&
                                           (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD ||
                                            selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT);
                 // The scaling below turns an element count into a byte count
@@ -17978,15 +18276,25 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrValueId operand_value = value;
                 if (pointer_arithmetic)
                 {
-                    IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
-                    IrType* element = ir_type_from_id(&builder->program->types, value_type->element_type);
                     value = c_ir_emit_cast(builder, value, builder->ptrdiff_type, source);
-                    if (!element || !element->layout.resolved || !element->layout.size || value.value == IR_ID_UNDERLYING_INVALID)
+                    if (value.value == IR_ID_UNDERLYING_INVALID)
                     {
                         return false;
                     }
-                    IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, token, builder->ptrdiff_type);
-                    value = c_ir_emit_binary_value(builder, value, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+                    if (!selected->builtin_atomic_gnu)
+                    {
+                        IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
+                        IrType* element = value_type ? ir_type_from_id(&builder->program->types, value_type->element_type) : 0;
+                        if (element && element->layout.resolved && element->layout.size)
+                        {
+                            IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, token, builder->ptrdiff_type);
+                            value = c_ir_emit_binary_value(builder, value, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+                        }
+                        else
+                        {
+                            value = IR_VALUE_ID_INVALID;
+                        }
+                    }
                 }
                 else
                 {
@@ -18026,7 +18334,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     if (aggregate_value)
                     {
                         if (selected->builtin_atomic_gnu || operation != IR_ATOMIC_EXCHANGE ||
-                            !c_ir_atomic_aggregate_access_supported(builder, atomic_type))
+                            !c_ir_atomic_aggregate_access_representable(builder, atomic_type))
                         {
                             builder->failure_message = S8("C IR lowering does not support this atomic aggregate read-modify-write");
                             return false;
@@ -18559,13 +18867,26 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST, argument_start, separator, false);
             }
-            IrSourceRange clear_source = c_ir_token_source_range(builder, token);
-            IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type);
-            clear.operands = arena_allocate(builder->arena, IrValueId, 2);
-            clear.operands[0] = first;
-            clear.operands[1] = second;
-            clear.operand_count = 2;
-            c_ir_append_instruction(builder, clear, clear_source);
+            bool windows_runtime = builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->target.os == OPERATING_SYSTEM_WINDOWS;
+            if (windows_runtime)
+            {
+                if (!c_ir_emit_clear_cache_runtime_call(builder, token, first, second))
+                {
+                    finished_result = C_IR_PREPARED_CALL_STEP_FAILED;
+                    remaining = 0;
+                    continue;
+                }
+            }
+            else
+            {
+                IrSourceRange clear_source = c_ir_token_source_range(builder, token);
+                IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type);
+                clear.operands = arena_allocate(builder->arena, IrValueId, 2);
+                clear.operands[0] = first;
+                clear.operands[1] = second;
+                clear.operand_count = 2;
+                c_ir_append_instruction(builder, clear, clear_source);
+            }
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             selected->argument_count = 2;
             selected->emitted = true;
@@ -19384,7 +19705,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         remaining -= 1;
     } while (false);
     BUSTER_CHECK(!remaining);
-    return true;
+    return finished_result;
 }
 
 BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
@@ -21031,10 +21352,22 @@ BUSTER_C_INTERNAL bool c_ir_emit_atomic_float_update(CIntegerIrBuilder* builder,
     IrType* value = ir_type_from_id(&builder->program->types, value_type);
     u64 width = value && value->layout.resolved ? value->layout.size : 0;
     IrTypeId bits_type = c_ir_unsigned_type_of_size(builder, width);
+    IrType* object = ir_type_from_id(&builder->program->types, object_type);
+    // The integer view aliases an atomic object, so its place must retain the
+    // atomic qualifier.  A plain integer pointer makes the subsequent atomic
+    // load/compare-exchange fail canonical validation even though the address
+    // reinterpretation itself is valid.
+    IrTypeId atomic_bits_type = bits_type.value != IR_ID_UNDERLYING_INVALID && object
+                                    ? c_ir_add_qualified_type(builder->program, bits_type, true, object->is_volatile)
+                                    : IR_TYPE_ID_INVALID;
+    IrTypeId atomic_bits_pointer_type = atomic_bits_type.value != IR_ID_UNDERLYING_INVALID
+                                            ? c_ir_add_pointer_type(builder->program, builder->pointer_types, atomic_bits_type)
+                                            : IR_TYPE_ID_INVALID;
     IrTypeId bits_pointer_type = bits_type.value != IR_ID_UNDERLYING_INVALID
                                      ? c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type)
                                      : IR_TYPE_ID_INVALID;
-    bool result = width && (width == 4 || width == 8) && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID;
+    bool result = width && (width == 4 || width == 8) && atomic_bits_pointer_type.value != IR_ID_UNDERLYING_INVALID &&
+                  bits_pointer_type.value != IR_ID_UNDERLYING_INVALID;
     if (!result)
     {
         // An x87 long double is eighty bits in an object no integer is the
@@ -21042,7 +21375,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_atomic_float_update(CIntegerIrBuilder* builder,
         builder->failure_message = S8("C IR lowering does not yet support a read-modify-write of this atomic floating-point width");
     }
     IrValueId object_address = result ? c_ir_emit_address_of_place(builder, place, object_type, source) : IR_VALUE_ID_INVALID;
-    IrValueId object_bits_address = result ? c_ir_emit_cast(builder, object_address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId object_bits_address = result ? c_ir_emit_cast(builder, object_address, atomic_bits_pointer_type, source) : IR_VALUE_ID_INVALID;
     IrValueId object_bits = result ? c_ir_emit_dereference_place(builder, object_bits_address, source) : IR_VALUE_ID_INVALID;
     IrValueId scratch = result ? c_ir_emit_temporary(builder, value_type, source) : IR_VALUE_ID_INVALID;
     IrValueId scratch_address = result ? c_ir_emit_address_of_place(builder, scratch, value_type, source) : IR_VALUE_ID_INVALID;
@@ -43847,6 +44180,15 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         {
             global->type = flexible_type;
             type = ir_type_from_id(&program->types, flexible_type);
+            // The extended object is still the same data symbol.  Keep the
+            // symbol and global views synchronized before later function
+            // lowering emits GLOBAL places; the canonical validator requires
+            // those views to name the same synthesized type.
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+            if (symbol && symbol->kind == IR_SYMBOL_DATA)
+            {
+                symbol->type = flexible_type;
+            }
         }
         u8* bytes = arena_allocate(arena, u8, type->layout.size);
         u32 relocation_capacity = 0;
