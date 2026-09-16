@@ -1,0 +1,86 @@
+name: Offline dependency materializer
+
+on:
+  pull_request:
+    paths:
+      - 'tools/native_retirement_materializer.py'
+      - 'tools/native_retirement_materializer_test.py'
+      - '.github/workflows/native-retirement-materializer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/native_retirement_materializer.py'
+      - 'tools/native_retirement_materializer_test.py'
+      - '.github/workflows/native-retirement-materializer.yml'
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  materializer:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Offline materializer (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout candidate integration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Checkout PR baseline
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .materializer-baseline
+          persist-credentials: false
+      - name: Record baseline command availability
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/materializer-evidence"
+          git -C .materializer-baseline rev-parse HEAD | tee "$RUNNER_TEMP/materializer-evidence/baseline-sha.txt"
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/materializer-evidence/baseline.log"
+          from pathlib import Path
+          import subprocess
+          import sys
+          tool = Path('.materializer-baseline/tools/native_retirement_materializer.py')
+          result = subprocess.run([sys.executable, str(tool), 'self-test'], capture_output=True, text=True, timeout=30)
+          print('baseline_exit=' + str(result.returncode))
+          print(result.stdout, end='')
+          print(result.stderr, end='')
+          if tool.is_file():
+              if result.returncode != 0:
+                  raise SystemExit(result.returncode)
+              print('baseline_command=present; missing-command reproduction not applicable')
+          else:
+              if result.returncode != 2 or "can't open file" not in result.stderr:
+                  raise SystemExit('unexpected baseline failure')
+              print('baseline_command=absent; missing-command failure reproduced')
+          PY
+      - name: Validate offline materialization and rejection controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/materializer-evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/materializer-evidence/integration-sha.txt"
+          git hash-object tools/native_retirement_materializer.py tools/native_retirement_materializer_test.py | tee "$RUNNER_TEMP/materializer-evidence/source-blobs.txt"
+          python3 --version 2>&1 | tee "$RUNNER_TEMP/materializer-evidence/python.txt"
+          python3 tools/native_retirement_materializer.py self-test 2>&1 | tee "$RUNNER_TEMP/materializer-evidence/self-test.log"
+          python3 tools/native_retirement_materializer_test.py -v 2>&1 | tee "$RUNNER_TEMP/materializer-evidence/tests.log"
+      - name: Retain scoped materializer evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: offline-materializer-${{ matrix.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materializer-evidence
+          if-no-files-found: error
+          retention-days: 7
