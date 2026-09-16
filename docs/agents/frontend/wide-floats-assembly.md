@@ -52,11 +52,30 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `_Float16`: bfloat16 carries the lower conversion rank
   (`c_ir_float_conversion_rank` ranks it below binary16 despite equal storage
   width), so the usual arithmetic conversions convert `__bf16` to `_Float16`
-  numerically, never as an identity. This can reduce exponent range. Constant
-  conversions from a wide source (`long double` wider than 64 bits) to `__bf16`
-  are rejected explicitly rather than double-rounded; exact `long double`
-  constant conversion to `__bf16` remains pending, as does exact
-  resource-header builtin acceptance.
+  numerically, never as an identity. This can reduce exponent range.
+
+  Wide-source constants retain their target x87/binary128 payload in the two
+  integer limbs of `CIrConstantValue`; `c_ir_constant_float_literal` rounds a
+  literal in its source format first, and `c_ir_constant_wide_float_cast`
+  rounds directly to the destination through the existing rational machinery.
+  Neither casts nor arithmetic/comparison/truth/integer consumers may read a
+  wide value through the binary64 carrier. Scalar, array, aggregate and local
+  static BF16 initializers use this path. An explicit cast to `double` still
+  deliberately rounds to binary64. The binary128 rational converter uses a
+  two-limb quotient, not a host extended type or a new numeric dependency.
+  This does not add native BF16 arithmetic/ABI or binary128 scalar ABI support.
+
+  `c_parse_bfloat16_builtin` carries the LLVM18 BF16/AVX-NE-CONVERT signatures
+  and the select/FMA dependencies used by the pristine resource headers.
+  Identifier binding and type queries record their uses in a sparse worklist;
+  `c_parse_validate_bfloat16_builtin_calls` checks arity and operand types
+  before unused definitions are omitted. Nested, unreachable and unevaluated
+  calls are still checked. Same-sized GNU arithmetic vectors are convertible
+  by value; pointer pointees retain format/size identity, with ordinary C
+  null/void-pointer conversions. This signature checking is not a claim of
+  native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
+  source-format rounding on six layouts in both frontend forms, mixed-format
+  identity, positive/negative builtin operands, and deep nested calls.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

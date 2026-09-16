@@ -84,6 +84,8 @@
 //                                                 aggregate, folded in place
 //   c_ir_constant_apply_*, c_ir_constant_evaluate constant-expression
 //                                                 evaluator (128-bit integers)
+//   c_ir_constant_float_* ..                     source-format-preserving
+//   c_ir_constant_wide_float_*                    x87/binary128 constants
 //   c_ir_global_initializer, c_lower_to_ir        globals and the driver
 
 #include "c_internal.h"
@@ -1728,6 +1730,8 @@ struct CIrConstantValue
     IrTypeId type;
     IrSymbolId symbol;
     s64 addend;
+    // Integer values, or the target raw image of a wide floating constant.
+    // Narrow floating constants alone use the f64 carrier below.
     u64 integer;
     u64 integer_high;
     f64 floating;
@@ -3036,6 +3040,7 @@ BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value);
 BUSTER_C_INTERNAL u64 c_ir_bfloat16_bits_from_f64(f64 value);
 BUSTER_C_INTERNAL f64 c_ir_bfloat16_to_f64(u64 bits);
 BUSTER_C_INTERNAL f64 c_ir_bfloat16_round(f64 value);
+BUSTER_C_INTERNAL bool c_ir_constant_float_literal(CIntegerIrBuilder* builder, String8 spelling, CIrConstantValue* result);
 BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type, u8* bytes, u64 offset, u64 bits, bool sign_extend);
 // The same store through an explicit unit width, which is what a bit-field
 // whose packing narrowed its storage unit writes through.
@@ -40366,10 +40371,20 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_float_leaf(CIntegerIrBuild
     String8 ignored_real_spelling = {0};
     f64 floating = 0.0;
     char8 suffix = 0;
-    bool folded = !c_ir_number_imaginary_spelling(builder->arena, spelling, &ignored_real_spelling) &&
-                  c_ir_float_literal_value(spelling, &floating, &suffix) &&
-                  !(child->kind == IR_TYPE_FLOAT && child->float_format == IR_FLOAT_FORMAT_BFLOAT16 && (suffix == 'l' || suffix == 'L') &&
-                    target_data_layout(builder->target).long_double_type.bit_width > 64);
+    c_ir_float_suffix(spelling, &suffix);
+    bool wide_source = (suffix == 'l' || suffix == 'L') && target_data_layout(builder->target).long_double_type.bit_width > 64;
+    bool folded = !c_ir_number_imaginary_spelling(builder->arena, spelling, &ignored_real_spelling);
+    if (folded && wide_source)
+    {
+        CIrConstantValue source = {0};
+        CIrConstantValue converted = {0};
+        folded = c_ir_constant_float_literal(builder, spelling, &source) && c_ir_constant_cast(builder, &source, child->id, &converted);
+        floating = converted.floating;
+    }
+    else if (folded)
+    {
+        folded = c_ir_float_literal_value(spelling, &floating, &suffix);
+    }
     if (folded)
     {
         c_ir_constant_initializer_store_float_leaf(child, negative ? -floating : floating, bytes);
@@ -41326,7 +41341,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, const CIr
     }
     else if (value.kind == C_IR_CONSTANT_FLOAT)
     {
-        result = value.floating != 0.0;
+        result = type && type->bit_width > 64
+                     ? value.integer != 0 || (value.integer_high & (type->bit_width == 80 ? UINT64_C(0x7fff) : UINT64_C(0x7fffffffffffffff))) != 0
+                     : value.floating != 0.0;
     }
     else
     {
@@ -41533,6 +41550,24 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
                 {
                     memcpy(&result->integer_high, global->bytes.pointer, 8);
                     memcpy(&result->integer, global->bytes.pointer + 8, 8);
+                }
+                return true;
+            }
+            if (type && type->kind == IR_TYPE_FLOAT && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO)
+            {
+                *result = (CIrConstantValue){.type = global->type, .kind = C_IR_CONSTANT_FLOAT};
+                return true;
+            }
+            if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 80 || type->bit_width == 128) &&
+                global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer && global->bytes.length == type->layout.size)
+            {
+                *result = (CIrConstantValue){.type = global->type, .kind = C_IR_CONSTANT_FLOAT};
+                u32 payload_size = type->bit_width / 8;
+                for (u32 byte = 0; byte < payload_size; byte += 1)
+                {
+                    u32 offset = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte : payload_size - byte - 1;
+                    if (byte < 8) result->integer |= (u64)global->bytes.pointer[offset] << (byte * 8);
+                    else result->integer_high |= (u64)global->bytes.pointer[offset] << ((byte - 8) * 8);
                 }
                 return true;
             }
@@ -42075,6 +42110,487 @@ BUSTER_C_INTERNAL bool c_ir_constant_float_to_integer(f64 floating, IrType* targ
     return success;
 }
 
+// Wide constants keep their target image in the two integer limbs of
+// CIrConstantValue.  The ordinary f64 carrier remains the fast path for
+// binary16/bfloat16/binary32/binary64; it must never mediate a wide cast.
+typedef struct CIrConstantFloatParts CIrConstantFloatParts;
+struct CIrConstantFloatParts
+{
+    CIrWideInteger significand;
+    s32 exponent;
+    u8 classification;
+    bool negative;
+};
+
+enum
+{
+    C_IR_FLOAT_FINITE,
+    C_IR_FLOAT_INFINITY,
+    C_IR_FLOAT_NAN,
+};
+
+BUSTER_C_INTERNAL CIrConstantFloatParts c_ir_constant_float_parts(CIrConstantValue const* value, IrType const* type)
+{
+    CIrConstantFloatParts result = {0};
+    u32 exponent;
+    u32 special;
+    bool fraction;
+    if (type->bit_width == 80)
+    {
+        exponent = (u32)value->integer_high & 0x7fff;
+        special = 0x7fff;
+        result.negative = (value->integer_high & UINT64_C(0x8000)) != 0;
+        result.significand.low = value->integer;
+        result.exponent = (s32)(exponent ? exponent : 1) - 16383 - 63;
+        fraction = (value->integer & UINT64_C(0x7fffffffffffffff)) != 0;
+    }
+    else if (type->bit_width == 128)
+    {
+        exponent = (u32)(value->integer_high >> 48) & 0x7fff;
+        special = 0x7fff;
+        result.negative = (value->integer_high >> 63) != 0;
+        result.significand = (CIrWideInteger){.low = value->integer, .high = value->integer_high & UINT64_C(0x0000ffffffffffff)};
+        fraction = result.significand.low != 0 || result.significand.high != 0;
+        if (exponent && exponent != special) result.significand.high |= UINT64_C(1) << 48;
+        result.exponent = (s32)(exponent ? exponent : 1) - 16383 - 112;
+    }
+    else
+    {
+        u64 bits;
+        memcpy(&bits, &value->floating, sizeof(bits));
+        exponent = (u32)(bits >> 52) & 0x7ff;
+        special = 0x7ff;
+        result.negative = (bits >> 63) != 0;
+        result.significand.low = bits & UINT64_C(0x000fffffffffffff);
+        fraction = result.significand.low != 0;
+        if (exponent && exponent != special) result.significand.low |= UINT64_C(1) << 52;
+        result.exponent = (s32)(exponent ? exponent : 1) - 1023 - 52;
+    }
+    if (exponent == special) result.classification = fraction ? C_IR_FLOAT_NAN : C_IR_FLOAT_INFINITY;
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_constant_float_big(CIrExt80Big* result, CIrWideInteger significand)
+{
+    if (significand.high)
+    {
+        result->limbs[0] = (u32)significand.low;
+        result->limbs[1] = (u32)(significand.low >> 32);
+        result->limbs[2] = (u32)significand.high;
+        result->limbs[3] = (u32)(significand.high >> 32);
+        result->count = 4;
+        c_ir_ext80_big_normalize(result);
+    }
+    else
+    {
+        c_ir_ext80_big_set_u64(result, significand.low);
+    }
+}
+
+BUSTER_C_INTERNAL CIrConstantValue c_ir_constant_float_special(IrType const* type, bool negative, u8 classification)
+{
+    CIrConstantValue result = {.type = type->id, .kind = C_IR_CONSTANT_FLOAT};
+    bool special = classification != C_IR_FLOAT_FINITE;
+    bool nan = classification == C_IR_FLOAT_NAN;
+    if (type->bit_width == 80)
+    {
+        result.integer = special ? (nan ? C_IR_EXT80_QUIET_NAN_SIGNIFICAND : C_IR_EXT80_INFINITY_SIGNIFICAND) : 0;
+        result.integer_high = (negative ? UINT64_C(0x8000) : 0) | (special ? UINT64_C(0x7fff) : 0);
+    }
+    else if (type->bit_width == 128)
+    {
+        result.integer_high = (negative ? UINT64_C(0x8000000000000000) : 0) |
+                              (special ? UINT64_C(0x7fff000000000000) : 0) | (nan ? UINT64_C(0x0000800000000000) : 0);
+    }
+    else
+    {
+        u64 bits = (negative ? UINT64_C(0x8000000000000000) : 0) |
+                   (special ? UINT64_C(0x7ff0000000000000) : 0) | (nan ? UINT64_C(0x0008000000000000) : 0);
+        memcpy(&result.floating, &bits, sizeof(bits));
+    }
+    return result;
+}
+
+// Round a rational once to binary128's 113 significant bits.  Division needs
+// two quotient limbs, not a host __float128 or an intervening x87/f64 value.
+BUSTER_C_INTERNAL u8 c_ir_ieee128_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                               bool negative, CIrWideInteger* result)
+{
+    u8 status = denominator->count ? C_IR_ROUND_OK : C_IR_ROUND_FAILED;
+    CIrWideInteger quotient = {0};
+    s64 exponent = 0;
+    bool subnormal = false;
+    if (status == C_IR_ROUND_OK && numerator->count)
+    {
+        exponent = (s64)c_ir_ext80_big_bit_length(numerator) - c_ir_ext80_big_bit_length(denominator) + binary_exponent;
+        s64 shift = exponent - binary_exponent;
+        if (shift < INT32_MIN || shift > INT32_MAX)
+        {
+            status = C_IR_ROUND_FAILED;
+        }
+        else
+        {
+            if (c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)shift) < 0) exponent -= 1;
+            if (exponent > 16383) status = C_IR_ROUND_OVERFLOW;
+            else if (exponent < -16495) status = C_IR_ROUND_UNDERFLOW;
+        }
+        if (status == C_IR_ROUND_OK)
+        {
+            subnormal = exponent < -16382;
+            s64 scaling = (s64)binary_exponent + 112 - (subnormal ? -16382 : exponent);
+            CIrExt80Big remainder;
+            CIrExt80Big divisor;
+            c_ir_ext80_big_copy(&remainder, numerator);
+            c_ir_ext80_big_copy(&divisor, denominator);
+            bool scaled = scaling >= 0 ? scaling <= UINT32_MAX && c_ir_ext80_big_shift_left(&remainder, (u32)scaling)
+                                       : -scaling <= UINT32_MAX && c_ir_ext80_big_shift_left(&divisor, (u32)-scaling);
+            if (!scaled) status = C_IR_ROUND_FAILED;
+            for (s32 bit = 112; bit >= 0 && status == C_IR_ROUND_OK; bit -= 1)
+            {
+                if (c_ir_ext80_big_compare_shifted(&remainder, &divisor, bit) >= 0)
+                {
+                    if (!c_ir_ext80_big_subtract_shifted(&remainder, &divisor, (u32)bit)) status = C_IR_ROUND_FAILED;
+                    else if (bit >= 64) quotient.high |= UINT64_C(1) << (u32)(bit - 64);
+                    else quotient.low |= UINT64_C(1) << (u32)bit;
+                }
+            }
+            if (status == C_IR_ROUND_OK)
+            {
+                s32 halfway = c_ir_ext80_big_compare_shifted(&remainder, &divisor, -1);
+                if (halfway > 0 || (halfway == 0 && (quotient.low & 1)))
+                {
+                    quotient.low += 1;
+                    quotient.high += quotient.low == 0;
+                }
+                if (quotient.high & (UINT64_C(1) << 49))
+                {
+                    quotient.low = (quotient.low >> 1) | (quotient.high << 63);
+                    quotient.high >>= 1;
+                    exponent += 1;
+                    if (exponent > 16383) status = C_IR_ROUND_OVERFLOW;
+                }
+                if (!quotient.low && !quotient.high) status = C_IR_ROUND_UNDERFLOW;
+            }
+        }
+    }
+    if (status == C_IR_ROUND_OK)
+    {
+        u64 exponent_field = !numerator->count ? 0 : subnormal ? (quotient.high >> 48) : (u64)(exponent + 16383);
+        *result = (CIrWideInteger){.low = quotient.low,
+                                  .high = (negative ? UINT64_C(0x8000000000000000) : 0) | (exponent_field << 48) |
+                                          (quotient.high & UINT64_C(0x0000ffffffffffff))};
+    }
+    return status;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_float_round(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                                 bool negative, IrType const* type, CIrConstantValue* result)
+{
+    bool brain = type->float_format == IR_FLOAT_FORMAT_BFLOAT16;
+    u32 fraction = type->bit_width == 16 ? (brain ? 7u : 10u) : type->bit_width == 32 ? 23u : type->bit_width == 64 ? 52u :
+                   type->bit_width == 80 ? 63u : 112u;
+    s32 minimum = type->bit_width == 16 ? (brain ? -126 : -14) : type->bit_width == 32 ? -126 : type->bit_width == 64 ? -1022 : -16382;
+    s32 maximum = type->bit_width == 16 ? (brain ? 127 : 15) : type->bit_width == 32 ? 127 : type->bit_width == 64 ? 1023 : 16383;
+    u32 exponent_bits = type->bit_width == 16 ? (brain ? 8u : 5u) : type->bit_width == 32 ? 8u : 11u;
+    u8 status = C_IR_ROUND_OK;
+    CIrWideInteger bits = {0};
+    s64 estimate = (s64)c_ir_ext80_big_bit_length(numerator) - c_ir_ext80_big_bit_length(denominator) + binary_exponent;
+    if (!denominator->count)
+    {
+        status = C_IR_ROUND_FAILED;
+    }
+    else if (numerator->count && estimate > (s64)maximum + 1)
+    {
+        status = C_IR_ROUND_OVERFLOW;
+    }
+    else if (numerator->count && estimate < (s64)minimum - fraction - 1)
+    {
+        status = C_IR_ROUND_UNDERFLOW;
+    }
+    else if (type->bit_width == 128)
+    {
+        status = c_ir_ieee128_from_rational(numerator, denominator, binary_exponent, negative, &bits);
+    }
+    else if (type->bit_width == 80)
+    {
+        u16 exponent_sign = 0;
+        status = c_ir_ext80_from_rational(numerator, denominator, binary_exponent, negative, &bits.low, &exponent_sign);
+        bits.high = exponent_sign;
+    }
+    else
+    {
+        status = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, fraction, minimum, maximum, exponent_bits, &bits.low);
+    }
+    if (status == C_IR_ROUND_OK)
+    {
+        *result = (CIrConstantValue){.type = type->id, .kind = C_IR_CONSTANT_FLOAT};
+        if (type->bit_width > 64)
+        {
+            result->integer = bits.low;
+            result->integer_high = bits.high;
+        }
+        else if (type->bit_width == 16)
+        {
+            result->floating = brain ? c_ir_bfloat16_to_f64(bits.low) : c_ir_float16_to_f64(bits.low);
+        }
+        else if (type->bit_width == 32)
+        {
+            u32 narrow_bits = (u32)bits.low;
+            f32 narrow;
+            memcpy(&narrow, &narrow_bits, sizeof(narrow));
+            result->floating = (f64)narrow;
+        }
+        else
+        {
+            memcpy(&result->floating, &bits.low, sizeof(bits.low));
+        }
+    }
+    else if (status != C_IR_ROUND_FAILED)
+    {
+        *result = c_ir_constant_float_special(type, negative, status == C_IR_ROUND_OVERFLOW ? C_IR_FLOAT_INFINITY : C_IR_FLOAT_FINITE);
+    }
+    return status != C_IR_ROUND_FAILED;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_float_literal(CIntegerIrBuilder* builder, String8 spelling, CIrConstantValue* result)
+{
+    char8 suffix = 0;
+    c_ir_float_suffix(spelling, &suffix);
+    IrTypeId type_id = suffix == 'h' ? builder->f16_type : suffix == 'f' || suffix == 'F' ? builder->f32_type :
+                       suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
+    IrType const* type = ir_type_from_id(&builder->program->types, type_id);
+    bool valid = type && type->kind == IR_TYPE_FLOAT;
+    if (valid && type->bit_width > 64)
+    {
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
+        s32 exponent = 0;
+        valid = c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &exponent) &&
+                c_ir_constant_float_round(&numerator, &denominator, exponent, false, type, result);
+    }
+    else if (valid)
+    {
+        f64 floating;
+        valid = c_ir_float_literal_value(spelling, &floating, &suffix);
+        if (valid) *result = (CIrConstantValue){.type = type_id, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
+                                                     IrType const* target, CIrConstantValue* result)
+{
+    CIrConstantFloatParts parts = {0};
+    if (source->kind == C_IR_CONSTANT_FLOAT)
+    {
+        parts = c_ir_constant_float_parts(source, source_type);
+    }
+    else
+    {
+        parts.significand = (CIrWideInteger){.low = source->integer, .high = source_type->bit_width == 128 ? source->integer_high : 0};
+        if (source_type->is_signed)
+        {
+            if (source_type->bit_width == 128)
+            {
+                parts.negative = (parts.significand.high >> 63) != 0;
+                if (parts.negative) parts.significand = c_ir_wide_negate(parts.significand);
+            }
+            else
+            {
+                s64 signed_value = c_ir_integer_signed_value(source->integer, source_type);
+                parts.negative = signed_value < 0;
+                parts.significand.low = parts.negative ? 0 - (u64)signed_value : (u64)signed_value;
+            }
+        }
+    }
+    bool valid = true;
+    if (parts.classification)
+    {
+        *result = c_ir_constant_float_special(target, parts.negative, parts.classification);
+    }
+    else
+    {
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
+        c_ir_constant_float_big(&numerator, parts.significand);
+        c_ir_ext80_big_set_u64(&denominator, 1);
+        valid = c_ir_constant_float_round(&numerator, &denominator, parts.exponent, parts.negative, target, result);
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,
+                                                           IrType const* target, CIrWideInteger* result)
+{
+    CIrConstantFloatParts parts = c_ir_constant_float_parts(source, source_type);
+    CIrWideInteger magnitude = parts.significand;
+    u32 length = magnitude.high ? 128u - leading_zeroes_u64(magnitude.high) : magnitude.low ? 64u - leading_zeroes_u64(magnitude.low) : 0;
+    bool valid = !parts.classification && (!length || (s64)length + parts.exponent <= 128);
+    if (valid)
+    {
+        if (!length || parts.exponent <= -128) magnitude = (CIrWideInteger){0};
+        else if (parts.exponent >= 64) magnitude = (CIrWideInteger){.high = magnitude.low << (u32)(parts.exponent - 64)};
+        else if (parts.exponent > 0)
+        {
+            magnitude.high = (magnitude.high << (u32)parts.exponent) | (magnitude.low >> (u32)(64 - parts.exponent));
+            magnitude.low <<= (u32)parts.exponent;
+        }
+        else if (parts.exponent <= -64) magnitude = (CIrWideInteger){.low = magnitude.high >> (u32)(-parts.exponent - 64)};
+        else if (parts.exponent < 0)
+        {
+            magnitude.low = (magnitude.low >> (u32)-parts.exponent) | (magnitude.high << (u32)(64 + parts.exponent));
+            magnitude.high >>= (u32)-parts.exponent;
+        }
+        length = magnitude.high ? 128u - leading_zeroes_u64(magnitude.high) : magnitude.low ? 64u - leading_zeroes_u64(magnitude.low) : 0;
+        if (target->is_signed)
+        {
+            CIrWideInteger minimum = target->bit_width > 64 ? (CIrWideInteger){.high = UINT64_C(1) << (target->bit_width - 65)} :
+                                                              (CIrWideInteger){.low = UINT64_C(1) << (target->bit_width - 1)};
+            valid = length < target->bit_width ||
+                    (parts.negative && magnitude.low == minimum.low && magnitude.high == minimum.high);
+        }
+        else
+        {
+            valid = length <= target->bit_width && (!parts.negative || !length);
+        }
+        if (valid) *result = parts.negative ? c_ir_wide_negate(magnitude) : magnitude;
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL void c_ir_constant_wide_float_sign(CIrConstantValue* value, IrType const* type, bool negative)
+{
+    u64 mask = type->bit_width == 80 ? UINT64_C(0x8000) : UINT64_C(0x8000000000000000);
+    value->integer_high = (value->integer_high & ~mask) | (negative ? mask : 0);
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_wide_float_binary(CIntegerIrBuilder* builder, CConditionalOperator operation,
+                                                       CIrConstantValue left, CIrConstantValue right, IrType const* type,
+                                                       CIrConstantValue* result)
+{
+    CIrConstantFloatParts a = c_ir_constant_float_parts(&left, type);
+    CIrConstantFloatParts b = c_ir_constant_float_parts(&right, type);
+    bool a_zero = !a.classification && !a.significand.low && !a.significand.high;
+    bool b_zero = !b.classification && !b.significand.low && !b.significand.high;
+    bool nan = a.classification == C_IR_FLOAT_NAN || b.classification == C_IR_FLOAT_NAN;
+    bool comparison = operation == C_CONDITIONAL_EQUAL || operation == C_CONDITIONAL_NOT_EQUAL || operation == C_CONDITIONAL_LESS ||
+                      operation == C_CONDITIONAL_LESS_EQUAL || operation == C_CONDITIONAL_GREATER || operation == C_CONDITIONAL_GREATER_EQUAL;
+    bool additive = operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT;
+    bool multiply = operation == C_CONDITIONAL_MULTIPLY;
+    bool divide = operation == C_CONDITIONAL_DIVIDE;
+    bool valid = comparison || additive || multiply || divide;
+    if (comparison)
+    {
+        u64 mask = type->bit_width == 80 ? UINT64_C(0x7fff) : UINT64_C(0x7fffffffffffffff);
+        u64 a_high = left.integer_high & mask;
+        u64 b_high = right.integer_high & mask;
+        s32 order = a_high != b_high ? (a_high < b_high ? -1 : 1) : left.integer != right.integer ? (left.integer < right.integer ? -1 : 1) : 0;
+        if (a_zero && b_zero) order = 0;
+        else if (a.negative != b.negative) order = a.negative ? -1 : 1;
+        else if (a.negative) order = -order;
+        bool answer = operation == C_CONDITIONAL_NOT_EQUAL ? nan || order != 0 : !nan &&
+                      (operation == C_CONDITIONAL_EQUAL ? order == 0 : operation == C_CONDITIONAL_LESS ? order < 0 :
+                       operation == C_CONDITIONAL_LESS_EQUAL ? order <= 0 : operation == C_CONDITIONAL_GREATER ? order > 0 : order >= 0);
+        *result = c_ir_constant_integer(builder->s32_type, answer);
+    }
+    else if (valid && nan)
+    {
+        *result = c_ir_constant_float_special(type, a.classification == C_IR_FLOAT_NAN ? a.negative : b.negative, C_IR_FLOAT_NAN);
+    }
+    else if (valid)
+    {
+        if (operation == C_CONDITIONAL_SUBTRACT) b.negative = !b.negative;
+        bool negative = additive ? a.negative : a.negative != b.negative;
+        bool invalid = additive ? a.classification && b.classification && a.negative != b.negative :
+                       multiply ? (a.classification && b_zero) || (b.classification && a_zero) :
+                                  (a.classification && b.classification) || (a_zero && b_zero);
+        if (invalid)
+        {
+            *result = c_ir_constant_float_special(type, false, C_IR_FLOAT_NAN);
+        }
+        else if (a.classification || b.classification || (divide && b_zero))
+        {
+            if (additive) negative = a.classification ? a.negative : b.negative;
+            u8 classification = divide && b.classification ? C_IR_FLOAT_FINITE : C_IR_FLOAT_INFINITY;
+            *result = c_ir_constant_float_special(type, negative, classification);
+        }
+        else if ((multiply || divide) && (a_zero || b_zero))
+        {
+            *result = c_ir_constant_float_special(type, negative, C_IR_FLOAT_FINITE);
+        }
+        else if (additive && (a_zero || b_zero))
+        {
+            *result = a_zero ? right : left;
+            c_ir_constant_wide_float_sign(result, type, a_zero && b_zero ? a.negative && b.negative : a_zero ? b.negative : a.negative);
+        }
+        else
+        {
+            CIrExt80Big numerator;
+            CIrExt80Big other;
+            CIrExt80Big denominator;
+            c_ir_constant_float_big(&numerator, a.significand);
+            c_ir_constant_float_big(&other, b.significand);
+            c_ir_ext80_big_set_u64(&denominator, 1);
+            s32 exponent = a.exponent;
+            bool rounded = false;
+            if (additive)
+            {
+                s32 a_top = a.exponent + (s32)c_ir_ext80_big_bit_length(&numerator);
+                s32 b_top = b.exponent + (s32)c_ir_ext80_big_bit_length(&other);
+                s32 precision = type->bit_width == 80 ? 64 : 113;
+                // A value below one quarter ulp cannot change nearest-even
+                // rounding.  This also bounds alignment across the enormous
+                // wide-float exponent range without enlarging the bignum.
+                if (a_top - b_top > precision + 2 || b_top - a_top > precision + 2)
+                {
+                    *result = a_top > b_top ? left : right;
+                    c_ir_constant_wide_float_sign(result, type, a_top > b_top ? a.negative : b.negative);
+                    rounded = true;
+                }
+                else
+                {
+                    exponent = a.exponent < b.exponent ? a.exponent : b.exponent;
+                    valid = c_ir_ext80_big_shift_left(&numerator, (u32)(a.exponent - exponent)) &&
+                            c_ir_ext80_big_shift_left(&other, (u32)(b.exponent - exponent));
+                    if (valid && a.negative == b.negative)
+                    {
+                        valid = c_ir_ext80_big_add(&numerator, &other);
+                    }
+                    else if (valid)
+                    {
+                        s32 order = c_ir_ext80_big_compare(&numerator, &other);
+                        if (order >= 0)
+                        {
+                            valid = c_ir_ext80_big_subtract_shifted(&numerator, &other, 0);
+                            negative = a.negative && order != 0;
+                        }
+                        else
+                        {
+                            valid = c_ir_ext80_big_subtract_shifted(&other, &numerator, 0);
+                            c_ir_ext80_big_copy(&numerator, &other);
+                            negative = b.negative;
+                        }
+                    }
+                }
+            }
+            else if (multiply)
+            {
+                CIrExt80Big product;
+                valid = c_ir_ext80_big_multiply(&numerator, &other, &product);
+                if (valid) c_ir_ext80_big_copy(&numerator, &product);
+                exponent += b.exponent;
+            }
+            else
+            {
+                c_ir_ext80_big_copy(&denominator, &other);
+                exponent -= b.exponent;
+            }
+            if (valid && !rounded) valid = c_ir_constant_float_round(&numerator, &denominator, exponent, negative, type, result);
+        }
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrConstantValue* source_input, IrTypeId target_type, CIrConstantValue* result)
 {
     CIrConstantValue source = *source_input;
@@ -42132,16 +42648,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                 }
                 else if (target->kind == IR_TYPE_FLOAT)
                 {
-                    success = (source.kind == C_IR_CONSTANT_FLOAT ||
-                               (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type))) &&
-                              !(target->float_format == IR_FLOAT_FORMAT_BFLOAT16 && source.kind == C_IR_CONSTANT_FLOAT && source_type &&
-                                source_type->kind == IR_TYPE_FLOAT && source_type->bit_width > 64);
-                    if (!success && target->float_format == IR_FLOAT_FORMAT_BFLOAT16 && source.kind == C_IR_CONSTANT_FLOAT && source_type &&
-                        source_type->kind == IR_TYPE_FLOAT && source_type->bit_width > 64)
+                    success = source_type && (source.kind == C_IR_CONSTANT_FLOAT ||
+                              (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type)));
+                    bool wide = target->bit_width > 64 || (source.kind == C_IR_CONSTANT_FLOAT && source_type && source_type->bit_width > 64);
+                    if (success && wide)
                     {
-                        builder->failure_message = S8("constant conversion from wide floating point to __bf16 is not implemented");
+                        success = c_ir_constant_wide_float_cast(&source, source_type, target, result);
                     }
-                    if (success)
+                    else if (success)
                     {
                         u32 precision = target->bit_width == 16   ? (target->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? 8u : 11u)
                                         : target->bit_width == 32 ? 24u
@@ -42167,7 +42681,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                     if (source.kind == C_IR_CONSTANT_FLOAT)
                     {
                         CIrWideInteger integer = {0};
-                        success = c_ir_constant_float_to_integer(source.floating, target, &integer);
+                        success = source_type && source_type->bit_width > 64
+                                      ? c_ir_constant_wide_float_to_integer(&source, source_type, target, &integer)
+                                      : c_ir_constant_float_to_integer(source.floating, target, &integer);
                         if (success)
                         {
                             *result = c_ir_constant_integer(target_type, integer.low & c_ir_integer_type_mask(target));
@@ -42267,7 +42783,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
             if (value->kind == C_IR_CONSTANT_FLOAT && operation != C_CONDITIONAL_BITWISE_NOT)
             {
                 if (operation == C_CONDITIONAL_UNARY_MINUS)
-                    value->floating = -value->floating;
+                {
+                    if (type->bit_width > 64) value->integer_high ^= type->bit_width == 80 ? UINT64_C(0x8000) : UINT64_C(0x8000000000000000);
+                    else value->floating = -value->floating;
+                }
                 success = true;
             }
             else if (c_ir_constant_type_is_integer(type))
@@ -42524,6 +43043,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     IrType* type = ir_type_from_id(&builder->program->types, common);
     if (type && type->kind == IR_TYPE_FLOAT)
     {
+        if (type->bit_width > 64)
+        {
+            return c_ir_constant_wide_float_binary(builder, operation, left, right, type, result);
+        }
         // Whether an operation created a NaN, rather than propagating one it
         // was handed: IEEE leaves the created NaN's sign unspecified, and the
         // host's own divide answers 0.0/0.0 with the negative indefinite on
@@ -43022,8 +43545,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 CIrConstantValue value = {0};
                 if (c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)))
                 {
-                    f64 floating = 0.0;
-                    char8 suffix = 0;
                     // This evaluator has no complex value, and folding an
                     // imaginary literal as its magnitude would answer
                     // `1.0i == 1.0` with true. Refuse instead.
@@ -43033,9 +43554,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    if (!c_ir_float_literal_value(c_token_spelling(builder->preprocess.spelling_base, token), &floating, &suffix)) return false;
-                    IrTypeId type = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
-                    value = (CIrConstantValue){.type = type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
+                    if (!c_ir_constant_float_literal(builder, c_token_spelling(builder->preprocess.spelling_base, token), &value)) return false;
                 }
                 else
                 {

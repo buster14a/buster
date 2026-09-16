@@ -16110,7 +16110,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
                                                                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
                     BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
-                    BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+                    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                    BUSTER_TEST(arguments, lowered.program != 0);
+                    IrGlobal* wide = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("wide")) : 0;
+                    BUSTER_TEST(arguments, wide != 0);
+                    if (wide && wide->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
+                    {
+                        BUSTER_TEST(arguments, wide->bytes.pointer && wide->bytes.length == 2 && wide->bytes.pointer[0] == 0x81 && wide->bytes.pointer[1] == 0x3f);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, wide && wide->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && wide->initializer_bits == 0x3f81);
+                    }
                     scratch_end(temporary);
                 }
             }
@@ -16154,6 +16165,253 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* argum
         }
     }
 
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_semantic_acceptance(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Clang 17.0.0 independently emitted each row for all six target triples.
+    // The source rounds in its own format before the BF16 conversion. In
+    // particular, the 2^-100 perturbation survives binary128 but not x87.
+    u16 expected64[] = {
+        0x3f80, 0x3f80, 0xbf80, 0xbf80, 0x3f80, 0x3f80, 0x3f80, 0x3f80,
+        0x3f80, 0x7580, 0xf580, 0x3f80, 0x3eab, 0x0000, 0x8000, 0x0000,
+        0x0000, 0x8000, 0x7f80, 0x7f80, 0x7f80, 0xff80, 0x7fc0, 0xffc0,
+        0x7fc0, 0x7fc0, 0x7f80, 0x0000, 0x0000, 0x3f80, 0x0000, 0xc040,
+        0x7f00, 0x3f80, 0x3f80,
+    };
+    u16 expected80[] = {
+        0x3f81, 0x3f80, 0xbf81, 0xbf80, 0x3f81, 0x3f81, 0x3f80, 0x3f80,
+        0x3f80, 0x7580, 0xf580, 0x3f80, 0x3eab, 0x0000, 0x8000, 0x0001,
+        0x0000, 0x8001, 0x7f7f, 0x7f80, 0x7f80, 0xff80, 0x7fc0, 0xffc0,
+        0x7fc0, 0x7fc0, 0x7f80, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0xc040,
+        0x7f00, 0x3f81, 0x3f80,
+    };
+    u16 expected128[] = {
+        0x3f81, 0x3f80, 0xbf81, 0xbf80, 0x3f81, 0x3f81, 0x3f80, 0x3f81,
+        0x3f80, 0x7581, 0xf581, 0x3f80, 0x3eab, 0x0000, 0x8000, 0x0001,
+        0x0000, 0x8001, 0x7f7f, 0x7f80, 0x7f80, 0xff80, 0x7fc0, 0xffc0,
+        0x7fc0, 0x7fc0, 0x7f80, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0xc040,
+        0x7f00, 0x3f81, 0x3f80,
+    };
+    String8 source = S8("typedef unsigned __int128 uint128;\n"
+        "__bf16 values[] = {\n"
+        "    0x1.0100000000000002p0L, 0x1.00fffffffffffffep0L,\n"
+        "    -0x1.0100000000000002p0L, -0x1.00fffffffffffffep0L,\n"
+        "    (__bf16)0x1.0100000000000002p0L,\n"
+        "    0x1.01p0L + 0x1p-63L, 0x1.01p0L - 0x1p-63L,\n"
+        "    0x1.01p0L + 0x1p-100L, 0x1.01p0L - 0x1p-100L,\n"
+        "    (long double)(((uint128)257 << 100) + 1),\n"
+        "    -(long double)(((uint128)257 << 100) + 1),\n"
+        "    (0x1.01p0L * 3.0L) / 3.0L, 1.0L / 3.0L,\n"
+        "    0.0L, -0.0L, 0x1.0000000000000002p-134L,\n"
+        "    0x1.fffffffffffffffep-135L, -0x1.0000000000000002p-134L,\n"
+        "    0x1.fefffffffffffffep127L, 0x1.ff00000000000002p127L,\n"
+        "    (long double)__builtin_inf(), -(long double)__builtin_inf(),\n"
+        "    (long double)__builtin_nan(\"\"), -(long double)__builtin_nan(\"\"),\n"
+        "    0.0L / 0.0L, (long double)__builtin_inf() - (long double)__builtin_inf(),\n"
+        "    0x1p16383L, 0x1p-16445L,\n"
+        "    0x1.0000000000000002p0L > 1.0L,\n"
+        "    !0.0L, !!0x1p-16445L,\n"
+        "    (int)-3.75L, (unsigned __int128)0x1p127L,\n"
+        "    1 ? 0x1.0100000000000002p0L : 0.0L,\n"
+        "    (double)0x1.0100000000000002p0L\n"
+        "};\n"
+        "\n"
+        "__bf16 scalar = 0x1.0100000000000002p0L;\n"
+        "struct brain_holder { __bf16 value; } aggregate = {0x1.0100000000000002p0L};\n"
+        "__bf16 *local_static(void) { static __bf16 value = 0x1.0100000000000002p0L; return &value; }\n"
+        "_Float16 mixed_left = (__bf16)1.0 + (_Float16)0x1p-9;\n"
+        "_Float16 mixed_right = (_Float16)0x1p-9 + (__bf16)1.0;\n"
+        "_Float16 to_half(__bf16 a) { return (_Float16)a; }\n"
+        "__bf16 to_brain(_Float16 a) { return (__bf16)a; }\n");
+    String8 targets[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"), S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(targets[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        TargetDataLayout layout = target_data_layout(target.target);
+        u16 const* expected = layout.long_double_type.bit_width == 128 ? expected128 : layout.long_double_type.bit_width == 80 ? expected80 : expected64;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target.target, .data_layout = layout});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-wide-acceptance.c"), preprocess, syntax, target.target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.program != 0);
+            IrGlobal* values = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("values")) : 0;
+            if (BUSTER_REQUIRE(arguments, values && values->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                          values->bytes.pointer && values->bytes.length == sizeof(expected64)))
+            {
+                for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(expected64); value += 1)
+                {
+                    u32 bits = (u32)values->bytes.pointer[value * 2] | ((u32)values->bytes.pointer[value * 2 + 1] << 8);
+                    BUSTER_TEST(arguments, bits == expected[value]);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                IrGlobal* scalar = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("scalar"));
+                IrGlobal* aggregate = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("aggregate"));
+                BUSTER_TEST(arguments, scalar && scalar->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && scalar->initializer_bits == expected[0]);
+                if (BUSTER_REQUIRE(arguments, aggregate && aggregate->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                              aggregate->bytes.pointer && aggregate->bytes.length == 2))
+                {
+                    u32 bits = (u32)aggregate->bytes.pointer[0] | ((u32)aggregate->bytes.pointer[1] << 8);
+                    BUSTER_TEST(arguments, bits == expected[0]);
+                }
+                String8 mixed_names[] = {S8("mixed_left"), S8("mixed_right")};
+                for (u32 mixed = 0; mixed < BUSTER_ARRAY_LENGTH(mixed_names); mixed += 1)
+                {
+                    IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, mixed_names[mixed]);
+                    IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                    BUSTER_TEST(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && global->initializer_bits == 0x3c02);
+                    BUSTER_TEST(arguments, type && type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 prefix = S8("typedef __bf16 b8 __attribute__((vector_size(16)));\n"
+        "typedef __bf16 b16 __attribute__((vector_size(32)));\n"
+        "typedef __bf16 b32 __attribute__((vector_size(64)));\n"
+        "typedef _Float16 h8 __attribute__((vector_size(16)));\n"
+        "typedef short i8 __attribute__((vector_size(16)));\n"
+        "typedef float f4 __attribute__((vector_size(16)));\n"
+        "typedef float f8 __attribute__((vector_size(32)));\n"
+        "typedef float f16 __attribute__((vector_size(64)));\n");
+    String8 valid[] = {
+        S8("static inline float scalar(__bf16 a) { return __builtin_ia32_cvtsbf162ss_32(a); }"),
+        S8("static inline float conversion(float a) { return __builtin_ia32_cvtsbf162ss_32(a); }"),
+        S8("static inline b8 conversion_vector(i8 a, f4 b) { return __builtin_ia32_cvtne2ps2bf16_128(a,b); }"),
+        S8("static inline f4 half_dot(f4 a, h8 b) { return __builtin_ia32_dpbf16ps_128(a,b,b); }"),
+        S8("static inline b8 nested(f4 a) { return __builtin_ia32_selectpbf_128(1, __builtin_ia32_cvtne2ps2bf16_128(a,a), __builtin_ia32_cvtne2ps2bf16_128(a,a)); }"),
+        S8("__typeof__(__builtin_ia32_cvtsbf162ss_32((__bf16)0)) typed_result; _Static_assert(sizeof(typed_result) == 4, \"scalar return\");"),
+        S8("__typeof__(__builtin_ia32_cvtne2ps2bf16_128((f4){0},(f4){0})) typed_result; _Static_assert(sizeof(typed_result) == 16, \"BF vector return\");"),
+        S8("__typeof__(__builtin_ia32_selectpbf_128(1, __builtin_ia32_cvtne2ps2bf16_128((f4){0},(f4){0}), (b8){0})) typed_result;"),
+        S8("static inline b8 typed_0(f4 a, f4 b) { return __builtin_ia32_cvtne2ps2bf16_128(a,b); }"),
+        S8("static inline b16 typed_1(f8 a, f8 b) { return __builtin_ia32_cvtne2ps2bf16_256(a,b); }"),
+        S8("static inline b32 typed_2(f16 a, f16 b) { return __builtin_ia32_cvtne2ps2bf16_512(a,b); }"),
+        S8("static inline b8 typed_3(f4 a, b8 b, unsigned char c) { return __builtin_ia32_cvtneps2bf16_128_mask(a,b,c); }"),
+        S8("static inline b8 typed_4(f8 a, b8 b, unsigned char c) { return __builtin_ia32_cvtneps2bf16_256_mask(a,b,c); }"),
+        S8("static inline b16 typed_5(f16 a, b16 b, unsigned short c) { return __builtin_ia32_cvtneps2bf16_512_mask(a,b,c); }"),
+        S8("static inline f4 typed_6(f4 a, b8 b, b8 c) { return __builtin_ia32_dpbf16ps_128(a,b,c); }"),
+        S8("static inline f8 typed_7(f8 a, b16 b, b16 c) { return __builtin_ia32_dpbf16ps_256(a,b,c); }"),
+        S8("static inline f16 typed_8(f16 a, b32 b, b32 c) { return __builtin_ia32_dpbf16ps_512(a,b,c); }"),
+        S8("static inline b8 typed_9(unsigned char a, b8 b, b8 c) { return __builtin_ia32_selectpbf_128(a,b,c); }"),
+        S8("static inline b16 typed_10(unsigned short a, b16 b, b16 c) { return __builtin_ia32_selectpbf_256(a,b,c); }"),
+        S8("static inline b32 typed_11(unsigned int a, b32 b, b32 c) { return __builtin_ia32_selectpbf_512(a,b,c); }"),
+        S8("static inline b8 typed_12(unsigned char a, b8 b, b8 c) { return __builtin_ia32_selectsbf_128(a,b,c); }"),
+        S8("static inline f4 typed_13(unsigned char a, f4 b, f4 c) { return __builtin_ia32_selectps_128(a,b,c); }"),
+        S8("static inline f8 typed_14(unsigned char a, f8 b, f8 c) { return __builtin_ia32_selectps_256(a,b,c); }"),
+        S8("static inline f16 typed_15(unsigned short a, f16 b, f16 c) { return __builtin_ia32_selectps_512(a,b,c); }"),
+        S8("static inline f4 typed_16(const __bf16 * a) { return __builtin_ia32_vbcstnebf162ps128(a); }"),
+        S8("static inline f8 typed_17(const __bf16 * a) { return __builtin_ia32_vbcstnebf162ps256(a); }"),
+        S8("static inline f4 typed_18(const b8 * a) { return __builtin_ia32_vcvtneebf162ps128(a); }"),
+        S8("static inline f8 typed_19(const b16 * a) { return __builtin_ia32_vcvtneebf162ps256(a); }"),
+        S8("static inline f4 typed_20(const b8 * a) { return __builtin_ia32_vcvtneobf162ps128(a); }"),
+        S8("static inline f8 typed_21(const b16 * a) { return __builtin_ia32_vcvtneobf162ps256(a); }"),
+        S8("static inline b8 typed_22(f4 a) { return __builtin_ia32_vcvtneps2bf16128(a); }"),
+        S8("static inline b8 typed_23(f8 a) { return __builtin_ia32_vcvtneps2bf16256(a); }"),
+        S8("static inline f4 typed_24(f4 a, f4 b, f4 c) { return __builtin_ia32_vfmaddps(a,b,c); }"),
+        S8("static inline f8 typed_25(f8 a, f8 b, f8 c) { return __builtin_ia32_vfmaddps256(a,b,c); }"),
+        S8("static inline f4 typed_26(f4 a, f4 b, f4 c) { return __builtin_ia32_vfmaddsubps(a,b,c); }"),
+        S8("static inline f8 typed_27(f8 a, f8 b, f8 c) { return __builtin_ia32_vfmaddsubps256(a,b,c); }"),
+        S8("static inline f4 typed_28(f4 a, f4 b, f4 c, unsigned char d) { return __builtin_ia32_vfmaddcph128_mask(a,b,c,d); }"),
+        S8("static inline f8 typed_29(f8 a, f8 b, f8 c, unsigned char d) { return __builtin_ia32_vfmaddcph256_mask(a,b,c,d); }"),
+        S8("static inline f4 typed_30(f4 a, f4 b, f4 c, unsigned char d) { return __builtin_ia32_vfcmaddcph128_mask(a,b,c,d); }"),
+        S8("static inline f8 typed_31(f8 a, f8 b, f8 c, unsigned char d) { return __builtin_ia32_vfcmaddcph256_mask(a,b,c,d); }"),
+        S8("static inline f4 cast_mask(f4 a) { return __builtin_ia32_vfcmaddcph128_mask(a,a,a,(unsigned char)-1); }"),
+        S8("static inline f4 signed_fma(f4 a, f4 b, f4 c) { return __builtin_ia32_vfmaddps(+a,-b,c); }"),
+        S8("static inline f4 null_pointer(void) { return __builtin_ia32_vbcstnebf162ps128(0); }"),
+        S8("static inline f4 null_expression(void) { return __builtin_ia32_vbcstnebf162ps128(1 - 1); }"),
+        S8("static inline f4 array_pointer(void) { __bf16 a[8]; return __builtin_ia32_vbcstnebf162ps128(a); }"),
+    };
+    String8 invalid[] = {
+        S8("static inline f4 bad_complement(f4 a) { return __builtin_ia32_vfmaddps(~a,a,a); }"),
+        S8("static inline float bad(float a) { return __builtin_ia32_cvtsbf162ss_32(a,a); }"),
+        S8("static inline float bad(void) { return __builtin_ia32_cvtsbf162ss_32(); }"),
+        S8("static inline float bad(float *a) { return __builtin_ia32_cvtsbf162ss_32(a); }"),
+        S8("static inline float bad(b8 a) { return __builtin_ia32_cvtsbf162ss_32(a); }"),
+        S8("static inline b8 bad(f8 a) { return __builtin_ia32_cvtne2ps2bf16_128(a,a); }"),
+        S8("static inline b8 bad(float a) { return __builtin_ia32_cvtne2ps2bf16_128(a,a); }"),
+        S8("static inline b8 bad(f4 a) { return __builtin_ia32_selectpbf_128(1, __builtin_ia32_cvtne2ps2bf16_128(a), __builtin_ia32_cvtne2ps2bf16_128(a,a)); }"),
+        S8("static inline f4 bad(b8 *a) { return __builtin_ia32_vbcstnebf162ps128(a); }"),
+        S8("static inline b8 bad(int *mask, b8 a) { return __builtin_ia32_selectpbf_128(mask,a,a); }"),
+        S8("static inline float bad(float a) { if (0) return __builtin_ia32_cvtsbf162ss_32(a,a); return a; }"),
+        S8("static inline int bad(float a) { return sizeof(__builtin_ia32_cvtsbf162ss_32(a,a)); }"),
+        S8("__typeof__(__builtin_ia32_cvtsbf162ss_32(1,2)) bad;"),
+        S8("static inline void bad(void) { (void)&__builtin_ia32_cvtsbf162ss_32; }"),
+        S8("float bad(float a) { return __builtin_ia32_cvtsbf162ss_32(a,a); }"),
+    };
+    for (u32 negative = 0; negative < 2; negative += 1)
+    {
+        u32 count = negative ? BUSTER_ARRAY_LENGTH(invalid) : BUSTER_ARRAY_LENGTH(valid);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+                String8 test_source = string_format(temporary.arena, S8("{S8}{S8}"), prefix, negative ? invalid[index] : valid[index]);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, test_source,
+                    (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-builtin-acceptance.c"), preprocess, syntax, target.target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+                BUSTER_TEST(arguments, negative ? lowered.diagnostic_count != 0 : lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, negative ? lowered.program == 0 : lowered.program != 0);
+                if (!negative && lowered.program)
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    if (index >= 5 && index <= 7)
+                    {
+                        IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, S8("typed_result"));
+                        IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                        if (index != 5)
+                        {
+                            BUSTER_TEST(arguments, type && type->kind == IR_TYPE_VECTOR);
+                            type = type ? ir_type_from_id(&lowered.program->types, type->element_type) : 0;
+                        }
+                        BUSTER_TEST(arguments, type && type->kind == IR_TYPE_FLOAT && type->bit_width == (index == 5 ? 32 : 16));
+                        BUSTER_TEST(arguments, type && type->float_format == (index == 5 ? IR_FLOAT_FORMAT_IEEE : IR_FLOAT_FORMAT_BFLOAT16));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    for (u32 negative = 0; negative < 2; negative += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 expression = negative ? S8("__builtin_ia32_selectpbf_128(1, a)") : S8("a");
+            for (u32 depth = 0; depth < 128; depth += 1)
+                expression = string_format(temporary.arena, S8("__builtin_ia32_selectpbf_128(1, {S8}, a)"), expression);
+            String8 test_source = string_format(temporary.arena, S8("{S8}static inline b8 deep(b8 a) {{ return {S8}; }}"), prefix, expression);
+            TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, test_source,
+                (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-nested-builtin.c"), preprocess, syntax, target.target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+            BUSTER_TEST(arguments, negative ? lowered.diagnostic_count != 0 : lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, negative ? lowered.program == 0 : lowered.program != 0);
+            scratch_end(temporary);
+        }
+    }
     return result;
 }
 
@@ -17565,6 +17823,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
     BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);

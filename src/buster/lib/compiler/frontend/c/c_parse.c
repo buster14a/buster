@@ -37,6 +37,8 @@
 //   c_parse_type_layout                           sizes/alignments, aggregate
 //                                                 and bit-field layout
 //   c_semantic_check_named_call_arities          bound call constraints without IR
+//   c_parse_bfloat16_builtin,                    target builtin signatures
+//   c_parse_validate_bfloat16_builtin_calls       checked before unused pruning
 //   c_parse_direct_expression_base ..             expression typing without
 //   c_parse_conditional_expression_type           lowering (usual arithmetic
 //                                                 conversions, precedence,
@@ -2320,6 +2322,104 @@ CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analy
 }
 #endif
 
+// The BF16 resource-header contract, including its vector select operations.
+// Signatures are pinned to LLVM c13b7485b87909fcf739f62cfa382b55407433c0,
+// clang/include/clang/Basic/BuiltinsX86.def. These are semantic types, not
+// permission to emit native BF16 arithmetic. A call is checked even when its
+// enclosing definition will later be discarded as unused.
+typedef struct CBfloat16BuiltinType CBfloat16BuiltinType;
+struct CBfloat16BuiltinType
+{
+    CTypeKind kind;
+    u8 lanes;
+    bool pointer;
+};
+
+typedef struct CBfloat16Builtin CBfloat16Builtin;
+struct CBfloat16Builtin
+{
+    String8 name;
+    CBfloat16BuiltinType types[5]; // Return type, then up to four parameters.
+    u8 parameter_count;
+};
+
+BUSTER_GLOBAL_LOCAL CBfloat16Builtin const c_bfloat16_builtins[] = {
+    // Shared selectps header bodies call these directly, without casts. Keep
+    // the closure typed rather than accepting an unknown argument type.
+    {S8_INITIALIZER("__builtin_ia32_vfmaddps"), {{C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_vfmaddps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_vfmaddsubps"), {{C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_vfmaddsubps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_vfmaddcph128_mask"), {{C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_UNSIGNED_CHAR}}, 4},
+    {S8_INITIALIZER("__builtin_ia32_vfmaddcph256_mask"), {{C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_UNSIGNED_CHAR}}, 4},
+    {S8_INITIALIZER("__builtin_ia32_vfcmaddcph128_mask"), {{C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_UNSIGNED_CHAR}}, 4},
+    {S8_INITIALIZER("__builtin_ia32_vfcmaddcph256_mask"), {{C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_UNSIGNED_CHAR}}, 4},
+    {S8_INITIALIZER("__builtin_ia32_cvtsbf162ss_32"), {{C_TYPE_FLOAT}, {C_TYPE_BFLOAT16}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_cvtne2ps2bf16_128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}}, 2},
+    {S8_INITIALIZER("__builtin_ia32_cvtne2ps2bf16_256"), {{C_TYPE_BFLOAT16, 16}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}}, 2},
+    {S8_INITIALIZER("__builtin_ia32_cvtne2ps2bf16_512"), {{C_TYPE_BFLOAT16, 32}, {C_TYPE_FLOAT, 16}, {C_TYPE_FLOAT, 16}}, 2},
+    {S8_INITIALIZER("__builtin_ia32_cvtneps2bf16_128_mask"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 8}, {C_TYPE_UNSIGNED_CHAR}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_cvtneps2bf16_256_mask"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 8}, {C_TYPE_UNSIGNED_CHAR}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_cvtneps2bf16_512_mask"), {{C_TYPE_BFLOAT16, 16}, {C_TYPE_FLOAT, 16}, {C_TYPE_BFLOAT16, 16}, {C_TYPE_UNSIGNED_SHORT}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_dpbf16ps_128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 8}, {C_TYPE_BFLOAT16, 8}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_dpbf16ps_256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 16}, {C_TYPE_BFLOAT16, 16}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_dpbf16ps_512"), {{C_TYPE_FLOAT, 16}, {C_TYPE_FLOAT, 16}, {C_TYPE_BFLOAT16, 32}, {C_TYPE_BFLOAT16, 32}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectpbf_128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_BFLOAT16, 8}, {C_TYPE_BFLOAT16, 8}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectpbf_256"), {{C_TYPE_BFLOAT16, 16}, {C_TYPE_UNSIGNED_SHORT}, {C_TYPE_BFLOAT16, 16}, {C_TYPE_BFLOAT16, 16}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectpbf_512"), {{C_TYPE_BFLOAT16, 32}, {C_TYPE_UNSIGNED_INT}, {C_TYPE_BFLOAT16, 32}, {C_TYPE_BFLOAT16, 32}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectsbf_128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_BFLOAT16, 8}, {C_TYPE_BFLOAT16, 8}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectps_128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectps_256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_selectps_512"), {{C_TYPE_FLOAT, 16}, {C_TYPE_UNSIGNED_SHORT}, {C_TYPE_FLOAT, 16}, {C_TYPE_FLOAT, 16}}, 3},
+    {S8_INITIALIZER("__builtin_ia32_vbcstnebf162ps128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 0, true}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vbcstnebf162ps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 0, true}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vcvtneebf162ps128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 8, true}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vcvtneebf162ps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 16, true}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vcvtneobf162ps128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 8, true}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vcvtneobf162ps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 16, true}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vcvtneps2bf16128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 4}}, 1},
+    {S8_INITIALIZER("__builtin_ia32_vcvtneps2bf16256"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 8}}, 1},
+};
+
+BUSTER_C_INTERNAL CBfloat16Builtin const* c_parse_bfloat16_builtin(String8 name)
+{
+    CBfloat16Builtin const* result = 0;
+    if (string_starts_with_sequence(name, S8("__builtin_ia32_")))
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_bfloat16_builtins) && !result; index += 1)
+        {
+            if (string_equal(name, c_bfloat16_builtins[index].name)) result = c_bfloat16_builtins + index;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, CBfloat16Builtin const* builtin)
+{
+    CBfloat16BuiltinType shape = builtin->types[0];
+    CTypeId type = c_parse_add_type(result, (CType){
+        .element_type = C_TYPE_ID_INVALID,
+        .return_type = C_TYPE_ID_INVALID,
+        .unqualified_type = C_TYPE_ID_INVALID,
+        .array_bound = C_ARRAY_BOUND_INVALID,
+        .kind = shape.kind,
+        .is_complete = true,
+    });
+    if (shape.lanes && type.value < result->type_count)
+    {
+        type = c_parse_add_type(result, (CType){
+            .element_type = type,
+            .return_type = C_TYPE_ID_INVALID,
+            .unqualified_type = C_TYPE_ID_INVALID,
+            .array_bound = C_ARRAY_BOUND_INVALID,
+            .kind = C_TYPE_VECTOR,
+            .vector_byte_size = (u32)shape.lanes * (shape.kind == C_TYPE_FLOAT ? 4u : 2u),
+            .is_complete = true,
+        });
+    }
+    return type;
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                          u32 base_start, u32 base_end)
 {
@@ -2362,6 +2462,16 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
                 base_type = &result->types[base_type->element_type.value];
             }
             type = base_type->kind == C_TYPE_FUNCTION ? base_type->return_type : C_TYPE_ID_INVALID;
+        }
+        else if (call_base && entity_id.value == C_ID_UNDERLYING_INVALID)
+        {
+            CBfloat16Builtin const* builtin = c_parse_bfloat16_builtin(c_token_spelling(preprocess.spelling_base, preprocess.tokens[base_start]));
+            if (builtin)
+            {
+                c_parse_position_index_append(result->arena, &result->bfloat16_builtin_calls, &result->bfloat16_builtin_call_count,
+                                               &result->bfloat16_builtin_call_capacity, base_start);
+                type = c_parse_bfloat16_builtin_result(result, builtin);
+            }
         }
     }
     else if (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -3126,6 +3236,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
 BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 
+BUSTER_C_INTERNAL bool c_parse_expression_real_kind(CTypeKind kind)
+{
+    bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
+                  kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE;
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -3223,6 +3340,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             u32 question = task->end;
             u32 colon = task->end;
             u32 nested_questions = 0;
+            u32 cast_prefix_close = UINT32_MAX;
             for (u32 index = task->start; !task->operators_checked && index < task->end; index += 1)
             {
                 CToken token = preprocess.tokens[index];
@@ -3233,6 +3351,18 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     if (close >= task->end)
                     {
                         break;
+                    }
+                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                        (index == task->start || index - 1 == cast_prefix_close ||
+                         !c_parse_expression_token_ends_operand(preprocess.tokens[index - 1])))
+                    {
+                        u32 type_index = index + 1;
+                        CTypeId cast = c_parse_machineless_base_type(result, preprocess, scope, index + 1, close, &type_index);
+                        if (cast.value < result->type_count)
+                        {
+                            cast = c_parse_pointer_chain(result, preprocess, cast, &type_index, close);
+                            if (cast.value < result->type_count && type_index == close) cast_prefix_close = close;
+                        }
                     }
                     index = close;
                     continue;
@@ -3256,7 +3386,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     continue;
                 }
                 u32 precedence = c_parse_expression_operator_precedence(token);
-                bool binary = precedence && index > task->start && index + 1 < task->end && c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
+                // The ')' of a cast does not end an operand: in (mask)-1,
+                // '-' remains unary. An ordinary (object)-1 is subtraction.
+                bool binary = precedence && index > task->start && index + 1 < task->end && index - 1 != cast_prefix_close &&
+                              c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
                 bool right_associative = precedence == 2;
                 if (binary && (precedence < best_precedence || (precedence == best_precedence && !right_associative)))
                 {
@@ -3363,6 +3496,16 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 // `last` already holds the operand's type, which is the
                 // increment's whole answer.
+            }
+            else if (result->types[last.value].kind == C_TYPE_VECTOR)
+            {
+                CTypeId element = result->types[last.value].element_type;
+                CTypeKind kind = element.value < result->type_count ? result->types[element.value].kind : C_TYPE_INVALID;
+                bool complement = c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_TILDE);
+                bool valid = complement ? c_parse_expression_integer_kind(kind) : c_parse_expression_real_kind(kind);
+                // GNU vector +/- preserve the vector type, not a promoted
+                // scalar element. This is used by FMA's negated arguments.
+                if (!valid) last = C_TYPE_ID_INVALID;
             }
             else
             {
@@ -3532,6 +3675,136 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         *type_out = machine->result_type;
     }
     return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                                CTypeId type_id, u32 start, u32 end);
+
+BUSTER_C_INTERNAL bool c_parse_bfloat16_builtin_argument(CParseResult* result, CTypeId type_id, CBfloat16BuiltinType expected)
+{
+    CType const* type = type_id.value < result->type_count ? result->types + type_id.value : 0;
+    bool valid = type != 0;
+    if (valid && expected.pointer)
+    {
+        valid = (type->kind == C_TYPE_POINTER || type->kind == C_TYPE_ARRAY) && type->element_type.value < result->type_count;
+        type = valid ? result->types + type->element_type.value : 0;
+    }
+    if (valid && type->kind == C_TYPE_VOID && expected.pointer)
+    {
+        // C permits conversion between void pointers and object pointers.
+        valid = true;
+    }
+    else if (valid && expected.lanes)
+    {
+        valid = type->kind == C_TYPE_VECTOR && type->element_type.value < result->type_count &&
+                type->vector_byte_size == (u32)expected.lanes * (expected.kind == C_TYPE_FLOAT ? 4u : 2u);
+        if (valid)
+        {
+            CTypeKind element = result->types[type->element_type.value].kind;
+            // Clang's C GNU-vector conversions admit same-sized arithmetic
+            // vectors by value (including half/integer vectors), not a scalar
+            // splat. Pointers must still point to the declared element format.
+            valid = expected.pointer ? element == expected.kind : c_parse_expression_real_kind(element);
+        }
+    }
+    else if (valid)
+    {
+        valid = expected.pointer ? type->kind == expected.kind : c_parse_expression_real_kind(type->kind);
+    }
+    return valid;
+}
+
+// The binder collects only known target-builtin uses. There is no extra scan
+// over a translation unit with no such calls, and checking a nested argument
+// reuses the existing explicit type-query machine rather than recursing.
+BUSTER_C_INTERNAL void c_parse_validate_bfloat16_builtin_calls(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                               CPreprocessResult preprocess)
+{
+    u8* checked = result->bfloat16_builtin_call_count ? arena_allocate_zeroed(arena, u8, preprocess.token_count / 8 + 1) : 0;
+    if (result->bfloat16_builtin_call_count && !checked)
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[result->bfloat16_builtin_calls[0]]),
+                           C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("insufficient memory for target builtin validation"));
+    }
+    for (u32 call = 0; checked && call < result->bfloat16_builtin_call_count; call += 1)
+    {
+        u32 token_index = result->bfloat16_builtin_calls[call];
+        u8 bit = (u8)(1u << (token_index & 7));
+        if (checked[token_index / 8] & bit) continue;
+        checked[token_index / 8] |= bit;
+        String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
+        CBfloat16Builtin const* builtin = c_parse_bfloat16_builtin(name);
+        u32 open = token_index + 1;
+        u32 close = open < preprocess.token_count && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                        ? c_parse_matching_delimiter_indexed(result, preprocess, open) : UINT32_MAX;
+        String8 message = {0};
+        if (!builtin || close == UINT32_MAX || close >= preprocess.token_count)
+        {
+            message = S8("target builtin must be called with a complete argument list");
+        }
+        else
+        {
+            u32 starts[4] = {0};
+            u32 ends[4] = {0};
+            u32 argument_count = 0;
+            u32 start = open + 1;
+            for (u32 token = start; token <= close; token += 1)
+            {
+                CToken current = preprocess.tokens[token];
+                if (token == close || c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+                {
+                    if (token != start || token != close || argument_count)
+                    {
+                        if (argument_count < BUSTER_ARRAY_LENGTH(starts))
+                        {
+                            starts[argument_count] = start;
+                            ends[argument_count] = token;
+                        }
+                        argument_count += 1;
+                    }
+                    start = token + 1;
+                }
+                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                         c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET) ||
+                         c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    u32 nested = c_parse_matching_delimiter_indexed(result, preprocess, token);
+                    if (nested < close) token = nested;
+                }
+            }
+            if (argument_count != builtin->parameter_count)
+            {
+                message = c_semantic_call_arity_message(arena, name, builtin->parameter_count, false, argument_count);
+            }
+            else
+            {
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, token_index);
+                for (u32 argument = 0; argument < argument_count && !message.length; argument += 1)
+                {
+                    CTypeId type = C_TYPE_ID_INVALID;
+                    bool valid = starts[argument] < ends[argument] &&
+                                 c_parse_expression_type_query(machine, arena, preprocess, result, scope, starts[argument], ends[argument], &type);
+                    if (valid)
+                    {
+                        CBfloat16BuiltinType expected = builtin->types[argument + 1];
+                        valid = c_parse_bfloat16_builtin_argument(result, type, expected) ||
+                                (expected.pointer && type.value < result->type_count &&
+                                 (result->types[type.value].kind == C_TYPE_NULLPTR ||
+                                  c_parse_range_is_null_pointer_constant(arena, preprocess, result, scope, type, starts[argument], ends[argument])));
+                    }
+                    if (!valid)
+                    {
+                        message = string_format(arena, S8("incompatible type for argument {u32} of target builtin '{S8}'"), argument + 1, name);
+                    }
+                }
+            }
+        }
+        if (message.length)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token_index]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+        }
+    }
 }
 
 BUSTER_C_INTERNAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -12129,6 +12402,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                                       CEntityId entity)
 {
     CToken token = preprocess.tokens[token_index];
+    bool first_use = token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index];
     BUSTER_VALIDATE(result->identifier_use_count < result->identifier_use_capacity);
     u32 use_index = result->identifier_use_count++;
     result->identifier_uses[use_index] = (CIdentifierUse){
@@ -12148,6 +12422,11 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
     if (entity.value == C_ID_UNDERLYING_INVALID)
     {
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        if (first_use && c_parse_bfloat16_builtin(spelling))
+        {
+            c_parse_position_index_append(arena, &result->bfloat16_builtin_calls, &result->bfloat16_builtin_call_count,
+                                           &result->bfloat16_builtin_call_capacity, token_index);
+        }
         bool predefined_function_name = string_equal(spelling, S8("__func__")) || string_equal(spelling, S8("__FUNCTION__")) ||
                                         string_equal(spelling, S8("__PRETTY_FUNCTION__")) || string_equal(spelling, S8("__builtin_va_start")) ||
                                         string_equal(spelling, S8("__va_start")) || string_equal(spelling, S8("__builtin_va_arg")) ||
@@ -16567,6 +16846,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         .value = 0,
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
+    c_parse_validate_bfloat16_builtin_calls(&machine, arena, &result, preprocess);
     scratch_end(machine_temporary);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     return result;
