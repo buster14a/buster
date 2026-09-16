@@ -8946,7 +8946,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
             state->prefer_frame = true;
             state->epoch += 1;
         }
-        else if (state->frame_valid && virtual_register < function->virtual_register_count &&
+        else if (state->frame_valid && virtual_register < function->virtual_register_count && offset != MACHINE_VIRTUAL_REGISTER_NO_HOME &&
                  offset == placement->virtual_register_offsets[virtual_register])
         {
             state->frame_valid = false;
@@ -9064,8 +9064,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction co
     {
         return false;
     }
+    // A homeless register is a value without a frame location, not invalid IR:
+    // rows that would select its frame copy stay unavailable.
+    u32 home = placement->virtual_register_offsets[payload];
     s32 frame_offset = 0;
-    if (!codegen_machine_debug_frame_offset(placement->virtual_register_offsets[payload], frame_base_offset, target, &frame_offset))
+    if (home != MACHINE_VIRTUAL_REGISTER_NO_HOME && !codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset))
     {
         return false;
     }
@@ -9149,7 +9152,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction co
                                              selected_register, &selected_invalid);
             edit_cursor += 1;
         }
-        if (!selected_invalid && selected_frame)
+        if (!selected_invalid && selected_frame && home != MACHINE_VIRTUAL_REGISTER_NO_HOME)
         {
             rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_FRAME, .frame_offset = frame_offset};
             available[row] = true;
@@ -10306,8 +10309,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 scheduled_saved_registers = 0;
                         for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
                         {
-                            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
-                            scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
+                            placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
+                            scheduled_saved_registers += (u32)((scheduled_placement.callee_saved_mask >> physical_register) & 1u);
                         }
                         if (scheduled_placement.valid &&
                             scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
@@ -10371,7 +10374,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u32 machine_saved_register_count = 0;
                             for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                             {
-                                machine_saved_register_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                                machine_saved_register_count += (u32)((placement.callee_saved_mask >> saved_register) & 1u);
                             }
                             u32 machine_frame_total = placement.frame_size + 16u + 8u * machine_saved_register_count;
                             u32 machine_frame_chunks = machine_frame_total / A64_SP_ADJUST_CHUNK +
@@ -10397,7 +10400,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_push_count = 0;
                         for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                         {
-                            machine_push_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                            machine_push_count += (u32)((placement.callee_saved_mask >> saved_register) & 1u);
                         }
                         u32 machine_frame_area = placement.frame_size + 8 * machine_push_count;
                         bool machine_windows_frame = selected.function.windows_aarch64_frame;
