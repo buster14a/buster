@@ -1,0 +1,213 @@
+name: Issue 667 isolated validation
+
+on:
+  push:
+    branches: [automation/issue-667-validation]
+    paths: [.github/workflows/issue-667-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-667-isolated-validation
+  cancel-in-progress: false
+
+env:
+  BASE_SHA: 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
+  SOURCE_FILE: src/buster/lib/compiler/codegen/machine_x86_64.c
+
+jobs:
+  prepare:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/automation/issue-667-validation' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.patch.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
+      - name: Publish exactly the one-line cleanup on its own branch
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=fix/issue-667-cmpxchg16b-store
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          test "$(git hash-object "$SOURCE_FILE")" = 39997d56fac9fba58a5f601c97874ccd3b8aeeff
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path(os.environ['SOURCE_FILE'])
+          before = path.read_bytes()
+          store = b'            selector->atomic_success_registers[instruction->result.value] = success_register;\n'
+          assert before.count(store + store) == 1, 'duplicate must occur exactly once'
+          path.write_bytes(before.replace(store + store, store, 1))
+          PY
+          git diff --check
+          test "$(git diff --numstat)" = "$(printf '0\t1\t%s' "$SOURCE_FILE")"
+          git switch -c "$branch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "$SOURCE_FILE"
+          git commit -m 'codegen: remove duplicate CMPXCHG16B success-register store'
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'candidate=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git show --format=fuller --stat HEAD
+
+  validate:
+    needs: prepare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_SHA: ${{ needs.prepare.outputs.candidate }}
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CFLAGS: -Wno-invalid-feature-combination
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare a header-free CX16 probe and record provenance
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/issue667"
+          mkdir -p "$evidence"
+          printf 'base=%s\ncandidate=%s\n' "$BASE_SHA" "$CANDIDATE_SHA" > "$evidence/provenance.txt"
+          clang --version | tee -a "$evidence/provenance.txt"
+          uname -a | tee -a "$evidence/provenance.txt"
+          lscpu >> "$evidence/provenance.txt"
+          git diff "$BASE_SHA" "$CANDIDATE_SHA" > "$evidence/change.patch"
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          cat > "$evidence/cmpxchg16.c" <<'C'
+          int atomic_cmpxchg16(_Atomic(unsigned __int128)* object,
+                              unsigned __int128 expected,
+                              unsigned __int128 desired)
+          {
+              return __c11_atomic_compare_exchange_strong(object, &expected, desired,
+                                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          }
+          C
+          cat > "$evidence/compile-probe.sh" <<'SH'
+          set -euo pipefail
+          stage="$1"
+          evidence="$RUNNER_TEMP/issue667"
+          mkdir -p "$evidence/$stage"
+          for allocator in mir-stack fast quality; do
+            for frontend in ssa memory; do
+              flag=-ffrontend-ssa
+              if test "$frontend" = memory; then flag=-fno-frontend-ssa; fi
+              prefix="$evidence/$stage/$allocator-$frontend"
+              build/Release/ide cc -target x86_64-unknown-linux -mcpu=baseline -mattr=+cx16 \
+                "-fregister-allocator=$allocator" -fno-machine-fallback "$flag" \
+                "-fbootstrap-trace=$prefix" -c "$evidence/cmpxchg16.c" \
+                -o build/issue667-cmpxchg16.o -v > "$prefix.log" 2>&1
+              cp build/issue667-cmpxchg16.o "$prefix.o"
+              objdump -d "$prefix.o" > "$prefix.disassembly"
+              grep -q 'cmpxchg16b' "$prefix.disassembly"
+              for phase in tokens ir mir; do
+                test "$(tail -c 8 "$prefix.$phase")" = BSTREND1
+              done
+              sha256sum "$prefix.o" "$prefix.tokens" "$prefix.ir" "$prefix.mir"
+            done
+          done
+          SH
+      - name: Restore exact baseline source and build Release
+        id: baseline_build
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/issue667/baseline-build.log") 2>&1
+          git checkout "$BASE_SHA" -- "$SOURCE_FILE"
+          test "$(git write-tree)" = "$(git rev-parse "$BASE_SHA^{tree}")"
+          # This is the documented GitHub-hosted Clang bootstrap exception,
+          # not a canonical local TCC bootstrap or a reusable trusted artifact.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Baseline self-host fixed point
+        id: baseline_self_host
+        if: ${{ !cancelled() && steps.baseline_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/issue667/baseline-self-host.log"
+      - name: Baseline selection and object evidence
+        id: baseline_trace
+        if: ${{ !cancelled() && steps.baseline_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/issue667/compile-probe.sh" before 2>&1 | tee "$RUNNER_TEMP/issue667/baseline-hashes.log"
+      - name: Restore exact candidate source and rebuild Release
+        id: candidate_build
+        if: ${{ !cancelled() && steps.baseline_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/issue667/candidate-build.log") 2>&1
+          git checkout "$CANDIDATE_SHA" -- "$SOURCE_FILE"
+          git diff --exit-code HEAD
+          test "$(git write-tree)" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Require byte-identical tokens IR selected MIR and object output
+        id: comparison
+        if: ${{ !cancelled() && steps.baseline_trace.outcome == 'success' && steps.candidate_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/issue667"
+          bash "$evidence/compile-probe.sh" after 2>&1 | tee "$evidence/candidate-hashes.log"
+          for allocator in mir-stack fast quality; do
+            for frontend in ssa memory; do
+              for phase in tokens ir mir o; do
+                cmp "$evidence/before/$allocator-$frontend.$phase" "$evidence/after/$allocator-$frontend.$phase"
+                printf 'IDENTICAL %s %s %s\n' "$allocator" "$frontend" "$phase" | tee -a "$evidence/comparison.log"
+              done
+            done
+          done
+      - name: Candidate Release test_all including registered machine CAS regressions
+        id: test_all
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/issue667/release-test-all.log"
+      - name: Candidate self-host fixed point
+        id: candidate_self_host
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/issue667/candidate-self-host.log"
+      - name: Candidate execution-mode matrix
+        id: mode_matrix
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/issue667/mode-matrix.log"
+      - name: Record exact gate outcomes
+        if: ${{ always() }}
+        shell: bash
+        env:
+          STEP_OUTCOMES: ${{ toJSON(steps) }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/issue667"
+          printf '%s\n' "$STEP_OUTCOMES" > "$RUNNER_TEMP/issue667/step-outcomes.json"
+          printf 'Base: %s\nCandidate: %s\nNo throughput claim. The PR branch contains only the duplicate-store deletion.\n' "$BASE_SHA" "$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: issue-667-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue667/
+          if-no-files-found: error
+          retention-days: 7
