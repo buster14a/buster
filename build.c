@@ -21,6 +21,9 @@
 //   test_timing_summary_*                        summaries
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
+//   matrix_coverage_*                            authoritative desktop
+//                                                expected/detected/executed
+//                                                coverage and lane policy
 //   xed_import_*, assembly_import_*              x86 metadata importer (XED)
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
@@ -117,6 +120,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
+    BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
     BUILD_COMMAND_COUNT,
 } BuildCommand;
 
@@ -21972,6 +21976,8 @@ struct MatrixTestTree
     u32 combination_count;
     u32 parallel_jobs;
     u32 unity_only : 1;
+    u32 unity_analysis_scheduled : 1;
+    u32 table_audit_scheduled : 1;
 };
 
 typedef struct MatrixSuperbuildSelfHostPlan MatrixSuperbuildSelfHostPlan;
@@ -21990,6 +21996,948 @@ struct MatrixSuperbuildSelfHostPlan
     u32 uses_inner_ninja : 1;
     u32 producer_clean_required : 1;
 };
+
+#define MATRIX_COVERAGE_MAX_ROWS 32
+#define MATRIX_COVERAGE_MAX_TREES (BUILD_COMPILER_COUNT * 2)
+#define MATRIX_COVERAGE_POLICY_VERSION 1
+typedef struct MatrixCoverageTarget MatrixCoverageTarget;
+struct MatrixCoverageTarget
+{
+    String8 platform, architecture;
+    u32 windows : 1, apple : 1, aarch64 : 1;
+};
+typedef struct MatrixCoverageLane MatrixCoverageLane;
+struct MatrixCoverageLane
+{
+    String8 lane_id, suite, shard, platform, architecture;
+    String8 source_revision, repository, ref, run_id, run_attempt;
+    String8 source_path, source_hash, driver_path, driver_hash;
+};
+typedef struct MatrixCoverageRow MatrixCoverageRow;
+struct MatrixCoverageRow
+{
+    String8 id, configuration, execution, exclusion;
+    BuildCompiler compiler;
+    u32 optimize : 1, sanitize : 1, fuzz : 1, unity : 1;
+};
+typedef struct MatrixCoverageTreePlan MatrixCoverageTreePlan;
+struct MatrixCoverageTreePlan
+{
+    BuildCompiler compiler;
+    u32 row_indices[2];
+    String8 configuration_types;
+    u32 row_count, first_optimize, optimize_count;
+    u32 sanitize : 1, fuzz_available : 1;
+};
+typedef struct MatrixCoveragePlan MatrixCoveragePlan;
+struct MatrixCoveragePlan
+{
+    MatrixCoverageRow rows[MATRIX_COVERAGE_MAX_ROWS];
+    MatrixCoverageTreePlan trees[MATRIX_COVERAGE_MAX_TREES];
+    u32 row_count, tree_count, required_count, policy_row_count, policy_required_count;
+    u64 policy_fingerprint;
+};
+typedef struct MatrixCoverageCapability MatrixCoverageCapability;
+struct MatrixCoverageCapability
+{
+    String8 path, executable_hash, identity, target, version, reason;
+    u32 available : 1;
+};
+typedef struct MatrixCoverageObligations MatrixCoverageObligations;
+struct MatrixCoverageObligations
+{
+    String8 self_host_state, self_host_reason, fixed_point_state, fixed_point_reason;
+    String8 unity_analysis_state, unity_analysis_reason, table_audit_state, table_audit_reason;
+    u32 self_host_scheduled : 1, fixed_point_scheduled : 1, unity_analysis_scheduled : 1, table_audit_scheduled : 1;
+};
+typedef struct MatrixCoverageManifest MatrixCoverageManifest;
+struct MatrixCoverageManifest
+{
+    MatrixCoverageLane lane;
+    MatrixCoveragePlan plan;
+    MatrixCoverageCapability capabilities[BUILD_COMPILER_COUNT];
+    MatrixCoverageObligations obligations;
+    String8 mode, output_path;
+    u32 capability_probe_count;
+};
+BUSTER_GLOBAL_LOCAL MatrixCoverageTarget matrix_coverage_target_current(void)
+{
+    MatrixCoverageTarget result = {
+#if BUSTER_WINDOWS
+        .platform = S8("windows"),
+#elif BUSTER_MACOS
+        .platform = S8("macos"),
+#elif BUSTER_LINUX
+        .platform = S8("linux"),
+#else
+        .platform = S8("unknown"),
+#endif
+#if BUSTER_CPU_ARCH_X86_64
+        .architecture = S8("x86_64"),
+#elif BUSTER_CPU_ARCH_AARCH64
+        .architecture = S8("aarch64"),
+#else
+        .architecture = S8("unknown"),
+#endif
+        .windows = BUSTER_WINDOWS,
+        .apple = BUSTER_APPLE,
+        .aarch64 = BUSTER_CPU_ARCH_AARCH64,
+    };
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_environment_value(String8 name)
+{
+    String8 result = os_get_environment_variable(name);
+    if (!result.length)
+    {
+        result = S8("local");
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_json_escape(Arena* arena, String8 value)
+{
+    u64 start = arena->position;
+    arena_append_json_string(arena, value);
+    String8 result = {.pointer = (char8*)arena_get_byte_pointer_at_position(arena, start), .length = arena->position - start};
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_sha256_file(Arena* arena, String8 path, String8* digest)
+{
+    String8 path_z = string_duplicate_arena(arena, path, true);
+    String8 absolute = os_path_absolute(arena, path_z, true);
+    FileMapRead map = file_map_read(arena, absolute, (FileReadOptions){.map_required = 1});
+    bool result = absolute.length && map.mapped_pointer && map.bytes.pointer && map.bytes.length;
+    if (result)
+    {
+        Sha256 hash = {0};
+        char8 digest_buffer[SHA256_HEX_CAPACITY] = {0};
+        sha256_init(&hash);
+        sha256_add(&hash, map.bytes.pointer, map.bytes.length);
+        sha256_finish_hex(&hash, digest_buffer);
+        *digest = string_duplicate_arena(arena, string_from_pointer(digest_buffer), true);
+    }
+    file_map_unmap(map);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_hash_or_unavailable(Arena* arena, String8 path)
+{
+    String8 result = {0};
+    if (!matrix_coverage_sha256_file(arena, path, &result))
+    {
+        result = S8("unavailable");
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL MatrixCoverageLane matrix_coverage_lane_create(Arena* arena)
+{
+    MatrixCoverageTarget target = matrix_coverage_target_current();
+    MatrixCoverageLane result = {
+        .suite = S8("desktop"),
+        .shard = S8("combinations"),
+        .platform = target.platform,
+        .architecture = target.architecture,
+        .source_revision = matrix_coverage_environment_value(S8("GITHUB_SHA")),
+        .repository = matrix_coverage_environment_value(S8("GITHUB_REPOSITORY")),
+        .ref = matrix_coverage_environment_value(S8("GITHUB_REF")),
+        .run_id = matrix_coverage_environment_value(S8("GITHUB_RUN_ID")),
+        .run_attempt = matrix_coverage_environment_value(S8("GITHUB_RUN_ATTEMPT")),
+        .source_path = os_path_absolute(arena, S8("build.c"), true),
+        .driver_path = build_running_driver(arena),
+    };
+    result.source_hash = matrix_coverage_hash_or_unavailable(arena, result.source_path);
+    result.driver_hash = matrix_coverage_hash_or_unavailable(arena, result.driver_path);
+    result.lane_id = string_format(arena, S8("{S8}/{S8}/{S8}/{S8}/source={S8}/run={S8}/attempt={S8}"), result.suite, result.shard,
+                                   result.platform, result.architecture, result.source_revision, result.run_id, result.run_attempt);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_add_row(Arena* arena, MatrixCoveragePlan* plan, MatrixCoverageLane lane,
+                                                       BuildCompiler compiler, String8 configuration, bool optimize, bool sanitize,
+                                                       bool fuzz, bool unity, String8 execution, String8 exclusion)
+{
+    bool result = plan->row_count < BUSTER_ARRAY_LENGTH(plan->rows);
+    if (result)
+    {
+        MatrixCoverageRow* row = &plan->rows[plan->row_count];
+        *row = (MatrixCoverageRow){
+            .id = string_format(arena, S8("{S8}/{S8}/{S8}/{S8}/compiler={S8}/configuration={S8}/sanitize={S8}/fuzz={S8}/unity={S8}/execution={S8}"),
+                                 lane.suite, lane.shard, lane.platform, lane.architecture, build_compilers[compiler], configuration,
+                                 sanitize ? S8("on") : S8("off"), fuzz ? S8("on") : S8("off"), unity ? S8("on") : S8("off"), execution),
+            .configuration = configuration, .execution = execution, .exclusion = exclusion, .compiler = compiler,
+            .optimize = optimize, .sanitize = sanitize, .fuzz = fuzz, .unity = unity,
+        };
+        plan->row_count += 1;
+        if (!exclusion.length)
+        {
+            plan->required_count += 1;
+        }
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_add_tree(Arena* arena, MatrixCoveragePlan* plan, MatrixCoverageLane lane,
+                                                        BuildCompiler compiler, bool sanitize, bool fuzz_available,
+                                                        u32 first_optimize, u32 optimize_count)
+{
+    MatrixCoverageTreePlan tree = {
+        .compiler = compiler,
+        .configuration_types = optimize_count > 1 ? S8("Debug;Release") : (first_optimize ? S8("Release") : S8("Debug")),
+        .first_optimize = first_optimize, .optimize_count = optimize_count, .sanitize = sanitize, .fuzz_available = fuzz_available,
+    };
+    bool result = plan->tree_count < BUSTER_ARRAY_LENGTH(plan->trees) && optimize_count <= BUSTER_ARRAY_LENGTH(tree.row_indices);
+    for (u32 optimize_i = 0; result && optimize_i < optimize_count; optimize_i += 1)
+    {
+        bool optimize = first_optimize + optimize_i;
+        String8 configuration = optimize ? S8("Release") : S8("Debug");
+        bool fuzz = fuzz_available && ((sanitize && !optimize) || (!sanitize && optimize));
+        bool unity = compiler == BUILD_COMPILER_CLANG && !sanitize && optimize;
+        u32 row_index = plan->row_count;
+        result = matrix_coverage_plan_add_row(arena, plan, lane, compiler, configuration, optimize, sanitize, fuzz, unity,
+                                              compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link"), S8(""));
+        if (result)
+        {
+            tree.row_indices[tree.row_count++] = row_index;
+        }
+    }
+    if (result)
+    {
+        plan->trees[plan->tree_count++] = tree;
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_add_exclusion(Arena* arena, MatrixCoveragePlan* plan, MatrixCoverageLane lane,
+                                                             BuildCompiler compiler, String8 configuration, bool sanitize, bool fuzz,
+                                                             String8 reason)
+{
+    bool optimize = string_equal(configuration, S8("Release"));
+    bool unity = compiler == BUILD_COMPILER_CLANG && optimize && !sanitize;
+    bool result = matrix_coverage_plan_add_row(arena, plan, lane, compiler, configuration, optimize, sanitize, fuzz, unity, S8("none"), reason);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_validate(MatrixCoveragePlan* plan);
+
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_sanitizer_exclusion_reason(BuildCompiler compiler)
+{
+    String8 result = compiler == BUILD_COMPILER_CL ? S8("msvc-sanitizer-not-in-combination-matrix") :
+                     S8("non-clang-sanitizer-not-in-combination-matrix");
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_fuzz_exclusion_reason(MatrixCoverageTarget target, BuildCompiler compiler)
+{
+    String8 result = {0};
+    if (compiler != BUILD_COMPILER_CLANG)
+    {
+        result = compiler == BUILD_COMPILER_CL ? S8("msvc-fuzz-not-in-combination-matrix") :
+                                                 S8("non-clang-fuzz-not-in-combination-matrix");
+    }
+    else
+    {
+        result = target.apple ? S8("apple-fuzzer-runtime-unavailable") : S8("windows-aarch64-fuzzer-runtime-unavailable");
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_sanitizer_runtime_reason(MatrixCoverageTarget target)
+{
+    String8 result = target.windows && target.aarch64 ? S8("windows-aarch64-sanitizer-runtime-unavailable") :
+                                                         S8("sanitizer-runtime-unavailable-on-runner");
+    return result;
+}
+BUSTER_GLOBAL_LOCAL u64 matrix_coverage_policy_fingerprint(MatrixCoveragePlan* plan)
+{
+    u64 hash = 1469598103934665603ULL;
+    hash = build_artifact_fanout_hash_string(hash, S8("matrix-policy-v1"));
+    for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = plan->rows[row_i];
+        hash = build_artifact_fanout_hash_string(hash, row.id);
+        hash = build_artifact_fanout_hash_string(hash, row.exclusion);
+    }
+    return hash;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_build_for_target(Arena* arena, MatrixCoveragePlan* plan, MatrixCoverageLane lane,
+                                                               MatrixCoverageTarget target)
+{
+    bool result = true;
+    bool windows_arm = target.windows && target.aarch64;
+    BuildCompiler first_compiler = target.windows ? BUILD_COMPILER_CL : BUILD_COMPILER_CLANG;
+    for (BuildCompiler compiler = first_compiler; compiler < BUILD_COMPILER_COUNT; compiler += 1)
+    {
+        bool unsupported_compiler = windows_arm && compiler > BUILD_COMPILER_CLANG;
+        bool is_clang = compiler == BUILD_COMPILER_CLANG;
+        bool fuzz_supported = is_clang && !target.apple && !windows_arm;
+        bool support_sanitize = is_clang && !windows_arm;
+        if (unsupported_compiler)
+        {
+            // Windows ARM64 intentionally publishes these rows as separate
+            // exclusions: the installed lane toolchain does not provide a
+            // verified GCC/Zig target, so this is not a generic compiler
+            // capability omission that could be confused with another host.
+            String8 reason = S8("windows-aarch64-compiler-target-unavailable");
+            result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Debug"), false, false, reason) && result;
+            result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Release"), false, false, reason) && result;
+        }
+        else
+        {
+            if (!is_clang)
+            {
+                result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Release"), false, false, S8("non-clang-portability-debug-only")) && result;
+                for (u32 optimize = 0; optimize < 2; optimize += 1)
+                {
+                    String8 configuration = optimize ? S8("Release") : S8("Debug");
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, configuration, true, false, matrix_coverage_sanitizer_exclusion_reason(compiler)) && result;
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, configuration, true, true, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && result;
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, configuration, false, true, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && result;
+                }
+            }
+            if (is_clang)
+            {
+                String8 debug_reason = support_sanitize ? S8("sanitized-debug-covers-unsanitized-debug") :
+                                                          S8("windows-aarch64-clang-debug-unavailable");
+                result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Debug"), false, false, debug_reason) && result;
+                if (!support_sanitize)
+                {
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Debug"), true, false, matrix_coverage_sanitizer_runtime_reason(target)) && result;
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Release"), true, false, matrix_coverage_sanitizer_runtime_reason(target)) && result;
+                }
+                if (!fuzz_supported)
+                {
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Release"), false, true, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && result;
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Debug"), true, true, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && result;
+                    result = matrix_coverage_plan_add_exclusion(arena, plan, lane, compiler, S8("Release"), true, true, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && result;
+                }
+            }
+
+            for (u32 sanitize = 0; sanitize < 1u + support_sanitize; sanitize += 1)
+            {
+                u32 first_optimize = is_clang && !sanitize ? 1 : 0;
+                u32 optimize_count = is_clang && sanitize ? 2 : 1;
+                bool split_configs = fuzz_supported && optimize_count > 1;
+                u32 tree_count = split_configs ? optimize_count : 1;
+                for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+                {
+                    u32 tree_first_optimize = split_configs ? first_optimize + tree_i : first_optimize;
+                    u32 tree_optimize_count = split_configs ? 1 : optimize_count;
+                    bool fuzz_available = fuzz_supported && ((sanitize && !tree_first_optimize) || (!sanitize && tree_first_optimize));
+                    result = matrix_coverage_plan_add_tree(arena, plan, lane, compiler, sanitize, fuzz_available, tree_first_optimize, tree_optimize_count) && result;
+                }
+            }
+        }
+    }
+    plan->policy_row_count = plan->row_count;
+    plan->policy_required_count = plan->required_count;
+    plan->policy_fingerprint = matrix_coverage_policy_fingerprint(plan);
+    result = result && matrix_coverage_plan_validate(plan);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_plan_validate(MatrixCoveragePlan* plan)
+{
+    bool result = plan->row_count && plan->tree_count && plan->required_count;
+    if (plan->policy_row_count)
+        result = result && plan->row_count == plan->policy_row_count && plan->required_count == plan->policy_required_count;
+    if (plan->policy_fingerprint)
+        result = result && matrix_coverage_policy_fingerprint(plan) == plan->policy_fingerprint;
+    u32 scheduled_count = 0;
+    bool scheduled[MATRIX_COVERAGE_MAX_ROWS] = {0};
+    for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = plan->rows[row_i];
+        result = result && row.id.length && row.configuration.length && row.execution.length;
+        result = result && row.compiler < BUILD_COMPILER_COUNT;
+        result = result && row.optimize == string_equal(row.configuration, S8("Release"));
+        for (u32 previous_i = 0; previous_i < row_i; previous_i += 1)
+            result = result && !string_equal(row.id, plan->rows[previous_i].id);
+        result = result && string_equal(row.execution, row.exclusion.length ? S8("none") :
+                                                      (row.compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link")));
+    }
+    for (u32 tree_i = 0; tree_i < plan->tree_count; tree_i += 1)
+    {
+        MatrixCoverageTreePlan tree = plan->trees[tree_i];
+        result = result && tree.configuration_types.length && tree.row_count && tree.row_count <= BUSTER_ARRAY_LENGTH(tree.row_indices);
+        for (u32 tree_row_i = 0; tree_row_i < tree.row_count; tree_row_i += 1)
+        {
+            u32 row_index = tree.row_indices[tree_row_i];
+            MatrixCoverageRow row = row_index < plan->row_count ? plan->rows[row_index] : (MatrixCoverageRow){0};
+            bool expected_fuzz = tree.fuzz_available && ((tree.sanitize && !row.optimize) || (!tree.sanitize && row.optimize));
+            result = result && row_index < plan->row_count && !row.exclusion.length && row.compiler == tree.compiler && row.sanitize == tree.sanitize &&
+                     row.optimize == tree.first_optimize + tree_row_i && row.fuzz == expected_fuzz &&
+                     row.unity == (row.compiler == BUILD_COMPILER_CLANG && !row.sanitize && row.optimize) &&
+                     string_equal(row.execution, row.compiler == BUILD_COMPILER_CLANG ? S8("runtime") : S8("compile-link"));
+            result = result && row_index < BUSTER_ARRAY_LENGTH(scheduled) && !scheduled[row_index];
+            if (row_index < BUSTER_ARRAY_LENGTH(scheduled))
+                scheduled[row_index] = true;
+            scheduled_count += row_index < plan->row_count && !plan->rows[row_index].exclusion.length;
+        }
+    }
+    result = result && scheduled_count == plan->required_count;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_row_exists(MatrixCoveragePlan* plan, BuildCompiler compiler, String8 configuration,
+                                                            bool sanitize, bool fuzz, bool required, String8 reason)
+{
+    bool result = false;
+    for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = plan->rows[row_i];
+        bool state_matches = required ? !row.exclusion.length : string_equal(row.exclusion, reason);
+        result = result || (state_matches && row.compiler == compiler && string_equal(row.configuration, configuration) && row.sanitize == sanitize &&
+                            row.fuzz == fuzz && (row.exclusion.length == 0) == required);
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL MatrixCoverageObligations matrix_coverage_obligations_for_lane(bool direct_matrix, bool fanout_requested,
+                                                                                    MatrixCoveragePlan* plan)
+{
+    MatrixCoverageObligations result = {0};
+    bool self_host_enabled = fanout_requested && !direct_matrix;
+    bool has_unity = false;
+    for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = plan->rows[row_i];
+        has_unity = has_unity || (!row.exclusion.length && row.unity);
+    }
+    result.self_host_scheduled = self_host_enabled;
+    result.fixed_point_scheduled = self_host_enabled;
+    result.self_host_state = self_host_enabled ? S8("scheduled") : S8("not-applicable");
+    result.fixed_point_state = result.self_host_state;
+    result.self_host_reason = self_host_enabled ? S8("canonical-release-fanout") :
+                              (direct_matrix ? S8("direct-matrix-does-not-consume-fanout") :
+                                               S8("superbuild-does-not-consume-fanout"));
+    result.fixed_point_reason = self_host_enabled ? S8("canonical-release-fanout") :
+                                (direct_matrix ? S8("direct-matrix-does-not-run-self-host") :
+                                                 S8("superbuild-does-not-run-self-host"));
+    result.unity_analysis_scheduled = has_unity;
+    result.table_audit_scheduled = has_unity;
+    result.unity_analysis_state = has_unity ? S8("scheduled") : S8("not-applicable");
+    result.unity_analysis_reason = has_unity ? S8("canonical-clang-release") : S8("no-canonical-clang-release");
+    result.table_audit_state = has_unity ? S8("scheduled") : S8("not-applicable");
+    result.table_audit_reason = has_unity ? (direct_matrix ? S8("direct-matrix-default-audit") : S8("canonical-superbuild-tree")) :
+                                        S8("no-canonical-clang-release");
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_ci_table_audit_override_allowed(bool ci, String8 override)
+{
+    return !ci || !override.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_policy_self_test(Arena* arena)
+{
+    MatrixCoverageTarget targets[] = {
+        {.platform = S8("linux"), .architecture = S8("x86_64")},
+        {.platform = S8("linux"), .architecture = S8("aarch64"), .aarch64 = 1},
+        {.platform = S8("macos"), .architecture = S8("x86_64"), .apple = 1},
+        {.platform = S8("macos"), .architecture = S8("aarch64"), .apple = 1, .aarch64 = 1},
+        {.platform = S8("windows"), .architecture = S8("x86_64"), .windows = 1},
+        {.platform = S8("windows"), .architecture = S8("aarch64"), .windows = 1, .aarch64 = 1},
+    };
+    bool result = matrix_coverage_ci_table_audit_override_allowed(false, S8("0")) &&
+                  matrix_coverage_ci_table_audit_override_allowed(true, (String8){0}) &&
+                  !matrix_coverage_ci_table_audit_override_allowed(true, S8("0"));
+    for (u32 target_i = 0; target_i < BUSTER_ARRAY_LENGTH(targets); target_i += 1)
+    {
+        MatrixCoverageTarget target = targets[target_i];
+        MatrixCoverageLane lane = {.suite = S8("desktop"), .shard = S8("combinations"), .platform = target.platform, .architecture = target.architecture};
+        MatrixCoveragePlan plan = {0};
+        bool built = matrix_coverage_plan_build_for_target(arena, &plan, lane, target);
+        bool fuzz_supported = !target.apple && !(target.windows && target.aarch64);
+        bool sanitize_supported = !(target.windows && target.aarch64);
+        u32 expected_rows = 0;
+        u32 expected_required = 0;
+        BuildCompiler first_compiler = target.windows ? BUILD_COMPILER_CL : BUILD_COMPILER_CLANG;
+        for (BuildCompiler compiler = first_compiler; compiler < BUILD_COMPILER_COUNT; compiler += 1)
+        {
+            bool unsupported = target.windows && target.aarch64 && compiler > BUILD_COMPILER_CLANG;
+            bool family = true;
+            if (unsupported)
+            {
+                expected_rows += 2;
+                family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), false, false, false,
+                                                           S8("windows-aarch64-compiler-target-unavailable")) &&
+                         matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), false, false, false,
+                                                           S8("windows-aarch64-compiler-target-unavailable")) && family;
+            }
+            else if (compiler != BUILD_COMPILER_CLANG)
+            {
+                expected_rows += 8;
+                expected_required += 1;
+                family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), false, false, true, S8("")) &&
+                         matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), false, false, false, S8("non-clang-portability-debug-only")) &&
+                         matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, false, false, matrix_coverage_sanitizer_exclusion_reason(compiler)) &&
+                         matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, true, false, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && family;
+            }
+            else
+            {
+                expected_rows += 4;
+                expected_required += 1;
+                family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), false, false, false,
+                                                           sanitize_supported ? S8("sanitized-debug-covers-unsanitized-debug") :
+                                                                                S8("windows-aarch64-clang-debug-unavailable")) &&
+                         matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), false, fuzz_supported, true, S8("")) && family;
+                if (sanitize_supported)
+                {
+                    expected_required += 2;
+                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, fuzz_supported, true, S8("")) &&
+                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, false, true, S8("")) && family;
+                }
+                else
+                {
+                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, false, false, matrix_coverage_sanitizer_runtime_reason(target)) &&
+                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, false, false, matrix_coverage_sanitizer_runtime_reason(target)) && family;
+                }
+                if (!fuzz_supported)
+                {
+                    expected_rows += 3;
+                    family = matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), false, true, false, matrix_coverage_fuzz_exclusion_reason(target, compiler)) &&
+                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Debug"), true, true, false, matrix_coverage_fuzz_exclusion_reason(target, compiler)) &&
+                             matrix_coverage_policy_row_exists(&plan, compiler, S8("Release"), true, true, false, matrix_coverage_fuzz_exclusion_reason(target, compiler)) && family;
+                }
+            }
+            result = result && family;
+        }
+        result = result && built && plan.row_count == expected_rows && plan.required_count == expected_required;
+        MatrixCoverageObligations direct_obligations = matrix_coverage_obligations_for_lane(true, false, &plan);
+        MatrixCoverageObligations superbuild_obligations = matrix_coverage_obligations_for_lane(false, true, &plan);
+        result = result && !direct_obligations.self_host_scheduled && !direct_obligations.fixed_point_scheduled &&
+                 direct_obligations.unity_analysis_scheduled && direct_obligations.table_audit_scheduled &&
+                 string_equal(direct_obligations.self_host_reason, S8("direct-matrix-does-not-consume-fanout")) &&
+                 string_equal(direct_obligations.fixed_point_reason, S8("direct-matrix-does-not-run-self-host")) &&
+                 string_equal(direct_obligations.table_audit_reason, S8("direct-matrix-default-audit"));
+        result = result && superbuild_obligations.self_host_scheduled && superbuild_obligations.fixed_point_scheduled &&
+                 superbuild_obligations.unity_analysis_scheduled && superbuild_obligations.table_audit_scheduled &&
+                 string_equal(superbuild_obligations.self_host_reason, S8("canonical-release-fanout")) &&
+                 string_equal(superbuild_obligations.fixed_point_reason, S8("canonical-release-fanout")) &&
+                 string_equal(superbuild_obligations.table_audit_reason, S8("canonical-superbuild-tree"));
+        MatrixCoverageObligations superbuild_without_fanout = matrix_coverage_obligations_for_lane(false, false, &plan);
+        result = result && !superbuild_without_fanout.self_host_scheduled && !superbuild_without_fanout.fixed_point_scheduled &&
+                 superbuild_without_fanout.unity_analysis_scheduled && superbuild_without_fanout.table_audit_scheduled &&
+                 string_equal(superbuild_without_fanout.self_host_reason, S8("superbuild-does-not-consume-fanout")) &&
+                 string_equal(superbuild_without_fanout.fixed_point_reason, S8("superbuild-does-not-run-self-host"));
+        MatrixCoverageObligations direct_with_fanout = matrix_coverage_obligations_for_lane(true, true, &plan);
+        result = result && !direct_with_fanout.self_host_scheduled && !direct_with_fanout.fixed_point_scheduled &&
+                 string_equal(direct_with_fanout.self_host_reason, S8("direct-matrix-does-not-consume-fanout")) &&
+                 string_equal(direct_with_fanout.fixed_point_reason, S8("direct-matrix-does-not-run-self-host"));
+        MatrixCoveragePlan no_unity_plan = {0};
+        result = matrix_coverage_plan_add_tree(arena, &no_unity_plan, lane, BUILD_COMPILER_GCC, false, false, 0, 1) && result;
+        MatrixCoverageObligations no_unity_obligations = matrix_coverage_obligations_for_lane(false, false, &no_unity_plan);
+        result = result && no_unity_obligations.self_host_state.pointer &&
+                 no_unity_obligations.unity_analysis_state.pointer && !no_unity_obligations.unity_analysis_scheduled &&
+                 !no_unity_obligations.table_audit_scheduled &&
+                 string_equal(no_unity_obligations.unity_analysis_reason, S8("no-canonical-clang-release")) &&
+                 string_equal(no_unity_obligations.table_audit_reason, S8("no-canonical-clang-release"));
+        MatrixCoveragePlan reduced = plan;
+        if (reduced.row_count > 2)
+        {
+            reduced.row_count -= 2;
+            reduced.required_count = reduced.required_count > 0 ? reduced.required_count - 1 : 0;
+            result = result && !matrix_coverage_plan_validate(&reduced);
+
+            // A producer that removes a required and an excluded row must not
+            // be able to rewrite the visible counts and pass. The immutable
+            // policy fingerprint covers the complete row/exclusion set.
+            MatrixCoveragePlan coordinated = plan;
+            bool last_required = !coordinated.rows[coordinated.row_count - 1].exclusion.length;
+            bool previous_required = !coordinated.rows[coordinated.row_count - 2].exclusion.length;
+            coordinated.row_count -= 2;
+            coordinated.required_count = coordinated.required_count - (last_required ? 1 : 0) - (previous_required ? 1 : 0);
+            coordinated.policy_row_count = coordinated.row_count;
+            coordinated.policy_required_count = coordinated.required_count;
+            result = result && !matrix_coverage_plan_validate(&coordinated);
+        }
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_compiler_executable(Arena* arena, BuildCompiler compiler)
+{
+    String8 result = {0};
+    if (compiler <= BUILD_COMPILER_GCC)
+    {
+        result = cmake_cc(arena, compiler);
+    }
+    else if (compiler == BUILD_COMPILER_ZIG)
+    {
+        result = executable_resolve_in_path(arena, S8("zig"));
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_target_contains(String8 value, String8 needle)
+{
+    bool result = false;
+    if (needle.length && value.length >= needle.length)
+    {
+        for (u64 offset = 0; offset + needle.length <= value.length && !result; offset += 1)
+        {
+            result = true;
+            for (u64 i = 0; i < needle.length; i += 1)
+            {
+                if (ascii_to_lower(value.pointer[offset + i]) != ascii_to_lower(needle.pointer[i]))
+                {
+                    result = false;
+                    break;
+                }
+            }
+        }
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_target_matches(MatrixCoverageTarget target, BuildCompiler compiler, String8 observed)
+{
+    bool result = false;
+    if (compiler == BUILD_COMPILER_CL)
+    {
+        // cl.exe does not expose a machine triple. VSCMD_ARG_TGT_ARCH is the
+        // exact selected Visual Studio target and is deliberately required;
+        // /Bv text is version evidence, not a target fallback.
+        result = target.windows && (target.aarch64 ? string_equal_ascii_case_insensitive(observed, S8("arm64")) :
+                                                              string_equal_ascii_case_insensitive(observed, S8("x64")) ||
+                                                              string_equal_ascii_case_insensitive(observed, S8("amd64")));
+    }
+    else
+    {
+        bool architecture_matches = target.aarch64 ? (matrix_coverage_target_contains(observed, S8("aarch64")) ||
+                                                        matrix_coverage_target_contains(observed, S8("arm64"))) :
+                                                        (matrix_coverage_target_contains(observed, S8("x86_64")) ||
+                                                         matrix_coverage_target_contains(observed, S8("x86-64")) ||
+                                                         matrix_coverage_target_contains(observed, S8("amd64")));
+        bool architecture_conflict = target.aarch64 ? (matrix_coverage_target_contains(observed, S8("x86_64")) ||
+                                                         matrix_coverage_target_contains(observed, S8("x86-64")) ||
+                                                         matrix_coverage_target_contains(observed, S8("amd64"))) :
+                                                         (matrix_coverage_target_contains(observed, S8("aarch64")) ||
+                                                          matrix_coverage_target_contains(observed, S8("arm64")));
+        bool platform_matches = target.windows ? (matrix_coverage_target_contains(observed, S8("windows")) ||
+                                                   matrix_coverage_target_contains(observed, S8("mingw")) ||
+                                                   matrix_coverage_target_contains(observed, S8("w64")) ||
+                                                   matrix_coverage_target_contains(observed, S8("msvc"))) :
+                                target.apple ? (matrix_coverage_target_contains(observed, S8("apple")) ||
+                                                 matrix_coverage_target_contains(observed, S8("macos")) ||
+                                                 matrix_coverage_target_contains(observed, S8("darwin"))) :
+                                target.platform.length && string_equal(target.platform, S8("linux")) &&
+                                matrix_coverage_target_contains(observed, S8("linux"));
+        bool platform_conflict = target.windows ? (matrix_coverage_target_contains(observed, S8("apple")) ||
+                                                    matrix_coverage_target_contains(observed, S8("macos")) ||
+                                                    matrix_coverage_target_contains(observed, S8("darwin")) ||
+                                                    matrix_coverage_target_contains(observed, S8("linux"))) :
+                                  target.apple ? (matrix_coverage_target_contains(observed, S8("windows")) ||
+                                                  matrix_coverage_target_contains(observed, S8("mingw")) ||
+                                                  matrix_coverage_target_contains(observed, S8("w64")) ||
+                                                  matrix_coverage_target_contains(observed, S8("msvc")) ||
+                                                  matrix_coverage_target_contains(observed, S8("linux"))) :
+                                  (matrix_coverage_target_contains(observed, S8("windows")) ||
+                                   matrix_coverage_target_contains(observed, S8("mingw")) ||
+                                   matrix_coverage_target_contains(observed, S8("w64")) ||
+                                   matrix_coverage_target_contains(observed, S8("msvc")) ||
+                                   matrix_coverage_target_contains(observed, S8("apple")) ||
+                                   matrix_coverage_target_contains(observed, S8("macos")) ||
+                                   matrix_coverage_target_contains(observed, S8("darwin")));
+        result = architecture_matches && !architecture_conflict && platform_matches && !platform_conflict;
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_resolve_executable(Arena* arena, String8 path)
+{
+    String8 result = path.length ? os_path_absolute(arena, path, true) : (String8){0};
+    if (!result.length || !path_exists(arena, result))
+    {
+        result = (String8){0};
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_process_query(Arena* arena, SliceString8 arguments, bool prefer_standard_error, String8* output)
+{
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    ProcessWaitResult wait = {0};
+    bool result = spawn.handle != 0;
+    if (result)
+    {
+        wait = os_process_wait_deadline(arena, spawn, 30 * 1000000);
+        result = wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out;
+        String8 standard_output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+        String8 standard_error = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]);
+        String8 selected = prefer_standard_error && standard_error.length ? standard_error :
+                           (standard_output.length ? standard_output : standard_error);
+        *output = build_compiler_output_trim(selected); result = result && output->length;
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_first_line(String8 output)
+{
+    output = build_compiler_output_trim(output);
+    for (u64 i = 0; i < output.length; i += 1)
+    {
+        if (output.pointer[i] == '\r' || output.pointer[i] == '\n')
+        {
+            output.length = i;
+            break;
+        }
+    }
+    return build_compiler_output_trim(output);
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_identity_matches(BuildCompiler compiler, String8 identity)
+{
+    bool result = compiler == BUILD_COMPILER_CL ? string_equal(identity, S8("BUSTER_BUILD_COMPILER_MSVC")) :
+                   compiler == BUILD_COMPILER_CLANG ? string_equal(identity, S8("BUSTER_BUILD_COMPILER_CLANG")) :
+                   compiler == BUILD_COMPILER_GCC ? build_compiler_identity_is_gcc(identity) :
+                   compiler == BUILD_COMPILER_ZIG && string_equal(identity, S8("BUSTER_BUILD_COMPILER_ZIG"));
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_probe(Arena* arena, MatrixCoverageTarget target, BuildCompiler compiler, String8 path,
+                                               MatrixCoverageCapability* capability)
+{
+    BuildCompilerIdentity info = {0};
+    String8 resolved_path = matrix_coverage_resolve_executable(arena, path);
+    bool result = resolved_path.length;
+    if (result && compiler == BUILD_COMPILER_CL)
+    {
+        // cl.exe reports D8003 for a bare /Bv invocation. Keep this probe
+        // source-bearing and preprocessing-only so it succeeds without
+        // creating an object or executable, while /Bv supplies the version
+        // evidence for the exact compiler that the lane selected.
+        String8 arguments[] = {resolved_path, S8("/Bv"), S8("/EP"), S8("/TC"), S8("tests/build_compiler_identity.h")};
+        String8 output = {0};
+        result = matrix_coverage_process_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), true, &output);
+        // /Bv appends compiler-pass paths whose spelling can differ only in
+        // case between the native driver and Python on Windows.  Its first
+        // line is the stable compiler version/target identity we require.
+        output = matrix_coverage_first_line(output);
+        String8 target = os_get_environment_variable(S8("VSCMD_ARG_TGT_ARCH"));
+        info = (BuildCompilerIdentity){.executable = resolved_path, .identity = S8("BUSTER_BUILD_COMPILER_MSVC"), .target = target, .version = output};
+    }
+    else if (result && compiler == BUILD_COMPILER_ZIG)
+    {
+        String8 arguments[] = {resolved_path, S8("version")};
+        String8 target_arguments[] = {resolved_path, S8("cc"), S8("-dumpmachine")};
+        result = matrix_coverage_process_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), false, &info.version);
+        String8 target = {0};
+        result = matrix_coverage_process_query(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_arguments), false, &target) && result;
+        info = (BuildCompilerIdentity){.executable = resolved_path, .identity = S8("BUSTER_BUILD_COMPILER_ZIG"), .target = target, .version = info.version};
+    }
+    else if (result)
+    {
+        result = build_compiler_inspect(arena, resolved_path, &info);
+    }
+    capability->path = resolved_path;
+    capability->executable_hash = matrix_coverage_hash_or_unavailable(arena, resolved_path);
+    capability->identity = info.identity;
+    capability->target = info.target;
+    capability->version = info.version;
+    capability->reason = result ? S8("") : S8("probe-failed");
+    if (result && !matrix_coverage_identity_matches(compiler, capability->identity))
+    {
+        result = false;
+        capability->reason = S8("logical-compiler-mismatch");
+    }
+    if (result && !matrix_coverage_target_matches(target, compiler, capability->target))
+    {
+        result = false;
+        capability->reason = capability->target.length ? S8("target-does-not-match-lane") : S8("target-unavailable");
+    }
+    if (result && string_equal(capability->executable_hash, S8("unavailable")))
+    {
+        result = false;
+        capability->reason = S8("executable-hash-unavailable");
+    }
+    capability->available = result;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_prepare(Arena* arena, MatrixCoveragePlan* plan, MatrixCoverageCapability* capabilities,
+                                                  MatrixCoverageTarget target, u32* capability_count)
+{
+    bool result = true;
+    for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
+    {
+        MatrixCoverageRow* row = &plan->rows[row_i];
+        if (!row->exclusion.length)
+        {
+            MatrixCoverageCapability* capability = &capabilities[row->compiler];
+            if (!capability->identity.length && !capability->reason.length)
+            {
+                *capability_count += 1;
+                matrix_coverage_probe(arena, target, row->compiler, matrix_coverage_compiler_executable(arena, row->compiler), capability);
+            }
+            result = result && capability->available && matrix_coverage_identity_matches(row->compiler, capability->identity);
+        }
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_output_path(Arena* arena)
+{
+    String8 result = os_get_environment_variable(S8("BUSTER_CI_COVERAGE_OUTPUT"));
+    if (!result.length)
+    {
+        result = os_get_environment_variable(S8("BUSTER_CI_COVERAGE_MANIFEST"));
+    }
+    if (!result.length)
+    {
+        String8 runner_temp = os_get_environment_variable(S8("RUNNER_TEMP"));
+        result = runner_temp.length ? path_join(arena, path_join(arena, runner_temp, S8("buster-ci")), S8("coverage.json"))
+                                    : string_format(arena, S8("build/ci-coverage-{u64}.json"), os_get_current_process_id());
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_required_ids(Arena* arena, MatrixCoveragePlan* plan)
+{
+    String8List ids = {0};
+    bool first = true;
+    for (u32 row_i = 0; row_i < plan->row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = plan->rows[row_i];
+        if (!row.exclusion.length)
+        {
+            if (!first)
+            {
+                string8_list_push(arena, &ids, S8(","));
+            }
+            string8_list_push(arena, &ids, matrix_coverage_json_escape(arena, row.id));
+            first = false;
+        }
+    }
+    String8 joined = string_join_arena(arena, string8_list_to_slice(arena, ids), false);
+    String8 result = string_format(arena, S8("[{S8}]"), joined);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_manifest_write(Arena* arena, MatrixCoverageManifest* manifest, bool complete)
+{
+    String8List lines = {0};
+    String8 phase = complete ? S8("complete") : S8("planned");
+    string8_list_push(arena, &lines, S8("{"));
+    string8_list_push(arena, &lines, S8("  \"schema\": 1,"));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"kind\": {S8},"), matrix_coverage_json_escape(arena, S8("desktop-matrix-coverage"))));
+    string8_list_push(arena, &lines, S8("  \"hash_algorithm\": \"sha256\","));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"mode\": {S8},"), matrix_coverage_json_escape(arena, manifest->mode)));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"phase\": {S8},"), matrix_coverage_json_escape(arena, phase)));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"identity\": {{\"lane_id\":{S8},\"suite\":{S8},\"shard\":{S8},\"platform\":{S8},\"architecture\":{S8},\"source_revision\":{S8},\"repository\":{S8},\"ref\":{S8},\"run_id\":{S8},\"run_attempt\":{S8},\"source_path\":{S8},\"source_hash\":{S8},\"driver_path\":{S8},\"driver_hash\":{S8}}},"),
+                                    matrix_coverage_json_escape(arena, manifest->lane.lane_id), matrix_coverage_json_escape(arena, manifest->lane.suite), matrix_coverage_json_escape(arena, manifest->lane.shard),
+                                    matrix_coverage_json_escape(arena, manifest->lane.platform), matrix_coverage_json_escape(arena, manifest->lane.architecture), matrix_coverage_json_escape(arena, manifest->lane.source_revision),
+                                    matrix_coverage_json_escape(arena, manifest->lane.repository), matrix_coverage_json_escape(arena, manifest->lane.ref), matrix_coverage_json_escape(arena, manifest->lane.run_id),
+                                    matrix_coverage_json_escape(arena, manifest->lane.run_attempt), matrix_coverage_json_escape(arena, manifest->lane.source_path),
+                                    matrix_coverage_json_escape(arena, manifest->lane.source_hash), matrix_coverage_json_escape(arena, manifest->lane.driver_path),
+                                    matrix_coverage_json_escape(arena, manifest->lane.driver_hash)));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"capability_probe_count\": {u32},"), manifest->capability_probe_count));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"policy\": {{\"version\":{u32},\"fingerprint\":{S8},\"row_count\":{u32},\"required_count\":{u32},\"excluded_count\":{u32}}},"),
+                                                    MATRIX_COVERAGE_POLICY_VERSION,
+                                                    matrix_coverage_json_escape(arena, string_format(arena, S8("{u64:x,width=[0,16],no_prefix}"), manifest->plan.policy_fingerprint)),
+                                                    manifest->plan.policy_row_count, manifest->plan.policy_required_count,
+                                                    manifest->plan.policy_row_count - manifest->plan.policy_required_count));
+    string8_list_push(arena, &lines, string_format(arena, S8("  \"obligations\": {{\"self_host\":{{\"state\":{S8},\"reason\":{S8}}},\"fixed_point\":{{\"state\":{S8},\"reason\":{S8}}},\"unity_analysis\":{{\"state\":{S8},\"reason\":{S8}}},\"table_audit\":{{\"state\":{S8},\"reason\":{S8}}}}},"),
+                                                    matrix_coverage_json_escape(arena, manifest->obligations.self_host_state), matrix_coverage_json_escape(arena, manifest->obligations.self_host_reason),
+                                                    matrix_coverage_json_escape(arena, manifest->obligations.fixed_point_state), matrix_coverage_json_escape(arena, manifest->obligations.fixed_point_reason),
+                                                    matrix_coverage_json_escape(arena, manifest->obligations.unity_analysis_state), matrix_coverage_json_escape(arena, manifest->obligations.unity_analysis_reason),
+                                                    matrix_coverage_json_escape(arena, manifest->obligations.table_audit_state), matrix_coverage_json_escape(arena, manifest->obligations.table_audit_reason)));
+    string8_list_push(arena, &lines, S8("  \"expected\": ["));
+    for (u32 row_i = 0; row_i < manifest->plan.row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = manifest->plan.rows[row_i];
+        String8 line = string_format(arena, S8("    {{\"id\":{S8},\"compiler\":{S8},\"configuration\":{S8},\"optimize\":{S8},\"sanitize\":{S8},\"fuzz\":{S8},\"unity\":{S8},\"execution\":{S8},\"state\":{S8},\"exclusion\":{S8}}}{S8}"),
+                                     matrix_coverage_json_escape(arena, row.id), matrix_coverage_json_escape(arena, build_compilers[row.compiler]), matrix_coverage_json_escape(arena, row.configuration),
+                                     row.optimize ? S8("true") : S8("false"), row.sanitize ? S8("true") : S8("false"), row.fuzz ? S8("true") : S8("false"), row.unity ? S8("true") : S8("false"),
+                                     matrix_coverage_json_escape(arena, row.execution), matrix_coverage_json_escape(arena, row.exclusion.length ? S8("excluded") : S8("required")),
+                                     matrix_coverage_json_escape(arena, row.exclusion), row_i + 1 < manifest->plan.row_count ? S8(",") : S8(""));
+        string8_list_push(arena, &lines, line);
+    }
+    string8_list_push(arena, &lines, S8("  ],"));
+    string8_list_push(arena, &lines, S8("  \"detected\": ["));
+    for (u32 row_i = 0; row_i < manifest->plan.row_count; row_i += 1)
+    {
+        MatrixCoverageRow row = manifest->plan.rows[row_i];
+        MatrixCoverageCapability capability = {0};
+        if (!row.exclusion.length && row.compiler < BUILD_COMPILER_COUNT)
+        {
+            capability = manifest->capabilities[row.compiler];
+        }
+        String8 line = string_format(arena, S8("    {{\"id\":{S8},\"compiler\":{S8},\"path\":{S8},\"path_hash\":{S8},\"identity\":{S8},\"target\":{S8},\"version\":{S8},\"state\":{S8},\"reason\":{S8}}}{S8}"),
+                                     matrix_coverage_json_escape(arena, row.id), matrix_coverage_json_escape(arena, build_compilers[row.compiler]), matrix_coverage_json_escape(arena, capability.path),
+                                     matrix_coverage_json_escape(arena, capability.executable_hash),
+                                     matrix_coverage_json_escape(arena, capability.identity), matrix_coverage_json_escape(arena, capability.target), matrix_coverage_json_escape(arena, capability.version),
+                                     matrix_coverage_json_escape(arena, row.exclusion.length ? S8("excluded") : (capability.available ? S8("available") : S8("unavailable"))),
+                                     matrix_coverage_json_escape(arena, row.exclusion.length ? row.exclusion : capability.reason), row_i + 1 < manifest->plan.row_count ? S8(",") : S8(""));
+        string8_list_push(arena, &lines, line);
+    }
+    string8_list_push(arena, &lines, S8("  ],"));
+    string8_list_push(arena, &lines, S8("  \"executed\": ["));
+    if (complete)
+    {
+        string8_list_push(arena, &lines,
+                          string_format(arena, S8("    {{\"lane_id\":{S8},\"status\":\"success\",\"evidence\":\"driver-complete\",\"rows\":{S8}}}"),
+                                        matrix_coverage_json_escape(arena, manifest->lane.lane_id), matrix_coverage_required_ids(arena, &manifest->plan)));
+    }
+    string8_list_push(arena, &lines, S8("  ]"));
+    string8_list_push(arena, &lines, S8("}"));
+    string8_list_push(arena, &lines, S8("\n"));
+    String8 json = string_join_arena(arena, string8_list_to_slice(arena, lines), true);
+    make_directory_recursive(arena, path_parent(arena, manifest->output_path));
+    bool result = file_write(manifest->output_path, BUSTER_SLICE_TO_BYTE_SLICE(json));
+    if (!result)
+    {
+        string_print(S8("error: failed to write mandatory desktop coverage manifest: {S8}\n"), manifest->output_path);
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL ProcessResult matrix_coverage_complete_action(Arena* arena, void* data)
+{
+    MatrixCoverageManifest* manifest = data;
+    bool result = matrix_coverage_manifest_write(arena, manifest, true);
+    return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+BUSTER_GLOBAL_LOCAL void matrix_coverage_completion_add(Arena* arena, MatrixCoverageManifest* manifest)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    *run = (ProcessRun){.callback = matrix_coverage_complete_action, .callback_data = manifest};
+}
+BUSTER_GLOBAL_LOCAL ProcessResult matrix_coverage_manifest_self_test(Arena* arena)
+{
+    MatrixCoverageLane lane = matrix_coverage_lane_create(arena);
+    MatrixCoveragePlan plan = {0};
+    bool result = matrix_coverage_policy_self_test(arena);
+    String8 cl_version_fixture = S8("\r\nMicrosoft (R) C/C++ Optimizing Compiler Version 19.44.35214 for ARM64\r\nC:\\BuildTools\\VC\\Tools\\MSVC\\bin\\Hostx64\\arm64\\c1.dll\r\n");
+    result = string_equal(matrix_coverage_first_line(cl_version_fixture),
+                          S8("Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35214 for ARM64")) && result;
+    BuildCompiler fixture_compiler = BUILD_COMPILER_COUNT;
+    BuildCompiler fixture_candidates[] = {BUILD_COMPILER_GCC, BUILD_COMPILER_CLANG, BUILD_COMPILER_CL, BUILD_COMPILER_ZIG};
+    for (u32 candidate_i = 0; candidate_i < BUSTER_ARRAY_LENGTH(fixture_candidates); candidate_i += 1)
+    {
+        BuildCompiler compiler = fixture_candidates[candidate_i];
+        String8 path = matrix_coverage_compiler_executable(arena, compiler);
+        if (fixture_compiler == BUILD_COMPILER_COUNT && path.length)
+        {
+            fixture_compiler = compiler;
+        }
+    }
+    if (fixture_compiler < BUILD_COMPILER_COUNT)
+    {
+        result = matrix_coverage_plan_add_tree(arena, &plan, lane, fixture_compiler, false, false, 0, 1) && result;
+        result = matrix_coverage_plan_add_exclusion(arena, &plan, lane, fixture_compiler, S8("Release"), false, false,
+                                                    S8("self-test-exclusion")) && result;
+        plan.policy_row_count = plan.row_count;
+        plan.policy_required_count = plan.required_count;
+        plan.policy_fingerprint = matrix_coverage_policy_fingerprint(&plan);
+        result = matrix_coverage_plan_validate(&plan) && result;
+    }
+    else
+    {
+        result = false;
+    }
+    String8 self_test_reason = S8("coverage-manifest-self-test-only");
+    MatrixCoverageManifest* manifest = arena_allocate(arena, MatrixCoverageManifest, 1);
+    *manifest = (MatrixCoverageManifest){
+        .lane = lane,
+        .plan = plan,
+        .mode = S8("self-test"),
+        .obligations = {
+            .self_host_state = S8("not-applicable"), .self_host_reason = self_test_reason,
+            .fixed_point_state = S8("not-applicable"), .fixed_point_reason = self_test_reason,
+            .unity_analysis_state = S8("not-applicable"), .unity_analysis_reason = self_test_reason,
+            .table_audit_state = S8("not-applicable"), .table_audit_reason = self_test_reason,
+        },
+        .output_path = matrix_coverage_output_path(arena),
+    };
+    if (fixture_compiler < BUILD_COMPILER_COUNT)
+    {
+        u32 capability_count = 0;
+        result = matrix_coverage_prepare(arena, &manifest->plan, manifest->capabilities, matrix_coverage_target_current(), &capability_count) && result;
+        manifest->capability_probe_count = capability_count;
+    }
+    result = matrix_coverage_manifest_write(arena, manifest, false) && result;
+    result = matrix_coverage_manifest_write(arena, manifest, true) && result;
+    string_print(S8("COVERAGE_MANIFEST_SELF_TEST: {S8} policy_lanes=6 output={S8}\n"), result ? S8("pass") : S8("fail"), manifest->output_path);
+    return result ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
 
 BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_count)
 {
@@ -22418,7 +23366,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         }
 
         String8 analyze_config = {0};
-        for (u32 combination_i = 0; combination_i < tree.combination_count; combination_i += 1)
+        for (u32 combination_i = 0; tree.unity_analysis_scheduled && combination_i < tree.combination_count; combination_i += 1)
         {
             MatrixTestCombination combination = combinations[tree.combination_indices[combination_i]];
             if (combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
@@ -22453,7 +23401,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         // text, so a second compiler or configuration re-derives the same
         // answer at full cost -- see the note in AGENTS.md.
         string8_list_push(arena, &lines,
-                          string_format(arena, S8("set({S8}_TABLE_AUDITS {u32})\n"), prefix, analyze_config.length ? 1u : 0u));
+                          string_format(arena, S8("set({S8}_TABLE_AUDITS {u32})\n"), prefix, tree.table_audit_scheduled));
     }
 
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), true);
@@ -22482,6 +23430,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
+    if (!matrix_coverage_ci_table_audit_override_allowed(ci, os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS"))))
+    {
+        // Direct matrix trees inherit the process environment instead of the
+        // superbuild's explicit child environment. Reject an override in CI
+        // so the manifest cannot claim a canonical audit that the test skips.
+        string_print(S8("error: BUSTER_TEST_TABLE_AUDITS cannot override CI coverage policy\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
     // These synthetic diagnostics deliberately build large in-memory fixtures.
     // Each gets a fresh mapping: arena allocations are not zero-initialized after
     // a rewind, and the self-tests exercise code that must begin from clean pages.
@@ -22565,9 +23522,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     bench_service_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(service_sanitized_test));
 #endif
 
-    MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
-    u64 combination_count = 0;
-    BuildStep* generate_step = step_add(arena);
     bool cmake_profile = environment_flag_is_on(S8("BUSTER_CMAKE_PROFILE"));
     u64 cmake_profile_summary_limit = environment_positive_u64_or(S8("BUSTER_CMAKE_PROFILE_SUMMARY_LIMIT"), 15);
     BuildStep* profile_summary_step = cmake_profile ? step_add(arena) : 0;
@@ -22577,109 +23531,106 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         build_prefix = S8("build/build-");
     }
 
+    MatrixCoverageLane coverage_lane = matrix_coverage_lane_create(arena);
+    MatrixCoverageTarget coverage_target = matrix_coverage_target_current();
+    MatrixCoveragePlan coverage_plan = {0};
+    bool coverage_plan_valid = matrix_coverage_plan_build_for_target(arena, &coverage_plan, coverage_lane, coverage_target);
+    u32 coverage_capability_count = 0;
+    MatrixCoverageObligations coverage_obligations = matrix_coverage_obligations_for_lane(direct_matrix, fanout_requested, &coverage_plan);
+    MatrixCoverageManifest* coverage_manifest = arena_allocate(arena, MatrixCoverageManifest, 1);
+    *coverage_manifest = (MatrixCoverageManifest){
+        .lane = coverage_lane, .plan = coverage_plan,
+        .obligations = coverage_obligations,
+        .mode = ci ? S8("ci") : S8("local"),
+        .output_path = matrix_coverage_output_path(arena),
+    };
+    bool coverage_identity_valid = !string_equal(coverage_lane.source_hash, S8("unavailable")) &&
+                                   !string_equal(coverage_lane.driver_hash, S8("unavailable"));
+    bool coverage_capabilities_valid = coverage_plan_valid && coverage_identity_valid &&
+                                       matrix_coverage_prepare(arena, &coverage_manifest->plan, coverage_manifest->capabilities, coverage_target,
+                                                                &coverage_capability_count);
+    coverage_manifest->capability_probe_count = coverage_capability_count;
+    string_print(S8("BUSTER_CI_COVERAGE_MANIFEST: {S8}\n"), coverage_manifest->output_path);
+    bool coverage_manifest_written = matrix_coverage_manifest_write(arena, coverage_manifest, false);
+    if (!coverage_plan_valid || !coverage_capabilities_valid || !coverage_manifest_written)
+    {
+        string_print(S8("error: desktop coverage plan or compiler capability evidence is incomplete\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
+    u64 combination_count = 0;
+    BuildStep* generate_step = step_add(arena);
+
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
 
-    for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
+    for (u32 tree_i = 0; tree_i < coverage_plan.tree_count; tree_i += 1)
     {
-        // The Windows ARM64 image exposes x86-64 MinGW as `gcc`, while Zig
-        // 0.16's native ARM64 frontend currently crashes before producing an
-        // object. Neither row tests this target. Keep the two genuine native
-        // toolchains: MSVC and standalone LLVM Clang.
-        if (BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && compiler > BUILD_COMPILER_CLANG)
+        MatrixCoverageTreePlan tree_plan = coverage_plan.trees[tree_i];
+        BuildCompiler compiler = tree_plan.compiler;
+        String8 build_directory_parts[] = {
+            build_prefix,
+            S8("ci_"),
+            ci ? S8("on") : S8("off"),
+            S8("-cc_"),
+            build_compilers[compiler],
+            S8("-sanitize_"),
+            tree_plan.sanitize ? S8("on") : S8("off"),
+            S8("-fuzz_available_"),
+            tree_plan.fuzz_available ? S8("on") : S8("off"),
+            S8("-configs_"),
+            tree_plan.optimize_count > 1 ? S8("shared") : (tree_plan.first_optimize ? S8("Release") : S8("Debug")),
+        };
+        String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
+        String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
+        Generate generate = {
+            .build_directory = build_directory,
+            .configuration_types = tree_plan.configuration_types,
+            .cmake_profile = cmake_profile_path,
+            .cmake_profile_summary_limit = cmake_profile_summary_limit,
+            .compiler = compiler,
+            .fuzz_available = tree_plan.fuzz_available,
+            .sanitize = tree_plan.sanitize,
+            .ci = ci,
+            .optimize = tree_plan.first_optimize,
+            .optimize_set = true,
+            .link_libc = true,
+            .time_trace = false,
+            .lto = false,
+            .include_tests = true,
+            .check_optional_warnings = false,
+            .developer_targets = false,
+            .profile_cmake = false,
+            .cmake_profile_set = cmake_profile,
+            .cmake_profile_summary = cmake_profile,
+            .cross_configs = !direct_matrix,
+            .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
+        };
+        generate_add(arena, generate_step, generate);
+        if (cmake_profile)
         {
-            continue;
+            cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
         }
-        bool is_clang = compiler == BUILD_COMPILER_CLANG;
-        // LLVM's Windows ARM64 distribution does not ship the libFuzzer or
-        // sanitizer runtimes. Keep the native Clang Release test row and all
-        // compiler portability rows, but do not generate impossible trees.
-        bool fuzz_supported = is_clang && !BUSTER_APPLE && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
-        bool support_sanitize = is_clang && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
-
-        for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
+        for (u32 tree_row_i = 0; tree_row_i < tree_plan.row_count; tree_row_i += 1)
         {
-            // Clang's unsanitized Debug row duplicates the stronger sanitized
-            // Debug coverage. Non-Clang compilers provide compile portability
-            // coverage only, so build just Debug and never execute it.
-            u32 first_optimize = is_clang && !sanitize ? 1 : 0;
-            u32 optimize_count = is_clang && sanitize ? 2 : 1;
-            bool split_configs = fuzz_supported && optimize_count > 1;
-            u32 tree_count = split_configs ? optimize_count : 1;
-            for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
-            {
-                u32 tree_first_optimize = split_configs ? first_optimize + tree_i : first_optimize;
-                u32 tree_optimize_count = split_configs ? 1 : optimize_count;
-                bool fuzz_available = fuzz_supported && ((sanitize && !tree_first_optimize) || (!sanitize && tree_first_optimize));
-                String8 build_directory_parts[] = {
-                    build_prefix,
-                    S8("ci_"),
-                    ci ? S8("on") : S8("off"),
-                    S8("-cc_"),
-                    build_compilers[compiler],
-                    S8("-sanitize_"),
-                    sanitize ? S8("on") : S8("off"),
-                    S8("-fuzz_available_"),
-                    fuzz_available ? S8("on") : S8("off"),
-                    S8("-configs_"),
-                    tree_optimize_count > 1 ? S8("shared") : (tree_first_optimize ? S8("Release") : S8("Debug")),
-                };
-
-                String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
-                String8 configuration_types =
-                    tree_optimize_count > 1 ? S8("Debug;Release") : (tree_first_optimize ? S8("Release") : S8("Debug"));
-                String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
-
-                Generate generate = {
-                    .build_directory = build_directory,
-                    .configuration_types = configuration_types,
-                    .cmake_profile = cmake_profile_path,
-                    .cmake_profile_summary_limit = cmake_profile_summary_limit,
-                    .compiler = compiler,
-                    .fuzz_available = fuzz_available,
-                    .sanitize = sanitize,
-                    .ci = ci,
-                    .optimize = tree_first_optimize,
-                    .optimize_set = true,
-                    .link_libc = true,
-                    .time_trace = false,
-                    .lto = false,
-                    .include_tests = true,
-                    .check_optional_warnings = false,
-                    .developer_targets = false,
-                    .profile_cmake = false,
-                    .cmake_profile_set = cmake_profile,
-                    .cmake_profile_summary = cmake_profile,
-                    .cross_configs = !direct_matrix,
-                    .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
-                };
-
-                generate_add(arena, generate_step, generate);
-                if (cmake_profile)
-                {
-                    cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
-                }
-
-                for (u32 optimize_i = 0; optimize_i < tree_optimize_count; optimize_i += 1)
-                {
-                    u32 optimize = tree_first_optimize + optimize_i;
-                    combinations[combination_count++] = (MatrixTestCombination){
-                        .build_directory = build_directory,
-                        .options =
-                            {
-                                .optimize = optimize,
-                                .optimize_set = true,
-                                .quiet = base_options.quiet,
-                            },
-                        .compiler = compiler,
-                        .generate = generate,
-                        .sanitize = sanitize,
-                        .run_tests = is_clang,
-                    };
-                }
-            }
+            u32 row_index = tree_plan.row_indices[tree_row_i];
+            MatrixCoverageRow row = coverage_plan.rows[row_index];
+            combinations[combination_count++] = (MatrixTestCombination){
+                .build_directory = build_directory,
+                .options = {.optimize = row.optimize, .optimize_set = true, .quiet = base_options.quiet},
+                .compiler = compiler,
+                .generate = generate,
+                .sanitize = row.sanitize,
+                .run_tests = compiler == BUILD_COMPILER_CLANG,
+            };
         }
+    }
+    if (combination_count != coverage_plan.required_count)
+    {
+        string_print(S8("error: coverage policy and scheduled desktop combinations diverged\n"));
+        return PROCESS_RESULT_FAILED;
     }
 
     MatrixTestTree trees[BUILD_COMPILER_COUNT * 2] = {0};
@@ -22721,6 +23672,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             MatrixTestCombination combination = combinations[tree->combination_indices[0]];
             tree->unity_only = combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize;
         }
+        tree->unity_analysis_scheduled = coverage_obligations.unity_analysis_scheduled && tree->unity_only;
+        tree->table_audit_scheduled = coverage_obligations.table_audit_scheduled && tree->unity_only;
     }
 
     // Declare the longest trees first so their test commands enter the shared
@@ -22825,7 +23778,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .tree_index = fanout && fanout_requested ? fanout_tree_index : 0,
             .pool_jobs = fanout && fanout_requested ? 1 : 0,
             .fuzz_available = fanout && fanout_requested ? fanout->generate.fuzz_available : 0,
-            .enabled = matrix_superbuild_self_host_enabled(direct_matrix, fanout_requested && fanout),
+            .enabled = coverage_obligations.self_host_scheduled,
             .ci = fanout && fanout_requested ? fanout->generate.ci : 0,
             .depends_on_compile = fanout && fanout_requested ? 1 : 0,
             .uses_inner_ninja = 0,
@@ -22903,6 +23856,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             x86_completion_census_add_existing(arena, fanout);
         }
 #endif
+        matrix_coverage_completion_add(arena, coverage_manifest);
         return PROCESS_RESULT_SUCCESS;
     }
 
@@ -22960,19 +23914,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         String8 targets[] = {combination.run_tests ? S8("test_all") : S8("ide")};
         build_add(arena, combination.build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, combination.options);
 
-        if (combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
+        if (coverage_obligations.unity_analysis_scheduled && combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
         {
             clang_analyze_command_add(arena, combination.build_directory, combination.options);
         }
     }
-    if (fanout && fanout_requested)
+    if (coverage_obligations.self_host_scheduled)
     {
+        BUSTER_CHECK(fanout != 0);
         ProcessResult fanout_result = self_host_from_existing_add(arena, fanout);
         if (fanout_result != PROCESS_RESULT_SUCCESS)
         {
             return fanout_result;
         }
     }
+    matrix_coverage_completion_add(arena, coverage_manifest);
     return PROCESS_RESULT_SUCCESS;
 }
 
@@ -37103,6 +38059,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
+        [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_command_names) == BUILD_COMMAND_COUNT);
@@ -38367,6 +39324,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             machine_info_print();
             bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
             result = test_all(arena, ci, options);
+        }
+        break;
+        case BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST:
+        {
+            result = matrix_coverage_manifest_self_test(arena);
         }
         }
     }
