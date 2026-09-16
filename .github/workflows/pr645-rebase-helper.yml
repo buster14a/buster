@@ -13,7 +13,7 @@ jobs:
     env:
       ORIGINAL: e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b
       VERIFIED_MAIN: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
-      UPDATED_MAIN: 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
+      UPDATED_MAIN: 43a2299211a239c6eeaff5d4b5813e2acdce0c7d
       EXPECTED_TREE: 319a5c96636deb444b0b53d62f6219c23caa982d
       DESTINATION: refs/heads/codex/569-canonical-landing-20260914
     steps:
@@ -75,7 +75,10 @@ jobs:
           import os, pathlib
           actual = set((pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr645-validation/main-advance-files.txt').read_text().splitlines())
           assert actual == {'android/ci_summary_test.py', 'android/run_tests.sh', 'android/run_tests_test.sh',
-                            'docs/agents/testing.md', 'docs/ci-github-actions.md', 'tools/ci_summary.py'}, actual
+                            'docs/agents/testing.md', 'docs/ci-github-actions.md', 'tools/ci_summary.py',
+                            'src/buster/lib/compiler/frontend/c/c_gen.c',
+                            'src/buster/tests/compiler/driver/driver_test.c',
+                            'src/buster/tests/compiler/frontend/c/c_test.c'}, actual
           PY
           GIT_EDITOR=true git rebase "$UPDATED_MAIN" > "$RUNNER_TEMP/pr645-validation/main-advance-rebase.log" 2>&1
           git diff --unified=0 "$UPDATED_MAIN" HEAD | git patch-id --stable | cut -d ' ' -f 1 > "$RUNNER_TEMP/pr645-validation/final.patch-id"
@@ -120,8 +123,13 @@ jobs:
           cd "$RUNNER_TEMP/pr645-candidate"
           actual="$(git ls-remote origin "$DESTINATION" | cut -f1)"
           test "$actual" = "$ORIGINAL"
-          main="$(git ls-remote origin refs/heads/main | cut -f1)"
-          test "$main" = "$UPDATED_MAIN"
+          git fetch origin refs/heads/main
+          main="$(git rev-parse FETCH_HEAD)"
+          git merge-base --is-ancestor "$UPDATED_MAIN" "$main"
+          # A concurrent main advance is not overwritten. Reject any new merge conflict;
+          # ordinary pull-request CI will validate the resulting merge revision.
+          git merge-tree --write-tree HEAD "$main" > "$RUNNER_TEMP/pr645-validation/current-main-merge-preview.txt"
+          printf '%s\n' "$main" > "$RUNNER_TEMP/pr645-validation/main-at-publication.txt"
           authorization="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
             push "--force-with-lease=$DESTINATION:$ORIGINAL" origin "HEAD:$DESTINATION"
