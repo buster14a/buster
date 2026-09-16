@@ -100,6 +100,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                         }
                         expected = IR_VALIDATION_RETURN_TYPE;
                     }
+                    program->fast_passes = IR_FAST_ALL;
                     IrValidationResult validation = ir_prepare_canonical_module(program, module, certified != 0);
                     BUSTER_TEST(arguments, validation.error == expected);
                     BUSTER_TEST(arguments, validation.boundary == (certified ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
@@ -112,6 +113,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                     BUSTER_TEST(arguments, validation.function.value == (variant >= 3 ? other->id.value : IR_ID_UNDERLYING_INVALID));
                     BUSTER_TEST(arguments, validation.block.value == (variant >= 3 ? other_entry->id.value : IR_ID_UNDERLYING_INVALID));
                     BUSTER_TEST(arguments, validation.instruction.value == (variant >= 3 ? other_entry->last_instruction.value : IR_ID_UNDERLYING_INVALID));
+                    // A failed scan must also keep the optional transforms off the module.
+                    BUSTER_TEST(arguments, module->fast.functions == 0 && !module->fast_complete);
                 }
             }
             scratch_end(temporary);
