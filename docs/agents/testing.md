@@ -103,6 +103,29 @@
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
   compilation and device/simulator execution remain separate CI gates.
+- Android CI reports per-phase status lines that must be read together before
+  treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
+  per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
+  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses and the
+  monitor deadline), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
+  configuration, `not-run` when a configuration never reached execution), and
+  `ANDROID_BATCH_RESULT` (test_ci.sh batch phase, first failed configuration,
+  preserved overall status, and emulator cleanup status). The workflow step
+  itself ends with `ANDROID_CI_RESULT` separating `payload_status` from
+  `cleanup_status`. A later Release success never clears an earlier Debug
+  failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
+  Release — plus the batch line's `status=` field; a missing per-config line or
+  `status=not-run` is itself evidence of an incomplete run.
+  Payload interruption statuses 130/143 stop the batch immediately and remain
+  the workflow status even when emulator cleanup also fails; unstarted
+  configurations remain `not-run`. Ordinary test failures still run the later
+  configurations and keep the batch failed. Run `bash android/run_tests_test.sh`
+  alongside the frozen shared mobile suite to cover both attribution and
+  cancellation through the real workflow body. Android/workflow changes also
+  schedule the unchanged frozen-support contract checks automatically.
+  The lifecycle helper treats an owned terminated zombie as already stopped,
+  not as a signalable emulator; the harness holds a child unreaped to cover
+  this path deterministically. Unknown process-state queries remain fail-closed.
 
 ## Throughput runner integration
 
@@ -112,6 +135,24 @@ before compiler/configuration trees. The tool links shared foundations through
 timeout/descendant cleanup, argv, diagnostics and dedicated-host locking.
 SHA-256 and recoverable file/path contracts also run in the registered hash and
 OS module tests. See `tools/throughput/README.md` for the diagnostic build.
+
+## Bench service self-test
+
+`./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
+POSIX queue, materializer, journal-replay and fake-worker regressions plus the
+Linux lease-handoff and result-evidence suites; see
+`tools/bench_service/README.md` for the full contract. Interrupted workers
+retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
+index, a bundle-only crash prefix completes idempotently, and invalid
+published controls are never repaired. The coordinator removes the
+`.lease-handoff` socket before the worker is continued. On Linux the suite
+also runs a materializer-to-recipe bridge: a real `bq_materialize` fixture
+feeds the real `bench_service_recipe` build graph through
+`bench_service_recipe_self_test JOB TOKEN WORKSPACE BASE CANDIDATE RESULT`,
+with only the external build and throughput programs stubbed, followed by the
+fixed no-argument recipe suite. These tests are fake-backend and
+stubbed-external evidence; privileged live-systemd and deployment
+qualification remain explicit operator gates and are not covered here.
 
 ## Configured external compiler fixtures
 

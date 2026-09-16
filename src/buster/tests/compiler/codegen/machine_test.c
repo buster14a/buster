@@ -4,6 +4,7 @@
 // the bounded linear remapping oracle and large-fanout structural controls.
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
+// machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -1137,6 +1138,93 @@ BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModu
     return UINT32_MAX;
 }
 #endif
+
+// Full C->canonical->MIR->bytes coverage for both directions of pointer/frame
+// copies across imm12, including sized tails. Native AArch64 Unix hosts also
+// execute the generated function and compare every byte plus guard regions.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_large_aggregate_copy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 sizes[] = {32768, 32775, 65543};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_WINDOWS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = systems[system]};
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 size = sizes[size_index];
+                String8 source = string_format(temporary.arena,
+                    S8("typedef struct Payload {{ unsigned char bytes[{u32}]; }} Payload; "
+                       "void copy_payload(Payload *out, Payload const *in) {{ Payload local = *in; *out = local; }"), size);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("large-aggregate-copy.c"), source, target,
+                    (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                BUSTER_TEST(arguments, program && program->module_count);
+                if (program && program->module_count)
+                {
+                    IrModule* module = program->modules;
+                    IrFunction* function = machine_test_ir_function_find(module, S8("copy_payload"));
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        bool from_pointer = false;
+                        bool to_pointer = false;
+                        for (u32 row = 0; selected.supported && row < selected.function.instruction_count; row += 1)
+                        {
+                            MachineInstruction const* instruction = selected.function.instructions + row;
+                            from_pointer |= instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_PTR && instruction->payload == size;
+                            to_pointer |= instruction->opcode == MACHINE_A64_COPY_PTR_FROM_FRAME && instruction->payload == size;
+                        }
+                        BUSTER_TEST(arguments, from_pointer && to_pointer);
+                    }
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.code.length != 0);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0 && generated.relocation_count == 0);
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                        if (target.os == target_native.os && generated.error == CODEGEN_ERROR_NONE && generated.relocation_count == 0)
+                        {
+                            CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                            u32 offset = machine_test_module_offset(&generated, module, S8("copy_payload"));
+                            BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE && offset != UINT32_MAX);
+                            if (executable.address && offset != UINT32_MAX)
+                            {
+                                u8* input = arena_allocate(temporary.arena, u8, size);
+                                u8* output = arena_allocate(temporary.arena, u8, size + 16u);
+                                for (u32 index = 0; index < size; index += 1)
+                                {
+                                    input[index] = (u8)(index * 37u + 19u);
+                                }
+                                memset(output, 0xa5, size + 16u);
+                                void* address = (u8*)executable.address + offset;
+                                void (*copy)(void*, void const*) = 0;
+                                memcpy(&copy, &address, sizeof(copy));
+                                copy(output + 8, input);
+                                BUSTER_TEST(arguments, memcmp(output + 8, input, size) == 0);
+                                bool guards = true;
+                                for (u32 index = 0; index < 8; index += 1)
+                                {
+                                    guards &= output[index] == 0xa5 && output[size + 8u + index] == 0xa5;
+                                }
+                                BUSTER_TEST(arguments, guards);
+                            }
+                            codegen_release_executable(executable);
+                        }
+#endif
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
 {
@@ -4760,6 +4848,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
                     CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
                         (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
                     BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+                    // The driver records locations by default. The mask-only
+                    // locals a, b and c name homeless predicate registers.
+                    CodegenModule located = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true, .debug_info = true});
+                    BUSTER_TEST(arguments, located.error == CODEGEN_ERROR_NONE && located.statistics.fallback_function_count == 0);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
                     TargetCpuFeatures features = cpu_detect_features_x86_64();
                     bool execute = system == 0 && target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) &&
@@ -4915,7 +5008,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_edges(UnitTestArgument
                 mode == 1 ? machine_fast_placement_build(arguments->arena, &function) : machine_quality_placement_build(arguments->arena, &function);
             MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &function, &placement);
             BUSTER_TEST(arguments, placement.valid && encoded.valid);
-            BUSTER_TEST(arguments, variant == 0 || (placement.rematerialize_count > 0 && placement.virtual_register_offsets[2] == UINT32_MAX));
+            BUSTER_TEST(arguments, variant == 0 || (placement.rematerialize_count > 0 && placement.virtual_register_offsets[2] == MACHINE_VIRTUAL_REGISTER_NO_HOME));
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
             TargetCpuFeatures features = cpu_detect_features_x86_64();
             bool execute = target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) && target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW);
@@ -5255,6 +5348,170 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_sparse_pins(UnitTestArgu
     return result;
 }
 
+// Deterministic pseudo-random source for the differential fixtures. A fixed
+// stream keeps a failure reproducible from the case index alone.
+BUSTER_GLOBAL_LOCAL u32 machine_test_debug_random(u32* state, u32 bound)
+{
+    *state = *state * 1664525u + 1013904223u;
+    return (*state >> 8) % bound;
+}
+
+// The indexed debug-value builder against the whole-array reference. The shapes
+// below cover what the lookups replaced: values in zero, one, two and more
+// virtual registers, promoted (mutable) places, parameters whose place is only
+// an IR_OPCODE_ARGUMENT result, canonical locals past the place array, and
+// place-less locals that emit one value per block.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        CASE_COUNT = 48,
+        VALUE_COUNT = 40,
+        BLOCK_COUNT = 5,
+        LOCAL_COUNT = 10,
+        DEBUG_COUNT = 14,
+        REGISTER_COUNT = 34,
+    };
+    IrField fields[] = {{.offset = 0}, {.offset = 8}};
+    IrType types[] = {
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 32, .layout = {.resolved = true, .size = 4, .alignment = 4}},
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 64, .layout = {.resolved = true, .size = 8, .alignment = 8}},
+        {.kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 2, .layout = {.resolved = true, .size = 16, .alignment = 8}},
+        {.kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 2, .layout = {.resolved = true, .size = 32, .alignment = 8}},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    u32 random_state = 0x9e3779b9u;
+    for (u32 case_index = 0; case_index < CASE_COUNT; case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        IrValue* values = arena_allocate(temporary.arena, IrValue, VALUE_COUNT);
+        IrInstruction* instructions = arena_allocate(temporary.arena, IrInstruction, VALUE_COUNT);
+        u64* immediates = arena_allocate(temporary.arena, u64, VALUE_COUNT);
+        for (u32 index = 0; index < VALUE_COUNT; index += 1)
+        {
+            u32 shape = machine_test_debug_random(&random_state, 5u);
+            u8 opcode = shape == 0 ? (u8)IR_OPCODE_LOCAL
+                                   : shape == 1 ? (u8)IR_OPCODE_ARGUMENT
+                                                : shape == 2 ? (u8)IR_OPCODE_CONSTANT_INTEGER : (u8)IR_OPCODE_ADDRESS_OF;
+            immediates[index] = machine_test_debug_random(&random_state, DEBUG_COUNT + 2u);
+            values[index] = (IrValue){.definition = {.value = index},
+                                      .canonical_type = {.value = machine_test_debug_random(&random_state, BUSTER_ARRAY_LENGTH(types))}};
+            instructions[index] = (IrInstruction){
+                .opcode = opcode,
+                .result = {.value = index},
+                .canonical_local = {.value = machine_test_debug_random(&random_state, LOCAL_COUNT + 3u)},
+                .immediates = immediates + index,
+                .immediate_count = 1,
+            };
+        }
+        IrCfgParameter* cfg_parameters = arena_allocate(temporary.arena, IrCfgParameter, BLOCK_COUNT * 2u);
+        IrCfgBlock* cfg_blocks = arena_allocate(temporary.arena, IrCfgBlock, BLOCK_COUNT);
+        IrBlock* blocks = arena_allocate(temporary.arena, IrBlock, BLOCK_COUNT);
+        memset(blocks, 0, sizeof(*blocks) * BLOCK_COUNT);
+        for (u32 block_index = 0; block_index < BLOCK_COUNT; block_index += 1)
+        {
+            IrValueId* local_values = arena_allocate(temporary.arena, IrValueId, LOCAL_COUNT);
+            for (u32 local_index = 0; local_index < LOCAL_COUNT; local_index += 1)
+            {
+                u32 choice = machine_test_debug_random(&random_state, VALUE_COUNT + LOCAL_COUNT);
+                local_values[local_index] = choice < VALUE_COUNT ? (IrValueId){.value = choice} : IR_VALUE_ID_INVALID;
+            }
+            blocks[block_index] = (IrBlock){
+                .local_values = local_values,
+                .first_instruction = {.value = block_index * (VALUE_COUNT / BLOCK_COUNT)},
+                .id = {.value = block_index},
+            };
+            cfg_parameters[block_index * 2u] = (IrCfgParameter){
+                .canonical_local = {.value = machine_test_debug_random(&random_state, LOCAL_COUNT + 3u)},
+                .value = {.value = machine_test_debug_random(&random_state, VALUE_COUNT)},
+            };
+            cfg_parameters[block_index * 2u + 1u] = (IrCfgParameter){
+                .canonical_local = {.value = machine_test_debug_random(&random_state, LOCAL_COUNT + 3u)},
+                .value = {.value = machine_test_debug_random(&random_state, VALUE_COUNT)},
+            };
+            cfg_blocks[block_index] = (IrCfgBlock){
+                .first_instruction = block_index * (VALUE_COUNT / BLOCK_COUNT),
+                // A zero-instruction block contributes no debug value even when
+                // it holds one for the local.
+                .instruction_count = machine_test_debug_random(&random_state, 4u) ? VALUE_COUNT / BLOCK_COUNT : 0,
+                .parameter_offset = block_index * 2u,
+                .parameter_count = machine_test_debug_random(&random_state, 3u),
+            };
+        }
+        IrPublishedCfg published = {
+            .blocks = cfg_blocks,
+            .parameters = cfg_parameters,
+            .block_count = BLOCK_COUNT,
+            .parameter_count = machine_test_debug_random(&random_state, BLOCK_COUNT * 2u + 1u),
+        };
+        IrDebugLocal* debug_locals = arena_allocate(temporary.arena, IrDebugLocal, DEBUG_COUNT);
+        memset(debug_locals, 0, sizeof(*debug_locals) * DEBUG_COUNT);
+        for (u32 debug_index = 0; debug_index < DEBUG_COUNT; debug_index += 1)
+        {
+            u32 identity = machine_test_debug_random(&random_state, LOCAL_COUNT + 4u);
+            debug_locals[debug_index].id = identity < LOCAL_COUNT + 3u ? (IrLocalId){.value = identity} : IR_LOCAL_ID_INVALID;
+            debug_locals[debug_index].is_parameter = machine_test_debug_random(&random_state, 2u) != 0;
+            debug_locals[debug_index].type = (IrTypeId){.value = 0};
+        }
+        IrFunction function = {
+            .instructions = instructions,
+            .values = values,
+            .blocks = blocks,
+            .debug_locals = debug_locals,
+            .published_cfg = &published,
+            .instruction_count = VALUE_COUNT,
+            .value_count = VALUE_COUNT,
+            .block_count = BLOCK_COUNT,
+            .local_count = LOCAL_COUNT,
+            .debug_local_count = DEBUG_COUNT,
+        };
+        MachineVirtualRegister* virtual_registers = arena_allocate(temporary.arena, MachineVirtualRegister, REGISTER_COUNT);
+        memset(virtual_registers, 0, sizeof(*virtual_registers) * REGISTER_COUNT);
+        for (u32 register_index = 0; register_index < REGISTER_COUNT; register_index += 1)
+        {
+            // Crowd the origins so some values land in one register, some in
+            // two, and some in more than the piece layout can describe.
+            virtual_registers[register_index] = (MachineVirtualRegister){
+                .definition_point = MACHINE_POINT_INVALID,
+                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                .flags = machine_test_debug_random(&random_state, 4u) ? 0 : MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE,
+                .typed_origin = machine_test_debug_random(&random_state, VALUE_COUNT / 2u),
+            };
+        }
+        u32* stack_slots = arena_allocate(temporary.arena, u32, VALUE_COUNT);
+        u32* indirect_slots = arena_allocate(temporary.arena, u32, VALUE_COUNT);
+        for (u32 index = 0; index < VALUE_COUNT; index += 1)
+        {
+            stack_slots[index] = machine_test_debug_random(&random_state, 3u) ? UINT32_MAX : index;
+            indirect_slots[index] = machine_test_debug_random(&random_state, 5u) ? UINT32_MAX : index;
+        }
+        MachineFunction indexed = {.virtual_registers = virtual_registers, .virtual_register_count = REGISTER_COUNT};
+        MachineFunction reference = indexed;
+        bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, stack_slots, indirect_slots);
+        bool reference_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &reference, stack_slots,
+                                                                     indirect_slots);
+        BUSTER_TEST(arguments, indexed_built == reference_built);
+        BUSTER_TEST(arguments, indexed.debug_value_count == reference.debug_value_count);
+        if (indexed_built && reference_built && indexed.debug_value_count == reference.debug_value_count)
+        {
+            bool same = true;
+            for (u32 value_index = 0; value_index < indexed.debug_value_count; value_index += 1)
+            {
+                MachineDebugValue a = indexed.debug_values[value_index];
+                MachineDebugValue b = reference.debug_values[value_index];
+                same = same && a.local.value == b.local.value && a.first_instruction == b.first_instruction &&
+                       a.instruction_count == b.instruction_count && a.kind == b.kind && a.piece_count == b.piece_count &&
+                       a.value_size == b.value_size && a.constant == b.constant && a.pieces[0] == b.pieces[0] &&
+                       a.pieces[1] == b.pieces[1] && a.piece_sizes[0] == b.piece_sizes[0] && a.piece_sizes[1] == b.piece_sizes[1];
+            }
+            BUSTER_TEST(arguments, same);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5287,7 +5544,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     MachineFunction machine_function = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     u64 position = temporary.arena->position;
-    bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function);
+    bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function, 0, 0);
     u64 retained = temporary.arena->position - position;
     BUSTER_TEST(arguments, built && machine_function.debug_value_count == LOCAL_COUNT && retained < BUSTER_KB(8));
     scratch_end(temporary);
@@ -5298,6 +5555,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
@@ -5316,6 +5574,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_large_aggregate_copy);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
@@ -9908,21 +10167,41 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                             string_format(arguments->arena, S8("a64 generated {S8} offset {u32}"), a64_memory_forms[form_index].name,
                                           offsets[offset_index]));
         }
-        if (size > 1)
+        // A large aggregate copy can reach both out-of-range and unaligned
+        // sized tails. Pin all expanded forms independently, not only whether
+        // a module produced bytes. Small aligned addresses above remain exact.
+        u32 expanded_offsets[] = {1, 4096u * size};
+        for (u32 expanded = size == 1 ? 1u : 0u; expanded < BUSTER_ARRAY_LENGTH(expanded_offsets); expanded += 1)
         {
             u32 bytes[4] = {0};
             u32 byte_count = 0;
             bool error = false;
-            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, 1, size, store, false, &byte_count,
-                                                                            &error) &&
-                                      error && byte_count == 0);
+            u32 offset = expanded_offsets[expanded];
+            BUSTER_TEST(arguments, machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, offset, size, store, false,
+                                                                         &byte_count, &error) && !error && byte_count == 12);
+            BUSTER_TEST(arguments, bytes[0] == (UINT32_C(0xd2800010) | (offset << 5)) &&
+                                   bytes[1] == UINT32_C(0x8b100390) && bytes[2] == (base | (16u << 5) | 17u));
         }
-        u32 bytes[4] = {0};
-        u32 byte_count = 0;
-        bool error = false;
-        BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, 4096u * size, size, store, false, &byte_count,
-                                                                        &error) &&
-                                  error && byte_count == 0);
+        // Invalid transfer widths/register ids and destructive address-scratch
+        // aliases stay errors, with no published prefix.
+        u32 invalid[][4] = {{17, 28, 0, 3}, {32, 28, 0, size}, {17, 32, 0, size},
+                            {17, 16, 4096u * size, size}, {17, 31, 4096u * size, size}};
+        for (u32 bad = 0; bad < BUSTER_ARRAY_LENGTH(invalid); bad += 1)
+        {
+            u32 bytes[4] = {0};
+            u32 byte_count = 0;
+            bool error = false;
+            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), invalid[bad][0], invalid[bad][1],
+                invalid[bad][2], invalid[bad][3], store, false, &byte_count, &error) && error && byte_count == 0);
+        }
+        if (store)
+        {
+            u32 bytes[4] = {0};
+            u32 byte_count = 0;
+            bool error = false;
+            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 16, 28, 4096u * size, size,
+                true, false, &byte_count, &error) && error && byte_count == 0);
+        }
     }
     {
         u32 bytes[16] = {0};

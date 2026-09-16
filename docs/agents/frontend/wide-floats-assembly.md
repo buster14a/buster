@@ -1,4 +1,4 @@
-# Long double, assembly, and Wasm boundaries
+# `_Float16`, long double, assembly, and Wasm boundaries
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
@@ -14,6 +14,31 @@ does not claim binary128 scalar ABI or arithmetic support.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **`_Float16` is IEEE-754 binary16, and it is a real type rather than a
+  storage alias.** Two naturally aligned bytes on every supported target
+  (`TargetDataLayout.float16_type`, `C_TYPE_FLOAT16`), its own rank below
+  `float` in the usual arithmetic conversions, its own place in the
+  `vector_size` element ladder, and `_Float16 _Complex` beside it as clang's
+  extension (`C_TYPE_FLOAT16_COMPLEX`, two contiguous halves). The C23
+  `f16`/`F16` constant suffix and the `__FLT16_*__` prelude macros carry it,
+  and every constant rounds through one encoder pair,
+  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64` in `c_gen.c`: no host
+  half type is used, because the compiler builds under four C compilers and
+  cross-compiles. Every static-initializer writer routes its 16-bit case
+  through that pair; the byte strings in `c_test_float16_type` were taken
+  from clang 18 compiling the same spellings.
+
+  **Code generation does not implement binary16 yet.** No backend has its
+  arithmetic, its conversions, or its ABI position, so a function that needs
+  a half value at run time is refused by the existing structured codegen
+  diagnostic (`codegen.unsupported-abi`, `codegen.unsupported-instruction`)
+  rather than emitted. What does reach an object today is everything the
+  frontend settles on its own: layout, `sizeof`/`_Alignof`, type
+  compatibility, folded constants and static initializers. That is enough for
+  the LLVM FP16 resource headers, whose `static __inline__` intrinsic bodies
+  are analyzed and then dropped unused. Lifting the restriction is
+  backend-owned work: binary16 loads/stores, f16↔f32 conversion, and the SSE
+  or NEON argument class.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

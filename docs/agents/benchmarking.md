@@ -527,9 +527,12 @@ data exports, 2N data imports, N function imports and N unrelated globals.
 Shape 1 has one data object, N aliases, N+1 data imports and one function
 import. N is 4, 128, 256, 512, 1,024, 2,048 or 4,096. Construction and the
 system-linker reference are outside the one-warmup/seven-sample driver timer.
-The AArch64 reference compiles the same C as PIC and links a PIE, so its
-alias identity comes directly from the DSO, independently of system-linker
-COPY-slot allocation. Buster still links and executes the non-PIC object.
+On both architectures the reference compiles the same C as PIC and links a
+PIE, so its alias identity comes directly from the DSO, independently of
+system-linker COPY-slot allocation. Relinking the x86-64 `-fPIE` object with
+`-no-pie` does not provide that under GCC: its direct imported-data references
+give each strong alias a separate COPY slot (GitHub #594). Buster still links
+and executes the host-compiled `-fPIE` or non-PIC object.
 The timed invocation reads the object and DSOs, links and writes its image;
 `retained` measures the invocation arena after that work. Both native images
 execute afterward, verifying shared addresses and writes visible through the

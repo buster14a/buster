@@ -1,6 +1,7 @@
 // File content ownership and transfer policy: file_write_checked preserves
 // transfer/close failures; file_read owns padded arena reads; file_map_read and
-// file_map_unmap own optional mappings; file_copy streams between descriptors.
+// file_map_unmap own optional mappings; file_copy_checked streams into a
+// staging file beside its destination and publishes it with os_file_replace.
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
@@ -321,31 +322,126 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
     return file_read_checked(arena, path, options).bytes;
 }
 
-bool file_copy(CopyFileArguments arguments)
+// A fixed stack buffer bounds copy memory independently of the source size.
+#define FILE_COPY_BUFFER_SIZE BUSTER_KB(64)
+
+// Until the outcome is decided the first failure is the result. After a
+// failure or refusal, later failures are cleanup and never replace it.
+BUSTER_GLOBAL_LOCAL void file_copy_record(FileCopyResult* result, OsError error)
 {
-    bool result = false;
-    // Copying a path onto itself would truncate the source before reading it.
-    if (!string_equal(arguments.original_path, arguments.new_path))
+    if (result->status == FILE_COPY_FAILED && !result->error.v)
     {
-        OsFileDescriptor* source = os_file_open(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-        if (source)
+        result->error = error;
+    }
+    else if (!result->cleanup_error.v)
+    {
+        result->cleanup_error = error;
+    }
+}
+
+FileCopyResult file_copy_checked(CopyFileArguments arguments)
+{
+    FileCopyResult result = {0};
+    // Other aliases are judged by identity below. Nothing here opens the
+    // destination's file destructively, so identity decides policy, not safety.
+    if (string_equal(arguments.original_path, arguments.new_path))
+    {
+        result.status = FILE_COPY_SAME_FILE;
+    }
+    else
+    {
+        OsFileOpenResult source = os_file_open_checked(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        result.error = source.error;
+        if (source.file)
         {
-            OsFileDescriptor* destination =
-                os_file_open(arguments.new_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
-            if (destination)
+            // The source stays open while the destination is inspected, so an
+            // equal identity cannot come from a recycled inode or file index.
+            FileStats source_stats = os_file_get_stats(source.file, (FileStatsOptions){.identity = 1});
+            FileStats target = {.error = source_stats.error};
+            if (source_stats.valid)
             {
-                u8 buffer[BUSTER_KB(64)];
-                u64 count = 0;
-                while ((result = os_file_read_attempt(source, (ByteSlice){buffer, sizeof(buffer)}, &count)) && count)
-                {
-                    result = os_file_write_attempt(destination, (ByteSlice){buffer, count});
-                    if (!result) break;
-                }
-                result = os_file_close(destination) && result;
+                target = os_file_replacement_target_stats(arguments.new_path);
             }
-            result = os_file_close(source) && result;
+            result.error = target.error;
+            bool replaces = target.valid && target.kind == OS_FILE_KIND_REGULAR;
+            bool stages = false;
+            if (replaces && target.device == source_stats.device && target.index == source_stats.index)
+            {
+                result.status = FILE_COPY_SAME_FILE;
+            }
+            else if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
+            {
+                result.status = FILE_COPY_UNSUPPORTED_DESTINATION;
+            }
+#if BUSTER_WINDOWS
+            else if (replaces && !(target.permissions & 0222))
+            {
+                // A POSIX writer's open refuses a read-only file; refuse the
+                // attribute here rather than depend on MoveFileExW's handling.
+                result.error.v = (u32)ERROR_ACCESS_DENIED;
+            }
+#endif
+            else
+            {
+                stages = target.valid;
+            }
+
+            TemporalArena scratch = scratch_begin(0, 0);
+            OsFileStagingResult staging = {0};
+            if (stages)
+            {
+                staging = os_file_staging_create(scratch.arena, arguments.new_path, (OpenPermissions){.read = 1, .write = 1});
+                result.error = staging.error;
+            }
+            bool staged = staging.file != 0;
+            if (staged)
+            {
+#if !BUSTER_WINDOWS
+                if (replaces)
+                {
+                    result.error = os_file_set_permissions(staging.file, target.permissions);
+                }
+#endif
+                u8 buffer[FILE_COPY_BUFFER_SIZE];
+                bool copying = !result.error.v;
+                while (copying)
+                {
+                    OsFileReadResult read = os_file_read_exact(source.file, (ByteSlice){buffer, sizeof(buffer)});
+                    if (read.status == OS_FILE_READ_ERROR)
+                    {
+                        result.error = read.error;
+                    }
+                    else
+                    {
+                        result.error = os_file_write_checked(staging.file, (ByteSlice){buffer, read.transferred}).error;
+                    }
+                    copying = !result.error.v && read.status == OS_FILE_READ_OK;
+                }
+                file_copy_record(&result, os_file_close_checked(staging.file));
+            }
+            // Closing the source before publication leaves the rename as the
+            // last fallible step.
+            file_copy_record(&result, os_file_close_checked(source.file));
+            if (staged && !result.error.v)
+            {
+                result.error = os_file_replace(staging.path, arguments.new_path);
+                if (!result.error.v)
+                {
+                    result.status = FILE_COPY_PUBLISHED;
+                }
+            }
+            if (staged && result.status != FILE_COPY_PUBLISHED)
+            {
+                file_copy_record(&result, os_file_delete_checked(staging.path));
+            }
+            scratch_end(scratch);
         }
     }
 
     return result;
+}
+
+bool file_copy(CopyFileArguments arguments)
+{
+    return file_copy_checked(arguments).status == FILE_COPY_PUBLISHED;
 }

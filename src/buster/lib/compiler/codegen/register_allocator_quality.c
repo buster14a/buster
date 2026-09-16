@@ -488,7 +488,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     u32 allocatable_count = 0;
     for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {
-        allocatable_count += (description->allocatable_mask >> physical_register) & 1u;
+        allocatable_count += (u32)((description->allocatable_mask >> physical_register) & 1u);
     }
     // Only allocatable registers are ever probed through the pin file, so
     // the prefix table stops at the highest allocatable index instead of
@@ -1203,12 +1203,12 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         u32 baseline_saved_registers = 0;
         for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
         {
-            baseline_saved_registers += (baseline.callee_saved_mask >> physical_register) & 1u;
+            baseline_saved_registers += (u32)((baseline.callee_saved_mask >> physical_register) & 1u);
         }
         u32 placement_saved_registers = 0;
         for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
         {
-            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
+            placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
         }
         u32 added_prologue_cost = 2 * (placement_saved_registers - BUSTER_MIN(placement_saved_registers, baseline_saved_registers));
         u64 placement_traffic_total = 0;

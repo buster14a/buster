@@ -1,10 +1,13 @@
 // Implementation of the platform boundary declared in os.h. Each facility
 // keeps its POSIX and Windows paths side by side inside one function
 // rather than in per-platform files, so the contract stays in one place:
-// virtual memory (os_reserve/os_commit/os_decommit and protection flags),
+// virtual memory (os_reserve/os_commit/os_decommit, the advisory os_prefault
+// hint, and protection flags),
 // threads, mutexes, and TLS, checked file IO (os_file_write_checked,
-// os_file_close_checked, os_file_flush), process spawn/wait with deadlines,
-// executable lookup, dynamic libraries, and the crash/failure printers.
+// os_file_close_checked, os_file_flush), replacement publication
+// (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
+// process spawn/wait with deadlines, executable lookup, dynamic libraries, and
+// the crash/failure printers. Replacement publication follows os_file_close.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -16,6 +19,19 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
+
+#if BUSTER_LINUX
+#include <limits.h>
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
+// rename(2) is declared only by <stdio.h>.
+#include <stdio.h>
+#endif
+
+#if !BUSTER_WINDOWS
+#include <sys/ioctl.h>
+#endif
 
 #if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && defined(MAP_JIT)
 extern void pthread_jit_write_protect_np(int enabled);
@@ -127,6 +143,28 @@ BUSTER_GLOBAL_LOCAL void w32_file_stats_from_file_information(FileStats* stats, 
             u64 unix_time_100ns = file_time_100ns - unix_epoch_100ns;
             stats->modified_time_s = unix_time_100ns / (u64)10000000;
             stats->modified_time_ns = (unix_time_100ns % (u64)10000000) * (u64)100;
+        }
+    }
+
+    if (options.identity)
+    {
+        DWORD attributes = file_information.dwFileAttributes;
+        stats->device = file_information.dwVolumeSerialNumber;
+        stats->index = ((u64)file_information.nFileIndexHigh << 32) | (u64)file_information.nFileIndexLow;
+        stats->permissions = (attributes & FILE_ATTRIBUTE_READONLY) ? 0444u : 0666u;
+        // Only a handle opened with FILE_FLAG_OPEN_REPARSE_POINT can report
+        // the reparse point itself rather than its target.
+        if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        {
+            stats->kind = OS_FILE_KIND_LINK;
+        }
+        else if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            stats->kind = OS_FILE_KIND_DIRECTORY;
+        }
+        else
+        {
+            stats->kind = OS_FILE_KIND_REGULAR;
         }
     }
 }
@@ -389,44 +427,109 @@ BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(OsFileDescriptor* fd)
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool os_fault(void* address, u64 size)
-{
-    bool result = 1;
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_prefault_test_forced;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsPrefaultResult os_prefault_test_forced_result;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsPrefaultTestCounters os_prefault_test_state;
 
-#if defined(__linux__)
-    int os_result = madvise(address, size, MADV_POPULATE_WRITE);
-    result = os_result == 0;
-#elif defined(__APPLE__)
-    int os_result = mlock(address, size);
-    result = os_result == 0;
-    if (result)
+void os_prefault_test_force_next(OsPrefaultResult result)
+{
+    os_prefault_test_forced = true;
+    os_prefault_test_forced_result = result;
+}
+
+OsPrefaultTestCounters os_prefault_test_counters(void)
+{
+    return os_prefault_test_state;
+}
+#endif
+
+// Best-effort prefaulting of an already-committed range: it populates page
+// table entries now so the first touch need not take a fault, and nothing
+// more. No path below keeps a page resident, so no caller may read success
+// as residency, as protection from paging, or as a latency guarantee. The
+// three platforms reach it by different means and refuse it for different
+// ordinary reasons, which is why the outcome is reported instead of hidden:
+//
+// Linux: madvise(MADV_POPULATE_WRITE) states exactly this intent and locks
+// nothing. Kernels before 5.14 do not know the advice and reject it with
+// EINVAL, which is a refusal of the request, never a commit failure.
+//
+// macOS: Darwin has no populate advice, so the range is locked and then
+// immediately unlocked. The lock is only what forces the faults in; it is
+// released before returning, so nothing stays pinned. RLIMIT_MEMLOCK bounds
+// an unprivileged process, so refusing a large range here is ordinary.
+//
+// Windows: VirtualAlloc(MEM_COMMIT) already charges the backing store, and
+// Windows exposes no supported populate call. An MSVC build can force the
+// faults by registering the range as a Winsock Registered I/O buffer, which
+// locks it for the registration and releases it on deregistration. That
+// table is present only once the process obtained the RIO extension
+// functions, and its length is 32 bits, so the ordinary Windows outcome is
+// that no prefault is performed at all.
+OsPrefaultResult os_prefault(void* address, u64 size)
+{
+    OsPrefaultResult result;
+#if BUSTER_INCLUDE_TESTS
+    if (os_prefault_test_forced)
     {
-        os_result = munlock(address, size);
+        os_prefault_test_forced = false;
+        result = os_prefault_test_forced_result;
     }
-    result = os_result == 0;
-#elif defined(_WIN32)
-#if defined(_MSC_VER)
-    if (w32_rio_functions.RIORegisterBuffer)
+    else
+#endif
     {
-        RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer((PCHAR)address, (DWORD)size);
-        result = buffer_id != RIO_INVALID_BUFFERID;
-        if (result)
+#if defined(__linux__)
+        result = madvise(address, size, MADV_POPULATE_WRITE) == 0 ? OS_PREFAULT_POPULATED : OS_PREFAULT_REFUSED;
+#elif defined(__APPLE__)
+        result = OS_PREFAULT_REFUSED;
+        if (mlock(address, size) == 0)
         {
-            if (w32_rio_functions.RIODeregisterBuffer)
+            // Releasing the lock is what makes this prefaulting rather than
+            // pinning. A failed release would leave the process holding
+            // locked memory it never promised to hold, so it is reported as
+            // a refusal rather than as a populated range.
+            result = munlock(address, size) == 0 ? OS_PREFAULT_POPULATED : OS_PREFAULT_REFUSED;
+        }
+#elif defined(_WIN32) && defined(_MSC_VER)
+        result = OS_PREFAULT_UNAVAILABLE;
+        // Both halves are required: a registration that cannot be released
+        // would leave the range locked for the life of the process, which is
+        // the opposite of what this function promises.
+        if (w32_rio_functions.RIORegisterBuffer && w32_rio_functions.RIODeregisterBuffer)
+        {
+            // The registration length is a DWORD. A larger range would be
+            // registered only in part, so refuse it instead of reporting a
+            // range that was never fully populated.
+            if (size > UINT32_MAX)
             {
-                w32_rio_functions.RIODeregisterBuffer(buffer_id);
+                result = OS_PREFAULT_REFUSED;
+            }
+            else
+            {
+                RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer((PCHAR)address, (DWORD)size);
+                result = buffer_id == RIO_INVALID_BUFFERID ? OS_PREFAULT_REFUSED : OS_PREFAULT_POPULATED;
+                if (result == OS_PREFAULT_POPULATED)
+                {
+                    w32_rio_functions.RIODeregisterBuffer(buffer_id);
+                }
             }
         }
-    }
 #else
-    BUSTER_UNUSED(address);
-    BUSTER_UNUSED(size);
+        BUSTER_UNUSED(address);
+        BUSTER_UNUSED(size);
+        result = OS_PREFAULT_UNAVAILABLE;
 #endif
+    }
+#if BUSTER_INCLUDE_TESTS
+    os_prefault_test_state.requests += 1;
+    os_prefault_test_state.unpopulated += result != OS_PREFAULT_POPULATED;
+    os_prefault_test_state.last = result;
 #endif
     return result;
 }
 
-bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
+bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
 {
     bool result = 1;
 
@@ -440,9 +543,12 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
     result = os_result != 0;
 #endif
 
-    if (result & lock)
+    // Strictly subordinate and strictly advisory: the request is issued only
+    // once the commit itself succeeded, and its outcome is deliberately kept
+    // out of `result`. A caller that needs the outcome asks os_prefault.
+    if (result & prefault)
     {
-        os_fault(address, size);
+        (void)os_prefault(address, size);
     }
 
 #if BUSTER_BENCH_ALLOCATIONS
@@ -814,6 +920,52 @@ void os_barrier_destroy(OsBarrierHandle* handle)
 }
 #endif
 
+u64 process_control_atomic_load(ProcessControlAtomic* address)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)_InterlockedCompareExchange64((volatile long long*)address, 0, 0);
+#elif defined(__clang__)
+    result = __c11_atomic_load(address, __ATOMIC_SEQ_CST);
+#else
+    result = __atomic_load_n(address, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
+void process_control_atomic_store(ProcessControlAtomic* address, u64 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = (s32)value;
+#elif BUSTER_COMPILER_MSVC
+    _InterlockedExchange64((volatile long long*)address, (long long)value);
+#elif defined(__clang__)
+    __c11_atomic_store(address, value, __ATOMIC_SEQ_CST);
+#else
+    __atomic_store_n(address, value, __ATOMIC_SEQ_CST);
+#endif
+}
+
+bool process_control_atomic_set_if_zero(ProcessControlAtomic* address, u64 value)
+{
+    bool result;
+#if BUSTER_SINGLE_THREADED
+    result = *address == 0;
+    if (result) { *address = (s32)value; }
+#elif BUSTER_COMPILER_MSVC
+    result = _InterlockedCompareExchange64((volatile long long*)address, (long long)value, 0) == 0;
+#elif defined(__clang__)
+    u64 expected = 0;
+    result = __c11_atomic_compare_exchange_strong(address, &expected, value, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#else
+    u64 expected = 0;
+    result = __atomic_compare_exchange_n(address, &expected, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
 u64 atomic_u64_add(AtomicU64* address, u64 addend)
 {
     // Builtins rather than <stdatomic.h>: that header lives in the host
@@ -852,18 +1004,29 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 {
     String8 result = {0};
 #if defined(__linux__) || defined(__APPLE__)
-    u64 position = arena->position;
-    u64 length = PATH_MAX;
-    char8* buffer = arena_allocate(arena, char8, length + null_terminate);
-    char* syscall_result = realpath((char*)relative_file_path.pointer, buffer);
-
-    if (syscall_result)
+    bool valid = relative_file_path.pointer || !relative_file_path.length;
+    for (u64 i = 0; i < relative_file_path.length && valid; i += 1)
     {
-        result = string_from_pointer(syscall_result);
-        BUSTER_VALIDATE(result.length <= length);
+        valid = relative_file_path.pointer[i] != 0;
     }
+    if (valid && relative_file_path.length)
+    {
+        TemporalArena temp = scratch_begin(&arena, 1);
+        String8 terminated = string_duplicate_arena(temp.arena, relative_file_path, true);
+        u64 position = arena->position;
+        u64 length = PATH_MAX;
+        char8* buffer = arena_allocate(arena, char8, length + null_terminate);
+        char* syscall_result = realpath((char*)terminated.pointer, buffer);
 
-    arena_set_position(arena, position + result.length + null_terminate);
+        if (syscall_result)
+        {
+            result = string_from_pointer(syscall_result);
+            BUSTER_VALIDATE(result.length <= length);
+        }
+
+        arena_set_position(arena, position + result.length + null_terminate);
+        scratch_end(temp);
+    }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(&arena, 1);
     String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
@@ -951,7 +1114,18 @@ bool os_make_directory_attempt(String8 path)
 void os_make_directory(String8 path)
 {
 #if defined(__linux__) || defined(__APPLE__)
-    mkdir((const char*)path.pointer, 0755);
+    bool valid = path.pointer != 0 && path.length != 0;
+    for (u64 i = 0; i < path.length && valid; i += 1)
+    {
+        valid = path.pointer[i] != 0;
+    }
+    if (valid)
+    {
+        TemporalArena temp = scratch_begin(0, 0);
+        String8 terminated = string_duplicate_arena(temp.arena, path, true);
+        mkdir((const char*)terminated.pointer, 0755);
+        scratch_end(temp);
+    }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(0, 0);
     String16 path_w = string16_from_string8(temp.arena, path, true);
@@ -962,24 +1136,7 @@ void os_make_directory(String8 path)
 
 bool os_file_delete(String8 path)
 {
-#if defined(__linux__) || defined(__APPLE__)
-    BUSTER_VALIDATE(!path.pointer[path.length]);
-    return unlink((const char*)path.pointer) == 0 || errno == ENOENT;
-#elif defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 path_w = string16_from_string8(temp.arena, path, true);
-    bool result = DeleteFileW(path_w.pointer);
-    if (!result)
-    {
-        DWORD error = GetLastError();
-        result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-    }
-    scratch_end(temp);
-    return result;
-#else
-    BUSTER_UNUSED(path);
-    return false;
-#endif
+    return !os_file_delete_checked(path).v;
 }
 
 #if defined(_WIN32)
@@ -1220,6 +1377,8 @@ typedef struct OsFileTestState OsFileTestState;
 struct OsFileTestState
 {
     String8 path;
+    // The staging file most recently created for `path` as its destination.
+    String8 staging;
     OsFileDescriptor* file;
     const OsFileTestStep* steps;
     u32 count;
@@ -1249,6 +1408,14 @@ BUSTER_GLOBAL_LOCAL const OsFileTestStep* os_file_test_take(OsFileTestOperation 
         os_file_test_state.next += 1;
     }
     return result;
+}
+
+// Replacement steps name both the staging file and its destination, so either
+// spelling selects them.
+BUSTER_GLOBAL_LOCAL bool os_file_test_selects(String8 path)
+{
+    bool staging = os_file_test_state.staging.length && string_equal(path, os_file_test_state.staging);
+    return os_file_test_state.path.length && (string_equal(path, os_file_test_state.path) || staging);
 }
 
 bool os_file_test_map_unavailable(String8 path)
@@ -1566,6 +1733,28 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
         {
             if (options.size) result.size = (u64)stats.st_size;
             if (options.modified_time) result.modified_time_s = (u64)stats.st_mtime;
+            if (options.identity)
+            {
+                result.device = (u64)stats.st_dev;
+                result.index = (u64)stats.st_ino;
+                result.permissions = (u32)(stats.st_mode & 0777);
+                if (S_ISREG(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_REGULAR;
+                }
+                else if (S_ISDIR(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_DIRECTORY;
+                }
+                else if (S_ISLNK(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_LINK;
+                }
+                else
+                {
+                    result.kind = OS_FILE_KIND_OTHER;
+                }
+            }
             result.valid = true;
         }
 #elif defined(_WIN32)
@@ -1639,6 +1828,302 @@ bool os_file_close(OsFileDescriptor* file_descriptor)
 {
     return !os_file_close_checked(file_descriptor).v;
 }
+
+OsError os_file_delete_checked(String8 path)
+{
+    OsError result = {0};
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = os_file_test_selects(path) ? os_file_test_take(OS_FILE_TEST_DELETE) : 0;
+    if (step) result.v = (u32)step->value;
+#endif
+    if (!result.v)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_VALIDATE(!path.pointer[path.length]);
+        if (unlink((const char*)path.pointer) != 0 && errno != ENOENT)
+        {
+            result = os_get_last_error();
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        if (!DeleteFileW(path_w.pointer))
+        {
+            OsError error = os_get_last_error();
+            if (error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
+            {
+                result = error;
+            }
+        }
+        scratch_end(scratch);
+#else
+        BUSTER_UNUSED(path);
+        result = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+
+FileStats os_file_replacement_target_stats(String8 path)
+{
+    FileStats result = {0};
+    if (!path.pointer || !path.length)
+    {
+        result.error = os_file_invalid_error();
+    }
+    else
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_VALIDATE(!path.pointer[path.length]);
+        // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
+        // keeps a terminal from becoming the controlling terminal.
+        int fd;
+        do
+        {
+            fd = open((char*)path.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+        } while (fd < 0 && errno == EINTR);
+        if (fd >= 0)
+        {
+            OsFileDescriptor* file = posix_fd_to_generic_fd(fd);
+            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+            OsError close_error = os_file_close_checked(file);
+            if (result.valid && close_error.v)
+            {
+                result = (FileStats){.error = close_error};
+            }
+        }
+        else
+        {
+            OsError error = os_get_last_error();
+            result.valid = true;
+            if (error.v == (u32)ENOENT)
+            {
+                result.kind = OS_FILE_KIND_MISSING;
+            }
+            else if (error.v == (u32)ELOOP)
+            {
+                result.kind = OS_FILE_KIND_LINK;
+            }
+            else if (error.v == (u32)EISDIR)
+            {
+                result.kind = OS_FILE_KIND_DIRECTORY;
+            }
+            else if (error.v == (u32)ENXIO)
+            {
+                result.kind = OS_FILE_KIND_OTHER;
+            }
+            else
+            {
+                result.valid = false;
+                result.error = error;
+            }
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        // Attribute-only access never conflicts with other handles' share
+        // modes; the reparse flag inspects a link rather than its target.
+        HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            OsFileDescriptor* file = (OsFileDescriptor*)handle;
+            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+            OsError close_error = os_file_close_checked(file);
+            if (result.valid && close_error.v)
+            {
+                result = (FileStats){.error = close_error};
+            }
+        }
+        else
+        {
+            OsError error = os_get_last_error();
+            result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
+            if (!result.valid)
+            {
+                result.error = error;
+            }
+        }
+        scratch_end(scratch);
+#else
+        result.error = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+
+// Collisions come only from leftovers of an earlier process with the same id
+// or from foreign files, so a short bounded search suffices.
+#define OS_FILE_STAGING_ATTEMPTS 64
+BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
+
+OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
+{
+    OsFileStagingResult result = {0};
+    // The staging name replaces only the final component, keeping the rename
+    // within one directory without lengthening the destination's name.
+    u64 directory_length = destination.pointer ? destination.length : 0;
+    bool separator = false;
+    while (directory_length && !separator)
+    {
+        char8 character = destination.pointer[directory_length - 1];
+#if defined(_WIN32)
+        separator = character == '/' || character == '\\' || character == ':';
+#else
+        separator = character == '/';
+#endif
+        if (!separator)
+        {
+            directory_length -= 1;
+        }
+    }
+#if BUSTER_INCLUDE_TESTS
+    bool selected = os_file_test_state.path.length && string_equal(destination, os_file_test_state.path);
+    const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
+    if (step) result.error.v = (u32)step->value;
+#endif
+    if (!result.error.v && (!destination.pointer || destination.length == directory_length))
+    {
+        result.error = os_file_invalid_error();
+    }
+
+    String8 directory = {.pointer = destination.pointer, .length = directory_length};
+    u64 mark = arena->position;
+    for (u32 attempt = 0; attempt < OS_FILE_STAGING_ATTEMPTS && !result.file && !result.error.v; attempt += 1)
+    {
+        arena_set_position(arena, mark);
+        u64 serial = atomic_u64_increment(&os_file_staging_counter);
+        String8 path = string_format_z(arena, S8("{S8}{S8}{u64}-{u64}{S8}"), directory, OS_FILE_STAGING_PREFIX, os_get_current_process_id(), serial,
+                                       OS_FILE_STAGING_SUFFIX);
+        OsError error;
+#if defined(__linux__) || defined(__APPLE__)
+        mode_t mode = permissions.execute ? 0755 : 0644;
+        int fd;
+        do
+        {
+            fd = open((char*)path.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
+        } while (fd < 0 && errno == EINTR);
+        error = fd >= 0 ? (OsError){0} : os_get_last_error();
+        if (fd >= 0)
+        {
+            result.file = posix_fd_to_generic_fd(fd);
+        }
+        bool collision = error.v == (u32)EEXIST;
+#elif defined(_WIN32)
+        String16 path_w = string16_from_string8(arena, path, true);
+        DWORD shared_mode = 0;
+        if (permissions.read)
+        {
+            shared_mode |= FILE_SHARE_READ;
+        }
+        if (permissions.write)
+        {
+            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        }
+        SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
+        HANDLE handle = CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+        error = handle != INVALID_HANDLE_VALUE ? (OsError){0} : os_get_last_error();
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            result.file = (OsFileDescriptor*)handle;
+        }
+        bool collision = error.v == (u32)ERROR_FILE_EXISTS || error.v == (u32)ERROR_ALREADY_EXISTS;
+#else
+        BUSTER_UNUSED(permissions);
+        error = os_file_invalid_error();
+        bool collision = false;
+#endif
+        if (result.file)
+        {
+            result.path = path;
+        }
+        else if (!collision || attempt + 1 == OS_FILE_STAGING_ATTEMPTS)
+        {
+            result.error = error;
+        }
+    }
+    if (!result.file)
+    {
+        arena_set_position(arena, mark);
+    }
+#if BUSTER_INCLUDE_TESTS
+    if (selected)
+    {
+        os_file_test_state.file = result.file;
+        os_file_test_state.staging = result.path;
+    }
+#endif
+    return result;
+}
+
+OsError os_file_replace(String8 path, String8 destination)
+{
+    OsError result = {0};
+    if (!path.pointer || !path.length || !destination.pointer || !destination.length)
+    {
+        result = os_file_invalid_error();
+    }
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = !result.v && (os_file_test_selects(path) || os_file_test_selects(destination)) ? os_file_test_take(OS_FILE_TEST_REPLACE) : 0;
+    if (step) result.v = (u32)step->value;
+#endif
+    if (!result.v)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        BUSTER_VALIDATE(!path.pointer[path.length] && !destination.pointer[destination.length]);
+        if (rename((const char*)path.pointer, (const char*)destination.pointer) != 0)
+        {
+            result = os_get_last_error();
+        }
+#elif defined(_WIN32)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        String16 destination_w = string16_from_string8(scratch.arena, destination, true);
+        // No MOVEFILE_COPY_ALLOWED: a cross-volume copy and delete is neither
+        // atomic nor a rename.
+        if (!MoveFileExW(path_w.pointer, destination_w.pointer, MOVEFILE_REPLACE_EXISTING))
+        {
+            result = os_get_last_error();
+        }
+        scratch_end(scratch);
+#else
+        result = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+
+#if !defined(_WIN32)
+OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions)
+{
+    OsError result = {0};
+    if (!file_descriptor || (permissions & ~(u32)0777))
+    {
+        result = os_file_invalid_error();
+    }
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = !result.v && file_descriptor == os_file_test_state.file ? os_file_test_take(OS_FILE_TEST_PERMISSIONS) : 0;
+    if (step) result.v = (u32)step->value;
+#endif
+    if (!result.v)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        int status;
+        do
+        {
+            status = fchmod(generic_fd_to_posix(file_descriptor), (mode_t)permissions);
+        } while (status < 0 && errno == EINTR);
+        if (status < 0)
+        {
+            result = os_get_last_error();
+        }
+#else
+        result = os_file_invalid_error();
+#endif
+    }
+    return result;
+}
+#endif
 
 u64 string8_code_point_count(String8 s, u8 code_point)
 {
@@ -1813,6 +2298,17 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
     {
+        if (options.new_process_group)
+        {
+            short flags = 0;
+            pipe_result = posix_spawnattr_getflags(&attributes, &flags) == 0 &&
+                          posix_spawnattr_setpgroup(&attributes, 0) == 0 &&
+                          posix_spawnattr_setflags(&attributes, (short)(flags | POSIX_SPAWN_SETPGROUP)) == 0;
+        }
+    }
+
+    if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
+    {
         PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
         PosixStringList envp = options.use_process_environment ? program_state->input.raw_environment
                                                                : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
@@ -1863,6 +2359,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     }
 
     result.handle = (OsProcessHandle*)(pid == -1 ? 0 : (u64)pid);
+    result.process_group = pid != -1 && options.new_process_group;
 #endif
 
     if (program_flag_get(PROGRAM_FLAG_VERBOSE))
@@ -1955,10 +2452,1092 @@ BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microsecon
     return result;
 }
 
+#if !BUSTER_WINDOWS
+typedef enum OsProcessGroupOperation
+{
+    OS_PROCESS_GROUP_SIGNAL,
+    OS_PROCESS_GROUP_QUERY,
+    OS_PROCESS_GROUP_OPERATION_COUNT,
+} OsProcessGroupOperation;
+
+typedef struct OsProcessGroupReservation OsProcessGroupReservation;
+struct OsProcessGroupReservation
+{
+    pid_t leader;
+#if BUSTER_INCLUDE_TESTS
+    bool count_test_syscalls;
+    bool lose_test_ownership;
+#endif
+};
+
+typedef struct OsProcessGroupSignalResult OsProcessGroupSignalResult;
+struct OsProcessGroupSignalResult
+{
+    int status;
+    int error;
+};
+
+typedef struct OsProcessGroupObservation OsProcessGroupObservation;
+struct OsProcessGroupObservation
+{
+    bool valid;
+    bool exited;
+    int error;
+};
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u64 os_process_group_test_syscall_attempts;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_process_wait_test_expire_deadline_after_ready;
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL pid_t os_linux_process_group_test_vanishing_process;
+#endif
+
+void os_process_wait_test_expire_deadline_after_ready_once(void)
+{
+    os_process_wait_test_expire_deadline_after_ready = true;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool os_process_group_reservation_acquire(const OsProcessGroupReservation* reservation, OsProcessGroupOperation operation,
+                                                              pid_t* leader)
+{
+    bool result = reservation->leader > 0 && operation < OS_PROCESS_GROUP_OPERATION_COUNT;
+    if (result) { *leader = reservation->leader; }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_group_reservation_release(OsProcessGroupReservation* reservation)
+{
+    reservation->leader = 0;
+}
+
+BUSTER_GLOBAL_LOCAL OsProcessGroupSignalResult os_process_group_signal(const OsProcessGroupReservation* reservation, int signal)
+{
+    OsProcessGroupSignalResult result = {.status = -1, .error = ESRCH};
+    pid_t leader = 0;
+    if (os_process_group_reservation_acquire(reservation, OS_PROCESS_GROUP_SIGNAL, &leader))
+    {
+#if BUSTER_INCLUDE_TESTS
+        if (reservation->count_test_syscalls) { os_process_group_test_syscall_attempts += 1; }
+#endif
+        result.status = kill(-leader, signal);
+        result.error = result.status ? errno : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL OsProcessGroupObservation os_process_group_observe(const OsProcessGroupReservation* reservation, bool no_hang)
+{
+    OsProcessGroupObservation result = {.error = ESRCH};
+    pid_t leader = 0;
+    if (os_process_group_reservation_acquire(reservation, OS_PROCESS_GROUP_QUERY, &leader))
+    {
+#if BUSTER_INCLUDE_TESTS
+        if (reservation->lose_test_ownership)
+        {
+            result.error = ECHILD;
+        }
+        else
+#endif
+        {
+            siginfo_t information;
+            int observed;
+            do
+            {
+                information = (siginfo_t){0};
+#if BUSTER_INCLUDE_TESTS
+                if (reservation->count_test_syscalls) { os_process_group_test_syscall_attempts += 1; }
+#endif
+                observed = waitid(P_PID, (id_t)leader, &information, WEXITED | WNOWAIT | (no_hang ? WNOHANG : 0));
+            } while (observed && errno == EINTR);
+            result.valid = !observed && (information.si_pid == 0 || information.si_pid == leader);
+            result.exited = result.valid && information.si_pid == leader;
+            result.error = result.valid ? 0 : observed ? errno : EINVAL;
+        }
+    }
+    return result;
+}
+
+#if BUSTER_MACOS
+BUSTER_GLOBAL_LOCAL bool os_apple_process_group_is_quiescent(Arena* arena, const OsProcessGroupReservation* reservation);
+#endif
+
+#if BUSTER_LINUX
+enum
+{
+    OS_LINUX_PROCESS_GROUP_MEMBER_LIMIT = 65536,
+    OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT = 32,
+};
+
+typedef struct OsLinuxProcessStatus OsLinuxProcessStatus;
+struct OsLinuxProcessStatus
+{
+    pid_t process_id;
+    pid_t namespace_process_ids[OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT];
+    u32 namespace_depth;
+    bool valid;
+};
+
+typedef struct OsLinuxProcessGroupMember OsLinuxProcessGroupMember;
+struct OsLinuxProcessGroupMember
+{
+    pid_t proc_process_id;
+    pid_t local_process_id;
+    pid_t namespace_process_ids[OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT];
+    u32 namespace_depth;
+};
+
+typedef struct OsLinuxProcessGroupCensus OsLinuxProcessGroupCensus;
+struct OsLinuxProcessGroupCensus
+{
+    OsLinuxProcessGroupMember* members;
+    u32 count;
+    bool valid;
+    bool retry;
+};
+
+typedef struct OsLinuxProcContext OsLinuxProcContext;
+struct OsLinuxProcContext
+{
+    int descriptor;
+    struct stat mount_identity;
+    struct stat pid_namespace_identity;
+    u32 current_namespace_index;
+    u32 current_namespace_depth;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_id_parse_length(const char* text, u64 length, pid_t* process_id)
+{
+    u64 value = 0;
+    bool result = length != 0;
+    for (u64 index = 0; result && index < length; index += 1)
+    {
+        u32 digit = (u32)(u8)text[index] - '0';
+        result = digit < 10 && value <= ((u64)INT_MAX - digit) / 10;
+        if (result) { value = value * 10 + digit; }
+    }
+    if (result) { *process_id = (pid_t)value; }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_id_parse(const char* text, pid_t* process_id)
+{
+    return os_linux_process_id_parse_length(text, strlen(text), process_id);
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_stat_parse(char* bytes, ssize_t length, pid_t expected_process_id,
+                                                      pid_t* process_group, char* state)
+{
+    char* first_space = 0;
+    char* close_parenthesis = 0;
+    for (ssize_t index = 0; index < length; index += 1)
+    {
+        if (!first_space && bytes[index] == ' ') { first_space = bytes + index; }
+        if (bytes[index] == ')') { close_parenthesis = bytes + index; }
+    }
+
+    bool result = first_space && first_space + 1 < bytes + length && first_space[1] == '(' &&
+        close_parenthesis && close_parenthesis > first_space + 1;
+    pid_t parsed_process_id = 0;
+    if (result)
+    {
+        char saved = *first_space;
+        *first_space = 0;
+        result = os_linux_process_id_parse(bytes, &parsed_process_id);
+        *first_space = saved;
+    }
+    long parent = 0;
+    long group = 0;
+    if (result)
+    {
+        result = parsed_process_id == expected_process_id &&
+            sscanf(close_parenthesis + 1, " %c %ld %ld", state, &parent, &group) == 3 &&
+            strchr("RSDZTWtXxKWPIN", *state) != 0 && group >= 0 && group <= INT_MAX;
+    }
+    if (result) { *process_group = (pid_t)group; }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_proc_read_at(int proc_descriptor, const char* path, char* bytes, u64 capacity, u64* length,
+                                               bool* vanished)
+{
+    int descriptor = openat(proc_descriptor, path, O_RDONLY | O_CLOEXEC);
+    *vanished = descriptor < 0 && (errno == ENOENT || errno == ESRCH);
+    bool result = descriptor >= 0;
+    u64 total = 0;
+    if (result)
+    {
+        bool exhausted = false;
+        while (result && !exhausted && total + 1 < capacity)
+        {
+            ssize_t read_result;
+            do
+            {
+                read_result = read(descriptor, bytes + total, capacity - total - 1);
+            } while (read_result < 0 && errno == EINTR);
+            result = read_result >= 0;
+            if (result)
+            {
+                exhausted = read_result == 0;
+                total += (u64)read_result;
+            }
+        }
+        if (result && !exhausted)
+        {
+            char overflow;
+            ssize_t read_result;
+            do
+            {
+                read_result = read(descriptor, &overflow, 1);
+            } while (read_result < 0 && errno == EINTR);
+            result = read_result == 0;
+        }
+        int close_result = close(descriptor);
+        result = result && total != 0 && close_result == 0;
+    }
+    if (result)
+    {
+        bytes[total] = 0;
+        *length = total;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_status_parse(char* bytes, u64 length, pid_t expected_process_id,
+                                                        OsLinuxProcessStatus* status)
+{
+    OsLinuxProcessStatus parsed = {0};
+    bool process_id_found = false;
+    bool namespace_ids_found = false;
+    bool result = true;
+    for (u64 line_start = 0; result && line_start < length;)
+    {
+        u64 line_end = line_start;
+        while (line_end < length && bytes[line_end] != '\n') { line_end += 1; }
+        u64 line_length = line_end - line_start;
+        char* line = bytes + line_start;
+        if (line_length >= 4 && memcmp(line, "Pid:", 4) == 0)
+        {
+            u64 value_start = 4;
+            while (value_start < line_length && (line[value_start] == ' ' || line[value_start] == '\t')) { value_start += 1; }
+            u64 value_end = value_start;
+            while (value_end < line_length && line[value_end] >= '0' && line[value_end] <= '9') { value_end += 1; }
+            u64 digits_end = value_end;
+            while (value_end < line_length && (line[value_end] == ' ' || line[value_end] == '\t')) { value_end += 1; }
+            process_id_found = !process_id_found && value_end == line_length &&
+                os_linux_process_id_parse_length(line + value_start, digits_end - value_start, &parsed.process_id);
+            result = process_id_found;
+        }
+        else if (line_length >= 7 && memcmp(line, "NSpid:", 6) == 0)
+        {
+            result = !namespace_ids_found;
+            namespace_ids_found = true;
+            u64 at = 6;
+            while (result && at < line_length)
+            {
+                while (at < line_length && (line[at] == ' ' || line[at] == '\t')) { at += 1; }
+                if (at < line_length)
+                {
+                    u64 value_start = at;
+                    while (at < line_length && line[at] >= '0' && line[at] <= '9') { at += 1; }
+                    result = value_start < at && parsed.namespace_depth < OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT &&
+                        os_linux_process_id_parse_length(line + value_start, at - value_start,
+                            &parsed.namespace_process_ids[parsed.namespace_depth]);
+                    if (result) { parsed.namespace_depth += 1; }
+                }
+            }
+        }
+        line_start = line_end < length ? line_end + 1 : line_end;
+    }
+    result = result && process_id_found && namespace_ids_found && parsed.namespace_depth &&
+        parsed.namespace_process_ids[0] == parsed.process_id &&
+        (!expected_process_id || parsed.process_id == expected_process_id);
+    if (result)
+    {
+        parsed.valid = true;
+        *status = parsed;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_stat_at(int proc_descriptor, pid_t process_id, pid_t* process_group,
+                                                   char* state, bool* vanished)
+{
+    char path[64];
+    int path_length = snprintf(path, sizeof(path), "%ld/stat", (long)process_id);
+    char bytes[4096];
+    u64 length = 0;
+    bool result = path_length > 0 && (u64)path_length < sizeof(path) &&
+        os_linux_proc_read_at(proc_descriptor, path, bytes, sizeof(bytes), &length, vanished);
+    if (result)
+    {
+        result = os_linux_process_stat_parse(bytes, (ssize_t)length, process_id, process_group, state);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_status_at(int proc_descriptor, pid_t process_id, OsLinuxProcessStatus* status,
+                                                     bool* vanished)
+{
+    char path[64];
+    int path_length = snprintf(path, sizeof(path), "%ld/status", (long)process_id);
+    char bytes[16384];
+    u64 length = 0;
+    bool result = path_length > 0 && (u64)path_length < sizeof(path) &&
+        os_linux_proc_read_at(proc_descriptor, path, bytes, sizeof(bytes), &length, vanished);
+    if (result) { result = os_linux_process_status_parse(bytes, length, process_id, status); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_pid_namespace_at(int proc_descriptor, pid_t process_id, struct stat* identity,
+                                                            bool* vanished)
+{
+    char path[64];
+    int path_length = snprintf(path, sizeof(path), "%ld/ns/pid", (long)process_id);
+    int status = path_length > 0 && (u64)path_length < sizeof(path) ? fstatat(proc_descriptor, path, identity, 0) : -1;
+    *vanished = status != 0 && (errno == ENOENT || errno == ESRCH);
+    return status == 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_same_file_identity(struct stat left, struct stat right)
+{
+    return left.st_dev == right.st_dev && left.st_ino == right.st_ino;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_status_namespace_index(OsLinuxProcessStatus status, pid_t process_id, u32* namespace_index)
+{
+    u32 matches = 0;
+    for (u32 index = 0; index < status.namespace_depth; index += 1)
+    {
+        if (status.namespace_process_ids[index] == process_id)
+        {
+            *namespace_index = index;
+            matches += 1;
+        }
+    }
+    return matches == 1;
+}
+
+BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
+{
+    OsLinuxProcContext result = {.descriptor = -1};
+    result.descriptor = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    result.valid = result.descriptor >= 0 && fstat(result.descriptor, &result.mount_identity) == 0 &&
+        fstatat(result.descriptor, "self/ns/pid", &result.pid_namespace_identity, 0) == 0;
+    char bytes[16384];
+    u64 length = 0;
+    bool vanished = false;
+    OsLinuxProcessStatus self = {0};
+    if (result.valid)
+    {
+        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished) &&
+            os_linux_process_status_parse(bytes, length, 0, &self);
+    }
+    pid_t self_process_id = getpid();
+    result.current_namespace_depth = self.namespace_depth;
+    result.valid = result.valid && os_linux_process_status_namespace_index(self, self_process_id, &result.current_namespace_index);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_proc_context_close(OsLinuxProcContext* context)
+{
+    struct stat final_identity = {0};
+    bool result = context->valid && context->descriptor >= 0;
+    if (context->descriptor >= 0)
+    {
+        bool identity_valid = fstat(context->descriptor, &final_identity) == 0 &&
+            os_linux_same_file_identity(context->mount_identity, final_identity);
+        int close_status = close(context->descriptor);
+        result = identity_valid && close_status == 0 && result;
+    }
+    context->descriptor = -1;
+    context->valid = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_group_resolve_leader(OsLinuxProcContext* context, pid_t local_leader,
+                                                                pid_t* proc_leader)
+{
+    bool result = false;
+    u32 matches = 0;
+    pid_t process_group = 0;
+    char state = 0;
+    bool vanished = false;
+    OsLinuxProcessStatus status = {0};
+    struct stat namespace_identity = {0};
+
+    // Same-namespace procfs is the ordinary fast path.
+    bool direct = os_linux_process_stat_at(context->descriptor, local_leader, &process_group, &state, &vanished) &&
+        process_group == local_leader &&
+        os_linux_process_status_at(context->descriptor, local_leader, &status, &vanished) &&
+        os_linux_process_pid_namespace_at(context->descriptor, local_leader, &namespace_identity, &vanished) &&
+        status.namespace_depth == context->current_namespace_depth &&
+        status.namespace_process_ids[context->current_namespace_index] == local_leader &&
+        os_linux_same_file_identity(namespace_identity, context->pid_namespace_identity);
+    if (direct)
+    {
+        *proc_leader = local_leader;
+        result = true;
+    }
+    else
+    {
+        int scan_descriptor = openat(context->descriptor, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        DIR* processes = scan_descriptor >= 0 ? fdopendir(scan_descriptor) : 0;
+        bool valid = processes != 0;
+        if (!processes && scan_descriptor >= 0) { close(scan_descriptor); }
+        while (valid)
+        {
+            errno = 0;
+            struct dirent* entry = readdir(processes);
+            if (!entry)
+            {
+                valid = errno == 0;
+                break;
+            }
+            bool numeric_name = entry->d_name[0] != 0;
+            for (u64 index = 0; numeric_name && entry->d_name[index]; index += 1)
+            {
+                numeric_name = entry->d_name[index] >= '0' && entry->d_name[index] <= '9';
+            }
+            pid_t process_id = 0;
+            bool parsed_id = numeric_name && os_linux_process_id_parse(entry->d_name, &process_id);
+            if (numeric_name && !parsed_id)
+            {
+                valid = false;
+            }
+            else if (parsed_id)
+            {
+                OsLinuxProcessStatus candidate_status = {0};
+                bool stat_valid = os_linux_process_stat_at(context->descriptor, process_id, &process_group, &state, &vanished);
+                // readdir is only a point-in-time inventory. A PID that exits
+                // before its files are opened is absent from this snapshot;
+                // malformed or unreadable live entries still fail closed.
+                valid = stat_valid || vanished;
+                if (stat_valid && process_group == process_id)
+                {
+                    bool status_valid = os_linux_process_status_at(context->descriptor, process_id, &candidate_status, &vanished);
+                    valid = status_valid || vanished;
+                    if (status_valid && candidate_status.namespace_depth == context->current_namespace_depth &&
+                        candidate_status.namespace_process_ids[context->current_namespace_index] == local_leader)
+                    {
+                        bool namespace_valid = os_linux_process_pid_namespace_at(
+                            context->descriptor, process_id, &namespace_identity, &vanished);
+                        valid = namespace_valid || vanished;
+                        if (namespace_valid && os_linux_same_file_identity(namespace_identity, context->pid_namespace_identity))
+                        {
+                            *proc_leader = process_id;
+                            matches += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if (processes && closedir(processes) != 0) { valid = false; }
+        result = valid && matches == 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL OsLinuxProcessGroupCensus os_linux_process_group_census(Arena* arena, OsLinuxProcContext* context,
+                                                                            pid_t proc_leader, pid_t local_leader)
+{
+    OsLinuxProcessGroupCensus result = {
+        .members = arena_allocate(arena, OsLinuxProcessGroupMember, OS_LINUX_PROCESS_GROUP_MEMBER_LIMIT),
+        .valid = true,
+    };
+    int scan_descriptor = openat(context->descriptor, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR* processes = scan_descriptor >= 0 ? fdopendir(scan_descriptor) : 0;
+    result.valid = processes != 0;
+    if (!processes && scan_descriptor >= 0) { close(scan_descriptor); }
+    while (result.valid)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(processes);
+        if (!entry)
+        {
+            result.valid = errno == 0;
+            break;
+        }
+        bool numeric_name = entry->d_name[0] != 0;
+        for (u64 index = 0; numeric_name && entry->d_name[index]; index += 1)
+        {
+            numeric_name = entry->d_name[index] >= '0' && entry->d_name[index] <= '9';
+        }
+        pid_t process_id = 0;
+        bool parsed_id = numeric_name && os_linux_process_id_parse(entry->d_name, &process_id);
+        if (numeric_name && !parsed_id)
+        {
+            result.valid = false;
+        }
+        else if (parsed_id)
+        {
+            pid_t process_group = 0;
+            char state = 0;
+            bool vanished = false;
+            OsLinuxProcessStatus status = {0};
+            bool include_member = false;
+            bool stat_valid = os_linux_process_stat_at(context->descriptor, process_id, &process_group, &state, &vanished);
+#if BUSTER_INCLUDE_TESTS
+            if (process_id == os_linux_process_group_test_vanishing_process)
+            {
+                stat_valid = false;
+                vanished = true;
+                os_linux_process_group_test_vanishing_process = 0;
+            }
+#endif
+            // A directory entry may legitimately disappear before stat is
+            // opened, but omitting it could make two incomplete inventories
+            // appear equal. Retry the complete two-snapshot proof instead.
+            result.retry = vanished;
+            result.valid = stat_valid;
+            if (stat_valid && process_group == proc_leader)
+            {
+                result.valid = state == 'Z';
+                bool status_valid = false;
+                if (result.valid)
+                {
+                    status_valid = os_linux_process_status_at(context->descriptor, process_id, &status, &vanished);
+                    result.retry = vanished;
+                    result.valid = status_valid;
+                }
+                if (status_valid)
+                {
+                    result.valid = status.namespace_depth >= context->current_namespace_depth &&
+                        context->current_namespace_index < status.namespace_depth &&
+                        result.count < OS_LINUX_PROCESS_GROUP_MEMBER_LIMIT;
+                    include_member = result.valid;
+                }
+                if (include_member && status.namespace_depth == context->current_namespace_depth)
+                {
+                    struct stat namespace_identity = {0};
+                    bool namespace_valid = os_linux_process_pid_namespace_at(
+                        context->descriptor, process_id, &namespace_identity, &vanished);
+                    result.retry = vanished;
+                    result.valid = namespace_valid &&
+                        os_linux_same_file_identity(namespace_identity, context->pid_namespace_identity);
+                    include_member = namespace_valid && result.valid;
+                }
+                if (include_member)
+                {
+                    result.members[result.count++] = (OsLinuxProcessGroupMember){
+                        .proc_process_id = process_id,
+                        .local_process_id = status.namespace_process_ids[context->current_namespace_index],
+                        .namespace_depth = status.namespace_depth,
+                    };
+                    memcpy(result.members[result.count - 1].namespace_process_ids, status.namespace_process_ids,
+                        sizeof(pid_t) * status.namespace_depth);
+                }
+            }
+        }
+    }
+    if (processes && closedir(processes) != 0) { result.valid = false; }
+    for (u32 index = 1; result.valid && index < result.count; index += 1)
+    {
+        OsLinuxProcessGroupMember member = result.members[index];
+        u32 insertion = index;
+        while (insertion && (result.members[insertion - 1].local_process_id > member.local_process_id ||
+                             (result.members[insertion - 1].local_process_id == member.local_process_id &&
+                              result.members[insertion - 1].proc_process_id > member.proc_process_id)))
+        {
+            result.members[insertion] = result.members[insertion - 1];
+            insertion -= 1;
+        }
+        result.members[insertion] = member;
+    }
+    u32 leader_count = 0;
+    for (u32 index = 0; result.valid && index < result.count; index += 1)
+    {
+        OsLinuxProcessGroupMember member = result.members[index];
+        leader_count += member.proc_process_id == proc_leader && member.local_process_id == local_leader;
+        if (index && member.local_process_id == result.members[index - 1].local_process_id) { result.valid = false; }
+    }
+    result.valid = result.valid && leader_count == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_group_census_equal(OsLinuxProcessGroupCensus left, OsLinuxProcessGroupCensus right)
+{
+    bool result = left.valid && right.valid && left.count == right.count;
+    for (u32 index = 0; result && index < left.count; index += 1)
+    {
+        result = left.members[index].proc_process_id == right.members[index].proc_process_id &&
+            left.members[index].local_process_id == right.members[index].local_process_id &&
+            left.members[index].namespace_depth == right.members[index].namespace_depth &&
+            memcmp(left.members[index].namespace_process_ids, right.members[index].namespace_process_ids,
+                sizeof(pid_t) * left.members[index].namespace_depth) == 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const OsProcessGroupReservation* reservation)
+{
+    enum {OS_LINUX_PROCESS_GROUP_CENSUS_ATTEMPTS = 8};
+    pid_t leader = 0;
+    bool result = os_process_group_reservation_acquire(reservation, OS_PROCESS_GROUP_QUERY, &leader);
+    if (result)
+    {
+        OsLinuxProcContext context = os_linux_proc_context_open();
+        pid_t proc_leader = 0;
+        result = context.valid && os_linux_process_group_resolve_leader(&context, leader, &proc_leader);
+        bool proven = false;
+        bool fatal = false;
+        u64 census_position = arena->position;
+        if (result)
+        {
+            for (u32 attempt = 0; attempt < OS_LINUX_PROCESS_GROUP_CENSUS_ATTEMPTS && !proven && !fatal; attempt += 1)
+            {
+                OsLinuxProcessGroupCensus first = os_linux_process_group_census(arena, &context, proc_leader, leader);
+                OsLinuxProcessGroupCensus second = {0};
+                if (first.valid) { second = os_linux_process_group_census(arena, &context, proc_leader, leader); }
+                fatal = (!first.valid && !first.retry) || (!second.valid && !second.retry && first.valid);
+                proven = first.valid && second.valid && os_linux_process_group_census_equal(first, second);
+                arena_set_position(arena, census_position);
+            }
+        }
+        result = result && proven;
+        result = os_linux_proc_context_close(&context) && result;
+        // Revalidate the exact child reservation immediately after the two
+        // snapshots. No numeric group operation is permitted if it was lost.
+        OsProcessGroupObservation observation = os_process_group_observe(reservation, true);
+        result = result && observation.valid && observation.exited;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool os_linux_process_group_churn_self_test(Arena* arena)
+{
+    pid_t leader = fork();
+    if (leader == 0)
+    {
+        int group_status = setpgid(0, 0);
+        _exit(group_status == 0 ? 0 : 103);
+    }
+    bool group_ready = leader > 0 && setpgid(leader, leader) == 0;
+    pid_t unrelated = group_ready ? fork() : -1;
+    if (unrelated == 0)
+    {
+        poll(0, 0, 3000);
+        _exit(0);
+    }
+
+    OsProcessGroupObservation observation = {0};
+    OsProcessGroupReservation reservation = {.leader = leader};
+    if (unrelated > 0)
+    {
+        observation = os_process_group_observe(&reservation, false);
+        os_linux_process_group_test_vanishing_process = unrelated;
+    }
+    bool quiescent = observation.valid && observation.exited &&
+        os_linux_process_group_is_quiescent(arena, &reservation);
+    os_linux_process_group_test_vanishing_process = 0;
+
+    bool leader_reaped = leader <= 0;
+    if (leader > 0)
+    {
+        int leader_status = 0;
+        pid_t leader_wait;
+        do
+        {
+            leader_wait = waitpid(leader, &leader_status, 0);
+        } while (leader_wait < 0 && errno == EINTR);
+        leader_reaped = leader_wait == leader;
+    }
+    bool unrelated_reaped = unrelated <= 0;
+    if (unrelated > 0)
+    {
+        int kill_status = kill(unrelated, SIGKILL);
+        bool kill_valid = kill_status == 0 || errno == ESRCH;
+        int unrelated_status = 0;
+        pid_t unrelated_wait;
+        do
+        {
+            unrelated_wait = waitpid(unrelated, &unrelated_status, 0);
+        } while (unrelated_wait < 0 && errno == EINTR);
+        unrelated_reaped = kill_valid && unrelated_wait == unrelated;
+    }
+    return group_ready && unrelated > 0 && quiescent && leader_reaped && unrelated_reaped;
+}
+#endif
+
+#if BUSTER_INCLUDE_TESTS
+bool os_linux_process_stat_parse_self_test(void)
+{
+    char zombie[] = "123 (comm with ) inside) Z 1 123 0";
+    char running[] = "456 (run) R 1 456 0";
+    char malformed[] = "789 (missing close Z 1 789 0";
+    char invalid_group[] = "321 (bad group) Z 1 -1 0";
+    char status_text[] = "Name:\ttest\nPid:\t999\nNSpid:\t999\t12\t7\n";
+    char duplicate_status[] = "Pid:\t999\nNSpid:\t999\t12\nNSpid:\t999\t12\n";
+    char short_status[] = "Pid:\t999\nNSpid:\t\n";
+    pid_t group = 0;
+    char state = 0;
+    OsLinuxProcessStatus status = {0};
+    bool result = os_linux_process_stat_parse(zombie, sizeof(zombie) - 1, 123, &group, &state) && group == 123 && state == 'Z';
+    result = os_linux_process_stat_parse(running, sizeof(running) - 1, 456, &group, &state) && group == 456 && state == 'R' && result;
+    result = !os_linux_process_stat_parse(zombie, sizeof(zombie) - 1, 124, &group, &state) && result;
+    result = !os_linux_process_stat_parse(malformed, sizeof(malformed) - 1, 789, &group, &state) && result;
+    result = !os_linux_process_stat_parse(invalid_group, sizeof(invalid_group) - 1, 321, &group, &state) && result;
+    result = os_linux_process_status_parse(status_text, sizeof(status_text) - 1, 999, &status) &&
+        status.namespace_depth == 3 && status.namespace_process_ids[0] == 999 && status.namespace_process_ids[1] == 12 &&
+        status.namespace_process_ids[2] == 7 && result;
+    result = !os_linux_process_status_parse(status_text, sizeof(status_text) - 1, 998, &status) && result;
+    result = !os_linux_process_status_parse(duplicate_status, sizeof(duplicate_status) - 1, 999, &status) && result;
+    result = !os_linux_process_status_parse(short_status, sizeof(short_status) - 1, 999, &status) && result;
+    OsLinuxProcessStatus mapping = {
+        .namespace_process_ids = {999, 12, 7},
+        .namespace_depth = 3,
+        .valid = true,
+    };
+    u32 namespace_index = 0;
+    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 1 && result;
+    result = !os_linux_process_status_namespace_index(mapping, 8, &namespace_index) && result;
+    mapping.namespace_process_ids[2] = 12;
+    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
+    OsLinuxProcessGroupMember members[] = {
+        {.proc_process_id = 999, .local_process_id = 12, .namespace_process_ids = {999, 12}, .namespace_depth = 2},
+    };
+    OsLinuxProcessGroupMember changed_members[] = {
+        {.proc_process_id = 999, .local_process_id = 12, .namespace_process_ids = {999, 12}, .namespace_depth = 2},
+    };
+    OsLinuxProcessGroupCensus census = {.members = members, .count = 1, .valid = true};
+    OsLinuxProcessGroupCensus changed = {.members = changed_members, .count = 1, .valid = true};
+    result = os_linux_process_group_census_equal(census, changed) && result;
+    changed_members[0].namespace_process_ids[0] = 998;
+    result = !os_linux_process_group_census_equal(census, changed) && result;
+    return result;
+}
+#endif
+#endif
+
+typedef enum OsProcessGroupCleanupResult
+{
+    OS_PROCESS_GROUP_CLEANUP_RETRY,
+    OS_PROCESS_GROUP_CLEANUP_PROVEN,
+    OS_PROCESS_GROUP_CLEANUP_OWNERSHIP_LOST,
+} OsProcessGroupCleanupResult;
+
+BUSTER_GLOBAL_LOCAL OsProcessGroupCleanupResult os_process_group_terminate_and_prove(Arena* arena,
+                                                                                     const OsProcessGroupReservation* reservation)
+{
+    // The first snapshot is the normal fast path. A bounded 100 ms tail lets
+    // killed members reach SZOMB under loaded CI without weakening the proof.
+    enum {OS_PROCESS_GROUP_CLEANUP_ATTEMPTS = 101};
+    OsProcessGroupCleanupResult result = OS_PROCESS_GROUP_CLEANUP_RETRY;
+#if BUSTER_LINUX || BUSTER_MACOS
+    BUSTER_CHECK(arena != 0);
+    u64 arena_position = arena->position;
+#else
+    BUSTER_UNUSED(arena);
+#endif
+    for (u32 attempt = 0; attempt < OS_PROCESS_GROUP_CLEANUP_ATTEMPTS && result == OS_PROCESS_GROUP_CLEANUP_RETRY; attempt += 1)
+    {
+#if BUSTER_LINUX || BUSTER_MACOS
+        arena_set_position(arena, arena_position);
+#endif
+        OsProcessGroupObservation observation = os_process_group_observe(reservation, true);
+        OsProcessGroupSignalResult signal_result = {0};
+        if (!observation.valid)
+        {
+            result = OS_PROCESS_GROUP_CLEANUP_OWNERSHIP_LOST;
+        }
+        else
+        {
+            signal_result = os_process_group_signal(reservation, SIGKILL);
+#if BUSTER_MACOS
+        // Darwin killpg success means at least one member accepted the signal,
+        // not that every member retired. Always prove the complete snapshot.
+        BUSTER_UNUSED(signal_result);
+            if (os_apple_process_group_is_quiescent(arena, reservation)) { result = OS_PROCESS_GROUP_CLEANUP_PROVEN; }
+#elif BUSTER_LINUX
+        BUSTER_UNUSED(signal_result);
+            if (os_linux_process_group_is_quiescent(arena, reservation)) { result = OS_PROCESS_GROUP_CLEANUP_PROVEN; }
+#else
+            if (signal_result.status == 0 || signal_result.error == ESRCH) { result = OS_PROCESS_GROUP_CLEANUP_PROVEN; }
+#endif
+        }
+        if (result == OS_PROCESS_GROUP_CLEANUP_RETRY && attempt + 1 < OS_PROCESS_GROUP_CLEANUP_ATTEMPTS) { poll(0, 0, 1); }
+    }
+#if BUSTER_LINUX || BUSTER_MACOS
+    arena_set_position(arena, arena_position);
+#endif
+    return result;
+}
+
+#if BUSTER_MACOS
+// Darwin reports EPERM when killpg finds only zombies. Query the still-reserved
+// process group before reaping its leader. A growing or malformed snapshot
+// fails closed, and a bound prevents a corrupt size from consuming the arena.
+BUSTER_GLOBAL_LOCAL bool os_apple_process_group_is_quiescent(Arena* arena, const OsProcessGroupReservation* reservation)
+{
+    enum {OS_APPLE_PROCESS_GROUP_MEMBER_LIMIT = 4096};
+    pid_t leader = 0;
+    bool result = false;
+    if (os_process_group_reservation_acquire(reservation, OS_PROCESS_GROUP_QUERY, &leader))
+    {
+        int query[] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, leader};
+        size_t required_size = 0;
+#if BUSTER_INCLUDE_TESTS
+        if (reservation->count_test_syscalls) { os_process_group_test_syscall_attempts += 1; }
+#endif
+        if (sysctl(query, 4, 0, &required_size, 0, 0) == 0 && required_size && required_size % sizeof(struct kinfo_proc) == 0 &&
+            required_size / sizeof(struct kinfo_proc) <= OS_APPLE_PROCESS_GROUP_MEMBER_LIMIT)
+        {
+            u64 capacity = required_size / sizeof(struct kinfo_proc);
+            struct kinfo_proc* process_infos = arena_allocate(arena, struct kinfo_proc, capacity);
+            size_t returned_size = required_size;
+#if BUSTER_INCLUDE_TESTS
+            if (reservation->count_test_syscalls) { os_process_group_test_syscall_attempts += 1; }
+#endif
+            if (sysctl(query, 4, process_infos, &returned_size, 0, 0) == 0 && returned_size && returned_size <= required_size &&
+                returned_size % sizeof(struct kinfo_proc) == 0)
+            {
+                u64 process_count = returned_size / sizeof(struct kinfo_proc);
+                u64 leader_count = 0;
+                bool all_zombies = true;
+                for (u64 process_index = 0; process_index < process_count; process_index += 1)
+                {
+                    leader_count += process_infos[process_index].kp_proc.p_pid == leader;
+                    all_zombies = all_zombies && process_infos[process_index].kp_proc.p_stat == SZOMB;
+                }
+                result = leader_count == 1 && all_zombies;
+            }
+        }
+    }
+    return result;
+}
+#endif
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+bool os_process_group_reservation_release_self_test(void)
+{
+    OsProcessGroupReservation reservation = {.leader = 0x7fffffff, .count_test_syscalls = true};
+    bool result = true;
+    for (u64 operation = 0; operation < OS_PROCESS_GROUP_OPERATION_COUNT; operation += 1)
+    {
+        pid_t leader = 0;
+        result = os_process_group_reservation_acquire(&reservation, (OsProcessGroupOperation)operation, &leader) && leader == reservation.leader && result;
+    }
+
+    os_process_group_reservation_release(&reservation);
+    u64 syscall_attempts = os_process_group_test_syscall_attempts;
+    OsProcessGroupSignalResult signal_result = os_process_group_signal(&reservation, 0);
+    result = signal_result.status == -1 && signal_result.error == ESRCH && os_process_group_test_syscall_attempts == syscall_attempts && result;
+#if BUSTER_MACOS
+    TemporalArena scratch = scratch_begin(0, 0);
+    result = !os_apple_process_group_is_quiescent(scratch.arena, &reservation) &&
+             os_process_group_test_syscall_attempts == syscall_attempts && result;
+    scratch_end(scratch);
+#else
+    pid_t leader = 0x7fffffff;
+    result = !os_process_group_reservation_acquire(&reservation, OS_PROCESS_GROUP_QUERY, &leader) && leader == 0x7fffffff && result;
+#endif
+    return result;
+}
+#endif
+#endif
+
+#if !BUSTER_WINDOWS
+typedef enum OsProcessGroupWaitOutcome
+{
+    OS_PROCESS_GROUP_WAIT_ACTIVE,
+    OS_PROCESS_GROUP_WAIT_QUIESCENT_RESERVED,
+    OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST,
+    OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE,
+} OsProcessGroupWaitOutcome;
+
+typedef enum OsProcessGroupControl
+{
+    OS_PROCESS_GROUP_CONTROL_NONE,
+    OS_PROCESS_GROUP_CONTROL_TERMINATE,
+    OS_PROCESS_GROUP_CONTROL_KILL,
+} OsProcessGroupControl;
+
+typedef struct OsProcessGroupWaitState OsProcessGroupWaitState;
+struct OsProcessGroupWaitState
+{
+    OsProcessGroupReservation reservation;
+    OsProcessGroupControl delivered_control;
+    OsProcessGroupWaitOutcome outcome;
+    u32 recovery_failures;
+    bool cleanup_failure_published;
+};
+
+BUSTER_GLOBAL_LOCAL OsProcessGroupControl os_process_group_control_requested(ProcessGroupControlState* control)
+{
+    OsProcessGroupControl result = OS_PROCESS_GROUP_CONTROL_NONE;
+    if (control && control->cancellation_escalated && process_control_atomic_load(control->cancellation_escalated))
+    {
+        result = OS_PROCESS_GROUP_CONTROL_KILL;
+    }
+    else if (control && control->cancellation_signal && process_control_atomic_load(control->cancellation_signal))
+    {
+        result = OS_PROCESS_GROUP_CONTROL_TERMINATE;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_group_wait_publish_cleanup_failure(ProcessSpawnResult spawn, OsProcessGroupWaitState* state)
+{
+    if (!state->cleanup_failure_published)
+    {
+        state->cleanup_failure_published = true;
+        ProcessGroupControlState* control = spawn.process_group_control;
+        if (control)
+        {
+            if (control->admission_mutex) { os_mutex_lock(control->admission_mutex); }
+            if (control->cancellation_signal) { process_control_atomic_set_if_zero(control->cancellation_signal, SIGTERM); }
+            if (control->cancellation_escalated) { process_control_atomic_store(control->cancellation_escalated, 1); }
+            if (control->admission_mutex) { os_mutex_unlock(control->admission_mutex); }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_group_wait_recover(ProcessSpawnResult spawn, OsProcessGroupWaitState* state)
+{
+    // An initial bounded campaign plus three forced campaigns gives the owner
+    // a deterministic recovery budget. Its first failure stops new admission;
+    // shared flags cannot signal a group or grant cleanup success.
+    enum {OS_PROCESS_GROUP_RECOVERY_CAMPAIGNS = 4};
+    os_process_group_wait_publish_cleanup_failure(spawn, state);
+    state->recovery_failures += 1;
+    if (state->recovery_failures >= OS_PROCESS_GROUP_RECOVERY_CAMPAIGNS)
+    {
+        state->outcome = OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE;
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+bool os_process_group_recovery_self_test(void)
+{
+    ProcessControlAtomic cancellation_signal = 0;
+    ProcessControlAtomic cancellation_escalated = 0;
+    ProcessGroupControlState control = {
+        .cancellation_signal = &cancellation_signal,
+        .cancellation_escalated = &cancellation_escalated,
+    };
+    ProcessSpawnResult spawn = {.process_group_control = &control};
+    OsProcessGroupWaitState state = {0};
+    for (u32 campaign = 0; campaign < 4; campaign += 1)
+    {
+        os_process_group_wait_recover(spawn, &state);
+    }
+    return process_control_atomic_load(&cancellation_signal) == SIGTERM && process_control_atomic_load(&cancellation_escalated) == 1 &&
+        state.cleanup_failure_published && state.recovery_failures == 4 &&
+        state.outcome == OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void os_process_group_wait_step(Arena* arena, ProcessSpawnResult spawn, bool force_kill,
+                                                    OsProcessGroupWaitState* state)
+{
+    if (state->outcome == OS_PROCESS_GROUP_WAIT_ACTIVE)
+    {
+        OsProcessGroupControl requested = os_process_group_control_requested(spawn.process_group_control);
+        if (force_kill || state->recovery_failures) { requested = OS_PROCESS_GROUP_CONTROL_KILL; }
+
+        // This successful WNOWAIT observation is the ownership proof for
+        // every group operation performed by this step.
+        OsProcessGroupObservation observation = os_process_group_observe(&state->reservation, true);
+        if (!observation.valid)
+        {
+            os_process_group_wait_publish_cleanup_failure(spawn, state);
+            state->outcome = OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+        }
+        else if (observation.exited)
+        {
+            OsProcessGroupCleanupResult cleanup = os_process_group_terminate_and_prove(arena, &state->reservation);
+            if (cleanup == OS_PROCESS_GROUP_CLEANUP_PROVEN)
+            {
+                state->outcome = OS_PROCESS_GROUP_WAIT_QUIESCENT_RESERVED;
+            }
+            else if (cleanup == OS_PROCESS_GROUP_CLEANUP_OWNERSHIP_LOST)
+            {
+                os_process_group_wait_publish_cleanup_failure(spawn, state);
+                state->outcome = OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+            }
+            else
+            {
+                os_process_group_wait_recover(spawn, state);
+            }
+        }
+        else if (requested > state->delivered_control)
+        {
+            int signal = requested == OS_PROCESS_GROUP_CONTROL_KILL ? SIGKILL : SIGTERM;
+            OsProcessGroupSignalResult signal_result = os_process_group_signal(&state->reservation, signal);
+            if (signal_result.status == 0)
+            {
+                state->delivered_control = requested;
+            }
+            else
+            {
+                // The leader can exit after the ownership observation but
+                // before killpg. Re-observe before interpreting that error or
+                // making any further operation on its numeric identity.
+                OsProcessGroupObservation after_signal = os_process_group_observe(&state->reservation, true);
+                if (!after_signal.valid)
+                {
+                    os_process_group_wait_publish_cleanup_failure(spawn, state);
+                    state->outcome = OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+                }
+                else if (after_signal.exited)
+                {
+                    OsProcessGroupCleanupResult cleanup = os_process_group_terminate_and_prove(arena, &state->reservation);
+                    if (cleanup == OS_PROCESS_GROUP_CLEANUP_PROVEN)
+                    {
+                        state->outcome = OS_PROCESS_GROUP_WAIT_QUIESCENT_RESERVED;
+                    }
+                    else if (cleanup == OS_PROCESS_GROUP_CLEANUP_OWNERSHIP_LOST)
+                    {
+                        os_process_group_wait_publish_cleanup_failure(spawn, state);
+                        state->outcome = OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+                    }
+                    else
+                    {
+                        os_process_group_wait_recover(spawn, state);
+                    }
+                }
+                else
+                {
+                    os_process_group_wait_recover(spawn, state);
+                }
+            }
+        }
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+bool os_process_group_ownership_loss_self_test(void)
+{
+    ProcessControlAtomic cancellation_signal = 0;
+    ProcessControlAtomic cancellation_escalated = 0;
+    ProcessGroupControlState control = {
+        .cancellation_signal = &cancellation_signal,
+        .cancellation_escalated = &cancellation_escalated,
+    };
+    ProcessSpawnResult spawn = {.process_group_control = &control};
+    OsProcessGroupWaitState state = {
+        .reservation = {.leader = 0x7fffffff, .count_test_syscalls = true, .lose_test_ownership = true},
+    };
+    u64 syscall_attempts = os_process_group_test_syscall_attempts;
+    os_process_group_wait_step(0, spawn, false, &state);
+    os_process_group_wait_step(0, spawn, false, &state);
+    return state.outcome == OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST && state.cleanup_failure_published &&
+        process_control_atomic_load(&cancellation_signal) == SIGTERM && process_control_atomic_load(&cancellation_escalated) == 1 &&
+        os_process_group_test_syscall_attempts == syscall_attempts;
+}
+#endif
+#endif
+
 ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
 {
     ProcessWaitResult result = {0};
     result.result = PROCESS_RESULT_UNKNOWN;
+#if BUSTER_INCLUDE_TESTS && !BUSTER_WINDOWS
+    bool test_expire_deadline_after_ready = os_process_wait_test_expire_deadline_after_ready;
+    os_process_wait_test_expire_deadline_after_ready = false;
+#endif
 
     if (spawn.handle)
     {
@@ -2095,6 +3674,11 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         CloseHandle(spawn.handle);
 #else
         pid_t pid = (pid_t)(u64)spawn.handle;
+        int status = 0;
+        struct rusage usage = {0};
+        pid_t wait_result = -1;
+        bool wait_failed = false;
+        OsProcessGroupWaitState group_state = {.reservation = {.leader = spawn.process_group ? pid : 0}};
 
         // The parent never writes to a captured stdin; close the write end up
         // front so a child reading stdin sees EOF instead of blocking forever.
@@ -2105,7 +3689,10 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         int read_pipes[(u64)STANDARD_STREAM_COUNT];
+        u64 quiescent_capture_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 open_pipe_count = 0;
+        bool quiescent_capture_snapshot = false;
+        bool capture_failed = false;
         for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
         {
             OsFileDescriptor* generic_read_pipe = spawn.pipes[stream][0];
@@ -2116,6 +3703,73 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
         while (open_pipe_count)
         {
+            if (spawn.process_group)
+            {
+                bool deadline_expired = deadline && !os_process_deadline_milliseconds(deadline, 1);
+                os_process_group_wait_step(scratch.arena, spawn, timed_out || deadline_expired, &group_state);
+                if (deadline_expired && group_state.outcome == OS_PROCESS_GROUP_WAIT_ACTIVE) { timed_out = true; }
+                if (group_state.outcome == OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST ||
+                    group_state.outcome == OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE) { break; }
+                if (group_state.outcome == OS_PROCESS_GROUP_WAIT_QUIESCENT_RESERVED)
+                {
+                    // A descriptor can outlive the owned group when an
+                    // unrelated process inherited its writer. Snapshot the
+                    // finite bytes already buffered at the quiescence proof,
+                    // drain exactly that snapshot, then close without waiting
+                    // for foreign EOF or accepting later foreign writes.
+                    if (!quiescent_capture_snapshot)
+                    {
+                        quiescent_capture_snapshot = true;
+                        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                        {
+                            if (read_pipes[stream] >= 0)
+                            {
+                                int available = 0;
+                                if (ioctl(read_pipes[stream], FIONREAD, &available) == 0 && available >= 0)
+                                {
+                                    quiescent_capture_remaining[stream] = (u64)available;
+                                }
+                                else
+                                {
+                                    capture_failed = true;
+                                }
+                            }
+                        }
+                    }
+                    for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                    {
+                        if (read_pipes[stream] >= 0 && quiescent_capture_remaining[stream])
+                        {
+                            u8 buffer[16 * 1024];
+                            u64 requested = quiescent_capture_remaining[stream] < sizeof(buffer)
+                                ? quiescent_capture_remaining[stream] : sizeof(buffer);
+                            ssize_t read_result = read(read_pipes[stream], buffer, (size_t)requested);
+                            if (read_result > 0)
+                            {
+                                pipe_capture_append(scratch.arena, &captures[stream], buffer, (u64)read_result);
+                                quiescent_capture_remaining[stream] -= (u64)read_result;
+                            }
+                            else if (read_result == 0 || errno != EINTR)
+                            {
+                                capture_failed = true;
+                                quiescent_capture_remaining[stream] = 0;
+                            }
+                        }
+                        if (read_pipes[stream] >= 0 && !quiescent_capture_remaining[stream])
+                        {
+                            capture_failed = close(read_pipes[stream]) != 0 || capture_failed;
+                            read_pipes[stream] = -1;
+                            open_pipe_count -= 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+            else if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+            {
+                timed_out = true;
+                break;
+            }
             struct pollfd poll_fds[(u64)STANDARD_STREAM_COUNT];
             u64 poll_streams[(u64)STANDARD_STREAM_COUNT];
             nfds_t poll_count = 0;
@@ -2130,22 +3784,43 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 }
             }
 
-            int poll_result = poll(poll_fds, poll_count, (int)os_process_deadline_milliseconds(deadline, (u64)-1));
+            u64 poll_milliseconds = os_process_deadline_milliseconds(deadline, (u64)-1);
+            if (spawn.process_group && (poll_milliseconds == (u64)-1 || poll_milliseconds > 10 || (timed_out && !poll_milliseconds)))
+            {
+                poll_milliseconds = 10;
+            }
+            int poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            int poll_error = errno;
+#if BUSTER_INCLUDE_TESTS
+            if (!spawn.process_group && poll_result > 0 && test_expire_deadline_after_ready)
+            {
+                test_expire_deadline_after_ready = false;
+                deadline = 1;
+            }
+#endif
+            // A continuously readable writer must not postpone the deadline.
+            // Group waits force cleanup, snapshot buffered bytes at proven
+            // quiescence, and drain that finite snapshot; the ordinary
+            // non-group path consumes this ready batch before enforcing it.
+            if (spawn.process_group)
+            {
+                bool deadline_expired = deadline && !os_process_deadline_milliseconds(deadline, 1);
+                os_process_group_wait_step(scratch.arena, spawn, timed_out || deadline_expired, &group_state);
+                if (deadline_expired && group_state.outcome == OS_PROCESS_GROUP_WAIT_ACTIVE) { timed_out = true; }
+                if (group_state.outcome == OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST ||
+                    group_state.outcome == OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE) { break; }
+                if (group_state.outcome == OS_PROCESS_GROUP_WAIT_QUIESCENT_RESERVED) { continue; }
+            }
             if (poll_result < 0)
             {
-                if (errno == EINTR)
+                if (poll_error == EINTR)
                 {
                     continue;
                 }
+                errno = poll_error;
                 string_print(S8("Failed to poll process pipes: {EOs}\n"), os_get_last_error());
                 break;
             }
-            if (!poll_result && deadline && !os_process_deadline_milliseconds(deadline, 1))
-            {
-                timed_out = true;
-                break;
-            }
-
             for (nfds_t poll_index = 0; poll_index < poll_count; poll_index += 1)
             {
                 if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR)))
@@ -2176,6 +3851,11 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     }
                 }
             }
+            if (!spawn.process_group && deadline && !os_process_deadline_milliseconds(deadline, 1))
+            {
+                timed_out = true;
+                break;
+            }
         }
 
         for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
@@ -2191,37 +3871,102 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
         }
 
-        int status = 0;
-        struct rusage usage = {0};
-        pid_t wait_result = -1;
-        // A child with no captured stream never entered the drain loop, so this
-        // is where its deadline is enforced. Poll for the exit rather than
-        // blocking in wait4, then kill what is still running.
-        while (!timed_out && deadline)
+        if (spawn.process_group)
         {
-            wait_result = wait4(pid, &status, WNOHANG, &usage);
-            if (wait_result == pid || (wait_result < 0 && errno != EINTR))
+            // Keep the WNOWAIT leader reservation while this lane alone drives
+            // cancellation, helper cleanup, and exit observation. Finite slices
+            // let flag-only signal handlers wake progress without owning PGIDs.
+            while (group_state.outcome == OS_PROCESS_GROUP_WAIT_ACTIVE)
             {
-                break;
+                bool deadline_expired = deadline && !os_process_deadline_milliseconds(deadline, 1);
+                os_process_group_wait_step(scratch.arena, spawn, timed_out || deadline_expired, &group_state);
+                if (deadline_expired && group_state.outcome == OS_PROCESS_GROUP_WAIT_ACTIVE) { timed_out = true; }
+                if (group_state.outcome == OS_PROCESS_GROUP_WAIT_ACTIVE)
+                {
+                    poll(0, 0, 10);
+                }
             }
-            u64 remaining = os_process_deadline_milliseconds(deadline, 1);
-            if (!remaining)
+            wait_failed = group_state.outcome != OS_PROCESS_GROUP_WAIT_QUIESCENT_RESERVED;
+            if (!wait_failed)
             {
-                timed_out = true;
-                break;
+                ProcessGroupControlState* control = spawn.process_group_control;
+                if (control && control->test_cancel_before_reap && control->cancellation_signal &&
+                    !process_control_atomic_load(control->cancellation_signal))
+                {
+                    raise(SIGTERM);
+                }
+                // Cleanup was already proven while the leader reserved the ID.
+                // A pre-reap cancellation only changes shared flags; signalling
+                // again would be redundant and would enlarge the ownership surface.
+                // Revalidate immediately before the nonblocking exact-child reap.
+                OsProcessGroupObservation before_reap = os_process_group_observe(&group_state.reservation, true);
+                if (!before_reap.valid)
+                {
+                    os_process_group_wait_publish_cleanup_failure(spawn, &group_state);
+                    group_state.outcome = OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+                    wait_failed = true;
+                }
+                else if (!before_reap.exited)
+                {
+                    os_process_group_wait_publish_cleanup_failure(spawn, &group_state);
+                    group_state.outcome = OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE;
+                    wait_failed = true;
+                }
+                else
+                {
+                    do
+                    {
+                        wait_result = wait4(pid, &status, WNOHANG, &usage);
+                    } while (wait_result < 0 && errno == EINTR);
+                    if (wait_result == pid)
+                    {
+                        os_process_group_reservation_release(&group_state.reservation);
+                    }
+                    else
+                    {
+                        if (wait_result < 0 && (errno == ECHILD || errno == ESRCH))
+                        {
+                            os_process_group_wait_publish_cleanup_failure(spawn, &group_state);
+                            group_state.outcome = OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+                        }
+                        else
+                        {
+                            os_process_group_wait_publish_cleanup_failure(spawn, &group_state);
+                            group_state.outcome = OS_PROCESS_GROUP_WAIT_RETAINED_FAILURE;
+                        }
+                        wait_failed = true;
+                    }
+                }
             }
-            poll(0, 0, (int)(remaining < 10 ? remaining : 10));
         }
-        if (timed_out)
+        else
         {
-            // The status below then describes this kill rather than the child's
-            // own progress, which is why `timed_out` is reported separately.
-            kill(pid, SIGKILL);
-            wait_result = -1;
-        }
-        if (wait_result != pid)
-        {
-            wait_result = wait4(pid, &status, 0, &usage);
+            // A child with no captured stream never entered the drain loop, so
+            // enforce its deadline with nonblocking waits before the final reap.
+            while (!timed_out && deadline && wait_result != pid && !wait_failed)
+            {
+                wait_result = wait4(pid, &status, WNOHANG, &usage);
+                if (wait_result < 0 && errno != EINTR) { wait_failed = true; }
+                if (wait_result == pid || wait_failed) { break; }
+                u64 remaining = os_process_deadline_milliseconds(deadline, 1);
+                if (!remaining) { timed_out = true; }
+                else { poll(0, 0, (int)(remaining < 10 ? remaining : 10)); }
+            }
+            if (timed_out)
+            {
+                // The status below then describes this kill rather than the
+                // child's progress, so `timed_out` is reported separately.
+                kill(pid, SIGKILL);
+                wait_result = -1;
+            }
+            if (wait_result != pid && !wait_failed)
+            {
+                do
+                {
+                    wait_result = wait4(pid, &status, 0, &usage);
+                } while (wait_result < 0 && errno == EINTR);
+                if (wait_result != pid) { wait_failed = true; }
+            }
         }
 
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
@@ -2251,6 +3996,11 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         {
             result.result = PROCESS_RESULT_FAILED;
         }
+        if (capture_failed) { wait_failed = true; }
+        if (wait_failed) { result.result = PROCESS_RESULT_FAILED; }
+        result.process_group_reservation_retained = spawn.process_group && wait_result != pid;
+        result.process_group_ownership_lost = result.process_group_reservation_retained &&
+            group_state.outcome == OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
 #endif
         if (timed_out)
         {
@@ -2262,6 +4012,141 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+bool os_process_group_escaped_capture_self_test(Arena* arena)
+{
+    int capture_pipe[2] = {-1, -1};
+    int ready_pipe[2] = {-1, -1};
+    bool pipes_ready = pipe(capture_pipe) == 0 && pipe(ready_pipe) == 0;
+    pid_t leader = -1;
+    pid_t holder = -1;
+    bool group_ready = false;
+    bool leader_exited = false;
+    bool holder_ready = false;
+    ProcessWaitResult waited = {0};
+    u64 elapsed = (u64)-1;
+
+    if (pipes_ready)
+    {
+        leader = fork();
+        if (leader == 0)
+        {
+            close(capture_pipe[0]);
+            close(ready_pipe[0]);
+            int group_status = setpgid(0, 0);
+            char output[] = "owned";
+            char ready = 'L';
+            ssize_t output_write = -1;
+            ssize_t ready_write = -1;
+            if (group_status == 0)
+            {
+                do
+                {
+                    output_write = write(capture_pipe[1], output, sizeof(output) - 1);
+                } while (output_write < 0 && errno == EINTR);
+                do
+                {
+                    ready_write = write(ready_pipe[1], &ready, sizeof(ready));
+                } while (ready_write < 0 && errno == EINTR);
+            }
+            close(capture_pipe[1]);
+            close(ready_pipe[1]);
+            _exit(group_status == 0 && output_write == (ssize_t)(sizeof(output) - 1) && ready_write == sizeof(ready) ? 0 : 101);
+        }
+        if (leader > 0)
+        {
+            struct pollfd leader_poll = {.fd = ready_pipe[0], .events = POLLIN};
+            int leader_poll_status = poll(&leader_poll, 1, 1000);
+            char leader_ready = 0;
+            ssize_t leader_read = leader_poll_status > 0 ? read(ready_pipe[0], &leader_ready, sizeof(leader_ready)) : -1;
+            group_ready = leader_read == sizeof(leader_ready) && leader_ready == 'L';
+            OsProcessGroupReservation reservation = {.leader = leader};
+            for (u32 attempt = 0; group_ready && !leader_exited && attempt < 1000; attempt += 1)
+            {
+                OsProcessGroupObservation observation = os_process_group_observe(&reservation, true);
+                leader_exited = observation.valid && observation.exited;
+                if (!leader_exited) { poll(0, 0, 1); }
+            }
+            if (leader_exited) { holder = fork(); }
+            if (holder == 0)
+            {
+                close(capture_pipe[0]);
+                close(ready_pipe[0]);
+                char ready = 'H';
+                ssize_t ready_write;
+                do
+                {
+                    ready_write = write(ready_pipe[1], &ready, sizeof(ready));
+                } while (ready_write < 0 && errno == EINTR);
+                close(ready_pipe[1]);
+                // Bound a broken wait without hanging the suite forever. A
+                // correct wait returns while this unrelated writer remains.
+                poll(0, 0, 3000);
+                close(capture_pipe[1]);
+                _exit(ready_write == sizeof(ready) ? 0 : 102);
+            }
+        }
+    }
+
+    if (capture_pipe[1] >= 0) { close(capture_pipe[1]); }
+    if (ready_pipe[1] >= 0) { close(ready_pipe[1]); }
+    if (group_ready && holder > 0)
+    {
+        struct pollfd ready_poll = {.fd = ready_pipe[0], .events = POLLIN};
+        int ready_status = poll(&ready_poll, 1, 1000);
+        char ready = 0;
+        ssize_t ready_read = ready_status > 0 ? read(ready_pipe[0], &ready, sizeof(ready)) : -1;
+        holder_ready = ready_read == sizeof(ready) && ready == 'H';
+    }
+    if (ready_pipe[0] >= 0) { close(ready_pipe[0]); }
+
+    if (holder_ready)
+    {
+        ProcessSpawnResult spawn = {
+            .handle = (OsProcessHandle*)(u64)leader,
+            .process_group = true,
+        };
+        spawn.pipes[STANDARD_STREAM_OUTPUT][0] = posix_fd_to_generic_fd(capture_pipe[0]);
+        capture_pipe[0] = -1;
+        u64 start = os_now_microseconds();
+        // The exact leader is already a reserved zombie. Even an immediately
+        // expired deadline must not relabel its successful exit while the
+        // finite buffered snapshot is drained.
+        waited = os_process_wait_deadline(arena, spawn, 1);
+        elapsed = os_now_microseconds() - start;
+        if (!waited.process_group_reservation_retained) { leader = -1; }
+    }
+
+    if (capture_pipe[0] >= 0) { close(capture_pipe[0]); }
+    bool holder_stopped = holder <= 0;
+    if (holder > 0)
+    {
+        int kill_status = kill(holder, SIGKILL);
+        bool kill_valid = kill_status == 0 || errno == ESRCH;
+        int holder_status = 0;
+        pid_t holder_wait;
+        do
+        {
+            holder_wait = waitpid(holder, &holder_status, 0);
+        } while (holder_wait < 0 && errno == EINTR);
+        holder_stopped = kill_valid && holder_wait == holder;
+    }
+    if (leader > 0)
+    {
+        kill(leader, SIGKILL);
+        int leader_status = 0;
+        while (waitpid(leader, &leader_status, 0) < 0 && errno == EINTR) {}
+    }
+
+    bool output_matches = waited.streams[STANDARD_STREAM_OUTPUT].length == 5 &&
+        !memcmp(waited.streams[STANDARD_STREAM_OUTPUT].pointer, "owned", 5);
+    bool result = pipes_ready && group_ready && leader_exited && holder_ready && holder_stopped && waited.result == PROCESS_RESULT_SUCCESS &&
+        !waited.timed_out && output_matches && elapsed < 1000000 &&
+        !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
+    return result;
+}
+#endif
 
 ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 {
