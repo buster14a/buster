@@ -667,13 +667,22 @@ typedef enum CTypeKind
     C_TYPE_UNSIGNED_LONG_LONG,
     C_TYPE_INT128,
     C_TYPE_UNSIGNED_INT128,
+    // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+    // storage-only alias: it has its own two-byte layout, its own rank below
+    // `float` in the usual arithmetic conversions, and its own place in the
+    // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+    // `__m512h` out of it, which is what brought it in.
+    C_TYPE_FLOAT16,
     C_TYPE_FLOAT,
     C_TYPE_DOUBLE,
     C_TYPE_LONG_DOUBLE,
-    // The three C99 complex types. Each is laid out as two contiguous
-    // elements of its underlying real type -- real part first -- which is
-    // both what the psABIs specify and what lets the IR model them as
-    // two-field aggregates (see c_ir_scalar_type).
+    // The three C99 complex types and the `_Float16 _Complex` extension
+    // beside them. Each is laid out as two contiguous elements of its
+    // underlying real type -- real part first -- which is both what the
+    // psABIs specify and what lets the IR model them as two-field
+    // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+    // `_Float16 _Complex` parameter, which is what brought the half form in.
+    C_TYPE_FLOAT16_COMPLEX,
     C_TYPE_FLOAT_COMPLEX,
     C_TYPE_DOUBLE_COMPLEX,
     C_TYPE_LONG_DOUBLE_COMPLEX,
@@ -695,12 +704,13 @@ typedef enum CTypeKind
 // real kind that has no complex counterpart (C only defines the three).
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
 {
-    return kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+    return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_element(CTypeKind kind)
 {
-    return kind == C_TYPE_FLOAT_COMPLEX         ? C_TYPE_FLOAT
+    return kind == C_TYPE_FLOAT16_COMPLEX       ? C_TYPE_FLOAT16
+           : kind == C_TYPE_FLOAT_COMPLEX       ? C_TYPE_FLOAT
            : kind == C_TYPE_DOUBLE_COMPLEX      ? C_TYPE_DOUBLE
            : kind == C_TYPE_LONG_DOUBLE_COMPLEX ? C_TYPE_LONG_DOUBLE
                                                 : C_TYPE_INVALID;
@@ -708,7 +718,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_compl
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_of(CTypeKind kind)
 {
-    return kind == C_TYPE_FLOAT         ? C_TYPE_FLOAT_COMPLEX
+    return kind == C_TYPE_FLOAT16       ? C_TYPE_FLOAT16_COMPLEX
+           : kind == C_TYPE_FLOAT       ? C_TYPE_FLOAT_COMPLEX
            : kind == C_TYPE_DOUBLE      ? C_TYPE_DOUBLE_COMPLEX
            : kind == C_TYPE_LONG_DOUBLE ? C_TYPE_LONG_DOUBLE_COMPLEX
                                         : C_TYPE_INVALID;

@@ -3788,16 +3788,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 }
                 else
                 {
-#if BUSTER_CPU_ARCH_AARCH64
                     // Read the reference's alias addresses directly from the
-                    // DSO, independently of system COPY-slot allocation.
+                    // DSO, independently of system COPY-slot allocation. GCC's
+                    // x86-64 -fPIE object addresses imported data directly, and
+                    // a -no-pie system link gives each strong alias its own
+                    // COPY slot, so writes through one alias miss the other.
                     command[command_count++] = S8("-fPIC");
                     command[command_count++] = S8("-pie");
                     command[command_count++] = main_source;
-#else
-                    command[command_count++] = S8("-no-pie");
-                    command[command_count++] = object_path;
-#endif
                     command[command_count++] = S8("-L");
                     command[command_count++] = directory;
                     command[command_count++] = S8("-ldataprobe");
@@ -4482,7 +4480,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
 {
     UnitTestResult result = {0};
     String8 specifiers[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
-        S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("_Complex int"), S8("_Complex char")};
+        S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("_Complex int"), S8("_Complex char"),
+        S8("long _Float16"), S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 int"),
+        S8("_Float16 _Float16"), S8("_Float16 float"), S8("_Float16 double"), S8("void _Float16"),
+        S8("_Complex long _Float16"), S8("_Float16 _Complex int"), S8("const _Float16 const unsigned")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
     String8 sentinel = S8("existing output must survive invalid type specifiers");
@@ -4564,7 +4565,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
         }
     }
     String8 control_targets[] = {S8("x86_64-linux"), S8("aarch64-linux"), S8("x86_64-windows"), S8("aarch64-macos")};
-    String8 control_specifiers[] = {S8("long long int"), S8("double _Complex")};
+    String8 control_specifiers[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(control_targets); target += 1)
     {
         for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
@@ -4581,8 +4582,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 if (BUSTER_REQUIRE(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE) &&
                     BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
                 {
-                    u64 expected_size = control == 0 ? target_data_layout(parsed_target.target).long_long_integer.size
-                                                     : 2u * target_data_layout(parsed_target.target).double_type.size;
+                    TargetDataLayout layout = target_data_layout(parsed_target.target);
+                    u64 control_sizes[] = {layout.long_long_integer.size, 2u * layout.double_type.size,
+                        layout.float16_type.size, 2u * layout.float16_type.size};
+                    u64 expected_size = control_sizes[control];
                     String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), control_targets[target],
                         frontends[frontend], S8("-o"), output, input};
                     CompilerDriverResult built = compiler_driver_execute_invocation(
@@ -4602,17 +4605,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                             BUSTER_TEST_RAW(arguments, round_trip.error == OBJECT_ERROR_NONE, source);
                             if (round_trip.error == OBJECT_ERROR_NONE)
                             {
-                                bool macho_names = parsed_target.target.os == OPERATING_SYSTEM_MACOS ||
-                                                   parsed_target.target.os == OPERATING_SYSTEM_IOS;
                                 bool elf_format = parsed_target.target.os == OPERATING_SYSTEM_LINUX ||
                                                   parsed_target.target.os == OPERATING_SYSTEM_ANDROID;
-                                String8 serialized_v_name = macho_names ? S8("_v") : S8("v");
-                                String8 serialized_take_name = macho_names ? S8("_take") : S8("take");
-                                ObjectSymbol* serialized_v = compiler_driver_test_symbol_by_name(&round_trip, serialized_v_name);
+                                // object_read removes Mach-O's leading underscore; use canonical names
+                                // here while retaining each format's defined-symbol and size contracts.
+                                ObjectSymbol* serialized_v = compiler_driver_test_symbol_by_name(&round_trip, S8("v"));
                                 BUSTER_TEST_RAW(arguments, serialized_v && serialized_v->section != OBJECT_SECTION_UNDEFINED &&
                                     serialized_v->kind == OBJECT_SYMBOL_DATA &&
                                     (!elf_format || serialized_v->size == expected_size), source);
-                                ObjectSymbol* serialized_take = compiler_driver_test_symbol_by_name(&round_trip, serialized_take_name);
+                                ObjectSymbol* serialized_take = compiler_driver_test_symbol_by_name(&round_trip, S8("take"));
                                 BUSTER_TEST_RAW(arguments, serialized_take && serialized_take->section != OBJECT_SECTION_UNDEFINED &&
                                     serialized_take->kind == OBJECT_SYMBOL_FUNCTION, source);
                             }
@@ -4650,9 +4651,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 scratch_end(temporary);
             }
             String8 oracle_refused[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
-                S8("long long double"), S8("float double"), S8("_Imaginary double")};
+                S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("long _Float16"),
+                S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 int"), S8("_Float16 _Float16")};
             String8 oracle_extension[] = {S8("_Complex int"), S8("_Complex char")};
-            String8 oracle_valid[] = {S8("long long int"), S8("double _Complex")};
+            String8 oracle_valid[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
             for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
             {
                 for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -6335,6 +6337,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ByteSlice string_bytes = string_map.bytes;
         BUSTER_TEST(arguments, string_bytes.length != 0);
         file_map_unmap(string_map);
+        String8 wchar_object_path =
+            buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-wchar"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+        String8 wchar_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wchar_object_path, S8("tests/issue36_target_wchar.c"),
+        };
+        CompilerDriverResult wchar_result = compiler_driver_execute_invocation(
+            cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wchar_command_line)));
+        BUSTER_TEST(arguments, wchar_result.error == COMPILER_DRIVER_ERROR_NONE);
+        FileMapRead wchar_map = file_map_read(cross_temp.arena, wchar_object_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, wchar_map.bytes.length != 0);
+        file_map_unmap(wchar_map);
         String8 nullptr_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-nullptr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 nullptr_command_line[] = {
@@ -7692,11 +7705,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(debug_parity_sources); source_index += 1)
             {
                 String8 source = debug_parity_sources[source_index];
+                String8 debug_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g.o"), target_index, source_index));
+                String8 stripped_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g0.o"), target_index, source_index));
                 String8 debug_command_line[] = {
-                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], source,
+                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], S8("-o"), debug_object_path, source,
                 };
                 String8 stripped_command_line[] = {
-                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], source,
+                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], S8("-o"), stripped_object_path, source,
                 };
                 CompilerDriverResult with_debug = compiler_driver_execute_invocation(
                     debug_parity_temporary.arena,
@@ -9955,6 +9974,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // path, so the fixture runs the full lane checks natively and must
     // still produce objects for every cross target.
     buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_half_element_path"), false);
+    // A binary16 vector lane has no packed arithmetic on either backend --
+    // it needs AVX512-FP16's ADDPH, which is not selected here -- so the
+    // canonical emitters must refuse it rather than fall through to the
+    // binary32/binary64 encoding and add the vector as if its lanes were
+    // twice as wide. The `float` row beside it is the control: the widths
+    // that do have instructions still emit.
+    {
+        struct
+        {
+            String8 element;
+            bool supported;
+        } half_element_rows[] = {
+            {S8("_Float16"), false},
+            {S8("float"), true},
+            {S8("double"), true},
+            {S8("short"), true},
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(half_element_rows); row += 1)
+        {
+            String8 half_element_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-half-element"),
+                                                                          string_format(arguments->arena, S8("-{u32}.c"), row));
+            String8 half_element_source =
+                string_format(arguments->arena,
+                              S8("typedef {S8} lanes __attribute__((vector_size(16)));\nvoid add(lanes* p, lanes* q) {{ *p = *p + *q; }}\n"),
+                              half_element_rows[row].element);
+            BUSTER_TEST(arguments, file_write(half_element_source_path, BUSTER_SLICE_TO_BYTE_SLICE(half_element_source)));
+            String8 half_element_allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 half_element_targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu")};
+            for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(half_element_targets); target_index += 1)
+            {
+                for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(half_element_allocators); allocator += 1)
+                {
+                    String8 half_element_object = buster_test_temporary_path(
+                        arguments->arena, S8("buster-c-vector-half-element"),
+                        string_format(arguments->arena, S8("-{u32}-{u32}-{u32}.o"), row, target_index, allocator));
+                    String8 half_element_command_line[] = {
+                        S8("-c"), half_element_allocators[allocator], S8("-target"), half_element_targets[target_index], S8("-o"),
+                        half_element_object, half_element_source_path,
+                    };
+                    CompilerDriverResult half_element = compiler_driver_execute_invocation(
+                        arguments->arena,
+                        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(half_element_command_line)));
+                    if ((half_element.error == COMPILER_DRIVER_ERROR_NONE) != half_element_rows[row].supported)
+                    {
+                        arguments->show(arguments, S8("vector half element {S8} target {S8} allocator {S8}: error {u32}\n"),
+                                        half_element_rows[row].element, half_element_targets[target_index], half_element_allocators[allocator],
+                                        (u32)half_element.error);
+                    }
+                    BUSTER_TEST(arguments, (half_element.error == COMPILER_DRIVER_ERROR_NONE) == half_element_rows[row].supported);
+                    if (!half_element_rows[row].supported)
+                    {
+                        BUSTER_TEST(arguments, half_element.error == COMPILER_DRIVER_ERROR_CODEGEN && !half_element.has_object);
+                    }
+                }
+            }
+        }
+    }
+    buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_initializer_path"), false);
     String8 c_vector_initializer_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-initializer"),
 #if BUSTER_WINDOWS
@@ -11401,8 +11480,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // ELF writer then splits that back into the `.init_array.NNNNN` sections
     // `ld` orders across translation units by.  Both halves are checked below.
     {
+        String8 constructor_array_object_path = buster_test_temporary_path(arguments->arena, S8("buster-c-constructor-array-object"), S8(".o"));
         String8 constructor_object_command_line[] = {
-            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_constructor.c"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), constructor_array_object_path, S8("tests/basic_c_constructor.c"),
         };
         CompilerDriverResult constructor_object = compiler_driver_execute_invocation(
             arguments->arena,
@@ -14518,9 +14598,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 allocator_flag =
                     string_format(thread_local_model_arena, S8("-fregister-allocator={S8}"), thread_local_model_allocators[allocator_index]);
                 String8 position_independent_flag = pic_index ? S8("-fPIC") : S8("-fno-pic");
+                String8 thread_local_model_object_path =
+                    buster_test_temporary_path(thread_local_model_arena, S8("buster-c-thread-local-models-object"),
+                                               string_format(thread_local_model_arena, S8("-{u32}-{u32}.o"), allocator_index, pic_index));
                 String8 thread_local_model_object_command_line[] = {
                     allocator_flag, position_independent_flag, S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"),
-                    S8("tests/basic_c_thread_local_models.c"),
+                    S8("-o"), thread_local_model_object_path, S8("tests/basic_c_thread_local_models.c"),
                 };
                 CompilerDriverResult thread_local_model_object = compiler_driver_execute_invocation(
                     thread_local_model_arena, compiler_driver_parse_arguments(thread_local_model_arena,

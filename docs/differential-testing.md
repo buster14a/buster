@@ -259,7 +259,11 @@ The output directory contains `manifest.txt` with compiler paths, binary sizes
 and `buster_hash_64` fingerprints (not cryptographic hashes),
 `configurations.txt`, `processes.tsv`, and a final summary. Every phase saves
 byte-exact `.stdout`/`.stderr` and a NUL-delimited `.argv` file, so quoting or
-embedded whitespace cannot corrupt reproduction arguments. Per-failure files
+embedded whitespace cannot corrupt reproduction arguments. Each case's
+`evidence.tsv` records the size, hash and relative path of every stable source,
+command and captured-stream artifact. Collection reopens that manifest and
+every listed file, including zero-byte streams, before accepting the case.
+Per-failure files
 record the difference signature (runtime bits: kind=1, status=2, stdout=4,
 stderr=8, sanitizer=16; 100+ denotes a compiler/infrastructure/verification
 failure, and 170 denotes changed compiler diagnostics); reduction saves the original source,
@@ -313,29 +317,57 @@ the child's pipe ends, preventing another concurrently launched child from
 inheriting a capture writer; process execution and deadline waits overlap.
 
 Each case exclusively claims its directory and writes `processes.tsv`,
-`case.log` and a completion `result.txt`. After all lanes finish, the driver
+`case.log`, `evidence.tsv` and a completion `result.txt`. After all lanes finish, the driver
 checks one completion per case, full row counts for passing cases, the exact
-completion record and the saved process/log sizes and hashes. It then merges
+completion record, the saved process/log sizes and hashes, and every unique
+artifact named by the hashed evidence manifest. It then merges
 process records and prints diagnostics in corpus order. Missing, duplicate,
 truncated or unwritable evidence fails the aggregate. Failed child launch,
 crash, timeout and recovering sanitizer reports retain their existing failure
 semantics. No test is dropped when another case fails.
 
+On Linux and macOS every compiler, linker and executed program leads a private
+process group. `SIGINT` or `SIGTERM` handlers only publish cancellation flags.
+Each ordinary wait lane remains the sole owner of its group identity: it reads
+those flags, signals the group, proves every member quiescent while the exact
+leader remains reserved, and then reaps. A two-second alarm publishes escalation
+for groups which ignore termination; repeated termination signals do not extend
+that interval. Spawn admission is a serialized transaction published before its
+cancellation check, so a signal either closes a later transaction or leaves an
+already admitted child attached to the ordinary wait lane for cleanup. A retained
+cleanup failure stops further case/configuration admission without handing a raw
+PGID to async code. Deadline cleanup uses the same group boundary, so a
+compiler-owned helper cannot survive its timed-out parent. Once that group is
+proven quiescent, capture drains the finite bytes already buffered and does not
+wait for an unrelated process that inherited a writer.
+
 The existing self-test runs this same worker and collection path with real
 children at one and multiple lanes (respecting the quota), checks ordered binary
 observations, and injects crashes, deadlines, failed launches, duplicate case
-directories, missing/duplicate completion records and damaged evidence.
+directories, missing/duplicate completion records and truncated or missing
+per-child evidence.
 
 Each admitted case launches at most one compiler, linker or program at once;
 the compiler's own default remains one worker. `--jobs` is a CPU admission
 limit, not a RAM estimator. Budget up to N simultaneous child peaks and N
-case arenas when selecting it. Default hosted policy stays at one pending the
-matched platform timing/RSS acceptance in #408. For local comparison, use new
-output directories for each of `--jobs 1`, `--jobs 2` and `--jobs 4`, with the
-same compiler, corpus, sanitizer policy and quota. Normalize only the output
-root and `elapsed_us` when comparing process records; argv paths also contain
-the output root. Source, observations, configuration sets and case order must
-match exactly.
+case arenas when selecting it. The four hosted Unix native lanes explicitly
+request four workers. The runner still clamps that request to the logical CPU
+count, `BUSTER_TEST_JOBS`, and single-threaded policy; for example, the screened
+three-CPU macOS AArch64 image recorded four requested and three effective
+workers. Local and other invocations retain the one-worker default, and
+`--jobs 1` is the direct CI reproduction path.
+
+The hosted budget was selected from three position-balanced, full-corpus
+samples of `--jobs 1`, `--jobs 2` and `--jobs 4` on each native Unix runner,
+using one Release producer and fresh output directories. Exact canonical
+case/configuration/observation mappings matched across all 36 corpora after
+normalizing only output-root path fields, the exact output-root byte prefix in
+text diagnostics, and elapsed process fields. See the [current #408 performance
+audit](performance-audits/2026-09-15T072154Z.md) for source, workflow, runner,
+timing, sampled process-tree RSS and retained evidence identities. Requested
+four reduced the sum of per-platform median corpus wall times by 56.4% from
+requested one and by 19.5% from requested two; this is a corpus-invocation
+result, not a measured complete-job or workflow speedup.
 
 ### Registered admission controls
 
@@ -357,6 +389,18 @@ These are self-test-only counters, not process RSS or corpus instrumentation.
 Existing crash, timeout, failed-launch, sanitizer, missing/duplicate completion,
 damaged-stream and evidence-write controls remain registered.
 
+The Unix self-test also requests four children, applies the normal host/quota
+clamp, and gives each admitted child a live grandchild. The children rendezvous
+before cancelling the nested runner. The last grandchild ignores `SIGTERM` and
+closes its inherited capture descriptors while its direct parent exits, proving
+that wait-lane cleanup cannot lose a detached helper. Its lane injects `SIGTERM`
+through the explicit shared-state test seam after cleanup proof but before the
+exact child reap; the other live lanes must still be cancelled. The control requires
+the helper's READY marker, forbids its post-release ESCAPED marker, and requires
+the runner to retain the original `SIGTERM` status. This exercises the production
+signal, wait and process-group path rather than only worker counters.
+
 These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
-policy remains one worker, and #408's matched full-CI latency, aggregate runner
-time and concurrent peak-memory acceptance remain separate requirements.
+policy requests four workers only after the separate #408 full-corpus
+qualification. Complete native-job, workflow latency, aggregate runner work and
+concurrent peak-memory acceptance remain separate measurements.

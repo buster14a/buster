@@ -517,8 +517,11 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   error at the first specifier word, never a silent drop that lets an
   implicit-int or guessed-int answer continue. Complex-integer and imaginary
   types are deliberately unsupported, not partially accepted; `_Complex` alone
-  and its `__complex`/`__complex__` aliases on the three real floating kinds
-  remain valid. A type name refused this way pins `sizeof`/`_Alignof` to the
+  and its `__complex`/`__complex__` aliases on the three C99 real floating kinds
+  remain valid. `_Float16` and its complex extension use the same validity
+  gate in both scanners, retaining the binary16 specifier contract while
+  rejecting contradictory or repeated half-type words with a diagnostic.
+  A type name refused this way pins `sizeof`/`_Alignof` to the
   recorded constraint instead of falling back to a guessed `int`. Regressions:
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.

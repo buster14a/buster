@@ -14,7 +14,7 @@ substitute for inspecting the current implementation and fixtures.
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
 | Atomic layout, argument classification, loads/stores, conversions | [Atomics](frontend/atomics.md) |
 | Declarators, typeof, conditional types, calls, JIT/driver boundaries | [Calls](frontend/calls.md) |
-| Long double, x87, static folding, global/inline assembly, Wasm boundary | [Wide floats and assembly](frontend/wide-floats-assembly.md) |
+| `_Float16`, long double, x87, static folding, global/inline assembly, Wasm boundary | [Wide floats and assembly](frontend/wide-floats-assembly.md) |
 
 Layout and atomic ABI work often needs both the layout and atomics guides.
 Changes to places or calls also need the foundations guide. Native selection and
