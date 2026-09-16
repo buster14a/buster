@@ -1,0 +1,115 @@
+name: Issue 697 evidence
+
+on:
+  push:
+    branches: [work/697-worker-deadline-evidence]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Preserve immutable source for focused reproduction
+        run: |
+          mkdir -p /tmp/issue-697
+          git rev-parse HEAD > /tmp/issue-697/revision.txt
+          git archive HEAD | gzip > /tmp/issue-697/source.tar.gz
+          sha256sum /tmp/issue-697/source.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-697-source
+          path: /tmp/issue-697/source.tar.gz
+          retention-days: 7
+      - name: Build diagnostic Clang driver
+        run: |
+          clang --version
+          uname -a
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/buster-deadline-driver
+      - name: Unchanged normal service tests
+        run: |
+          set -o pipefail
+          /tmp/buster-deadline-driver bench_service self-test 2>&1 | tee /tmp/issue-697/normal.log
+      - name: Unchanged sanitized service tests
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          /tmp/buster-deadline-driver bench_service self-test --sanitize 2>&1 | tee /tmp/issue-697/sanitized.log
+      - name: Instrument the reported assertion without changing cleanup
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/bench_service/worker_linux.c')
+          s = p.read_text()
+          old = 'BUSTER_GLOBAL_LOCAL bool bq_worker_test_setpgid_failure;'
+          assert s.count(old) == 1
+          s = s.replace(old, old + '\nBUSTER_GLOBAL_LOCAL pid_t bq_worker_test_last_pid;')
+          old = '    pid_t pid = error == BQ_OK ? fork() : -1;'
+          assert s.count(old) == 1
+          s = s.replace(old, old + '\n#ifdef BUSTER_BENCH_SERVICE_TEST\n    if (pid > 0) bq_worker_test_last_pid = pid;\n#endif')
+          old = '        if (needs_kill)\n        {\n            kill(-pid, SIGKILL);'
+          assert s.count(old) == 1
+          s = s.replace(old, '''        if (needs_kill)
+                  {
+          #ifdef BUSTER_BENCH_SERVICE_TEST
+                      fprintf(stderr, "DEADLINE_PRE_KILL pid=%ld grouped=%d used=%u error=%d\\n", (long)pid, group_ready, used, error);
+                      char proc_path[64];
+                      snprintf(proc_path, sizeof(proc_path), "/proc/%ld/stat", (long)pid);
+                      FILE* proc = fopen(proc_path, "r");
+                      if (proc)
+                      {
+                          char state[1024];
+                          if (fgets(state, sizeof(state), proc)) fprintf(stderr, "DEADLINE_PROC %s", state);
+                          fclose(proc);
+                      }
+          #endif
+                      kill(-pid, SIGKILL);''')
+          p.write_text(s)
+          p = Path('tools/bench_service/tests.c')
+          s = p.read_text()
+          old = '''    errno = 0;
+              BQ_CHECK(after - before < 1000 && timed_group > 1 &&
+                       kill(-timed_group, 0) != 0 && errno == ESRCH);'''
+          assert s.count(old) == 1
+          s = s.replace(old, '''    errno = 0;
+              int group_result = timed_group > 1 ? kill(-timed_group, 0) : -2;
+              int group_errno = errno;
+              fprintf(stderr, "DEADLINE_RESULT elapsed=%llu captured=%ld actual=%ld group_result=%d group_errno=%d output=[%s]\\n",
+                      (unsigned long long)(after - before), (long)timed_group,
+                      (long)bq_worker_test_last_pid, group_result, group_errno, output);
+              BQ_CHECK(after - before < 1000);
+              BQ_CHECK(timed_group > 1);
+              BQ_CHECK(group_result == -1 && group_errno == ESRCH);
+              if (after - before >= 1000 || timed_group <= 1 || group_result != -1 || group_errno != ESRCH)
+              {
+                  int ps_result = system("ps -eo pid,ppid,pgid,state,wchan:24,comm");
+                  fprintf(stderr, "DEADLINE_PS status=%d\\n", ps_result);
+              }''')
+          p.write_text(s)
+          PY
+          git diff > /tmp/issue-697/diagnostics.patch
+      - name: Bounded sanitized reproduction; stop on the first failure
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          for iteration in $(seq 1 16); do
+            echo "DIAGNOSTIC_ITERATION=$iteration"
+            /tmp/buster-deadline-driver bench_service self-test --sanitize 2>&1 | tee "/tmp/issue-697/diagnostic-$iteration.log" || exit 1
+          done
+      - name: Retain every result, including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-697-diagnostics
+          path: |
+            /tmp/issue-697/*.log
+            /tmp/issue-697/*.patch
+            /tmp/issue-697/revision.txt
+          retention-days: 7
