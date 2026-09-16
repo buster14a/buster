@@ -3009,9 +3009,32 @@ void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 
     x64_emit_vector_native_binary_operation_kind(builder, integer_operation, element_width, prefix, opcode, size, base);
 }
 
+// A vector element the canonical emitters have lane instructions for: any of
+// the four integer widths they address, and a float lane only at the two IEEE
+// widths their arithmetic implements. The scalarized lane loops already asked
+// this of a float before operating; the shape guards at the top of both
+// emitters did not, so a binary16 lane was admitted and then selected the
+// binary32 or binary64 encoding. The MIR selectors spell the same rule.
+BUSTER_GLOBAL_LOCAL bool codegen_vector_element_supported(IrType* element)
+{
+    return element &&
+           ((element->kind == IR_TYPE_INTEGER &&
+             (element->bit_width == 8 || element->bit_width == 16 || element->bit_width == 32 || element->bit_width == 64)) ||
+            (element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64)));
+}
+
 bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
 {
     if (size <= 16 || size > target_vector_register_size(target))
+    {
+        return false;
+    }
+    // The packed float arithmetic here is ADDPS/ADDPD and their siblings, so
+    // a float lane narrower than binary32 has no encoding at all: binary16
+    // needs AVX512-FP16's ADDPH, which this backend does not select. Without
+    // this the binary32/binary64 pair was chosen for a `_Float16` lane and the
+    // vector was added as if its lanes were twice as wide.
+    if (!integer_operation && element_width < 32)
     {
         return false;
     }
@@ -6923,8 +6946,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
     IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
     IrType* vector = ir_type_from_id(&program->types, operand_type_id);
     IrType* element = vector ? ir_type_from_id(&program->types, vector->element_type) : 0;
-    if (!vector || vector->kind != IR_TYPE_VECTOR || !element || (element->kind != IR_TYPE_INTEGER && element->kind != IR_TYPE_FLOAT) ||
-        (element->bit_width != 8 && element->bit_width != 16 && element->bit_width != 32 && element->bit_width != 64) ||
+    if (!vector || vector->kind != IR_TYPE_VECTOR || !codegen_vector_element_supported(element) ||
         instruction->result.value == IR_ID_UNDERLYING_INVALID)
     {
         return false;
@@ -7844,8 +7866,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_vector_operation(CodegenBuffer* b
     IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
     IrType* vector = ir_type_from_id(&program->types, operand_type_id);
     IrType* element = vector ? ir_type_from_id(&program->types, vector->element_type) : 0;
-    if (!vector || vector->kind != IR_TYPE_VECTOR || !element || (element->kind != IR_TYPE_INTEGER && element->kind != IR_TYPE_FLOAT) ||
-        (element->bit_width != 8 && element->bit_width != 16 && element->bit_width != 32 && element->bit_width != 64) ||
+    if (!vector || vector->kind != IR_TYPE_VECTOR || !codegen_vector_element_supported(element) ||
         instruction->result.value == IR_ID_UNDERLYING_INVALID || vector->element_count > UINT32_MAX)
     {
         return false;
@@ -9490,20 +9511,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* funct
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(CodegenMachineDebugReference const* state, u32 row,
-                                                                            s32 frame_offset, bool has_frame_home)
+BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(CodegenMachineDebugReference const* state, u32 row, s32 frame_offset,
+                                                                              bool has_home)
 {
     CodegenMachineDebugSelection result = {.row = row, .physical_register = -1, .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE};
     bool selected_frame = state->frame_valid && (state->prefer_frame || state->physical_register < 0);
-    if (selected_frame)
+    if (selected_frame && has_home)
     {
-        if (has_frame_home)
-        {
-            result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
-            result.frame_offset = frame_offset;
-        }
+        result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
+        result.frame_offset = frame_offset;
     }
-    else if (state->physical_register >= 0)
+    else if (!selected_frame && state->physical_register >= 0)
     {
         result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_REGISTER;
         result.physical_register = state->physical_register;
@@ -9514,17 +9532,24 @@ BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(Co
 BUSTER_GLOBAL_LOCAL void codegen_machine_debug_selection_push(CodegenMachineDebugSelection* entries, u32* entry_count, u32 capacity,
                                                                CodegenMachineDebugSelection selection, u32 row_count)
 {
-    bool same = *entry_count && entries[*entry_count - 1u].kind == selection.kind &&
-                entries[*entry_count - 1u].frame_offset == selection.frame_offset &&
-                entries[*entry_count - 1u].physical_register == selection.physical_register;
-    if (selection.row < row_count && !same && *entry_count < capacity)
+    // A sample taken at a row supersedes the steady state the row before it
+    // published for that same row, so the superseded entry goes before the
+    // comparison rather than after it. Comparing against an entry that is
+    // about to be overwritten answers for the wrong neighbour: a row whose
+    // sample differs from its own steady state then keeps one entry per row,
+    // all carrying the same location, and every value that names the register
+    // walks them. That is the whole function again, once per value.
+    u32 count = *entry_count && entries[*entry_count - 1u].row == selection.row ? *entry_count - 1u : *entry_count;
+    bool same = count && entries[count - 1u].kind == selection.kind && entries[count - 1u].frame_offset == selection.frame_offset &&
+                entries[count - 1u].physical_register == selection.physical_register;
+    if (selection.row < row_count && count < capacity)
     {
-        if (*entry_count && entries[*entry_count - 1u].row == selection.row)
+        if (!same)
         {
-            *entry_count -= 1u;
+            entries[count] = selection;
+            count += 1u;
         }
-        entries[*entry_count] = selection;
-        *entry_count += 1u;
+        *entry_count = count;
     }
 }
 
@@ -9620,10 +9645,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                                                    u32* entry_count)
 {
     s32 frame_offset = 0;
-    bool result = payload < function->virtual_register_count && index->edits_valid;
-    u32 home = result ? placement->virtual_register_offsets[payload] : MACHINE_VIRTUAL_REGISTER_NO_HOME;
-    bool has_frame_home = home != MACHINE_VIRTUAL_REGISTER_NO_HOME;
-    result = result && (!has_frame_home || codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset));
+    // A homeless register is a value without a frame location, not invalid IR:
+    // a sample that would select its frame copy stays unavailable instead. The
+    // dense reference clips the same way. An offset that really is out of
+    // range is still rejected.
+    u32 home = payload < function->virtual_register_count ? placement->virtual_register_offsets[payload] : MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    bool has_home = home != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    bool result = payload < function->virtual_register_count && index->edits_valid &&
+                  (!has_home || codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset));
     *entry_count = 0;
     if (result)
     {
@@ -9641,7 +9670,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                 remat_group = codegen_machine_debug_group_find(&index->remats, machine_ref_payload(instruction->operands[1]));
             }
         }
-        u32 home_group = has_frame_home ? codegen_machine_debug_group_find(&index->homes, home) : UINT32_MAX;
+        // Every homeless register carries the marker as its key, and a spill of
+        // one of the others never invalidates this value, so there is no row
+        // here worth stopping at.
+        u32 home_group = has_home ? codegen_machine_debug_group_find(&index->homes, home) : UINT32_MAX;
         u32 home_cursor = home_group == UINT32_MAX ? 0 : index->homes.offsets[home_group];
         u32 remat_cursor = remat_group == UINT32_MAX ? 0 : index->remats.offsets[remat_group];
         u32 subject_cursor = index->subject_offsets[payload];
@@ -9652,8 +9684,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 unmapped_cursor = index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT];
         u32 block_cursor = 0;
         u32 row = 0;
-        codegen_machine_debug_selection_push(entries, entry_count, capacity,
-                                             codegen_machine_debug_sample(&state, 0, frame_offset, has_frame_home),
+        codegen_machine_debug_selection_push(entries, entry_count, capacity, codegen_machine_debug_sample(&state, 0, frame_offset, has_home),
                                              function->instruction_count);
         while (row < function->instruction_count)
         {
@@ -9800,7 +9831,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     }
                     CodegenMachineDebugSelection sampled = {.row = next, .physical_register = -1,
                                                             .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE};
-                    if (!selected_invalid && selected_frame && has_frame_home)
+                    if (!selected_invalid && selected_frame && has_home)
                     {
                         sampled.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
                         sampled.frame_offset = frame_offset;
@@ -9812,7 +9843,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     }
                     codegen_machine_debug_selection_push(entries, entry_count, capacity, sampled, function->instruction_count);
                     codegen_machine_debug_selection_push(entries, entry_count, capacity,
-                                                         codegen_machine_debug_sample(&state, next + 1u, frame_offset, has_frame_home),
+                                                         codegen_machine_debug_sample(&state, next + 1u, frame_offset, has_home),
                                                          function->instruction_count);
                     row = next + 1u;
                 }
@@ -10444,6 +10475,44 @@ bool codegen_test_record_machine_locations_growing(Arena* arena, CodegenModule* 
                                                      function_end, frame_base_offset, target);
     *capacity = sink.capacity;
     return recorded;
+}
+
+// The widest change-point timeline the event-driven recording would build for
+// this function. Sparsity is the whole point of the routine: a timeline that
+// holds an entry per row is walked again by every value that names the
+// register, which is the whole-function replay the routine replaced.
+u32 codegen_test_machine_debug_widest_timeline(Arena* arena, MachineFunction const* function, MachineStackPlacement const* placement,
+                                                u32 frame_base_offset, Target target)
+{
+    u32 widest = 0;
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    CodegenMachineDebugIndex index = {0};
+    codegen_machine_debug_index_build(scratch.arena, function, placement, &index);
+    u32 register_timeline_count = function->virtual_register_count ? function->virtual_register_count : 1u;
+    u32 slot_timeline_count = function->stack_slot_count ? function->stack_slot_count : 1u;
+    CodegenMachineDebugTimeline* register_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, register_timeline_count);
+    CodegenMachineDebugTimeline* slot_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, slot_timeline_count);
+    memset(register_timelines, 0, sizeof(*register_timelines) * (u64)register_timeline_count);
+    memset(slot_timelines, 0, sizeof(*slot_timelines) * (u64)slot_timeline_count);
+    u32 scratch_capacity = 2u * function->instruction_count + 2u;
+    CodegenMachineDebugSelection* selection_scratch = arena_allocate(scratch.arena, CodegenMachineDebugSelection, scratch_capacity);
+    for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + value_index;
+        u32 piece_count = value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE
+                              ? BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces))
+                              : 0;
+        for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
+        {
+            CodegenMachineDebugTimeline const* timeline = 0;
+            codegen_machine_debug_timeline_for(scratch.arena, function, placement, &index, register_timelines, slot_timelines,
+                                               selection_scratch, scratch_capacity, value->pieces[piece_index], frame_base_offset, target,
+                                               &timeline);
+            widest = timeline && timeline->entry_count > widest ? timeline->entry_count : widest;
+        }
+    }
+    scratch_end(scratch);
+    return widest;
 }
 
 bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
@@ -11438,8 +11507,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 scheduled_saved_registers = 0;
                         for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
                         {
-                            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
-                            scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
+                            placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
+                            scheduled_saved_registers += (u32)((scheduled_placement.callee_saved_mask >> physical_register) & 1u);
                         }
                         if (scheduled_placement.valid &&
                             scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
@@ -11503,7 +11572,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u32 machine_saved_register_count = 0;
                             for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                             {
-                                machine_saved_register_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                                machine_saved_register_count += (u32)((placement.callee_saved_mask >> saved_register) & 1u);
                             }
                             u32 machine_frame_total = placement.frame_size + 16u + 8u * machine_saved_register_count;
                             u32 machine_frame_chunks = machine_frame_total / A64_SP_ADJUST_CHUNK +
@@ -11529,7 +11598,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_push_count = 0;
                         for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                         {
-                            machine_push_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                            machine_push_count += (u32)((placement.callee_saved_mask >> saved_register) & 1u);
                         }
                         u32 machine_frame_area = placement.frame_size + 8 * machine_push_count;
                         bool machine_windows_frame = selected.function.windows_aarch64_frame;

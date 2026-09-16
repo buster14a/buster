@@ -419,12 +419,16 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
         return S8("__int128");
     case C_TYPE_UNSIGNED_INT128:
         return S8("unsigned __int128");
+    case C_TYPE_FLOAT16:
+        return S8("_Float16");
     case C_TYPE_FLOAT:
         return S8("float");
     case C_TYPE_DOUBLE:
         return S8("double");
     case C_TYPE_LONG_DOUBLE:
         return S8("long double");
+    case C_TYPE_FLOAT16_COMPLEX:
+        return S8("_Float16 _Complex");
     case C_TYPE_FLOAT_COMPLEX:
         return S8("float _Complex");
     case C_TYPE_DOUBLE_COMPLEX:
@@ -525,6 +529,11 @@ BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind
         *bit_width = layout.unsigned_integer128.bit_width;
         *alignment = layout.unsigned_integer128.alignment;
         return true;
+    case C_TYPE_FLOAT16:
+        *ir_kind = IR_TYPE_FLOAT;
+        *bit_width = layout.float16_type.bit_width;
+        *alignment = layout.float16_type.alignment;
+        return true;
     case C_TYPE_FLOAT:
         *ir_kind = IR_TYPE_FLOAT;
         *bit_width = layout.float_type.bit_width;
@@ -552,6 +561,7 @@ BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind
         return true;
     // The complex kinds are two-element aggregates, not scalars; they are
     // built by c_ir_scalar_type before it reaches this ladder.
+    case C_TYPE_FLOAT16_COMPLEX:
     case C_TYPE_FLOAT_COMPLEX:
     case C_TYPE_DOUBLE_COMPLEX:
     case C_TYPE_LONG_DOUBLE_COMPLEX:
@@ -2454,6 +2464,7 @@ struct CIntegerIrBuilder
     IrTypeId bool_type;
     IrTypeId nullptr_type;
     IrTypeId void_type;
+    IrTypeId f16_type;
     IrTypeId f32_type;
     IrTypeId f64_type;
     IrTypeId long_double_type;
@@ -3012,6 +3023,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_type_is_integer(IrType* type);
 BUSTER_C_INTERNAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, const CIrConstantValue* value);
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrConstantValue* source, IrTypeId target_type, CIrConstantValue* result);
 BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* source_input, IrType* type, u32 precision);
+BUSTER_C_INTERNAL u64 c_ir_float16_bits_from_f64(f64 value);
+BUSTER_C_INTERNAL f64 c_ir_float16_to_f64(u64 bits);
+BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value);
 BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type, u8* bytes, u64 offset, u64 bits, bool sign_extend);
 // The same store through an explicit unit width, which is what a bit-field
 // whose packing narrowed its storage unit writes through.
@@ -8413,18 +8427,53 @@ BUSTER_C_INTERNAL bool c_ir_number_imaginary_spelling(Arena* arena, String8 spel
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out)
+// The suffix of a floating constant: how many trailing bytes it occupies and
+// which type it names, reported as one code. C's suffixes are `f`/`F` for
+// float and `l`/`L` for long double, and C23 adds `f16`/`F16` for `_Float16`
+// -- the only one longer than a letter, so reading the last byte alone cannot
+// recognize it. The half suffix reports as 'h', a letter C does not use as a
+// suffix, so a caller comparing against 'f' or 'l' cannot confuse the two.
+// Every spelling-to-value path shares this so that the type a literal is
+// given and the digits that are parsed for it cannot disagree.
+BUSTER_C_INTERNAL u32 c_ir_float_suffix(String8 spelling, char8* code_out)
 {
-    *suffix_out = 0;
-    if (spelling.length)
+    // In a hexadecimal spelling `f` and `F` are digits, and only a `p`
+    // exponent makes such a spelling a floating constant at all: `0x2f16` is
+    // the integer 12054 and `0x2f` the integer 47, where `0x1p4f` really does
+    // carry the float suffix. Asking for the exponent is what keeps a
+    // float-typed initializer written with a hexadecimal integer from losing
+    // its last digits to a suffix that is not there.
+    bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+    bool suffixable = !hexadecimal;
+    for (u64 index = 2; !suffixable && index < spelling.length; index += 1)
+    {
+        suffixable = spelling.pointer[index] == 'p' || spelling.pointer[index] == 'P';
+    }
+    char8 code = 0;
+    u32 length = 0;
+    if (suffixable && spelling.length >= 3 && (spelling.pointer[spelling.length - 3] == 'f' || spelling.pointer[spelling.length - 3] == 'F') &&
+        spelling.pointer[spelling.length - 2] == '1' && spelling.pointer[spelling.length - 1] == '6')
+    {
+        code = 'h';
+        length = 3;
+    }
+    else if (suffixable && spelling.length)
     {
         char8 last = spelling.pointer[spelling.length - 1];
         if (last == 'f' || last == 'F' || last == 'l' || last == 'L')
         {
-            *suffix_out = last;
-            spelling.length -= 1;
+            code = last;
+            length = 1;
         }
     }
+    *code_out = code;
+
+    return length;
+}
+
+BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out)
+{
+    spelling.length -= c_ir_float_suffix(spelling, suffix_out);
     bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
     u32 base = hexadecimal ? 16 : 10;
     u64 index = hexadecimal ? 2 : 0;
@@ -8578,13 +8627,15 @@ BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8*
 // double format is neither stable across targets nor available to the
 // self-hosted compiler.  The bounded bignum is deliberately local to this
 // narrow literal path; no generic IR wide-float constant is introduced.
-#define C_IR_EXT80_BIG_LIMBS 1024
-typedef struct CIrExt80Big CIrExt80Big;
-struct CIrExt80Big
-{
-    u32 limbs[C_IR_EXT80_BIG_LIMBS];
-    u32 count;
-};
+//
+// CIrExt80Big is declared in c_gen_internal.h so the frontend tests can
+// inspect its limbs.  It holds C_IR_EXT80_BIG_LIMBS limbs, but a literal lives
+// in a handful of them, so only the limbs below `count` are defined.  Every
+// helper here reads a limb at or above an operand's count only after writing
+// it in the same call, and initializes and copies just the live prefix
+// (c_ir_ext80_big_set_u64, c_ir_ext80_big_copy): a whole value is four
+// kilobytes, and the long divisions below shift a copy of the denominator for
+// every quotient bit.
 
 BUSTER_C_INTERNAL void c_ir_ext80_big_normalize(CIrExt80Big* value)
 {
@@ -8596,13 +8647,15 @@ BUSTER_C_INTERNAL void c_ir_ext80_big_normalize(CIrExt80Big* value)
 
 BUSTER_C_INTERNAL void c_ir_ext80_big_set_u64(CIrExt80Big* value, u64 bits)
 {
-    memset(value, 0, sizeof(*value));
-    if (bits)
-    {
-        value->limbs[0] = (u32)bits;
-        value->limbs[1] = (u32)(bits >> 32);
-        value->count = value->limbs[1] ? 2 : 1;
-    }
+    value->limbs[0] = (u32)bits;
+    value->limbs[1] = (u32)(bits >> 32);
+    value->count = value->limbs[1] ? 2 : (value->limbs[0] ? 1 : 0);
+}
+
+BUSTER_C_INTERNAL void c_ir_ext80_big_copy(CIrExt80Big* destination, CIrExt80Big const* source)
+{
+    destination->count = source->count;
+    memcpy(destination->limbs, source->limbs, source->count * sizeof(source->limbs[0]));
 }
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_mul_small(CIrExt80Big* value, u32 multiplier)
@@ -8649,39 +8702,47 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_add_small(CIrExt80Big* value, u32 addend)
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_shift_left(CIrExt80Big* value, u32 shift)
 {
+    bool result = true;
     if (shift && value->count)
     {
         u32 limb_shift = shift / 32;
         u32 bit_shift = shift % 32;
-        if (limb_shift >= C_IR_EXT80_BIG_LIMBS || value->count > C_IR_EXT80_BIG_LIMBS - limb_shift)
+        u32 count = value->count;
+        // The bits the top limb carries into a new limb; shifting through u64
+        // keeps a zero bit_shift defined and carrying nothing.  Once the count
+        // fits, only this carry can land past the last limb.
+        u32 carry = (u32)(((u64)value->limbs[count - 1] << bit_shift) >> 32);
+        if (limb_shift >= C_IR_EXT80_BIG_LIMBS || count > C_IR_EXT80_BIG_LIMBS - limb_shift ||
+            (carry && count + limb_shift == C_IR_EXT80_BIG_LIMBS))
         {
-            return false;
+            result = false;
         }
-        CIrExt80Big shifted = {0};
-        for (u32 index = 0; index < value->count; index += 1)
+        else
         {
-            u64 part = (u64)value->limbs[index] << bit_shift;
-            u32 destination = index + limb_shift;
-            shifted.limbs[destination] |= (u32)part;
-            if (part >> 32)
+            // Shift in place from the top down.  Limb `index` lands at
+            // index + limb_shift, never below itself, so every source limb is
+            // read before anything overwrites it, and every limb below the new
+            // count is assigned rather than combined with what was stored there.
+            u32 shifted_count = count + limb_shift;
+            if (carry)
             {
-                if (destination + 1 >= C_IR_EXT80_BIG_LIMBS)
-                {
-                    return false;
-                }
-                shifted.limbs[destination + 1] |= (u32)(part >> 32);
+                value->limbs[shifted_count] = carry;
+                shifted_count += 1;
             }
+            for (u32 index = count - 1; index; index -= 1)
+            {
+                u64 high = (u64)value->limbs[index] << bit_shift;
+                u64 low = (u64)value->limbs[index - 1] << bit_shift;
+                value->limbs[index + limb_shift] = (u32)(high | (low >> 32));
+            }
+            value->limbs[limb_shift] = (u32)((u64)value->limbs[0] << bit_shift);
+            memset(value->limbs, 0, limb_shift * sizeof(value->limbs[0]));
+            value->count = shifted_count;
+            c_ir_ext80_big_normalize(value);
         }
-        shifted.count = value->count + limb_shift;
-        if (bit_shift && shifted.count < C_IR_EXT80_BIG_LIMBS && shifted.limbs[shifted.count])
-        {
-            shifted.count += 1;
-        }
-        c_ir_ext80_big_normalize(&shifted);
-        *value = shifted;
     }
 
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Big const* right)
@@ -8703,16 +8764,17 @@ BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Bi
 
 BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift)
 {
-    CIrExt80Big shifted = *right;
+    CIrExt80Big shifted;
     if (shift >= 0)
     {
+        c_ir_ext80_big_copy(&shifted, right);
         if (!c_ir_ext80_big_shift_left(&shifted, (u32)shift))
         {
             return -1;
         }
         return c_ir_ext80_big_compare(left, &shifted);
     }
-    shifted = *left;
+    c_ir_ext80_big_copy(&shifted, left);
     s32 result;
     if (shift == INT32_MIN)
     {
@@ -8732,7 +8794,8 @@ BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare_shifted(CIrExt80Big const* left, CI
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift)
 {
-    CIrExt80Big shifted = *right;
+    CIrExt80Big shifted;
+    c_ir_ext80_big_copy(&shifted, right);
     if (!c_ir_ext80_big_shift_left(&shifted, shift) || c_ir_ext80_big_compare(left, &shifted) < 0)
     {
         return false;
@@ -8768,16 +8831,19 @@ BUSTER_C_INTERNAL u32 c_ir_ext80_big_bit_length(CIrExt80Big const* value)
 // Operand-to-operand addition and multiplication.  A single literal only ever
 // scaled its rational by a small constant, so mul_small and add_small were
 // enough for it; folding `a * b` or `a + b` over two literals needs the whole
-// products and sums.  Limbs above `count` are always zero here -- every writer
-// in this bignum either starts from a cleared value or normalizes down through
-// zeros -- so the shorter operand reads as zero without a length test.
+// products and sums.  Limbs at or above `count` are undefined, so the shorter
+// addend contributes zero past its own count rather than whatever is stored
+// there, and the product clears only the limbs it accumulates into.
 BUSTER_C_INTERNAL bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right)
 {
-    u32 count = left->count > right->count ? left->count : right->count;
+    u32 left_count = left->count;
+    u32 count = left_count > right->count ? left_count : right->count;
     u64 carry = 0;
     for (u32 index = 0; index < count; index += 1)
     {
-        u64 sum = (u64)left->limbs[index] + right->limbs[index] + carry;
+        u64 left_limb = index < left_count ? left->limbs[index] : 0;
+        u64 right_limb = index < right->count ? right->limbs[index] : 0;
+        u64 sum = left_limb + right_limb + carry;
         left->limbs[index] = (u32)sum;
         carry = sum >> 32;
     }
@@ -8796,7 +8862,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* 
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out)
 {
-    memset(product_out, 0, sizeof(*product_out));
+    product_out->count = 0;
     if (!left->count || !right->count)
     {
         return true;
@@ -8805,6 +8871,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80
     {
         return false;
     }
+    memset(product_out->limbs, 0, (left->count + right->count) * sizeof(product_out->limbs[0]));
     for (u32 left_index = 0; left_index < left->count; left_index += 1)
     {
         u64 carry = 0;
@@ -8831,7 +8898,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_divide_round(CIrExt80Big const* numerator,
     {
         return false;
     }
-    CIrExt80Big remainder = *numerator;
+    CIrExt80Big remainder;
+    c_ir_ext80_big_copy(&remainder, numerator);
     u64 quotient = 0;
     bool overflow = false;
     for (s32 bit = 64; bit >= 0; bit -= 1)
@@ -8880,7 +8948,8 @@ BUSTER_C_INTERNAL bool c_ir_ieee_big_divide_round(CIrExt80Big const* numerator, 
     {
         return false;
     }
-    CIrExt80Big remainder = *numerator;
+    CIrExt80Big remainder;
+    c_ir_ext80_big_copy(&remainder, numerator);
     u64 quotient = 0;
     bool overflow = false;
     for (s32 bit = (s32)fraction_bits + 1; bit >= 0; bit -= 1)
@@ -8909,30 +8978,30 @@ BUSTER_C_INTERNAL bool c_ir_ieee_big_divide_round(CIrExt80Big const* numerator, 
     return true;
 }
 
-BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
-                                             u32 fraction_bits, s32 min_exponent, s32 max_exponent, u32 exponent_bits,
-                                             u64* bits_out)
+BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                             bool negative, u32 fraction_bits, s32 min_exponent, s32 max_exponent,
+                                             u32 exponent_bits, u64* bits_out)
 {
-    if (!denominator.count || !bits_out || !fraction_bits || fraction_bits >= 62 || !exponent_bits || exponent_bits >= 32 ||
+    if (!denominator->count || !bits_out || !fraction_bits || fraction_bits >= 62 || !exponent_bits || exponent_bits >= 32 ||
         exponent_bits > 63 - fraction_bits ||
         min_exponent >= max_exponent)
     {
         return C_IR_ROUND_FAILED;
     }
     u64 sign_bit = (u64)1 << (fraction_bits + exponent_bits);
-    if (!numerator.count)
+    if (!numerator->count)
     {
         *bits_out = negative ? sign_bit : 0;
         return C_IR_ROUND_OK;
     }
 
-    s64 exponent = (s64)c_ir_ext80_big_bit_length(&numerator) - (s64)c_ir_ext80_big_bit_length(&denominator) + binary_exponent;
+    s64 exponent = (s64)c_ir_ext80_big_bit_length(numerator) - (s64)c_ir_ext80_big_bit_length(denominator) + binary_exponent;
     // Correct the one-bit estimate from the operand lengths into floor(log2).
     for (u32 iteration = 0; iteration < 2; iteration += 1)
     {
         s64 shift = exponent - binary_exponent;
         s32 comparison = shift <= INT32_MIN || shift > INT32_MAX ? (shift < 0 ? 1 : -1)
-                                                                : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)shift);
+                                                                : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)shift);
         if (comparison < 0)
         {
             exponent -= 1;
@@ -8941,7 +9010,7 @@ BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big 
         s64 next_shift = shift + 1;
         s32 next_comparison = next_shift <= INT32_MIN || next_shift > INT32_MAX
                                   ? (next_shift < 0 ? 1 : -1)
-                                  : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)next_shift);
+                                  : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)next_shift);
         if (next_comparison >= 0)
         {
             exponent += 1;
@@ -8956,8 +9025,10 @@ BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big 
         return C_IR_ROUND_OVERFLOW;
     }
     s64 scaling = subnormal ? (s64)binary_exponent + fraction_bits - min_exponent : (s64)binary_exponent + fraction_bits - exponent;
-    CIrExt80Big scaled_numerator = numerator;
-    CIrExt80Big scaled_denominator = denominator;
+    CIrExt80Big scaled_numerator;
+    CIrExt80Big scaled_denominator;
+    c_ir_ext80_big_copy(&scaled_numerator, numerator);
+    c_ir_ext80_big_copy(&scaled_denominator, denominator);
     if (scaling >= 0)
     {
         if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -8996,8 +9067,8 @@ BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big 
             return C_IR_ROUND_OVERFLOW;
         }
         scaling = (s64)binary_exponent + fraction_bits - exponent;
-        scaled_numerator = numerator;
-        scaled_denominator = denominator;
+        c_ir_ext80_big_copy(&scaled_numerator, numerator);
+        c_ir_ext80_big_copy(&scaled_denominator, denominator);
         if (scaling >= 0)
         {
             if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9167,11 +9238,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     {
         return false;
     }
-    char8 suffix = spelling.pointer[spelling.length - 1];
-    if (suffix == 'f' || suffix == 'F' || suffix == 'l' || suffix == 'L')
-    {
-        spelling.length -= 1;
-    }
+    char8 suffix = 0;
+    spelling.length -= c_ir_float_suffix(spelling, &suffix);
     if (!spelling.length)
     {
         return false;
@@ -9181,7 +9249,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     bool fraction = false;
     bool saw_digit = false;
     u32 fraction_digits = 0;
-    CIrExt80Big numerator = {0};
+    CIrExt80Big numerator;
+    c_ir_ext80_big_set_u64(&numerator, 0);
     while (index < spelling.length)
     {
         u8 byte = spelling.pointer[index];
@@ -9242,12 +9311,12 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     {
         return false;
     }
-    CIrExt80Big denominator = {0};
+    CIrExt80Big denominator;
     c_ir_ext80_big_set_u64(&denominator, 1);
     if (!numerator.count)
     {
-        *numerator_out = numerator;
-        *denominator_out = denominator;
+        c_ir_ext80_big_copy(numerator_out, &numerator);
+        c_ir_ext80_big_copy(denominator_out, &denominator);
         *binary_exponent_out = 0;
         return true;
     }
@@ -9289,11 +9358,46 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     {
         return false;
     }
-    *numerator_out = numerator;
-    *denominator_out = denominator;
+    c_ir_ext80_big_copy(numerator_out, &numerator);
+    c_ir_ext80_big_copy(denominator_out, &denominator);
     *binary_exponent_out = (s32)binary_exponent;
     return true;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// Seams for the live-limb contract above; c_test_ext80_big_live_limbs drives
+// them with a sentinel in every limb a helper must not read or write.
+bool c_test_ext80_big_shift_left(CIrExt80Big* value, u32 shift)
+{
+    return c_ir_ext80_big_shift_left(value, shift);
+}
+
+s32 c_test_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift)
+{
+    return c_ir_ext80_big_compare_shifted(left, right, shift);
+}
+
+bool c_test_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift)
+{
+    return c_ir_ext80_big_subtract_shifted(left, right, shift);
+}
+
+bool c_test_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right)
+{
+    return c_ir_ext80_big_add(left, right);
+}
+
+bool c_test_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out)
+{
+    return c_ir_ext80_big_multiply(left, right, product_out);
+}
+
+bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
+                                         s32* binary_exponent_out)
+{
+    return c_ir_ext80_parse_rational_literal(spelling, numerator_out, denominator_out, binary_exponent_out);
+}
+#endif
 
 // The value a float literal denotes, for the static-initializer paths that
 // need it as one f64: constant-expression evaluation and the two global
@@ -9318,12 +9422,21 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
     if (result)
     {
         bool single = *suffix_out == 'f' || *suffix_out == 'F';
-        CIrExt80Big numerator = {0};
-        CIrExt80Big denominator = {0};
+        bool half = *suffix_out == 'h';
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
         s32 binary_exponent = 0;
         u64 bits = 0;
-        if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
-            c_ir_ieee_from_rational(numerator, denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
+        if (half)
+        {
+            // The half literal rounds through the shared binary16 encoder
+            // rather than the rational one: its range is narrow enough that
+            // overflow and subnormals are the common cases, and the encoder
+            // already answers both from the exactly-decoded binary64 value.
+            *value_out = c_ir_float16_round(*value_out);
+        }
+        else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
+            c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
                                     single ? 127 : 1023, single ? 8 : 11, &bits) == C_IR_ROUND_OK)
         {
             if (single)
@@ -9343,26 +9456,26 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
     return result;
 }
 
-BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
-                                              u64* significand_out, u16* exponent_sign_out)
+BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                              bool negative, u64* significand_out, u16* exponent_sign_out)
 {
-    if (!denominator.count)
+    if (!denominator->count)
     {
         return C_IR_ROUND_FAILED;
     }
-    if (!numerator.count)
+    if (!numerator->count)
     {
         *significand_out = 0;
         *exponent_sign_out = negative ? UINT16_C(0x8000) : 0;
         return C_IR_ROUND_OK;
     }
-    s64 exponent = (s64)c_ir_ext80_big_bit_length(&numerator) - (s64)c_ir_ext80_big_bit_length(&denominator) + binary_exponent;
+    s64 exponent = (s64)c_ir_ext80_big_bit_length(numerator) - (s64)c_ir_ext80_big_bit_length(denominator) + binary_exponent;
     // Correct the one-bit estimate from the operand lengths into floor(log2).
     for (u32 iteration = 0; iteration < 2; iteration += 1)
     {
         s64 shift = exponent - binary_exponent;
         s32 comparison = shift <= INT32_MIN || shift > INT32_MAX ? (shift < 0 ? 1 : -1)
-                                                                : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)shift);
+                                                                : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)shift);
         if (comparison < 0)
         {
             exponent -= 1;
@@ -9371,7 +9484,7 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big
         s64 next_shift = shift + 1;
         s32 next_comparison = next_shift <= INT32_MIN || next_shift > INT32_MAX
                                   ? (next_shift < 0 ? 1 : -1)
-                                  : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)next_shift);
+                                  : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)next_shift);
         if (next_comparison >= 0)
         {
             exponent += 1;
@@ -9385,8 +9498,10 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big
         return C_IR_ROUND_OVERFLOW;
     }
     s64 scaling = subnormal ? (s64)binary_exponent + 16445 : (s64)binary_exponent + 63 - exponent;
-    CIrExt80Big scaled_numerator = numerator;
-    CIrExt80Big scaled_denominator = denominator;
+    CIrExt80Big scaled_numerator;
+    CIrExt80Big scaled_denominator;
+    c_ir_ext80_big_copy(&scaled_numerator, numerator);
+    c_ir_ext80_big_copy(&scaled_denominator, denominator);
     if (scaling >= 0)
     {
         if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9419,8 +9534,8 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big
             return C_IR_ROUND_OVERFLOW;
         }
         scaling = (s64)binary_exponent + 63 - exponent;
-        scaled_numerator = numerator;
-        scaled_denominator = denominator;
+        c_ir_ext80_big_copy(&scaled_numerator, numerator);
+        c_ir_ext80_big_copy(&scaled_denominator, denominator);
         if (scaling >= 0)
         {
             if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9507,18 +9622,18 @@ BUSTER_C_INTERNAL bool c_ir_ext80_from_ieee64(u64 bits, bool negative, u64* sign
         *exponent_sign_out = (source_negative ^ negative) ? UINT16_C(0x8000) : 0;
         return true;
     }
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     if (exponent_bits)
     {
         c_ir_ext80_big_set_u64(&numerator, UINT64_C(0x0010000000000000) | fraction);
         c_ir_ext80_big_set_u64(&denominator, 1);
-        return c_ir_ext80_from_rational(numerator, denominator, (s32)exponent_bits - 1023 - 52, source_negative ^ negative,
+        return c_ir_ext80_from_rational(&numerator, &denominator, (s32)exponent_bits - 1023 - 52, source_negative ^ negative,
                                         significand_out, exponent_sign_out) == C_IR_ROUND_OK;
     }
     c_ir_ext80_big_set_u64(&numerator, fraction);
     c_ir_ext80_big_set_u64(&denominator, 1);
-    return c_ir_ext80_from_rational(numerator, denominator, -1074, source_negative ^ negative, significand_out, exponent_sign_out) ==
+    return c_ir_ext80_from_rational(&numerator, &denominator, -1074, source_negative ^ negative, significand_out, exponent_sign_out) ==
            C_IR_ROUND_OK;
 }
 
@@ -9537,18 +9652,18 @@ BUSTER_C_INTERNAL bool c_ir_ext80_from_ieee32(u32 bits, bool negative, u64* sign
         *exponent_sign_out = (source_negative ^ negative) ? UINT16_C(0x8000) : 0;
         return true;
     }
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     if (exponent_bits)
     {
         c_ir_ext80_big_set_u64(&numerator, UINT64_C(0x00800000) | fraction);
         c_ir_ext80_big_set_u64(&denominator, 1);
-        return c_ir_ext80_from_rational(numerator, denominator, (s32)exponent_bits - 127 - 23, source_negative ^ negative,
+        return c_ir_ext80_from_rational(&numerator, &denominator, (s32)exponent_bits - 127 - 23, source_negative ^ negative,
                                         significand_out, exponent_sign_out) == C_IR_ROUND_OK;
     }
     c_ir_ext80_big_set_u64(&numerator, fraction);
     c_ir_ext80_big_set_u64(&denominator, 1);
-    return c_ir_ext80_from_rational(numerator, denominator, -149, source_negative ^ negative, significand_out, exponent_sign_out) ==
+    return c_ir_ext80_from_rational(&numerator, &denominator, -149, source_negative ^ negative, significand_out, exponent_sign_out) ==
            C_IR_ROUND_OK;
 }
 
@@ -9558,8 +9673,8 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negati
     {
         return C_IR_ROUND_FAILED;
     }
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     s32 binary_exponent = 0;
     u8 result;
     if (!c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
@@ -9568,7 +9683,7 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negati
     }
     else
     {
-        result = c_ir_ext80_from_rational(numerator, denominator, binary_exponent, negative, significand_out, exponent_sign_out);
+        result = c_ir_ext80_from_rational(&numerator, &denominator, binary_exponent, negative, significand_out, exponent_sign_out);
     }
 
     return result;
@@ -9598,12 +9713,15 @@ struct CIrExt80Value
     u8 rank;
 };
 
+// The real floating types in conversion-rank order: an operation rounds in
+// the higher rank of its two operands, so the numbering is the comparison.
 enum
 {
     C_IR_EXT80_RANK_INTEGER = 0,
-    C_IR_EXT80_RANK_FLOAT = 1,
-    C_IR_EXT80_RANK_DOUBLE = 2,
-    C_IR_EXT80_RANK_LONG_DOUBLE = 3,
+    C_IR_EXT80_RANK_HALF = 1,
+    C_IR_EXT80_RANK_FLOAT = 2,
+    C_IR_EXT80_RANK_DOUBLE = 3,
+    C_IR_EXT80_RANK_LONG_DOUBLE = 4,
 };
 
 // The x87 value occupies the first ten bytes of its sixteen-byte slot and the
@@ -9694,8 +9812,8 @@ BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_default_nan(u8 rank)
 // holding the float quotient rather than the long double one.  Overflow and
 // underflow are values here, not failures: C says the result becomes the
 // infinity or the signed zero, and Clang folds them that way.
-BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative, u8 rank,
-                                                CIrExt80Value* result_out)
+BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                                bool negative, u8 rank, CIrExt80Value* result_out)
 {
     u64 significand = 0;
     u16 exponent_sign = 0;
@@ -9703,6 +9821,24 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big numerator, CIrExt80Big
     if (rank == C_IR_EXT80_RANK_LONG_DOUBLE)
     {
         status = c_ir_ext80_from_rational(numerator, denominator, binary_exponent, negative, &significand, &exponent_sign);
+    }
+    else if (rank == C_IR_EXT80_RANK_HALF)
+    {
+        // binary16 rounds in its own format and then widens through binary64,
+        // which is exact for every value it can hold, so the x87 encoding it
+        // reaches is the one the half result denotes.
+        u64 bits = 0;
+        status = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, 10, -14, 15, 5, &bits);
+        if (status == C_IR_ROUND_OK)
+        {
+            f64 widened = c_ir_float16_to_f64(bits);
+            u64 widened_bits = 0;
+            memcpy(&widened_bits, &widened, sizeof(widened_bits));
+            if (!c_ir_ext80_from_ieee64(widened_bits, false, &significand, &exponent_sign))
+            {
+                status = C_IR_ROUND_FAILED;
+            }
+        }
     }
     else
     {
@@ -9747,13 +9883,13 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_convert(CIrExt80Value* value, u8 rank)
     bool result = true;
     if (value->rank != rank && rank != C_IR_EXT80_RANK_LONG_DOUBLE && !c_ir_ext80_value_is_special(*value) && value->significand)
     {
-        CIrExt80Big numerator = {0};
-        CIrExt80Big denominator = {0};
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
         s32 binary_exponent = 0;
         bool negative = false;
         c_ir_ext80_big_set_u64(&denominator, 1);
         result = c_ir_ext80_value_rational(*value, &numerator, &binary_exponent, &negative) &&
-                 c_ir_ext80_value_round(numerator, denominator, binary_exponent, negative, rank, value);
+                 c_ir_ext80_value_round(&numerator, &denominator, binary_exponent, negative, rank, value);
     }
     value->rank = rank;
 
@@ -9850,8 +9986,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_special(CPunctuator op, CIrExt80Value le
 
 BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value left, CIrExt80Value right, u8 rank, CIrExt80Value* result_out)
 {
-    CIrExt80Big left_numerator = {0};
-    CIrExt80Big right_numerator = {0};
+    CIrExt80Big left_numerator;
+    CIrExt80Big right_numerator;
     s32 left_exponent = 0;
     s32 right_exponent = 0;
     bool left_negative = false;
@@ -9861,16 +9997,16 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
     {
         return false;
     }
-    CIrExt80Big denominator = {0};
+    CIrExt80Big denominator;
     c_ir_ext80_big_set_u64(&denominator, 1);
     bool negative = false;
     bool valid = false;
     s64 exponent = 0;
     if (op == C_PUNCTUATOR_STAR)
     {
-        CIrExt80Big product = {0};
+        CIrExt80Big product;
         valid = c_ir_ext80_big_multiply(&left_numerator, &right_numerator, &product);
-        left_numerator = product;
+        c_ir_ext80_big_copy(&left_numerator, &product);
         negative = left_negative != right_negative;
         exponent = (s64)left_exponent + right_exponent;
     }
@@ -9882,7 +10018,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
         // numeric core beyond what a single literal already used.  A zero
         // divisor never arrives -- c_ir_ext80_value_special answered it.
         valid = right_numerator.count != 0;
-        denominator = right_numerator;
+        c_ir_ext80_big_copy(&denominator, &right_numerator);
         negative = left_negative != right_negative;
         exponent = (s64)left_exponent - right_exponent;
     }
@@ -9908,7 +10044,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
             }
             else if (!left_numerator.count)
             {
-                left_numerator = right_numerator;
+                c_ir_ext80_big_copy(&left_numerator, &right_numerator);
                 negative = right_negative;
                 exponent = right_exponent;
             }
@@ -9944,9 +10080,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
             }
             else
             {
-                CIrExt80Big difference = right_numerator;
-                valid = c_ir_ext80_big_subtract_shifted(&difference, &left_numerator, 0);
-                left_numerator = difference;
+                valid = c_ir_ext80_big_subtract_shifted(&right_numerator, &left_numerator, 0);
+                c_ir_ext80_big_copy(&left_numerator, &right_numerator);
                 negative = right_negative;
             }
         }
@@ -9955,7 +10090,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
     {
         return false;
     }
-    return c_ir_ext80_value_round(left_numerator, denominator, (s32)exponent, negative, rank, result_out);
+    return c_ir_ext80_value_round(&left_numerator, &denominator, (s32)exponent, negative, rank, result_out);
 }
 
 // The usual arithmetic conversions decide where an operation rounds: both
@@ -9999,7 +10134,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
     u64 significand = 0;
     u16 exponent_sign = 0;
     bool floating = c_number_is_float(spelling);
-    char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
+    char8 suffix = 0;
+    c_ir_float_suffix(spelling, &suffix);
     bool long_suffix = suffix == 'l' || suffix == 'L';
     u8 status = C_IR_ROUND_FAILED;
     u8 rank = C_IR_EXT80_RANK_INTEGER;
@@ -10011,24 +10147,37 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
     else if (floating)
     {
         bool single = suffix == 'f' || suffix == 'F';
-        rank = single ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
-        CIrExt80Big numerator = {0};
-        CIrExt80Big denominator = {0};
+        bool half = suffix == 'h';
+        rank = half ? C_IR_EXT80_RANK_HALF : single ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
         s32 binary_exponent = 0;
         if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
         {
             u64 ieee_bits = 0;
             bool source_nonzero = c_ir_ext80_spelling_nonzero(spelling);
-            status = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, single ? 23 : 52, single ? -126 : -1022,
-                                             single ? 127 : 1023, single ? 8 : 11, &ieee_bits);
+            status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, negative, half ? 10u : single ? 23u : 52u,
+                                             half ? -14 : single ? -126 : -1022, half ? 15 : single ? 127 : 1023, half ? 5u : single ? 8u : 11u,
+                                             &ieee_bits);
             if (status == C_IR_ROUND_OK)
             {
                 // A nonzero spelling that rounded to zero without reporting an
                 // underflow would be a bug in the core above, not a value.
-                u64 magnitude = single ? (ieee_bits & UINT32_C(0x7fffffff)) : (ieee_bits & UINT64_C(0x7fffffffffffffff));
+                u64 magnitude = half     ? (ieee_bits & UINT64_C(0x7fff))
+                                : single ? (ieee_bits & UINT32_C(0x7fffffff))
+                                         : (ieee_bits & UINT64_C(0x7fffffffffffffff));
+                // A half value widens into binary64 exactly, so the x87
+                // encoding reached through it is the one the half literal
+                // denotes.
+                u64 widened_bits = ieee_bits;
+                if (half)
+                {
+                    f64 widened = c_ir_float16_to_f64(ieee_bits);
+                    memcpy(&widened_bits, &widened, sizeof(widened_bits));
+                }
                 if ((source_nonzero && !magnitude) ||
                     !(single ? c_ir_ext80_from_ieee32((u32)ieee_bits, false, &significand, &exponent_sign)
-                             : c_ir_ext80_from_ieee64(ieee_bits, false, &significand, &exponent_sign)))
+                             : c_ir_ext80_from_ieee64(widened_bits, false, &significand, &exponent_sign)))
                 {
                     status = C_IR_ROUND_FAILED;
                 }
@@ -10064,13 +10213,13 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
                     negative = false;
                 }
             }
-            CIrExt80Big numerator = {0};
-            CIrExt80Big denominator = {0};
+            CIrExt80Big numerator;
+            CIrExt80Big denominator;
             c_ir_ext80_big_set_u64(&numerator, integer);
             c_ir_ext80_big_set_u64(&denominator, 1);
             // Every u64 is exact in a 64-bit significand, so an integer
             // spelling can only come back as C_IR_ROUND_OK or a failure.
-            status = c_ir_ext80_from_rational(numerator, denominator, 0, negative, &significand, &exponent_sign);
+            status = c_ir_ext80_from_rational(&numerator, &denominator, 0, negative, &significand, &exponent_sign);
         }
     }
     bool result = true;
@@ -10388,8 +10537,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_f80_constant_bits(CIntegerIrBuilder* build
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder, String8 spelling, IrSourceRange source)
 {
-    char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
-    IrTypeId type = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
+    char8 suffix = 0;
+    c_ir_float_suffix(spelling, &suffix);
+    IrTypeId type = suffix == 'h'                   ? builder->f16_type
+                    : suffix == 'f' || suffix == 'F' ? builder->f32_type
+                    : suffix == 'l' || suffix == 'L' ? builder->long_double_type
+                                                     : builder->f64_type;
     IrType* type_value = ir_type_from_id(&builder->program->types, type);
     if (!type_value || type_value->kind != IR_TYPE_FLOAT)
     {
@@ -10431,17 +10584,31 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     // which changes the observable `%g` rendering in cJSON's print tests.
     // The bounded integer path is shared with x87 literals and implements
     // round-to-nearest-even for both IEEE widths.
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     s32 binary_exponent = 0;
     bool converted = false;
-    if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+    if (type_value->bit_width == 16)
     {
-        converted = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, false,
+        // A `f16` literal rounds through the shared binary16 encoder, which
+        // is the same step the static-initializer writer takes for the same
+        // spelling; the exactly-decoded binary64 it reads is a value the
+        // rational path would have produced unchanged.
+        f64 value = 0.0;
+        converted = c_ir_float_literal_value(spelling, &value, &suffix);
+        bits = converted ? c_ir_float16_bits_from_f64(value) : 0;
+    }
+    else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+    {
+        converted = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
                                              type_value->bit_width == 32 ? 23 : 52,
                                              type_value->bit_width == 32 ? -126 : -1022,
                                              type_value->bit_width == 32 ? 127 : 1023,
                                              type_value->bit_width == 32 ? 8 : 11, &bits) == C_IR_ROUND_OK;
+    }
+    if (!converted && type_value->bit_width == 16)
+    {
+        return IR_VALUE_ID_INVALID;
     }
     if (!converted)
     {
@@ -10490,8 +10657,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_float_literal_type(CIntegerIrBuilder* builder, S
 {
     String8 real_spelling = spelling;
     bool imaginary = c_ir_number_imaginary_spelling(builder->arena, spelling, &real_spelling);
-    char8 suffix = real_spelling.length ? real_spelling.pointer[real_spelling.length - 1] : 0;
-    IrTypeId element = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
+    char8 suffix = 0;
+    c_ir_float_suffix(real_spelling, &suffix);
+    IrTypeId element = suffix == 'h'                   ? builder->f16_type
+                       : suffix == 'f' || suffix == 'F' ? builder->f32_type
+                       : suffix == 'l' || suffix == 'L' ? builder->long_double_type
+                                                        : builder->f64_type;
     if (!imaginary)
     {
         return element;
@@ -11399,7 +11570,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
     {
         bool short_wchar = target_uses_16_bit_wchar(target);
         width = short_wchar ? 2 : 4;
-        element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT :
+                       target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
     }
     *shape_out = (CIrDecodedString){
         .element_width = width,
@@ -11574,7 +11746,8 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
         break;
     case 'L':
         width = target_uses_16_bit_wchar(target) ? 2 : 4;
-        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
+               target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
         break;
     default:
         return false;
@@ -24340,6 +24513,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             kind = c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                    : c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
                    : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                                                               : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
                                                                : C_TYPE_INT;
         }
         *type_out = builder->scalar_types[kind];
@@ -28875,6 +29049,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
                 kind = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                        : c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
                        : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                                                                   : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
                                                                    : C_TYPE_INT;
             }
             result = builder->scalar_types[kind];
@@ -37369,7 +37544,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     if (type->kind == IR_TYPE_FLOAT)
                     {
                         if (type->bit_width > 64) return false;
-                        if (type->bit_width == 32)
+                        if (type->bit_width == 16)
+                        {
+                            bits = c_ir_float16_bits_from_f64(converted.floating);
+                        }
+                        else if (type->bit_width == 32)
                         {
                             f32 narrowed = (f32)converted.floating;
                             u32 narrowed_bits = 0;
@@ -37455,7 +37634,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     return false;
                 }
                 value = negative ? -value : value;
-                if (type->bit_width == 32)
+                if (type->bit_width == 16)
+                {
+                    c_ir_constant_store_bits(program, type, bytes, task.offset, c_ir_float16_bits_from_f64(value), false);
+                }
+                else if (type->bit_width == 32)
                 {
                     f32 narrowed = (f32)value;
                     u32 bits = 0;
@@ -39978,10 +40161,11 @@ BUSTER_C_INTERNAL u8 c_ir_constant_initializer_leaf_class(CIntegerIrBuilder* bui
         // evaluator and the two-limb byte writer.
         bool integer_child = (child->kind == IR_TYPE_INTEGER || child->kind == IR_TYPE_BOOLEAN || child->kind == IR_TYPE_ENUM) &&
                              (size == 1 || size == 2 || size == 4 || size == 8);
-        // f32 and f64 only: the x87 element has its own folder ahead of the
-        // general one, and a narrower float is stored through the general
+        // binary16, f32 and f64: the x87 element has its own folder ahead of
+        // the general one, and any other width is stored through the general
         // folder's own conversion.
-        bool float_child = child->kind == IR_TYPE_FLOAT && ((child->bit_width == 32 && size == 4) || (child->bit_width == 64 && size == 8));
+        bool float_child = child->kind == IR_TYPE_FLOAT && ((child->bit_width == 16 && size == 2) || (child->bit_width == 32 && size == 4) ||
+                                                            (child->bit_width == 64 && size == 8));
         if (literal.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             bool floating = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, literal));
@@ -40074,13 +40258,17 @@ BUSTER_C_INTERNAL void c_ir_constant_initializer_store_integer_leaf(IrType* chil
     c_ir_constant_store_little_endian(bytes, child->layout.size, converted);
 }
 
-// A floating value stored into the f32 or f64 member `child`: the cast
-// rounds at the member's own precision (c_ir_constant_cast), and the
+// A floating value stored into the binary16, f32 or f64 member `child`: the
+// cast rounds at the member's own precision (c_ir_constant_cast), and the
 // folder writes that value's bits.
 BUSTER_C_INTERNAL void c_ir_constant_initializer_store_float_leaf(IrType* child, f64 floating, u8* bytes)
 {
     u64 bits = 0;
-    if (child->bit_width == 32)
+    if (child->bit_width == 16)
+    {
+        bits = c_ir_float16_bits_from_f64(floating);
+    }
+    else if (child->bit_width == 32)
     {
         f32 narrowed = (f32)(f64)(f32)floating;
         u32 narrowed_bits = 0;
@@ -41308,7 +41496,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
             if (global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width <= 64)
             {
                 f64 value = 0.0;
-                if (type->bit_width == 32)
+                if (type->bit_width == 16)
+                {
+                    value = c_ir_float16_to_f64(global->initializer_bits);
+                }
+                else if (type->bit_width == 32)
                 {
                     f32 narrowed = 0.0f;
                     u32 bits = (u32)global->initializer_bits;
@@ -41479,6 +41671,148 @@ BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrCo
     }
 
     return true;
+}
+
+// IEEE-754 binary16 -- the representation of `_Float16` -- as bits and back.
+// There is no host half type to convert through: this compiler builds under
+// four C compilers and cross-compiles, so the format is encoded arithmetically
+// with round-to-nearest-even, and the subnormal, overflow and NaN cases are
+// spelled out rather than inherited from a host conversion.
+//
+// The f64 carrier every folded constant travels in is exact over the whole
+// binary16 range -- the largest finite value is 65504 and the smallest
+// subnormal 2^-24, both exact in binary64 -- so this pair is the only place a
+// half constant rounds, and a value that reaches it has not been rounded
+// before.
+enum
+{
+    C_IR_FLOAT16_SIGNIFICAND_BITS = 10,
+    C_IR_FLOAT16_EXPONENT_BIAS = 15,
+    // The all-ones exponent field: the infinity/NaN encoding, and one past the
+    // largest finite exponent a rounded result may carry.
+    C_IR_FLOAT16_EXPONENT_SPECIAL = 0x1f,
+    // binary64 keeps 42 significand bits more than binary16 does.
+    C_IR_FLOAT16_SIGNIFICAND_SHIFT = 52 - C_IR_FLOAT16_SIGNIFICAND_BITS,
+    C_IR_FLOAT16_INFINITY = C_IR_FLOAT16_EXPONENT_SPECIAL << C_IR_FLOAT16_SIGNIFICAND_BITS,
+    // A quiet NaN with no payload; see the NaN arm below for why the quiet bit
+    // is set rather than carried over.
+    C_IR_FLOAT16_QUIET_NAN = C_IR_FLOAT16_INFINITY | (1 << (C_IR_FLOAT16_SIGNIFICAND_BITS - 1)),
+};
+
+BUSTER_C_INTERNAL u64 c_ir_float16_bits_from_f64(f64 value)
+{
+    u64 source = 0;
+    memcpy(&source, &value, sizeof(source));
+    u64 sign = (source >> 48) & 0x8000;
+    s32 exponent = (s32)((source >> 52) & 0x7ff);
+    u64 mantissa = source & UINT64_C(0x000fffffffffffff);
+    u64 magnitude;
+    if (exponent == 0x7ff)
+    {
+        // An infinity keeps its sign. A NaN keeps its sign and stays a NaN,
+        // quieted: the 42 discarded significand bits can be the only ones a
+        // payload occupies, and a NaN that lost all of them would decode as an
+        // infinity instead.
+        magnitude = mantissa ? (u64)C_IR_FLOAT16_QUIET_NAN : (u64)C_IR_FLOAT16_INFINITY;
+    }
+    else if (!exponent)
+    {
+        // Zero, and every binary64 subnormal: the largest of those is below
+        // 2^-1022, far under half the smallest binary16 subnormal, so all of
+        // them round to a signed zero.
+        magnitude = 0;
+    }
+    else
+    {
+        s32 target_exponent = exponent - 1023 + C_IR_FLOAT16_EXPONENT_BIAS;
+        u64 significand = mantissa | (UINT64_C(1) << 52);
+        // Bits discarded below the eleven binary16 keeps: 42 for a normal
+        // result, and one more for every step a subnormal result has to be
+        // clamped up to the format's single smallest exponent.
+        u32 shift = target_exponent > 0 ? (u32)C_IR_FLOAT16_SIGNIFICAND_SHIFT
+                                        : (u32)(C_IR_FLOAT16_SIGNIFICAND_SHIFT + 1 - target_exponent);
+        if (target_exponent >= C_IR_FLOAT16_EXPONENT_SPECIAL)
+        {
+            magnitude = (u64)C_IR_FLOAT16_INFINITY;
+        }
+        else if (shift >= 64)
+        {
+            // Below 2^-36, and so below half the smallest subnormal.
+            magnitude = 0;
+        }
+        else
+        {
+            u64 kept = significand >> shift;
+            u64 discarded = significand & ((UINT64_C(1) << shift) - 1);
+            u64 halfway = UINT64_C(1) << (shift - 1);
+            if (discarded > halfway || (discarded == halfway && (kept & 1)))
+            {
+                kept += 1;
+            }
+            if (target_exponent > 0)
+            {
+                // `kept` carries binary16's implicit one in bit 10, so the
+                // encoding is the biased exponent plus the stored significand.
+                // Adding rather than masking is what makes a carry out of the
+                // implicit one land in the exponent field: a rounding carry
+                // becomes the next exponent with a zero significand, and a
+                // carry out of the largest finite exponent becomes the
+                // infinity encoding, which is what round-to-nearest-even
+                // gives an overflowing value.
+                magnitude = ((u64)target_exponent << C_IR_FLOAT16_SIGNIFICAND_BITS) + kept - (UINT64_C(1) << C_IR_FLOAT16_SIGNIFICAND_BITS);
+            }
+            else
+            {
+                // A subnormal result stores no implicit one, so `kept` is
+                // already the encoding -- including the case where rounding
+                // carried it up to 0x400, the smallest normal.
+                magnitude = kept;
+            }
+        }
+    }
+
+    return sign | magnitude;
+}
+
+BUSTER_C_INTERNAL f64 c_ir_float16_to_f64(u64 bits)
+{
+    u64 sign = (bits & 0x8000) << 48;
+    u32 exponent = (u32)((bits >> C_IR_FLOAT16_SIGNIFICAND_BITS) & C_IR_FLOAT16_EXPONENT_SPECIAL);
+    u64 mantissa = bits & ((UINT64_C(1) << C_IR_FLOAT16_SIGNIFICAND_BITS) - 1);
+    u64 result_bits;
+    if (exponent == C_IR_FLOAT16_EXPONENT_SPECIAL)
+    {
+        result_bits = sign | UINT64_C(0x7ff0000000000000) | (mantissa << C_IR_FLOAT16_SIGNIFICAND_SHIFT);
+    }
+    else if (exponent)
+    {
+        result_bits = sign | ((u64)(exponent - C_IR_FLOAT16_EXPONENT_BIAS + 1023) << 52) | (mantissa << C_IR_FLOAT16_SIGNIFICAND_SHIFT);
+    }
+    else if (mantissa)
+    {
+        // A binary16 subnormal is an ordinary binary64 normal: move its
+        // leading one up to the implicit position and pay for the move out of
+        // the exponent. The mask below is what drops that leading one again.
+        u32 top = 63u - leading_zeroes_u64(mantissa);
+        s32 unbiased = (s32)top - (C_IR_FLOAT16_EXPONENT_BIAS + C_IR_FLOAT16_SIGNIFICAND_BITS - 1);
+        result_bits = sign | ((u64)(unbiased + 1023) << 52) | ((mantissa << (52 - top)) & UINT64_C(0x000fffffffffffff));
+    }
+    else
+    {
+        result_bits = sign;
+    }
+    f64 result;
+    memcpy(&result, &result_bits, sizeof(result));
+
+    return result;
+}
+
+// One value rounded to binary16 and carried on as an f64, which is how every
+// `_Float16` constant is held between operations -- the counterpart of the
+// `(f64)(f32)` step an f32 constant takes.
+BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value)
+{
+    return c_ir_float16_to_f64(c_ir_float16_bits_from_f64(value));
 }
 
 // Round an integer magnitude once, at the destination precision. Converting
@@ -41674,7 +42008,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                                                                          : c_ir_constant_integer_to_float(&source, source_type, target->bit_width == 32 ? 24 : 53);
                         // A floating source still rounds at the destination's
                         // precision; the integer path has already rounded once.
-                        if (target->bit_width == 32)
+                        // binary16 rounds from the binary64 carrier in both
+                        // cases: every value it can hold is exact there, so the
+                        // integer path's own rounding cannot have moved a
+                        // result across a half-precision boundary first.
+                        if (target->bit_width == 16)
+                            floating = c_ir_float16_round(floating);
+                        else if (target->bit_width == 32)
                             floating = (f64)(f32)floating;
                         *result = (CIrConstantValue){.type = target_type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
                     }
@@ -42084,8 +42424,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
             memcpy(&left.floating, &quiet_nan, sizeof(left.floating));
         }
         // The carrier is f64, but an f32 expression rounds here, before
-        // another operation or conversion can observe excess precision.
-        if (type->bit_width == 32)
+        // another operation or conversion can observe excess precision; a
+        // `_Float16` expression rounds for the same reason, one format down.
+        if (type->bit_width == 16)
+            left.floating = c_ir_float16_round(left.floating);
+        else if (type->bit_width == 32)
             left.floating = (f64)(f32)left.floating;
         *result = left;
         return true;
@@ -43109,7 +43452,13 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
                 {
                     return false;
                 }
-                if (type->bit_width == 32)
+                if (type->bit_width == 16)
+                {
+                    // `converted` has already been rounded to binary16 by the
+                    // cast above, so the encoding here cannot round twice.
+                    global->initializer_bits = c_ir_float16_bits_from_f64(converted.floating);
+                }
+                else if (type->bit_width == 32)
                 {
                     f32 narrowed = (f32)converted.floating;
                     // C23 6.7.1p6 wants a constexpr initializer exactly
@@ -43928,7 +44277,20 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         {
             value = -value;
         }
-        if (type->bit_width == 32)
+        if (type->bit_width == 16)
+        {
+            // The `f16` suffix reports as 'h'; see c_ir_float_suffix. A
+            // literal that already has the object's type has nothing left to
+            // round, so C23 6.7.1p6's exactness rule does not apply to it.
+            bool source_is_half = suffix == 'h';
+            f64 narrowed = c_ir_float16_round(value);
+            if (declaration.is_constexpr && !source_is_half && narrowed != value)
+            {
+                return false;
+            }
+            global->initializer_bits = c_ir_float16_bits_from_f64(value);
+        }
+        else if (type->bit_width == 32)
         {
             f32 narrowed = (f32)value;
             bool source_is_float = suffix == 'f' || suffix == 'F';
@@ -44584,6 +44946,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     IrTypeId char_type = c_ir_scalar_type(&type_context, C_TYPE_CHAR);
     IrTypeId bool_type = c_ir_scalar_type(&type_context, C_TYPE_BOOL);
     IrTypeId nullptr_type = c_ir_scalar_type(&type_context, C_TYPE_NULLPTR);
+    IrTypeId f16_type = c_ir_scalar_type(&type_context, C_TYPE_FLOAT16);
     IrTypeId f32_type = c_ir_scalar_type(&type_context, C_TYPE_FLOAT);
     IrTypeId f64_type = c_ir_scalar_type(&type_context, C_TYPE_DOUBLE);
     IrTypeId long_double_type = c_ir_scalar_type(&type_context, C_TYPE_LONG_DOUBLE);
@@ -44705,6 +45068,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         .bool_type = bool_type,
         .nullptr_type = nullptr_type,
         .void_type = void_type,
+        .f16_type = f16_type,
         .f32_type = f32_type,
         .f64_type = f64_type,
         .long_double_type = long_double_type,
@@ -46764,6 +47128,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             .bool_type = bool_type,
             .nullptr_type = nullptr_type,
             .void_type = void_type,
+            .f16_type = f16_type,
             .f32_type = f32_type,
             .f64_type = f64_type,
             .long_double_type = long_double_type,

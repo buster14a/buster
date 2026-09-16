@@ -152,6 +152,17 @@ speedup merely because a proxy improved.
   operand/result boundaries. The complete generic/exact opcode classification,
   feature refusal rules, and cross-target representation contract are in
   [vector semantics](../ir-vector-semantics.md).
+
+  Host and self-hosted dispatch preserves two x86-512 tiers. The BASE tier is
+  AVX512F+BW and uses the vector representation plus exact load, store, byte
+  splat/equality, dword splat/equality/unsigned-less-than, and dword compression
+  forms. `BUSTER_SIMD_512` additionally requires VBMI+VBMI2 and selects the
+  remaining exact forms and GNU vector operators. On a BASE-only target those
+  remaining operations use their scalar fallback over the vector
+  representation; without BASE, every operation uses the scalar struct and
+  fallback. Do not move byte permute/compression across this boundary merely
+  because a neighboring dword form is available: `PERMUTE2_BYTE` requires
+  VBMI, while `COMPRESS_BYTE` and `COMPRESS_STORE_BYTE` require VBMI2.
 - **SIMD C lexing method: the Validark lineage.** `c_lex_compact` in
   `frontend/c/c_source.c` draws on Niles Salter's (Validark's) Accelerated Zig
   Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream

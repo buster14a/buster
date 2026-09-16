@@ -2,6 +2,7 @@
 """Network-free tests of cache integrity and failure-summary contracts."""
 import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -25,6 +26,28 @@ import github_ci_time
 import native_retirement_archive
 
 
+class ZigResponse:
+    def __init__(self, payload, chunks=None, declared_length=None):
+        self.stream = io.BytesIO(payload)
+        self.chunks = iter(chunks or ())
+        self.declared_length = declared_length
+        self.read_sizes = []
+        self.headers = {} if declared_length is None else {"Content-Length": str(declared_length)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *arguments):
+        self.stream.close()
+
+    def read(self, size=-1):
+        self.read_sizes.append(size)
+        if size == 0:
+            return b""
+        chunk_size = next(self.chunks, size)
+        return self.stream.read(min(size, chunk_size))
+
+
 class ZigTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -38,13 +61,24 @@ class ZigTests(unittest.TestCase):
         self.manifest.write_text(json.dumps(self.manifest_data))
 
     def test_manifest_covers_every_platform(self):
+        expected_sizes = {
+            "x86_64-linux": 55478392,
+            "aarch64-linux": 51211944,
+            "x86_64-macos": 57396836,
+            "aarch64-macos": 52238004,
+            "x86_64-windows": 97217739,
+            "aarch64-windows": 93109828,
+        }
         for target in ci_zig.TARGETS:
-            version, digest = ci_zig.load_pin(ROOT / ".github/zig.json", target)
+            version, digest, size = ci_zig.load_pin(ROOT / ".github/zig.json", target)
             self.assertEqual(version, "0.16.0")
             self.assertEqual(len(digest), 64)
+            self.assertEqual(size, expected_sizes[target])
 
     def test_reject_incomplete_or_mutable_pins(self):
-        for field, value in (("version", "latest"), ("version", "../bad"), ("sha256", {})):
+        for field, value in (("version", "latest"), ("version", "../bad"),
+                             ("sha256", {}), ("size", {}),
+                             ("size", {target: True for target in ci_zig.TARGETS})):
             with self.subTest(field=field, value=value):
                 data = copy.deepcopy(self.manifest_data)
                 data[field] = value
@@ -98,7 +132,8 @@ class ZigTests(unittest.TestCase):
         self.assertEqual(output.read_text().strip(), str((real / "install").resolve()))
 
     def test_bad_download_never_extracts(self):
-        def bad_download(url, destination):
+        def bad_download(url, destination, max_bytes):
+            self.assertEqual(max_bytes, self.manifest_data["size"]["x86_64-linux"])
             Path(destination).write_bytes(b"bad download")
         with mock.patch.object(ci_zig, "download_archive", side_effect=bad_download), mock.patch.object(ci_zig.subprocess, "run") as run:
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
@@ -109,10 +144,203 @@ class ZigTests(unittest.TestCase):
         target = self.root / "archive"
         with mock.patch.object(ci_zig.urllib.request, "urlopen", side_effect=OSError("offline")) as request, mock.patch.object(ci_zig.time, "sleep"):
             with self.assertRaises(OSError):
-                ci_zig.download_archive("https://ziglang.org/test", target)
+                ci_zig.download_archive("https://ziglang.org/test", target, max_bytes=4)
             self.assertEqual(request.call_count, 3)
             self.assertFalse(target.exists())
             self.assertFalse(target.with_name("archive.part").exists())
+
+    def test_download_rejects_receipt_over_budget_before_commit(self):
+        target = self.root / "archive"
+        with mock.patch.object(ci_zig.urllib.request, "urlopen", return_value=ZigResponse(b"12345")):
+            with self.assertRaisesRegex(ValueError, "maximum"):
+                ci_zig.download_archive("https://ziglang.org/test", target, max_bytes=4)
+        self.assertFalse(target.exists())
+        self.assertFalse(target.with_name("archive.part").exists())
+
+    def test_download_budget_boundaries_include_empty_and_exact_receipts(self):
+        cases = (("empty", b"", 0, True), ("below", b"abc", 4, True),
+                 ("exact", b"abcd", 4, True), ("over", b"abcde", 4, False))
+        for name, payload, maximum, succeeds in cases:
+            with self.subTest(name=name):
+                target = self.root / name
+                response = ZigResponse(payload)
+                with mock.patch.object(ci_zig.urllib.request, "urlopen", return_value=response):
+                    if succeeds:
+                        ci_zig.download_archive("https://ziglang.org/test", target, maximum)
+                        self.assertEqual(target.read_bytes(), payload)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "maximum"):
+                            ci_zig.download_archive("https://ziglang.org/test", target, maximum)
+                        self.assertFalse(target.exists())
+                self.assertFalse(target.with_name(target.name + ".part").exists())
+
+    def test_download_uses_actual_bytes_with_missing_or_misleading_lengths(self):
+        target = self.root / "short"
+        with mock.patch.object(ci_zig.urllib.request, "urlopen",
+                               return_value=ZigResponse(b"abc", chunks=[1, 1, 1], declared_length=999)):
+            ci_zig.download_archive("https://ziglang.org/test", target, 4)
+        self.assertEqual(target.read_bytes(), b"abc")
+
+        target = self.root / "long"
+        writes = []
+        original_open = Path.open
+        partial = target.with_name(target.name + ".part")
+
+        def recording_open(path, mode="r", *arguments, **keywords):
+            stream = original_open(path, mode, *arguments, **keywords)
+            if path != partial:
+                return stream
+
+            class RecordingWriter:
+                def __enter__(self):
+                    stream.__enter__()
+                    return self
+
+                def __exit__(self, *exit_arguments):
+                    return stream.__exit__(*exit_arguments)
+
+                def write(self, data):
+                    writes.append(bytes(data))
+                    return stream.write(data)
+
+            return RecordingWriter()
+
+        response = ZigResponse(b"abcde", chunks=[2, 1, 2], declared_length=1)
+        with mock.patch.object(ci_zig.urllib.request, "urlopen", return_value=response), \
+                mock.patch.object(ci_zig.Path, "open", new=recording_open):
+            with self.assertRaisesRegex(ValueError, "maximum"):
+                ci_zig.download_archive("https://ziglang.org/test", target, 4)
+        self.assertLessEqual(sum(map(len, writes)), 4)
+        self.assertFalse(target.exists())
+        self.assertFalse(partial.exists())
+        self.assertEqual(response.read_sizes[-1], 2)
+
+        exact = ZigResponse(b"abcd", chunks=[4], declared_length=999)
+        with mock.patch.object(ci_zig.urllib.request, "urlopen", return_value=exact):
+            ci_zig.download_archive("https://ziglang.org/test", self.root / "exact", 4)
+        self.assertIn(1, exact.read_sizes)
+
+    def test_read_failure_retries_and_cleans_each_partial_attempt(self):
+        class ReadFailure(ZigResponse):
+            def read(self, size=-1):
+                if self.stream.tell() >= 2:
+                    raise OSError("read failed")
+                return super().read(size)
+
+        target = self.root / "read-failure"
+        partial = target.with_name(target.name + ".part")
+        attempt_writes = []
+        original_open = Path.open
+
+        def recording_open(path, mode="r", *arguments, **keywords):
+            stream = original_open(path, mode, *arguments, **keywords)
+            if path != partial:
+                return stream
+            current = []
+
+            class RecordingWriter:
+                def __enter__(self):
+                    stream.__enter__()
+                    return self
+
+                def __exit__(self, *exit_arguments):
+                    attempt_writes.append(sum(current))
+                    return stream.__exit__(*exit_arguments)
+
+                def write(self, data):
+                    current.append(len(data))
+                    return stream.write(data)
+
+            return RecordingWriter()
+
+        responses = [ReadFailure(b"abcdef", chunks=[2]) for _ in range(3)]
+        with mock.patch.object(ci_zig.urllib.request, "urlopen", side_effect=responses) as request, \
+                mock.patch.object(ci_zig.Path, "open", new=recording_open), \
+                mock.patch.object(ci_zig.time, "sleep"):
+            with self.assertRaises(OSError):
+                ci_zig.download_archive("https://ziglang.org/test", target, 8)
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(attempt_writes, [2, 2, 2])
+        self.assertTrue(all(written <= 8 for written in attempt_writes))
+        self.assertFalse(target.exists())
+        self.assertFalse(partial.exists())
+
+    def test_write_failure_retries_and_cleans_partial(self):
+        target = self.root / "write-failure"
+        partial = target.with_name(target.name + ".part")
+        original_open = Path.open
+
+        def failing_open(path, mode="r", *arguments, **keywords):
+            stream = original_open(path, mode, *arguments, **keywords)
+            if path != partial:
+                return stream
+
+            class BrokenWriter:
+                def __enter__(self):
+                    stream.__enter__()
+                    return self
+
+                def __exit__(self, *exit_arguments):
+                    return stream.__exit__(*exit_arguments)
+
+                def write(self, data):
+                    raise OSError("write failed")
+
+            return BrokenWriter()
+
+        responses = [ZigResponse(b"abc") for _ in range(3)]
+        with mock.patch.object(ci_zig.urllib.request, "urlopen", side_effect=responses) as request, \
+                mock.patch.object(ci_zig.Path, "open", new=failing_open), \
+                mock.patch.object(ci_zig.time, "sleep"):
+            with self.assertRaises(OSError):
+                ci_zig.download_archive("https://ziglang.org/test", target, 4)
+        self.assertEqual(request.call_count, 3)
+        self.assertFalse(target.exists())
+        self.assertFalse(partial.exists())
+
+    def test_cold_install_passes_pinned_budget_and_publishes_only_after_success(self):
+        cache = self.root / "cache"
+        output = self.root / "path"
+        calls = []
+
+        def download(url, destination, maximum):
+            calls.append((url, destination, maximum))
+            Path(destination).write_bytes(self.payload)
+
+        with mock.patch.object(ci_zig, "download_archive", side_effect=download), \
+                mock.patch.object(ci_zig.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="0.16.0\n")
+            ci_zig.install("x86_64-linux", self.manifest, cache, self.root / "install", output)
+        self.assertEqual(calls[0][2], self.manifest_data["size"]["x86_64-linux"])
+        self.assertEqual(output.read_text().strip(), str((self.root / "install").resolve()))
+
+    def test_over_budget_download_never_extracts_or_publishes_path(self):
+        self.manifest_data["size"]["x86_64-linux"] = 4
+        self.manifest.write_text(json.dumps(self.manifest_data))
+        output = self.root / "path"
+        cache = self.root / "cache"
+        with mock.patch.object(ci_zig.urllib.request, "urlopen", return_value=ZigResponse(b"abcde")), \
+                mock.patch.object(ci_zig.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "maximum"):
+                ci_zig.install("x86_64-linux", self.manifest, cache, self.root / "install", output)
+        run.assert_not_called()
+        self.assertFalse((cache / "archive").exists())
+        self.assertFalse((cache / "archive.part").exists())
+        self.assertFalse((self.root / "install").exists())
+        self.assertFalse(output.exists())
+
+    def test_version_mismatch_does_not_publish_installation_or_path(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "archive").write_bytes(self.payload)
+        output = self.root / "path"
+        results = [subprocess.CompletedProcess([], 0),
+                   subprocess.CompletedProcess([], 0, stdout="0.15.2\n")]
+        with mock.patch.object(ci_zig.subprocess, "run", side_effect=results):
+            with self.assertRaisesRegex(ValueError, "pinned version"):
+                ci_zig.install("x86_64-linux", self.manifest, cache, self.root / "install", output)
+        self.assertFalse((self.root / "install").exists())
+        self.assertFalse(output.exists())
 
     def test_extraction_failure_does_not_publish_path(self):
         cache = self.root / "cache"

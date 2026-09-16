@@ -130,7 +130,7 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[73];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[74];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);
@@ -147,6 +147,14 @@ BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
+// The GNU layout attributes the frontend implements, as the parser spells
+// them. `__has_attribute` answers from these same predicates so the query
+// cannot claim an attribute layout does not implement, or deny one it does
+// (#639): packed and aligned reach layout through c_parse_layout_attributes,
+// and vector_size reaches the vector types through C_TOKEN_CLASS_VECTOR_SIZE.
+BUSTER_C_EXTERN bool c_parse_packed_word(String8 spelling);
+BUSTER_C_EXTERN bool c_parse_aligned_attribute_word(String8 spelling);
+BUSTER_C_EXTERN bool c_parse_vector_size_word(String8 spelling);
 // Whether an alignment record was spelled `_Alignas` rather than as a GNU
 // `aligned` attribute; see the definition for why the answer is read back out
 // of the token stream instead of stored in the record.
