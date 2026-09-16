@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Independently validate and reconcile native-retirement census v2 evidence."""
+"""Independently validate and reconcile native-retirement census v2 evidence.
+
+Applicability/admission is derived here as schema-2 evidence so the compiler
+producer cannot classify away a candidate failure.
+"""
 
 import argparse
 import csv
@@ -12,6 +16,53 @@ from pathlib import Path
 
 
 ALLOCATORS = ("none", "mir-stack", "fast", "quality")
+FULL_CENSUS_PROFILE = "full-census"
+SELF_TEST_PROFILE = "self-test"
+FULL_SUBJECT_COUNT = 402
+FULL_ROW_COUNT = 77184
+FULL_SHARD_COUNT = 4
+FULL_SUPPORTED_GAP_COUNT = 192
+# This is the SHA-256 of the canonical JSON list of full-census row numbers
+# declared as supported-native gaps by the frozen support ledger.  The value is
+# deliberately part of the validator contract; a producer cannot change it by
+# renaming a result disposition or by editing a manifest claim.
+FULL_SUPPORTED_GAP_SHA256 = "a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"
+FULL_SUPPORT_CONTRACT_SHA256 = "feea92fd08e8c513ee74ae976232e1e828bc7815b3759324d1384fc20344b985"
+# Applicability is a validator-owned projection of the immutable row identity
+# and observed result.  It deliberately does not appear in rows.tsv/results.tsv:
+# those files are producer evidence, while this projection is derived here so a
+# child cannot opt a supported cell out by supplying a convenient label.
+APPLICABILITY_CLASSES = ("admitted-supported", "retained-control", "retained-reference",
+                         "platform-inapplicable", "unavailable")
+MAX_RESIDUAL_ROWS = 256
+SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
+FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "356dd8e68db7591f6e3c88b753d09f3b415456065e6363307c741848521f11e1"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "944f1190122a61ed704a5328cda4ec40559554f2cf08360767dfd585d730c435"
+FULL_DEPENDENCY_PROJECT_SHA256 = "d88ced99268396951899442ed2a2c9dca95c9cf9c63c1df8132f035d5fc724be"
+FULL_DEPENDENCY_LEDGER_SHA256 = "b6e9e286de94f31af3c9da879e4809df65c3aff318d5fea51b3cb79da6e958a7"
+FULL_EXTERNAL_CHECKOUTS = (
+    {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
+    {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
+    {"name": "lz4", "repository": "lz4/lz4", "revision": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0", "path": "external/lz4"},
+    {"name": "yyjson", "repository": "ibireme/yyjson", "revision": "8b4a38dc994a110abaec8a400615567bd996105f", "path": "external/yyjson"},
+    {"name": "stb", "repository": "nothings/stb", "revision": "2c980bb59875b0d32144a71867fbdebb2f77cd20", "path": "external/stb"},
+    {"name": "zlib", "repository": "madler/zlib", "revision": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf", "path": "external/zlib"},
+    {"name": "musl", "repository": "ifduyue/musl", "revision": "9fa28ece75d8a2191de7c5bb53bed224c5947417", "path": "external/musl"},
+)
+FULL_EXTERNAL_GENERATED = (
+    {"name": "musl-x86_64", "checkout": "musl", "revision": "9fa28ece75d8a2191de7c5bb53bed224c5947417", "path": "external/musl-generated/x86_64", "generator": "sed:tools/mkalltypes.sed+arch/x86_64/bits/alltypes.h.in+include/alltypes.h.in;syscall-sed"},
+    {"name": "musl-aarch64", "checkout": "musl", "revision": "9fa28ece75d8a2191de7c5bb53bed224c5947417", "path": "external/musl-generated/aarch64", "generator": "sed:tools/mkalltypes.sed+arch/aarch64/bits/alltypes.h.in+include/alltypes.h.in;syscall-sed"},
+)
+FULL_ARCHIVED_INPUT_SHA256 = "bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500"
+FULL_ARCHIVED_FIXTURE_MAP_SHA256 = "8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f"
+FULL_ARCHIVED_ROW_SHA256 = "9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6"
+APPLICABILITY_FIELDS = ("row", "group", "fixture", "target", "cpu", "frontend", "allocator", "PIC",
+                        "applicability", "admission", "disposition", "reason", "ownership",
+                        "candidate_failure", "reference_failure", "acceptance_failure")
+RESIDUAL_FIELDS = ("row", "group", "fixture", "function", "function_id", "target", "cpu", "frontend",
+                   "allocator", "PIC", "applicability", "admission", "disposition", "reason", "ownership",
+                   "diagnostic", "stage", "opcode_id", "source_hex", "function_hex", "line", "column")
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("systemv-x86_64", "semantic-gate-509", "semantic-gate-509"),
     "aarch64-unknown-linux-gnu": ("aapcs64", "semantic-gate-509", "semantic-gate-509"),
@@ -51,6 +102,11 @@ FIXTURE_RECIPES = {
 }
 
 
+def canonical_rows_digest(rows):
+    """Hash sorted row numbers with one canonical JSON representation."""
+    return canonical_digest(sorted(int(row) for row in rows))
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -68,6 +124,21 @@ def table_with_fields(path):
     with path.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
         return tuple(reader.fieldnames or ()), list(reader)
+
+
+def write_table(path, fields, rows):
+    """Write a deterministic TSV evidence table.
+
+    The census producer writes its evidence in C, but admission/applicability
+    is intentionally a Python-side projection.  Keeping one small writer here
+    makes the projection byte-stable across runners and avoids locale/newline
+    differences in the retained evidence.
+    """
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t", lineterminator="\n",
+                                extrasaction="raise")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def canonical_digest(value):
@@ -144,25 +215,123 @@ def validate_environment(directory):
 
 def validate_dependencies(directory, manifest):
     rows = table(directory / "dependencies.tsv")
-    assert rows and all(row["kind"] == "resource-header" for row in rows)
-    assert [row["path"] for row in rows] == sorted(row["path"] for row in rows)
-    assert len({row["path"] for row in rows}) == len(rows)
-    closure = hashlib.sha256()
-    expected_files = set()
-    root = directory / "dependencies" / "resource-include"
+    assert rows and all(row["kind"] in {"resource-header", "project-header"} for row in rows)
+    include_namespace = {}
     for row in rows:
-        relative = relative_path(row["path"])
-        path = root / relative
-        exact_sha(path, row["bytes"], row["sha256"])
-        data = path.read_bytes()
-        closure.update(row["path"].encode())
-        closure.update(b"\0")
-        closure.update(struct.pack("<Q", len(data)))
-        closure.update(data)
-        expected_files.add(relative.as_posix())
-    actual_files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
-    assert actual_files == expected_files, "resource snapshot and ledger differ"
-    assert closure.hexdigest() == manifest["resource_include_sha256"]
+        path = row["path"]
+        relative = relative_path(path)
+        assert relative.as_posix() == path and not path.startswith("dependencies/"), \
+            f"dependency path is not include-relative: {path!r}"
+        if "destination" in row:
+            root_name = "resource-include" if row["kind"] == "resource-header" else "project-include"
+            assert row["destination"] == f"dependencies/{root_name}/{path}", \
+                f"dependency kind/root mismatch: {path!r}"
+        previous = include_namespace.get(path)
+        assert previous is None, f"global include namespace collision: {path}"
+        include_namespace[path] = row["kind"]
+    for kind in ("resource-header", "project-header"):
+        selected = [row for row in rows if row["kind"] == kind]
+        assert [row["path"] for row in selected] == sorted(row["path"] for row in selected)
+        assert len({row["path"] for row in selected}) == len(selected)
+        closure = hashlib.sha256()
+        expected_files = set()
+        root_name = "resource-include" if kind == "resource-header" else "project-include"
+        root = directory / "dependencies" / root_name
+        for row in selected:
+            relative = relative_path(row["path"])
+            path = root / relative
+            exact_sha(path, row["bytes"], row["sha256"])
+            data = path.read_bytes()
+            closure.update(row["path"].encode())
+            closure.update(b"\0")
+            closure.update(struct.pack("<Q", len(data)))
+            closure.update(data)
+            expected_files.add(relative.as_posix())
+        actual_files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} if root.is_dir() else set()
+        assert actual_files == expected_files, f"{kind} snapshot and ledger differ"
+        manifest_key = "resource_include_sha256" if kind == "resource-header" else "project_include_sha256"
+        if selected:
+            assert closure.hexdigest() == manifest.get(manifest_key, "")
+        else:
+            assert not manifest.get(manifest_key, "")
+
+
+def validate_dependency_binding(directory, manifest, profile, inputs):
+    required = profile == FULL_CENSUS_PROFILE or bool(manifest.get("project_include_sha256", ""))
+    if not required:
+        return
+    assert manifest.get("dependency_manifest") == "docs/native-retirement-dependencies-v1.json"
+    assert manifest.get("dependency_receipt") == "dependency-receipt.json"
+    descriptor = directory / "dependency-descriptor.json"
+    receipt_path = directory / "dependency-receipt.json"
+    ledger = directory / "dependency-materializer.tsv"
+    assert sha256(descriptor) == manifest.get("dependency_manifest_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
+    assert sha256(receipt_path) == manifest.get("dependency_receipt_sha256") == FULL_DEPENDENCY_RECEIPT_SHA256
+    assert sha256(ledger) == manifest.get("dependency_ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    descriptor_value = json.loads(descriptor.read_text(encoding="utf-8"))
+    assert descriptor_value.get("external_checkouts") == list(FULL_EXTERNAL_CHECKOUTS)
+    assert descriptor_value.get("external_generated") == list(FULL_EXTERNAL_GENERATED)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt.get("schema") == "buster-native-retirement-dependencies-v1" and receipt.get("version") == 1
+    assert receipt.get("descriptor_path") == "docs/native-retirement-dependencies-v1.json"
+    assert receipt.get("descriptor_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
+    assert receipt.get("project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
+    assert receipt.get("ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    assert receipt.get("external_checkouts") == list(FULL_EXTERNAL_CHECKOUTS)
+    assert receipt.get("external_generated") == list(FULL_EXTERNAL_GENERATED)
+    assert receipt.get("external_closure_sha256") == canonical_digest({
+        "external_checkouts": list(FULL_EXTERNAL_CHECKOUTS),
+        "external_generated": list(FULL_EXTERNAL_GENERATED),
+    })
+    assert manifest.get("dependency_project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
+    assert manifest.get("archived_input_identity_sha256") == FULL_ARCHIVED_INPUT_SHA256
+    assert manifest.get("archived_fixture_map_sha256") == FULL_ARCHIVED_FIXTURE_MAP_SHA256
+    assert manifest.get("archived_row_identity_sha256") == FULL_ARCHIVED_ROW_SHA256
+    replay = receipt.get("archived_replay", {})
+    expected_axes = {
+        "targets": list(TARGETS),
+        "frontend_lowering": ["local-backed-canonical", "direct-ssa"],
+        "PIC": ["0", "1"],
+        "allocators": list(ALLOCATORS[1:]),
+    }
+    assert replay.get("axes") == expected_axes
+    assert replay.get("projection") == {
+        "fixtures": 28,
+        "mir_candidate_rows": 4032,
+        "repo_owned_project_header_rows_closed": 264,
+        "remaining_diagnostic_rows": 3768,
+        "ios_simd_rows_pending_targetconditionals": 24,
+    }
+    assert replay.get("input_identity_sha256") == FULL_ARCHIVED_INPUT_SHA256
+    assert replay.get("fixture_map_sha256") == FULL_ARCHIVED_FIXTURE_MAP_SHA256
+    assert replay.get("row_identity_sha256") == FULL_ARCHIVED_ROW_SHA256
+    fixtures = replay.get("fixtures")
+    rows = replay.get("rows")
+    assert isinstance(fixtures, list) and len(fixtures) == 28
+    assert isinstance(rows, list) and len(rows) == 4032
+    fixture_map = {item["fixture"]: item for item in fixtures}
+    assert len(fixture_map) == len(fixtures)
+    project_destinations = {
+        path[len("dependencies/project-include/"):]
+        for path in receipt.get("files_by_destination", [])
+        if path.startswith("dependencies/project-include/")
+    }
+    for item in fixtures:
+        fixture = item["fixture"]
+        assert fixture in inputs and inputs[fixture]["role"] == "subject"
+        assert inputs[fixture]["sha256"] == item["input_sha256"]
+        assert item["project_headers"] and set(item["project_headers"]).issubset(project_destinations)
+    assert canonical_digest({item["fixture"]: item["input_sha256"] for item in fixtures}) == replay["input_identity_sha256"]
+    assert canonical_digest(fixtures) == replay["fixture_map_sha256"]
+    assert canonical_digest(rows) == replay["row_identity_sha256"]
+    assert [row["row"] for row in rows] == list(range(len(rows)))
+    assert all(row["fixture"] in fixture_map for row in rows)
+    assert sum(row["disposition"] == "repo-owned-project-header" for row in rows) == 264
+    assert sum(row["disposition"] != "repo-owned-project-header" for row in rows) == 3768
+    assert sum(row["disposition"] == "ios-simd-pending-targetconditionals" for row in rows) == 24
+    for row in rows:
+        expected_headers = fixture_map[row["fixture"]]["project_headers"] if row["disposition"] == "repo-owned-project-header" else []
+        assert row["project_headers"] == expected_headers
 
 
 def validate_inputs(directory, manifest):
@@ -173,11 +342,14 @@ def validate_inputs(directory, manifest):
     assert contract_fields == SUPPORT_FIELDS
     assert input_fields == INPUT_FIELDS
     assert len(inputs) == int(manifest["inputs"]) == len(contract)
-    assert [row["path"] for row in contract] == sorted(row["path"] for row in contract)
-    assert len({row["path"] for row in contract}) == len(contract)
-    assert [row["path"] for row in inputs] == sorted(row["path"] for row in inputs)
-    assert len({row["path"] for row in inputs}) == len(inputs)
-    for approved, row in zip(contract, inputs):
+    contract_by_path = {row["path"]: row for row in contract}
+    input_by_path = {row["path"]: row for row in inputs}
+    assert len(contract_by_path) == len(contract)
+    assert len(input_by_path) == len(inputs)
+    assert set(contract_by_path) == set(input_by_path)
+    for path in sorted(contract_by_path):
+        approved = contract_by_path[path]
+        row = input_by_path[path]
         assert tuple(approved[field] for field in SUPPORT_FIELDS) == tuple(row[field] for field in SUPPORT_FIELDS)
         exact_sha(directory / "inputs" / relative_path(row["path"]), row["bytes"], row["sha256"])
         recipe_name, recipe_flags = expected_fixture_recipe(row["path"])
@@ -186,7 +358,74 @@ def validate_inputs(directory, manifest):
     actual_files = {path.relative_to(directory / "inputs").as_posix()
                     for path in (directory / "inputs").rglob("*") if path.is_file()}
     assert actual_files == {row["path"] for row in inputs}, "input snapshot and ledger differ"
-    return {row["path"]: row for row in inputs}, ledger_map(inputs)
+    return input_by_path, ledger_map(inputs)
+
+
+def validate_supported_gap_ledger(directory, manifest, rows, profile):
+    """Authenticate the immutable list of currently declared supported gaps.
+
+    The producer may report any disposition text, but it cannot add, remove,
+    or reclassify a gap: the checked-in ledger is copied into the evidence
+    directory and its exact bytes are bound by the manifest.  The expanded
+    row identities are checked against the frozen rows.tsv cross-product.
+    """
+    path = directory / "supported-gap-ledger.tsv"
+    ledger_sha256 = sha256(path)
+    assert manifest.get("supported_gap_ledger") == "docs/native-retirement-supported-gaps-v1.tsv"
+    assert manifest.get("supported_gap_ledger_sha256") == ledger_sha256
+    if profile == FULL_CENSUS_PROFILE:
+        assert ledger_sha256 == FULL_SUPPORTED_GAP_LEDGER_SHA256
+    fields, records = table_with_fields(path)
+    assert fields == SUPPORTED_GAP_LEDGER_FIELDS
+    identities = []
+    for record in records:
+        assert record["admission"] == "admitted-supported"
+        assert record["reason"] == "supported-object-zero-fallback"
+        assert record["allocator"] in ALLOCATORS[1:]
+        assert record["frontend_lowering"] in {"local-backed-canonical", "direct-ssa"}
+        assert record["PIC"] in {"0", "1"}
+        identity = tuple(record[field] for field in SUPPORTED_GAP_LEDGER_FIELDS[:5])
+        assert identity not in identities
+        identities.append(identity)
+    assert identities == sorted(identities), "supported-gap ledger is not canonically sorted"
+    row_by_identity = {
+        tuple(row[field] for field in ("fixture", "target", "frontend_lowering", "PIC", "allocator")): row
+        for row in rows
+    }
+    assert len(row_by_identity) == len(rows), "rows.tsv contains duplicate census identities"
+    gap_row_numbers = []
+    for identity in identities:
+        assert identity in row_by_identity, f"supported-gap ledger references unknown row: {identity!r}"
+        row = row_by_identity[identity]
+        assert row["allocator"] != "none" and row["compile_obligation"] == "supported-object-zero-fallback"
+        gap_row_numbers.append(int(row["row"]))
+    gap_row_numbers.sort()
+    if profile == FULL_CENSUS_PROFILE:
+        assert len(records) == FULL_SUPPORTED_GAP_COUNT
+        assert canonical_rows_digest(gap_row_numbers) == FULL_SUPPORTED_GAP_SHA256
+    return set(identities), set(gap_row_numbers), ledger_sha256
+
+
+def validate_profile(manifest, inputs, row_count):
+    """Validate the declared inventory shape before reading result labels."""
+    profile = manifest.get("profile", "")
+    assert profile in {FULL_CENSUS_PROFILE, SELF_TEST_PROFILE}, \
+        f"unknown census profile: {profile!r}"
+    subjects = sum(row["role"] == "subject" for row in inputs.values())
+    if profile == FULL_CENSUS_PROFILE:
+        assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
+        assert manifest.get("support_contract_sha256") == FULL_SUPPORT_CONTRACT_SHA256
+        assert manifest.get("inputs") == "548"
+        assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
+        assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
+        assert manifest.get("subjects") == str(FULL_SUBJECT_COUNT)
+        assert subjects == FULL_SUBJECT_COUNT, "full census subject inventory is incomplete"
+        assert row_count == FULL_ROW_COUNT, "full census row count is incomplete"
+    elif profile == SELF_TEST_PROFILE:
+        # Small fixtures are intentionally accepted only with this explicit
+        # profile; they may not masquerade as the full 402-subject inventory.
+        assert subjects and row_count
+    return profile, subjects
 
 
 def read_argv(path):
@@ -209,23 +448,31 @@ def validate_argv(directory, manifest, row, recipes):
                 lowering, "-fregister-allocator=" + row["allocator"], "-fverify-codegen",
                 "-fmachine-fallback" if baseline else "-fno-machine-fallback", "-nostdinc",
                 "-isystem", str(recorded_root / "dependencies" / "resource-include"),
-                "-I" + str(recorded_root / "inputs" / "tests"),
-                str(recorded_root / "inputs" / row["fixture"]), "-o",
-                str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))]
+                ]
+    if manifest.get("project_include_sha256", ""):
+        if row["target"] in {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}:
+            arch = "x86_64" if row["target"].startswith("x86_64-") else "aarch64"
+            expected.extend(["-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / arch / "include"),
+                             "-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / "include")])
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
+        expected.append("-I" + str(recorded_root / "dependencies" / "project-include"))
+    else:
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
+    expected.extend([str(recorded_root / "inputs" / row["fixture"]), "-o",
+                str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))])
     expected.extend(recipes[row["fixture"]])
     if not baseline:
         expected.append("-fcodegen-fallback-census")
     assert argv == expected, f"argv mismatch for row {row['row']}"
 
 
-def classify_result(row, result, expected_baseline_functions):
-    """Classify an executed row without hiding its producer disposition.
+def classify_result(row, result, expected_baseline_functions, baseline_unresolved=False):
+    """Classify an executed row from structured evidence, never its label.
 
-    The producer's disposition is evidence, not a stable API for the gate:
-    in particular, missing-telemetry rows have appeared with more than one
-    disposition spelling.  The candidate gate therefore derives defects from
-    the structured telemetry fields and keeps the original disposition in the
-    returned record.
+    ``disposition`` is retained as producer text for diagnostics only.  It is
+    intentionally absent from every gate decision below: changing that free
+    form string cannot turn a failed object into a reference-only row or a
+    supported gap.
     """
     allocator = row["allocator"]
     disposition = result["disposition"]
@@ -246,54 +493,35 @@ def classify_result(row, result, expected_baseline_functions):
     inapplicable = row["execution_obligation"] == "unavailable-platform-control"
     execution_defect = result["kind"] != "0" or result["status"] != "0"
     fallback_defect = fallbacks != 0
-    if allocator == "none":
-        setup = disposition.startswith("infrastructure-") or disposition.startswith("setup-")
-        baseline_success_defect = disposition == "baseline-supported" and (
-            bool(telemetry_defects) or execution_defect or fallback_defect or object_bytes == 0 or
-            baseline_count_defect or functions != expected_baseline_functions)
-        telemetry_defect = bool(telemetry_defects) or baseline_success_defect or baseline_count_defect
-        reference_failure = not setup and (disposition != "baseline-supported" or baseline_success_defect)
-        candidate_failure = setup
-        return {
-            "side": "setup" if setup else "baseline",
-            "disposition": disposition,
-            "candidate_failure": candidate_failure,
-            "reference_failure": reference_failure,
-            "acceptance_failure": candidate_failure or reference_failure,
-            "inapplicable": inapplicable,
-            "fallback_defect": fallback_defect,
-            "telemetry_defect": telemetry_defect,
-            "execution_defect": execution_defect,
-            "telemetry_fields": telemetry_defects,
-        }
-
-    function_shape_defect = ((disposition in {"strict-success", "strict-success-baseline-unresolved"} and functions == 0)
-                            or (disposition == "strict-empty-unit" and functions != 0))
-    baseline_shape_defect = ((disposition == "strict-success" and baseline_functions != functions)
-                             or (disposition == "strict-empty-unit" and baseline_functions != 0))
-    artifact_defect = disposition in {"strict-success", "strict-success-baseline-unresolved", "strict-empty-unit"} and object_bytes == 0
-    telemetry_defect = (bool(telemetry_defects) or function_shape_defect or baseline_shape_defect or artifact_defect or
+    artifact_defect = object_bytes == 0
+    # A successful direct reference is the function-count oracle for MIR.
+    # When that reference is unresolved, its partial/zero count is not an
+    # authenticated shape for the candidate: the candidate's own object and
+    # telemetry remain checked, but a different authenticated function count
+    # is reference-only evidence.  Keep the baseline-count copy check above
+    # row-bound, so a producer cannot silently substitute another reference.
+    function_shape_defect = (not baseline_unresolved and
+                             functions != expected_baseline_functions)
+    # The direct allocator is the immutable reference side.  A bad direct
+    # object is an acceptance/reference failure, not a candidate failure.  MIR
+    # rows are candidate-owned regardless of the producer's disposition text.
+    telemetry_defect = (bool(telemetry_defects) or function_shape_defect or artifact_defect or
                         baseline_count_defect)
-    candidate_failure = fallback_defect or telemetry_defect or execution_defect
-    reference_failure = False
-
-    if disposition == "strict-success-baseline-unresolved":
-        side = "reference"
-        reference_failure = True
-    elif disposition.startswith("baseline-and-"):
-        # Preserve the reference failure while still rejecting the unresolved
-        # candidate side when the MIR leg did not produce a supported result.
-        side = "reference"
-        candidate_failure = True
-        reference_failure = True
-    elif disposition in {"strict-success", "strict-empty-unit"} and not candidate_failure:
-        side = "candidate"
-    elif disposition.startswith("infrastructure-") or disposition.startswith("setup-"):
-        side = "setup"
-        candidate_failure = True
+    evidence_defect = fallback_defect or telemetry_defect or execution_defect
+    structural_candidate_failure = evidence_defect
+    # The free-form disposition is retained as an observation only.  The
+    # direct allocator is always the reference side, and every MIR allocator
+    # is candidate-owned.  Baseline resolution is derived from its structured
+    # process/object/telemetry evidence and then row-bound to the MIR group.
+    if allocator == "none":
+        candidate_failure = False
+        reference_failure = evidence_defect
+        side = "baseline"
     else:
+        candidate_failure = structural_candidate_failure
+        reference_failure = baseline_unresolved
         side = "candidate"
-        candidate_failure = True
+    unexpected_failure = candidate_failure
     return {
         "side": side,
         "disposition": disposition,
@@ -304,8 +532,321 @@ def classify_result(row, result, expected_baseline_functions):
         "fallback_defect": fallback_defect,
         "telemetry_defect": telemetry_defect,
         "execution_defect": execution_defect,
+        "artifact_defect": artifact_defect,
+        "unexpected_failure": candidate_failure,
+        "structural_candidate_failure": structural_candidate_failure,
         "telemetry_fields": telemetry_defects,
     }
+
+
+def classify_applicability(row, result, outcome, baseline_unresolved=False, declared_supported_gap=False):
+    """Derive admission only from the authenticated row/support ledger.
+
+    ``result["disposition"]`` is deliberately not inspected.  Applicability
+    remains stable when a producer forges that text, while reference retention
+    is derived from the independently checked baseline outcome.
+    """
+    if declared_supported_gap:
+        classification = "admitted-supported"
+        reason = "supported-object-zero-fallback"
+        ownership = "candidate-compiler"
+    elif row["execution_obligation"] == "unavailable-platform-control":
+        classification = "platform-inapplicable"
+        reason = "native-execution-owner-unavailable"
+        ownership = "platform-execution"
+    elif row["compile_obligation"] != "supported-object-zero-fallback":
+        classification = "unavailable"
+        reason = "compile-obligation-not-admitted"
+        ownership = "admission"
+    elif baseline_unresolved:
+        classification = "retained-reference"
+        reason = "direct-reference-unresolved"
+        ownership = "reference-compiler"
+    elif row["allocator"] == "none":
+        classification = "retained-control"
+        reason = "direct-reference-control"
+        ownership = "reference-compiler"
+    else:
+        classification = "admitted-supported"
+        reason = "supported-object-zero-fallback"
+        ownership = "candidate-compiler"
+    assert classification in APPLICABILITY_CLASSES
+    return classification, classification, reason, ownership
+
+
+def _telemetry_fields(line):
+    """Parse unique key/value tokens from an authenticated diagnostic."""
+    fields = {}
+    for token in line.split():
+        key, separator, value = token.partition("=")
+        assert separator and key and value and key not in fields, f"malformed diagnostic field: {token!r}"
+        fields[key] = value
+    return fields
+
+
+def _decode_hex(value):
+    if not value or value == "-":
+        return ""
+    try:
+        return bytes.fromhex(value).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _diagnostic_target(target):
+    parts = target.split("-")
+    assert len(parts) >= 3
+    operating_system = parts[-1]
+    operating_system = {"gnu": "linux", "msvc": "windows"}.get(operating_system, operating_system)
+    return parts[0] + "-" + operating_system
+
+
+def _validate_function_diagnostic(diagnostic, row):
+    prefix = "CODEGEN_FALLBACK_FUNCTION "
+    assert diagnostic.startswith(prefix)
+    fields = _telemetry_fields(diagnostic[len(prefix):])
+    required = {"version", "row", "target", "allocator", "function_id", "reason", "stage", "opcode_id",
+                "line", "column", "source_hex", "function_hex"}
+    assert set(fields) == required, "fallback function diagnostic fields are not versioned or complete"
+    assert unsigned_decimal(fields["version"], 32, "diagnostic version") == 1
+    assert unsigned_decimal(fields["row"], 64, "diagnostic row") == int(row["row"])
+    assert fields["target"] == _diagnostic_target(row["target"])
+    assert fields["allocator"] == row["allocator"]
+    unsigned_decimal(fields["function_id"], 32, "function_id")
+    unsigned_decimal(fields["opcode_id"], 32, "opcode_id")
+    unsigned_decimal(fields["line"], 32, "line")
+    unsigned_decimal(fields["column"], 32, "column")
+    assert fields["reason"] in {"target-excluded", "signature", "opcode", "selection-other", "verification",
+                                 "placement", "encoding", "output-capacity", "unwind"}
+    expected_stage = {"signature": "selection", "opcode": "selection", "selection-other": "selection"}
+    assert fields["stage"] == expected_stage.get(fields["reason"], fields["reason"])
+    for name in ("source_hex", "function_hex"):
+        value = fields[name]
+        assert len(value) % 2 == 0 and value and all(byte in "0123456789abcdef" for byte in value)
+        assert _decode_hex(value), f"invalid UTF-8 {name} diagnostic field"
+    assert unsigned_decimal(fields["line"], 32, "diagnostic line") > 0
+    assert unsigned_decimal(fields["column"], 32, "diagnostic column") > 0
+    return fields
+
+
+def _validate_counter_diagnostic(diagnostic, row):
+    """Validate known aggregate counter records and their row association."""
+    assert diagnostic.startswith("CODEGEN_FALLBACK")
+    if diagnostic.startswith("CODEGEN_FALLBACK_REASON "):
+        fields = _telemetry_fields(diagnostic[len("CODEGEN_FALLBACK_REASON "):])
+        required = {"version", "row", "target", "allocator", "reason", "count"}
+        assert set(fields) == required
+        assert unsigned_decimal(fields["version"], 32, "diagnostic version") == 1
+        assert unsigned_decimal(fields["row"], 64, "diagnostic row") == int(row["row"])
+        assert fields["target"] == _diagnostic_target(row["target"])
+        assert fields["allocator"] == row["allocator"]
+        assert fields["reason"] in {"target-excluded", "signature", "opcode", "selection-other", "verification",
+                                     "placement", "encoding", "output-capacity", "unwind"}
+        unsigned_decimal(fields["count"], 32, "diagnostic count")
+    elif diagnostic.startswith("CODEGEN_FALLBACK opcode="):
+        fields = _telemetry_fields(diagnostic[len("CODEGEN_FALLBACK "):])
+        required = {"version", "row", "target", "allocator", "opcode", "count"}
+        assert set(fields) == required
+        assert unsigned_decimal(fields["version"], 32, "diagnostic version") == 1
+        assert unsigned_decimal(fields["row"], 64, "diagnostic row") == int(row["row"])
+        assert fields["target"] == _diagnostic_target(row["target"])
+        assert fields["allocator"] == row["allocator"]
+        unsigned_decimal(fields["opcode"], 32, "diagnostic opcode")
+        unsigned_decimal(fields["count"], 32, "diagnostic count")
+    elif diagnostic.startswith("CODEGEN_FALLBACK_STAGES "):
+        fields = _telemetry_fields(diagnostic[len("CODEGEN_FALLBACK_STAGES "):])
+        required = {"version", "row", "target", "allocator", "verify", "placement", "encode"}
+        assert set(fields) == required
+        assert unsigned_decimal(fields["version"], 32, "diagnostic version") == 1
+        assert unsigned_decimal(fields["row"], 64, "diagnostic row") == int(row["row"])
+        assert fields["target"] == _diagnostic_target(row["target"])
+        assert fields["allocator"] == row["allocator"]
+        for name in ("verify", "placement", "encode"):
+            unsigned_decimal(fields[name], 32, "diagnostic " + name)
+    else:
+        raise AssertionError("unknown fallback counter diagnostic")
+    return fields
+
+
+def _residual_record(row, outcome, diagnostic="", fields=None):
+    fields = fields or {}
+    function_id = fields.get("function_id", "")
+    function_name = _decode_hex(fields.get("function_hex", ""))
+    function = function_name or function_id
+    return {
+        "row": str(outcome["row"]),
+        "group": str(outcome["group"]),
+        "fixture": row["fixture"],
+        "function": function,
+        "function_id": function_id,
+        "target": row["target"],
+        "cpu": row["cpu"],
+        "frontend": row["frontend_lowering"],
+        "allocator": row["allocator"],
+        "PIC": row["PIC"],
+        "applicability": outcome["applicability"],
+        "admission": outcome["admission"],
+        "disposition": outcome["disposition"],
+        "reason": fields.get("reason", outcome["reason"]),
+        "ownership": outcome["ownership"],
+        "diagnostic": diagnostic,
+        "stage": fields.get("stage", ""),
+        "opcode_id": fields.get("opcode_id", ""),
+        "source_hex": fields.get("source_hex", ""),
+        "function_hex": fields.get("function_hex", ""),
+        "line": fields.get("line", ""),
+        "column": fields.get("column", ""),
+    }
+
+
+def _residual_sort_key(record):
+    function_id = record["function_id"]
+    try:
+        function_number = int(function_id)
+    except ValueError:
+        function_number = 1 << 32
+    # Every retained field participates in the key.  In particular, two
+    # records with the same function ID/reason must not retain filesystem
+    # iteration order as an implicit tie-breaker before the 256-row bound.
+    rest = tuple(record[field] for field in RESIDUAL_FIELDS if field not in {"row", "function_id"})
+    return (int(record["row"]), function_number, function_id, rest)
+
+
+def observed_supported_gap_rows(outcomes):
+    """Return candidate gaps from row obligations and checked evidence only."""
+    return sorted(item["row"] for item in outcomes.values()
+                  if item["applicability"] == "admitted-supported" and item["allocator"] != "none" and
+                  not item.get("baseline_unresolved", False) and
+                  item.get("structural_candidate_failure", item["candidate_failure"]))
+
+
+def validate_gap_declaration(manifest, profile, rows):
+    """Check the declared full-census supported-gap count and digest."""
+    digest = canonical_rows_digest(rows)
+    if profile == FULL_CENSUS_PROFILE:
+        assert manifest.get("supported_gap_count") == str(FULL_SUPPORTED_GAP_COUNT)
+        assert manifest.get("supported_gap_sha256") == FULL_SUPPORTED_GAP_SHA256
+        # A full-census manifest is emitted once per shard.  Each shard carries
+        # the authenticated whole-census declaration, but only the aggregate
+        # validator has all selected outcomes needed to check its 192-row
+        # observation.  A non-sharded full report can still be checked here.
+        if manifest.get("shard_count") != str(FULL_SHARD_COUNT) or len(rows) == FULL_SUPPORTED_GAP_COUNT:
+            assert len(rows) == FULL_SUPPORTED_GAP_COUNT, "full census supported-gap count changed"
+            assert digest == FULL_SUPPORTED_GAP_SHA256, "full census supported-gap digest changed"
+    elif "supported_gap_count" in manifest or "supported_gap_sha256" in manifest:
+        assert manifest.get("supported_gap_count") == str(len(rows))
+        assert manifest.get("supported_gap_sha256") == digest
+    return digest
+
+
+def read_residual_sources(directory, rows, outcomes):
+    """Authenticate all diagnostics and return the complete source set.
+
+    Retention is deliberately applied only by the aggregate validator, after
+    every shard's source records have been authenticated and globally sorted.
+    """
+    residuals = []
+    source_records = []
+    function_counts = Counter()
+    function_records = {}
+    counter_records = {}
+    functions_path = directory / "fallback-functions.tsv"
+    if functions_path.is_file():
+        fields, records = table_with_fields(functions_path)
+        assert fields == ("row", "record_valid", "telemetry")
+        for record in records:
+            key = record["row"]
+            assert key in outcomes and key in rows, "fallback record references an unselected row"
+            unsigned_decimal(key, 64, "fallback row")
+            assert record["record_valid"] == "1", "invalid fallback function record"
+            diagnostic = record["telemetry"]
+            assert diagnostic and "\t" not in diagnostic and "\n" not in diagnostic
+            parsed = _validate_function_diagnostic(diagnostic, rows[key])
+            function_counts[key] += 1
+            function_records.setdefault(key, []).append(parsed)
+            source_records.append(_residual_record(rows[key], outcomes[key], diagnostic, parsed))
+
+    counters_path = directory / "fallback-counters.tsv"
+    if counters_path.is_file():
+        fields, records = table_with_fields(counters_path)
+        assert fields == ("row", "telemetry")
+        for record in records:
+            key = record["row"]
+            assert key in outcomes and key in rows, "fallback counter references an unselected row"
+            unsigned_decimal(key, 64, "fallback counter row")
+            diagnostic = record["telemetry"]
+            assert diagnostic and "\t" not in diagnostic and "\n" not in diagnostic
+            parsed = _validate_counter_diagnostic(diagnostic, rows[key])
+            assert outcomes[key]["fallbacks"] != 0, "counter diagnostic has no matching fallback count"
+            counter_records.setdefault(key, []).append(parsed)
+            source_records.append(_residual_record(rows[key], outcomes[key], diagnostic, parsed))
+
+    # Every function attribution is row-matched to the result's fallback
+    # count.  Do this after reading the complete source so a malformed or
+    # omitted tail cannot be hidden by the 256-row bound.
+    for key, outcome in outcomes.items():
+        if outcome["allocator"] == "none":
+            # The direct reference does not request per-function census
+            # records, but its verbose aggregate counters are still retained
+            # when machine fallback was observed.  Keep those counters
+            # row-bound and require their reason totals to explain the
+            # structured fallback count; never treat the reference fallback as
+            # candidate evidence.
+            assert not function_counts[key], f"direct reference contains function telemetry for row {key}"
+            if outcome["fallbacks"] == 0:
+                assert not counter_records.get(key), f"zero-fallback reference has counter telemetry for row {key}"
+            else:
+                reason_total = sum(int(record["count"]) for record in counter_records.get(key, [])
+                                   if "reason" in record)
+                assert reason_total == outcome["fallbacks"], \
+                    f"reference fallback reason counters mismatch for row {key}"
+            continue
+        assert function_counts[key] == outcome["fallbacks"], \
+            f"fallback function attribution mismatch for row {key}"
+        if outcome["fallbacks"]:
+            function_ids = [int(record["function_id"]) for record in function_records[key]]
+            # The producer emits source order, but the retained TSV may be
+            # transported through a tool that changes record order.  Identity
+            # and uniqueness are authenticated here; the aggregate validator
+            # sorts the complete set before applying its retention cap.
+            assert len(function_ids) == len(set(function_ids)), \
+                f"duplicate fallback function diagnostic for row {key}"
+            reason_counts = Counter(record["reason"] for record in function_records[key])
+            opcode_reasons = {"signature", "opcode", "selection-other"}
+            opcode_counts = Counter("47" if record["opcode_id"] == "4294967295" else record["opcode_id"]
+                                    for record in function_records[key] if record["reason"] in opcode_reasons)
+            stage_counts = Counter()
+            for record in function_records[key]:
+                if record["stage"] == "verification":
+                    stage_counts["verify"] += 1
+                elif record["stage"] == "placement":
+                    stage_counts["placement"] += 1
+                elif record["stage"] in {"encoding", "output-capacity", "unwind"}:
+                    stage_counts["encode"] += 1
+            observed_reasons = Counter()
+            observed_opcodes = Counter()
+            observed_stages = Counter()
+            stage_records = 0
+            for record in counter_records.get(key, []):
+                if "reason" in record:
+                    observed_reasons[record["reason"]] += int(record["count"])
+                if "opcode" in record:
+                    observed_opcodes[record["opcode"]] += int(record["count"])
+                if "verify" in record:
+                    stage_records += 1
+                    for name in ("verify", "placement", "encode"):
+                        observed_stages[name] += int(record[name])
+            assert observed_reasons == reason_counts, f"fallback reason counters mismatch for row {key}"
+            assert observed_opcodes == opcode_counts, f"fallback opcode counters mismatch for row {key}"
+            assert stage_records <= 1 and observed_stages == stage_counts, \
+                f"fallback stage counters mismatch for row {key}"
+        else:
+            assert not function_records.get(key) and not counter_records.get(key), \
+                f"zero-fallback row has residual telemetry for row {key}"
+    residuals.extend(source_records)
+
+    residuals.sort(key=_residual_sort_key)
+    return residuals, False
 
 
 def validate(directory):
@@ -315,7 +856,13 @@ def validate(directory):
     assert manifest["identity_hash"] == "sha256"
     assert manifest["environment"] == "explicit-replacement-in-environment.tsv"
     assert manifest["unfrozen_dependencies"] == "none-for-object-census"
-    assert manifest["sysroot"] == manifest["system_include"] == "none"
+    if manifest.get("project_include_sha256", ""):
+        assert manifest["sysroot"] == "target-correct-musl-linux-gnu-only"
+        assert manifest["system_include"] == "target-correct-musl-project-include"
+        assert manifest["source_dependencies"] == (
+            "tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include-plus-pinned-github-closure")
+    else:
+        assert manifest["sysroot"] == manifest["system_include"] == "none"
     for revision in (manifest["compiler_revision_claim"], manifest["baseline_revision_claim"]):
         assert len(revision) == 40 and all(byte in "0123456789abcdef" for byte in revision)
     for name, prefix in (("candidate-ide.exe", "compiler"), ("baseline-ide.exe", "baseline")):
@@ -327,6 +874,10 @@ def validate(directory):
     result_fields, results = table_with_fields(directory / "results.tsv")
     assert row_fields == ROW_FIELDS
     assert result_fields == RESULT_FIELDS
+    profile, subject_count = validate_profile(manifest, inputs, len(rows))
+    validate_dependency_binding(directory, manifest, profile, inputs)
+    gap_ledger_identities, declared_gap_rows, gap_ledger_sha256 = validate_supported_gap_ledger(
+        directory, manifest, rows, profile)
     manifest_rows = unsigned_decimal(manifest["rows"], 64, "manifest rows")
     assert len(rows) == manifest_rows
     assert [unsigned_decimal(row["row"], 64, "row") for row in rows] == list(range(len(rows)))
@@ -383,6 +934,12 @@ def validate(directory):
     }
     selected_groups = {row["group"] for key, row in by_row.items() if key in by_result}
     assert set(baseline_by_group) == selected_groups, "selected group is missing its allocator-none baseline"
+    baseline_outcomes = {}
+    for key, result in by_result.items():
+        row = by_row[key]
+        if row["allocator"] == "none":
+            baseline_outcomes[row["group"]] = classify_result(row, result, baseline_by_group[row["group"]])
+    assert set(baseline_outcomes) == selected_groups, "selected group baseline evidence is incomplete"
     recipes = {path: shlex.split(row["fixture_flags"]) for path, row in inputs.items()}
     identities = {}
     outcomes = {}
@@ -401,9 +958,18 @@ def validate(directory):
                       result["object_sha256"])
         else:
             assert result["object_sha256"] == ""
-        outcome = classify_result(row, result, baseline_by_group[row["group"]])
+        baseline_unresolved = baseline_outcomes[row["group"]]["reference_failure"]
+        outcome = classify_result(row, result, baseline_by_group[row["group"]], baseline_unresolved)
         outcome.update({"row": int(key), "group": int(row["group"]), "allocator": row["allocator"],
                         "fallbacks": int(result["fallbacks"]), "functions": int(result["functions"])})
+        identity = tuple(row[field] for field in ("fixture", "target", "frontend_lowering", "PIC", "allocator"))
+        declared_supported_gap = identity in gap_ledger_identities
+        applicability, admission, reason, ownership = classify_applicability(row, result, outcome,
+                                                                               baseline_unresolved,
+                                                                               declared_supported_gap)
+        outcome.update({"applicability": applicability, "admission": admission,
+                        "classification": applicability, "reason": reason, "ownership": ownership,
+                        "baseline_unresolved": baseline_unresolved})
         outcomes[key] = outcome
         # The matrix columns identify a cell only together with the exact
         # fixture/input and relevant resource binding.  Compiler binaries and
@@ -422,14 +988,25 @@ def validate(directory):
                                 "inapplicable": outcome["inapplicable"],
                                 "fallback_defect": outcome["fallback_defect"],
                                 "telemetry_defect": outcome["telemetry_defect"],
-                                "execution_defect": outcome["execution_defect"]}
+                                "execution_defect": outcome["execution_defect"],
+                                "artifact_defect": outcome["artifact_defect"],
+                                "unexpected_failure": outcome["unexpected_failure"],
+                                "baseline_unresolved": baseline_unresolved,
+                                "applicability": applicability, "admission": admission,
+                                "reason": reason, "ownership": ownership}
     ordered_outcomes = {key: outcomes[key] for key in sorted(outcomes, key=int)}
     ordered_identities = {key: identities[key] for key in sorted(identities)}
+    supported_gap_rows = sorted(declared_gap_rows)
+    supported_gap_sha256 = validate_gap_declaration(manifest, profile, supported_gap_rows)
+    residuals, residual_source_truncated = read_residual_sources(directory, by_row, ordered_outcomes)
     return {
         "directory": str(directory),
-        "rows": len(results),
+        "rows": manifest_rows,
         "selected_rows": {int(key) for key in by_result},
+        "selected_row_records": {key: by_row[key] for key in by_result},
         "manifest": manifest,
+        "profile": profile,
+        "subjects": subject_count,
         "rows_identity": row_identities,
         "rows_identity_fields": ROW_IDENTITY_FIELDS,
         "rows_identity_sha256": rows_identity_sha256,
@@ -439,6 +1016,13 @@ def validate(directory):
         "manifest_identity_sha256": manifest_identity_sha256,
         "identities": ordered_identities,
         "outcomes": ordered_outcomes,
+        "supported_gap_rows": supported_gap_rows,
+        "supported_gap_count": len(supported_gap_rows),
+        "supported_gap_sha256": supported_gap_sha256,
+        "declared_gap_identities": gap_ledger_identities,
+        "supported_gap_ledger_sha256": gap_ledger_sha256,
+        "residuals": residuals,
+        "residual_source_truncated": residual_source_truncated,
     }
 
 
@@ -448,6 +1032,12 @@ def partition_shards(reports, require_clean_candidate=False, require_clean_accep
     manifests = [report["manifest"] for report in reports]
     first = manifests[0]
     count = len(reports)
+    assert all(report["profile"] == reports[0]["profile"] for report in reports), "census profile mismatch"
+    if require_clean_acceptance:
+        assert reports[0]["profile"] == FULL_CENSUS_PROFILE, \
+            "production acceptance requires full-census profile"
+    if reports[0]["profile"] == FULL_CENSUS_PROFILE:
+        assert count == FULL_SHARD_COUNT, "full census requires four shards"
     indices = [int(manifest["shard_index"]) for manifest in manifests]
     assert sorted(indices) == list(range(count)), "shard indices are incomplete or duplicated"
     assert all(int(manifest["shard_count"]) == count for manifest in manifests), "shard count mismatch"
@@ -475,6 +1065,8 @@ def partition_shards(reports, require_clean_candidate=False, require_clean_accep
         outcomes.update(report["outcomes"])
     expected_rows = set(range(int(first["rows"])))
     assert selected_rows == expected_rows, "shards do not cover the complete manifest row set"
+    if reports[0]["profile"] == FULL_CENSUS_PROFILE:
+        assert len(selected_rows) == FULL_ROW_COUNT, "full census selected row count is incomplete"
     assert len(identities) == len(expected_rows), "shards do not cover unique census identities"
     candidate_failures = sorted(item["row"] for item in outcomes.values() if item["candidate_failure"])
     acceptance_failures = sorted(item["row"] for item in outcomes.values() if item["acceptance_failure"])
@@ -493,12 +1085,24 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
     beside the v2 row validator, so the acceptance workflow cannot mistake
     four independently valid partial reports for a complete inventory.
     """
+    output = Path(output)
     reports = sorted((validate(directory) for directory in directories),
                      key=lambda report: int(report["manifest"]["shard_index"]))
+    if require_clean_acceptance:
+        assert reports[0]["profile"] == FULL_CENSUS_PROFILE, \
+            "production acceptance requires full-census profile"
     # Always write the aggregate, including failed dispositions, before
     # applying the optional gate.  Failed evidence must remain inspectable.
     first, selected_rows, outcomes = partition_shards(reports)
     count = len(reports)
+    row_records = {}
+    residuals = []
+    residual_source_truncated = False
+    for report in reports:
+        row_records.update(report["selected_row_records"])
+        residuals.extend(report["residuals"])
+        residual_source_truncated |= report["residual_source_truncated"]
+    assert set(row_records) == {str(row) for row in selected_rows}, "selected row records are incomplete"
     def counts(side):
         return {key: value for key, value in sorted(Counter(item["disposition"] for item in outcomes.values()
                                                           if item["side"] == side).items())}
@@ -510,10 +1114,60 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
     fallback_defects = sorted(item["row"] for item in outcomes.values() if item["fallback_defect"])
     telemetry_defects = sorted(item["row"] for item in outcomes.values() if item["telemetry_defect"])
     execution_defects = sorted(item["row"] for item in outcomes.values() if item["execution_defect"])
+    artifact_defects = sorted(item["row"] for item in outcomes.values() if item["artifact_defect"])
+    observed_applicability = Counter(item["applicability"] for item in outcomes.values())
+    assert set(observed_applicability) <= set(APPLICABILITY_CLASSES)
+    applicability_counts = {classification: observed_applicability[classification]
+                            for classification in APPLICABILITY_CLASSES}
+    applicability_row_sets = {
+        classification: sorted(item["row"] for item in outcomes.values()
+                               if item["applicability"] == classification)
+        for classification in APPLICABILITY_CLASSES
+    }
+    supported_gap_rows = sorted({row for report in reports for row in report["supported_gap_rows"]})
+    supported_gap_sha256 = canonical_rows_digest(supported_gap_rows)
+    if first["profile"] == FULL_CENSUS_PROFILE:
+        assert len(supported_gap_rows) == FULL_SUPPORTED_GAP_COUNT
+        assert supported_gap_sha256 == FULL_SUPPORTED_GAP_SHA256
+        assert all(outcomes[str(row)]["applicability"] == "admitted-supported" for row in supported_gap_rows)
+    elif "supported_gap_count" in first or "supported_gap_sha256" in first:
+        assert first.get("supported_gap_count") == str(len(supported_gap_rows))
+        assert first.get("supported_gap_sha256") == supported_gap_sha256
+    unexpected_failures = sorted(item["row"] for item in outcomes.values() if item["unexpected_failure"])
+    applicability_rows = []
+    for key in sorted(outcomes, key=int):
+        row = row_records[key]
+        outcome = outcomes[key]
+        applicability_rows.append({
+            "row": key,
+            "group": row["group"],
+            "fixture": row["fixture"],
+            "target": row["target"],
+            "cpu": row["cpu"],
+            "frontend": row["frontend_lowering"],
+            "allocator": row["allocator"],
+            "PIC": row["PIC"],
+            "applicability": outcome["applicability"],
+            "admission": outcome["admission"],
+            "disposition": outcome["disposition"],
+            "reason": outcome["reason"],
+            "ownership": outcome["ownership"],
+            "candidate_failure": str(int(outcome["candidate_failure"])),
+            "reference_failure": str(int(outcome["reference_failure"])),
+            "acceptance_failure": str(int(outcome["acceptance_failure"])),
+        })
+    residuals.sort(key=_residual_sort_key)
+    residual_truncated = residual_source_truncated or len(residuals) > MAX_RESIDUAL_ROWS
+    residuals = residuals[:MAX_RESIDUAL_ROWS]
+    applicability_path = output.parent / "applicability.tsv"
+    residual_path = output.parent / "residual.tsv"
+    write_table(applicability_path, APPLICABILITY_FIELDS, applicability_rows)
+    write_table(residual_path, RESIDUAL_FIELDS, residuals)
     result = {
         "schema": 2,
         "directories": [report["directory"] for report in reports],
         "shards": count,
+        "profile": first["profile"],
         "rows_validated": len(selected_rows),
         "groups": len(selected_rows) // len(ALLOCATORS),
         "compiler_revision_claim": first["compiler_revision_claim"],
@@ -521,6 +1175,7 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "compiler_sha256": first["compiler_sha256"],
         "baseline_sha256": first["baseline_sha256"],
         "support_contract_sha256": first["support_contract_sha256"],
+        "supported_gap_ledger_sha256": reports[0]["supported_gap_ledger_sha256"],
         "resource_include_sha256": first["resource_include_sha256"],
         "manifest_identity_sha256": reports[0]["manifest_identity_sha256"],
         "rows_identity_fields": list(reports[0]["rows_identity_fields"]),
@@ -531,6 +1186,25 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "reference_dispositions": counts("reference"),
         "setup_dispositions": counts("setup"),
         "candidate_dispositions": counts("candidate"),
+        "applicability_classes": list(APPLICABILITY_CLASSES),
+        "admission_classes": list(APPLICABILITY_CLASSES),
+        "applicability_counts": applicability_counts,
+        "admission_counts": applicability_counts,
+        "applicability_rows_by_class": applicability_row_sets,
+        "admission_rows_by_class": applicability_row_sets,
+        "supported_gap_rows": supported_gap_rows,
+        "supported_gap_count": len(supported_gap_rows),
+        "supported_gap_sha256": supported_gap_sha256,
+        "applicability_rows": len(applicability_rows),
+        "applicability_evidence": str(applicability_path),
+        "applicability_tsv": str(applicability_path),
+        "applicability_sha256": sha256(applicability_path),
+        "residual_evidence": str(residual_path),
+        "residual_tsv": str(residual_path),
+        "residual_sha256": sha256(residual_path),
+        "residual_rows": len(residuals),
+        "residual_limit": MAX_RESIDUAL_ROWS,
+        "residual_truncated": residual_truncated,
         "candidate_failure_rows": candidate_failures,
         "reference_failure_rows": reference_failures,
         "acceptance_failure_rows": acceptance_failures,
@@ -538,11 +1212,14 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "fallback_defect_rows": fallback_defects,
         "telemetry_defect_rows": telemetry_defects,
         "execution_defect_rows": execution_defects,
+        "artifact_defect_rows": artifact_defects,
+        "unexpected_failure_rows": unexpected_failures,
         "require_clean_candidate": require_clean_candidate,
         "require_clean_acceptance": require_clean_acceptance,
         "clean_candidate": not candidate_failures,
         "clean_acceptance": not acceptance_failures,
         "complete_row_partition": True,
+        "global_identity_unique": True,
     }
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if require_clean_candidate:
@@ -554,22 +1231,26 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
 
 def self_test():
     """Exercise the completeness guard without requiring compiler artifacts."""
-    manifest = {"shard_count": "4", "rows": "8", "provenance": "fixed"}
+    manifest = {"shard_count": "4", "rows": "8", "profile": SELF_TEST_PROFILE, "provenance": "fixed"}
     reports = []
     for index in range(4):
         reports.append({"manifest": dict(manifest, shard_index=str(index)),
                         "selected_rows": {index, index + 4}, "identities": {index, index + 4}})
     for report in reports:
+        report["profile"] = SELF_TEST_PROFILE
         report["rows_identity"] = {str(key): (str(key),) for key in range(8)}
         report["rows_identity_sha256"] = canonical_map_digest(report["rows_identity"])
         report["input_ledger"] = {"tests/unit.c": ("subject",)}
         report["input_ledger_sha256"] = canonical_map_digest(report["input_ledger"])
         report["manifest_identity_sha256"] = manifest_identity_digest(report["manifest"])
+        report["selected_row_records"] = {str(key): {} for key in report["selected_rows"]}
+        report["residuals"] = []
+        report["residual_source_truncated"] = False
         report["outcomes"] = {str(key): {"row": key, "candidate_failure": False,
                                           "reference_failure": False, "acceptance_failure": False,
                                           "inapplicable": False,
                                           "fallback_defect": False, "telemetry_defect": False,
-                                          "execution_defect": False,
+                                          "execution_defect": False, "artifact_defect": False,
                                           "side": "candidate", "disposition": "strict-success"}
                                 for key in report["selected_rows"]}
     _first, selected, _outcomes = partition_shards(reports, require_clean_candidate=True)
@@ -588,11 +1269,18 @@ def self_test():
 
 
 def reconcile(reference, candidate, output, require_clean_candidate, require_clean_acceptance=False):
+    reference_manifest = reference["manifest"]
+    candidate_manifest = candidate["manifest"]
+    if require_clean_acceptance:
+        assert reference.get("profile") == FULL_CENSUS_PROFILE and reference_manifest.get("profile") == FULL_CENSUS_PROFILE, \
+            "production acceptance requires full-census reference profile"
+        assert candidate.get("profile") == FULL_CENSUS_PROFILE and candidate_manifest.get("profile") == FULL_CENSUS_PROFILE, \
+            "production acceptance requires full-census candidate profile"
     old, new = reference["identities"], candidate["identities"]
     common = sorted(set(old) & set(new))
     transitions = Counter((old[key]["disposition"], new[key]["disposition"]) for key in common)
-    reference_manifest = reference["manifest"]
-    candidate_manifest = candidate["manifest"]
+    applicability_transitions = Counter((old[key].get("applicability"), new[key].get("applicability"))
+                                        for key in common)
     candidate_common_failure_rows = sorted(new[key]["row"] for key in common if new[key]["candidate_failure"])
     reference_common_failure_rows = sorted(new[key]["row"] for key in common if new[key]["reference_failure"])
     acceptance_common_failure_rows = sorted(new[key]["row"] for key in common if new[key]["acceptance_failure"])
@@ -619,6 +1307,8 @@ def reconcile(reference, candidate, output, require_clean_candidate, require_cle
               "added_rows": len(set(new) - set(old)),
               "transitions": [{"from": before, "to": after, "rows": count}
                               for (before, after), count in sorted(transitions.items())],
+              "applicability_transitions": [{"from": before, "to": after, "rows": count}
+                                             for (before, after), count in sorted(applicability_transitions.items())],
               "candidate_common_failures": len(candidate_common_failure_rows),
               "candidate_common_failure_rows": candidate_common_failure_rows,
               "reference_common_failures": len(reference_common_failure_rows),

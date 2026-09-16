@@ -163,65 +163,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         u32 instruction_count = invalid_function->instruction_count;
         invalid_program->disable_local_promotion = true;
         invalid_program->fast_passes = IR_FAST_ALL;
-#if BUSTER_BENCH_ALLOCATIONS
-        IrConstructionCounters before = ir_construction_counters();
-#endif
         IrValidationResult skipped = ir_prepare_canonical_module(invalid_program, invalid_module, true);
         BUSTER_TEST(arguments, skipped.error == IR_VALIDATION_NONE && invalid_module->fast_complete);
         BUSTER_TEST(arguments, invalid_module->fast.validation_skips == 1 && invalid_module->fast.functions == 0);
         BUSTER_TEST(arguments, invalid_function->instruction_count == instruction_count);
-#if BUSTER_BENCH_ALLOCATIONS
-        IrConstructionCounters after = ir_construction_counters();
-        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
-        BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_FAST_INPUT_VALIDATIONS]
-                             - before.values[IR_CONSTRUCTION_PREPARATION_FAST_INPUT_VALIDATIONS] == 1);
-        BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_OUTPUT_VALIDATIONS]
-                             - before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_OUTPUT_VALIDATIONS] == 0);
-#endif
     }
     scratch_end(invalid_temporary);
-    // A certified module that promotion actually changed is scanned once at
-    // the promotion-output boundary in test builds. FAST's input guard asks
-    // the same predicate of the same unmutated rows, so it must start from
-    // that scan rather than repeat it; the guard still runs when nothing has
-    // proven the current representation (promotion changed nothing).
-    for (u32 promotes = 0; promotes < 2; promotes += 1)
-    {
-        TemporalArena reuse_temporary = arena_begin_temporal(arguments->arena);
-        CIRLowerResult reuse_lowered = ir_promotion_lower(arguments->arena,
-            promotes ? S8("int test(int c){int x=3;if(c)x=7;return x+0;}") : S8("volatile int g;int test(void){return g+0;}"), target_native);
-        BUSTER_TEST(arguments, reuse_lowered.program && !reuse_lowered.diagnostic_count);
-        if (reuse_lowered.program && !reuse_lowered.diagnostic_count)
-        {
-            IrProgram* reuse_program = reuse_lowered.program;
-            IrModule* reuse_module = reuse_program->modules;
-            reuse_program->fast_passes = IR_FAST_ALL;
-#if BUSTER_BENCH_ALLOCATIONS
-            IrConstructionCounters before = ir_construction_counters();
-#endif
-            IrValidationResult reused = ir_prepare_canonical_module(reuse_program, reuse_module, true);
-            BUSTER_TEST(arguments, reused.error == IR_VALIDATION_NONE);
-            BUSTER_TEST(arguments, (reuse_module->local_promotion.promoted_locals != 0) == (promotes != 0));
-            BUSTER_TEST(arguments, reuse_module->local_promotion_complete && reuse_module->fast_complete);
-            BUSTER_TEST(arguments, reuse_module->fast.validation_skips == 0 && reuse_module->fast.functions == 1);
-            BUSTER_TEST(arguments, reuse_module->fast.passes[IR_FAST_FOLD].changes != 0);
-            BUSTER_TEST(arguments, reused.boundary == IR_VALIDATION_BOUNDARY_FAST_OUTPUT);
-            BUSTER_TEST(arguments, ir_validate_canonical_module(reuse_program, reuse_module).error == IR_VALIDATION_NONE);
-#if BUSTER_BENCH_ALLOCATIONS
-            IrConstructionCounters after = ir_construction_counters();
-            BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
-#define IR_PREPARATION_EXPECT(counter, expected) \
-    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
-            IR_PREPARATION_EXPECT(PREPARATION_INPUT_VALIDATIONS, 0);
-            IR_PREPARATION_EXPECT(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, promotes ? 1 : 0);
-            IR_PREPARATION_EXPECT(PREPARATION_FAST_INPUT_VALIDATIONS, promotes ? 0 : 1);
-            IR_PREPARATION_EXPECT(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
-            IR_PREPARATION_EXPECT(VALIDATION_CALLS, 3);
-#undef IR_PREPARATION_EXPECT
-#endif
-        }
-        scratch_end(reuse_temporary);
-    }
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.

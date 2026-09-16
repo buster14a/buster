@@ -3207,15 +3207,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     }
     // Keep this valid canonical-only source outside the frozen native support
     // inventory: it exists to exercise permissive fallback telemetry, not to
-    // claim strict MIR support for inline assembly.
-    String8 fallback_source = buster_test_temporary_path(arguments->arena, S8("buster-machine-fallback-inline-asm"), S8(".c"));
-    String8 fallback_source_text = S8("int machine_fallback_inline_asm(volatile int* pointer, int expected, int value)\n"
+    // claim strict MIR support for partial-width CPUID outputs. Complete
+    // 32-bit pure CPUID outputs are covered by the strict source corpus above.
+    String8 fallback_source = buster_test_temporary_path(arguments->arena, S8("buster-machine-fallback-partial-cpuid"), S8(".c"));
+    String8 fallback_source_text = S8("int machine_fallback_partial_cpuid(unsigned int leaf)\n"
                                      "{\n"
-                                     "    __asm__ __volatile__(\"lock ; cmpxchg %3, %1\" : \"=a\"(expected), \"=m\"(*pointer) : \"a\"(expected), \"r\"(value) : \"memory\");\n"
-                                     "    return expected;\n"
+                                     "    unsigned short a;\n"
+                                     "    unsigned short b;\n"
+                                     "    unsigned short c;\n"
+                                     "    unsigned short d;\n"
+                                     "    __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(leaf), \"c\"(0));\n"
+                                     "    return (int)(a ^ b ^ c ^ d);\n"
                                      "}\n");
     BUSTER_TEST(arguments, file_write(fallback_source, BUSTER_SLICE_TO_BYTE_SLICE(fallback_source_text)));
-    String8 fallback_targets[] = {S8("x86_64-unknown-windows")};
+    String8 fallback_targets[] = {S8("x86_64-unknown-linux"), S8("x86_64-unknown-windows")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -3250,7 +3255,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             if (strict.fallback_record_count == 1)
             {
                 CompilerDriverFallbackRecord record = strict.fallback_records[0];
-                BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_inline_asm")));
+                BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_partial_cpuid")));
                 BUSTER_TEST(arguments, string_equal(record.source, fallback_source));
                 BUSTER_TEST(arguments, record.line != 0 && record.column != 0);
                 BUSTER_TEST(arguments, record.codegen.reason == reason && record.codegen.opcode == IR_OPCODE_INLINE_ASSEMBLY);
@@ -3270,7 +3275,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                 }
             }
             BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, codegen_fallback_reason_string(reason)) < strict.diagnostic.length);
-            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("function='machine_fallback_inline_asm'")) < strict.diagnostic.length);
+            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("function='machine_fallback_partial_cpuid'")) < strict.diagnostic.length);
             BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, fallback_source) < strict.diagnostic.length);
             ByteSlice after = file_read(temporary.arena, output, (FileReadOptions){0});
             BUSTER_TEST(arguments, after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
@@ -3279,7 +3284,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     }
     // Multiple input compilation used to discard all fallback and allocator
     // traffic. Compare its census against each input compiled independently.
-    // Include a signature fallback and retained machine functions together.
+    // Include an opcode fallback and retained machine functions together.
     for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -3306,7 +3311,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         {
             // The producer's unit arena has already been destroyed here.
             CompilerDriverFallbackRecord record = multiple.fallback_records[0];
-            BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_inline_asm")));
+            BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_partial_cpuid")));
             BUSTER_TEST(arguments, string_equal(record.source, inputs[0]) && record.line != 0);
         }
 #define BUSTER_DRIVER_TEST_STATISTIC_SUM(field) \
