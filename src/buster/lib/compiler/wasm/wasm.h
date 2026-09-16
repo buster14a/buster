@@ -59,6 +59,8 @@ struct Wasm64Stats
     u64 memory_min_pages;
     u64 memory_max_pages;
     u64 static_data_bytes;
+    u64 stack_lower_bound;
+    u64 stack_upper_bound;
     u64 code_bytes;
     u64 binary_bytes;
 };
@@ -83,8 +85,8 @@ struct Wasm64Options
 {
     // Zero uses the deterministic defaults: export memory as "memory", start
     // data at 64 KiB, and choose the smallest memory64 minimum containing all
-    // static bytes and the stack base.  A non-zero max is encoded as the
-    // memory64 maximum; zero means no explicit maximum.
+    // static bytes and the complete 64 KiB upward-growing stack. A non-zero
+    // max is encoded as the memory64 maximum; zero means no explicit maximum.
     String8 memory_export_name;
     u64 initial_pages;
     u64 maximum_pages;
