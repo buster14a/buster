@@ -194,32 +194,29 @@ A consumer that cannot support a new semantic class must fail deliberately. A
 successful build with silently changed semantics is never an acceptable
 fallback.
 
-## Direct-native fallback contract
+## MIR-only native failure contract
 
-The direct canonical native emitter is a migration oracle, not a second target
-architecture. Until it is retired, every attempt to use a non-`NONE` allocator
-that falls back for a function remains measurable through
-`CodegenStatistics`:
+Native C generation has one production route: selection, verification,
+placement and encoding of machine IR. The former fallback counters remain in
+`CodegenStatistics` for ABI compatibility, but production generation keeps
+them zero:
 
-- `fallback_function_count` counts affected functions;
-- `fallback_opcode_counts` records selection refusals by canonical opcode;
-- `fallback_verify_count`, `fallback_placement_count` and
-  `fallback_encode_count` identify later-stage failures;
-- verbose compiler output publishes `CODEGEN_FALLBACK` and
-  `CODEGEN_FALLBACK_STAGES` records beside target and allocator information.
+- `fallback_function_count`, `fallback_opcode_counts`, and every
+  `fallback_reason_counts` entry remain zero;
+- `fallback_verify_count`, `fallback_placement_count`, and
+  `fallback_encode_count` remain zero;
+- verbose compiler output retains the fields so tooling can prove that no
+  fallback was published.
 
-A test intended to prove machine-path coverage asserts the fallback count and,
-where relevant, its stage/reason. Merely running the generated program is not
-coverage evidence because the direct emitter can produce the same answer.
-Unexpected fallback is a regression even when output bytes still execute
-correctly.
+A test intended to prove native coverage asserts a successful MIR transaction,
+zero fallback compatibility counters, and the relevant structural or runtime
+oracle. Any failure is returned as a structured `CodegenError` before object
+publication; no allocator or fallback-flag spelling can restore direct native
+emission.
 
-The direct path remains frozen except for correctness fixes needed to keep it a
-trustworthy differential oracle. It can be removed from production only after
-[issue #35](https://github.com/buster14a/buster/issues/35) establishes stable
-reason codes and a curated zero-unapproved-fallback corpus, and
-[issue #36](https://github.com/buster14a/buster/issues/36) records clean
-differential results and removes fallback in reviewable stages.
+[issue #36](https://github.com/buster14a/buster/issues/36) records the clean
+correctness, self-host, sanitizer, and controlled-performance acceptance that
+licensed physical removal.
 
 ## Current migration exceptions
 
@@ -230,7 +227,6 @@ bounded debt, not precedent for new code.
 | --- | --- |
 | Target-local promotion may still retain an explicitly flagged mutable machine virtual register. The verifier and telemetry count it; liveness and scheduling handle it conservatively, and SSA-only consumers must reject it. | [#33](https://github.com/buster14a/buster/issues/33), then [#34](https://github.com/buster14a/buster/issues/34) |
 | Eligible C locals can still enter canonical IR as `LOCAL`/`LOAD`/`STORE`, with overlapping promotion in native selectors. | [#33](https://github.com/buster14a/buster/issues/33), then [#34](https://github.com/buster14a/buster/issues/34) |
-| Native compilation may abandon machine selection, verification, placement or encoding and emit the whole function directly from canonical IR. | [#35](https://github.com/buster14a/buster/issues/35), then [#36](https://github.com/buster14a/buster/issues/36) |
 | Canonical instruction rows are dense, but complete CFG topology is not yet published through one immutable dense interface. | [#38](https://github.com/buster14a/buster/issues/38) |
 | The shared FAST canonical pass order and per-pass budgets are not yet an enforced pipeline contract. | [#40](https://github.com/buster14a/buster/issues/40) |
 | Memory scheduling is deliberately conservative and cannot yet relax dependencies by proven alias class. | [#41](https://github.com/buster14a/buster/issues/41); first preserve complete memory classification in [#126](https://github.com/buster14a/buster/issues/126) / [PR #127](https://github.com/buster14a/buster/pull/127) |

@@ -82,6 +82,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
             u8 original_code[4096] = {0};
             u64 original_code_length = 0;
             u32 original_location_count = 0;
+            // Every backend must honor the published entry identity rather
+            // than assuming block zero. Native MIR lays the entry first and
+            // remaps canonical CFG edges without changing the source IR.
             for (u32 permutation = 0; permutation < 3; permutation += 1)
             {
                 TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -103,7 +106,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                         u32 rotation = permutation == 2 ? function->block_count - 1 : permutation;
                         codegen_test_rotate_blocks(arguments->arena, function, rotation);
                         BUSTER_TEST(arguments, function->entry.value == rotation);
-                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        // Rotation invalidates the published CFG consumed by
+                        // MIR selection and eBPF emission; rebuild it from the
+                        // renumbered canonical graph before either backend.
+                        IrValidationResult rotated_prepared = ir_prepare_canonical_module(program, module, false);
+                        BUSTER_TEST(arguments, rotated_prepared.error == IR_VALIDATION_NONE);
                         if (target.cpu_arch == CPU_ARCH_BPFEL)
                         {
                             EbpfArtifact artifact = ebpf_emit_program(arguments->arena, program);
@@ -152,6 +159,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                                         }
                                         else
                                         {
+                                            if (code.debug_location_count != original_location_count)
+                                            {
+                                                arguments->show(arguments,
+                                                    S8("native entry debug count fixture {u32}, target {u32}, entry {u32}: actual={u32}, expected={u32}\n"),
+                                                    fixture, target_index, rotation, code.debug_location_count, original_location_count);
+                                            }
                                             BUSTER_TEST(arguments, code.debug_location_count == original_location_count);
                                             // Moving ID zero to the last ID preserves every
                                             // other block's relative order. Entry-first layout

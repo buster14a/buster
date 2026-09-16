@@ -75,7 +75,7 @@ class Checker:
             return ("timeout", b"")
         return (process.returncode, process.stdout)
 
-    def observe(self, text, ide_modes=("ide", "ide-canon")):
+    def observe(self, text, ide_modes=("ide", "alias-none")):
         """Returns (category, detail) for the candidate program text.
 
         The expensive checks run lazily: clang -O0 and the ide modes decide
@@ -93,7 +93,7 @@ class Checker:
             "clang-O0": ["clang", "-O0", "-w"],
             "clang-O2": ["clang", "-O2", "-w"],
             "ide": [self.ide_path, "cc"],
-            "ide-canon": [self.ide_path, "cc", "-fno-register-allocator"],
+            "alias-none": [self.ide_path, "cc", "-fno-register-allocator"],
         }
 
         def evaluate(label):
@@ -184,8 +184,8 @@ def main():
     print("reducing %s: %s (%s)" % (tag, category, detail))
     # Pin reduction to the one mode that diverged: rejects come from the
     # shared frontend, behavior stays with the mode that showed it.
-    if "ide-canon" in detail:
-        ide_modes = ("ide-canon",)
+    if "alias-none" in detail:
+        ide_modes = ("alias-none",)
     else:
         ide_modes = ("ide",)
 

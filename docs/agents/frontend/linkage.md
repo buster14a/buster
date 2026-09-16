@@ -10,9 +10,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   own value. Current fixed-stack producers establish RBP before allocation
   and keep RSP stable in the body. They therefore use PUSH/ALLOC/SAVE records
   without a declared frame register, with SAVE slots relative to final RSP.
-  MIR emits the documented ADD/pops/RET fixed epilogue. The direct dynamic-stack
-  producer allocates first, then establishes RBP, and retains its frame record
-  and LEA epilogue. Do not drop that dynamic-frame information.
+  MIR emits the documented ADD/pops/RET fixed epilogue. Its dynamic-stack
+  producer allocates first, then establishes RBP, and retains the SET_FPREG
+  frame record with its actual displacement and the LEA epilogue. Do not drop
+  that dynamic-frame information.
   `object_test.c` pins both action orders, real nonzero frame offsets, saved
   registers and small/large allocations. The existing native Windows x64
   stack-walk fixture also checks fixed-frame instruction boundaries using

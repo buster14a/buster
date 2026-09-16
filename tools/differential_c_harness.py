@@ -10,9 +10,9 @@ and its observable behavior compared:
               divergence is a harness/generator bug, never a compiler bug
   ide cc      the default pipeline (FAST register allocator)
   ide cc -fno-register-allocator
-              the canonical stack emitter, a separate codegen path that has
-              carried its own miscompiles (the W0 64-lane #UD family was
-              canonical-path-only)
+              the `alias-none` compatibility spelling for MIR_STACK. It is
+              intentionally a duplicate MIR observation, not an independent
+              canonical/direct oracle.
 
 The observables are the process exit status and stdout.  Generated programs
 print through the raw `write` syscall because printf is a silent no-op in
@@ -1916,7 +1916,7 @@ def modes(arguments):
         ("clang-O0", [arguments.cc, "-O0", "-w"]),
         ("clang-O2", [arguments.cc, "-O2", "-w"]),
         ("ide", [ide_path, "cc"]),
-        ("ide-canon", [ide_path, "cc", "-fno-register-allocator"]),
+        ("alias-none", [ide_path, "cc", "-fno-register-allocator"]),
     ]
 
 
@@ -1938,7 +1938,7 @@ def evaluate_case(arguments, family, seed, unit_count, work_directory, selected=
 
 
 def classify(family, seed, observations):
-    reference, control, ide_fast, ide_canon = observations
+    reference, control, ide_fast, alias_none = observations
     result = CaseResult(family, seed, "ok", observations=observations)
     if not reference.compile_ok or not control.compile_ok:
         result.category = "generator"
@@ -1950,7 +1950,7 @@ def classify(family, seed, observations):
         result.category = "generator"
         result.detail = "clang -O0 and -O2 disagree (undefined behavior in the generator)"
     else:
-        for ide_observation in (ide_fast, ide_canon):
+        for ide_observation in (ide_fast, alias_none):
             if not ide_observation.compile_ok:
                 if ide_observation.compile_returncode < 0:
                     result.category = "ide-crash"

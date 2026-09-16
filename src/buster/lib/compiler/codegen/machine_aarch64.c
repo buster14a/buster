@@ -788,7 +788,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_place_address_offset(MachineA64Selec
     {
         // A promoted local has no address. The promotability scan proved
         // no use needs one, so a request here is a selector hole — refuse
-        // to the canonical fallback rather than hand a register's value
+        // structurally rather than hand a register's value
         // out as an address. An over-aligned local's register is the
         // aligned pointer itself and falls through to the pointer path.
         return false;
@@ -2480,8 +2480,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_scalar_binary(MachineA64Selector* se
         // (size <= 8) is what keeps 128-bit operands off this table:
         // i128 values are slot-backed with no operand register, so any
         // i128 binary outside the constant-shift path above refuses here
-        // and the function falls back whole to the canonical emitter,
-        // which owns the remaining 128-bit pair lowerings.
+        // and the function refuses this scalar row; the explicit pair
+        // lowerings below own the remaining 128-bit operations.
         bool wide = machine_a64_type_is_64_bit(program, operand_type_id);
         u16 arithmetic = 0;
         switch (operation)
@@ -5900,6 +5900,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 block = function->entry.value + layout_index;
+    return block < function->block_count ? block : block - function->block_count;
+}
+
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                bool assume_validated, bool preserve_debug_values)
 {
@@ -5907,7 +5913,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
-        function->entry.value == 0)
+        function->entry.value < function->block_count)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
@@ -6009,8 +6015,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             selector.value_stack_slots[value_index] = UINT32_MAX;
             selector.value_indirect_slots[value_index] = UINT32_MAX;
         }
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             u32 parameter_count = 0;
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
             for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -6102,6 +6109,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
+        if (function->entry.value)
+        {
+            selector.block_entries = arena_allocate(arena, u32, function->block_count);
+            selector.block_exits = arena_allocate(arena, u32, function->block_count);
+        }
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
@@ -6259,6 +6271,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             block_candidate_counts[block_index] = block_candidate_count;
         }
+        if (function->entry.value)
+        {
+            u32 next_block = 0;
+            for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+            {
+                u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+                u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+                selector.block_entries[block_index] = next_block;
+                selector.block_exits[block_index] = next_block + block_width - 1u;
+                next_block += block_width;
+            }
+            BUSTER_CHECK(next_block == expanded_blocks);
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -6374,8 +6399,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
@@ -6736,8 +6762,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);
@@ -6760,7 +6787,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-            if (block_index == 0)
+            if (block_index == function->entry.value)
             {
                 if (windows_variadic)
                 {
@@ -7221,7 +7248,7 @@ struct MachineA64Encoder
     u32 capacity;
     bool overflow;
     // An operand or offset outside what the subset can encode; the caller
-    // reports an encode fallback rather than emitting wrong bytes.
+    // reports a structured encoder error rather than emitting wrong bytes.
     bool error;
     // Test-only sparse-layout mode: the planner mutates virtual offsets and
     // metadata without touching a giant byte buffer. Production encoders
@@ -7239,7 +7266,7 @@ struct MachineA64BranchFixup
     A64Opcode opcode;
     // A conditional fixup keeps its original condition here because a long
     // transfer inverts the condition and skips the scratch transfer.  The
-    // direct path still patches the exact word emitted by the MC encoder.
+    // final patch path still patches the exact word emitted by the encoder.
     u8 condition;
     u8 expanded;
     bool label_address;
@@ -7698,8 +7725,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_unsigned_memory(MachineA64En
     return true;
 }
 
-// Frame-relative sized memory operation off the X28 frame base, mirroring
-// the canonical codegen_canonical_a64_memory_operation_base: scaled
+// Frame-relative sized memory operation off the X28 frame base: scaled
 // unsigned offsets directly, larger offsets through the X16 scratch.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encoder, u32 register_number, u32 offset, u32 size, bool store)
 {
@@ -7718,9 +7744,9 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encode
         // member at offset two. Misalignment therefore takes the same X16
         // materialize-and-add path an out-of-range offset does -- which is
         // exactly what the vector sibling below already does, for the same
-        // reason. Failing closed here put the whole enclosing function back on
-        // the canonical emitter through an encode-stage fallback (#813); the
-        // access itself is legal, since AArch64 permits an unaligned normal-
+        // reason. Failing closed here used to turn the whole enclosing
+        // function into an encode-stage fallback (#813); the access itself is
+        // legal, since AArch64 permits an unaligned normal-
         // memory load or store and only the immediate form is scaled. X16 is
         // reserved from the allocator, so it can never be the register the
         // access itself names.
@@ -9470,7 +9496,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_ATOMIC_STORE:
             {
                 // One ldar/stlr-family word, the canonical
-                // a64_emit_atomic_pointer encoding; the low payload byte
+                // atomic-pointer payload encoding; the low payload byte
                 // carries the access size.
                 u32 atomic_size = instruction->payload & 0xffu;
                 u32 atomic_size_bits = atomic_size == 2 ? 0x40000000u : atomic_size == 4 ? 0x80000000u : atomic_size == 8 ? 0xc0000000u : 0;

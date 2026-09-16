@@ -11,7 +11,8 @@
 // after construction, integer-ID based. This header owns only the record
 // shapes, static opcode metadata interface, chunked builder, verifier, and
 // test-only replay; instruction selection and allocation build on top of it
-// in later stages. The canonical direct emitter (`NONE`) never touches it.
+// in later stages. Every supported native allocator reaches this model;
+// `NONE` is the MIR_STACK compatibility spelling.
 
 // A packed operand reference: kind in the top three bits, payload in the low
 // twenty-nine. Payload meaning depends on the kind (virtual/physical register
@@ -455,6 +456,23 @@ typedef enum MachineOpcode
     // RCX, and RDX is clobbered. The expansion moves RDX back into RAX, the
     // way the remainder rows do, so the answer arrives where slot 0 says.
     MACHINE_X64_MULH64, // use/def RAX, use RCX; clobbers RDX
+    // The x86-64 16-byte atomic store uses the same CMPXCHG16B retry
+    // protocol as the canonical emitter.  Operands 0..2 are the desired
+    // frame image (repeated so the constrained row has a complete frame
+    // lifetime), operand 3 is the address in the target's scratch slot.
+    // Payload is the stored value's byte size (9..16); a short aggregate
+    // masks the unused high bytes before the pair exchange.
+    MACHINE_X64_ATOMIC_STORE16,
+    // The x86-64 16-byte atomic load uses a zero-desired CMPXCHG16B retry
+    // protocol.  Operands 0..2 are the result frame image (repeated), operand
+    // 3 is the address in the target's scratch slot. Payload is the loaded
+    // value's byte size (9..16), which keeps the promoted frame image alive.
+    MACHINE_X64_ATOMIC_LOAD16,
+    // The x86-64 16-byte atomic RMW uses a CMPXCHG16B retry loop. Operands
+    // 0 is the old-value result frame, operands 1..2 repeat the desired value
+    // frame, and operand 3 is the address in the target's scratch slot.
+    // Payload low byte is 16 and bits 8.. carry IrAtomicOperation.
+    MACHINE_X64_ATOMIC_RMW16,
     // AArch64 scalar subset. Three-address forms carry no ties; the only
     // constrained rows are the remainder macro-ops, whose div-then-msub
     // sequence needs three distinct registers. Operand slot 0 is the
@@ -751,17 +769,17 @@ typedef enum MachineOpcode
 } MachineOpcode;
 
 // x86-64 encoder authority registry.  The opcode rows are a contiguous
-// projection of MACHINE_X64_MOV_RI..MACHINE_X64_MULH64; the authority and
+// projection of MACHINE_X64_MOV_RI..MACHINE_X64_ATOMIC_RMW16; the authority and
 // neutral-patch records below keep every remaining producer explicit while
 // migration work moves instruction construction behind metadata.
-#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 126u
+#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 129u
 #define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
 #define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 50u
-#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 29u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 32u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT 78u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT 19u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
-#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 29u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 32u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
 #define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 7u
 #define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
@@ -1499,8 +1517,8 @@ typedef enum MachineEditKind
 } MachineEditKind;
 
 // Result of selecting one canonical typed-IR function into machine IR.
-// `supported` false is an explicit per-function fallback: `failed_opcode`
-// names the first construct outside the selected subset.
+// `supported` false is a structured refusal: `failed_opcode` names the first
+// construct outside the selected subset.
 // How the relocation at a call-target site resolves. DIRECT uses the target's
 // default form (rip-relative on x86-64). GOT
 // names the linker-owned slot holding the symbol's address, PLT its procedure
@@ -1540,6 +1558,13 @@ struct MachineSelectResult
     u32 selected_typed_instructions;
     u32 machine_instructions;
     u32 simd_operation_count;
+    // Native vector telemetry is published by the MIR selector, not by the
+    // retired direct emitter: one count for target-width vector rows, one for
+    // wider values expanded lane-by-lane, and one for a native row that
+    // consumes the immediately carried native result without a snapshot.
+    u32 native_vector_operation_count;
+    u32 split_vector_operation_count;
+    u32 forwarded_wide_vector_load_count;
     // Explicit non-SSA values retained by transitional lowering. This is the
     // selector-side telemetry counterpart of MachineVerifyResult's count.
     u32 mutable_virtual_register_count;
@@ -1682,6 +1707,8 @@ struct MachineEncodeResult
     u32 exact_attempts;
     u32 exact_successes;
     u32 exact_failures;
+    // Actual transition-hygiene instructions emitted by the x86 encoder.
+    u32 vzeroupper_count;
 };
 
 // Chunked construction: one selection pass appends rows into fixed-size arena

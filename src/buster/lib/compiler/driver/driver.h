@@ -151,7 +151,8 @@ struct CompilerDriverInvocation
     bool sysv_bitfield_abi_explicit;
     // A CodegenRegisterAllocatorMode value. FAST is the driver default;
     // -fregister-allocator= selects another mode and
-    // -fno-register-allocator selects NONE.
+    // -fno-register-allocator selects the NONE compatibility spelling, which
+    // the native generator remaps to MIR_STACK.
     u8 register_allocator;
     // -fPIC/-fpic, cleared by -fno-pic. The code generator reads it as a code
     // model: it picks the thread-local model, and a symbol another object
@@ -163,11 +164,12 @@ struct CompilerDriverInvocation
     bool has_gpu_target;
     bool save_gpu_temporaries;
     bool register_allocator_explicit;
-    // -fno-machine-fallback: fail native C compilation before writing its
-    // object if any function needed the canonical differential oracle.
+    // -fno-machine-fallback/-fmachine-fallback are retained compatibility
+    // spellings. Native generation is always MIR-only; a MIR refusal fails
+    // before object writing regardless of this flag.
     bool reject_machine_fallback;
-    // -fcodegen-fallback-census: retain every observed native fallback's
-    // source identity. It does not enable or disable production fallback.
+    // -fcodegen-fallback-census remains an ABI-compatible diagnostic flag. The
+    // MIR-only generator does not populate fallback records.
     bool record_codegen_fallbacks;
     bool c_dialect_explicit;
 };
