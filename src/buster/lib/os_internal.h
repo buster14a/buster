@@ -36,6 +36,17 @@ struct OsFileTestStep
 BUSTER_F_DECL void os_file_test_begin(String8 path, const OsFileTestStep* steps, u32 count);
 BUSTER_F_DECL u32 os_file_test_end(void);
 BUSTER_F_DECL bool os_file_test_map_unavailable(String8 path);
+#if BUSTER_LINUX || BUSTER_MACOS
+BUSTER_F_DECL void os_process_wait_test_expire_deadline_after_ready_once(void);
+BUSTER_F_DECL bool os_process_group_reservation_release_self_test(void);
+BUSTER_F_DECL bool os_process_group_recovery_self_test(void);
+BUSTER_F_DECL bool os_process_group_ownership_loss_self_test(void);
+BUSTER_F_DECL bool os_process_group_escaped_capture_self_test(Arena* arena);
+#endif
+#if BUSTER_LINUX
+BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
+BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
+#endif
 
 // Calling-thread census of the advisory prefault requests os_prefault
 // observed, however they were produced. It exists so a test can prove that a
