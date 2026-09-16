@@ -1,0 +1,33 @@
+name: Issue 333 isolated validation
+on:
+  push:
+    branches: [codex/333-validation]
+    paths: [.github/workflows/issue-333-validation.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    name: Pinned source snapshot
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
+          persist-credentials: false
+      - name: Retain exact tracked source for local validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/source-revision.txt"
+          git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/buster-source.tar.gz"
+          sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-333-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/buster-source.tar.gz
+            ${{ runner.temp }}/source-revision.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
