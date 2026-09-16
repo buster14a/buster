@@ -522,7 +522,22 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   gate in both scanners, retaining the binary16 specifier contract while
   rejecting contradictory or repeated half-type words with a diagnostic.
   A type name refused this way pins `sizeof`/`_Alignof` to the
-  recorded constraint instead of falling back to a guessed `int`. Regressions:
+  recorded constraint instead of falling back to a guessed `int`.
+- A `struct`, `union` or `enum` specifier names a type exactly as a primitive
+  word does, so a set that spells both (`int struct S`, `struct S unsigned`)
+  or two tags (`struct S enum E`) is the same error at the same first
+  specifier word. `c_parse_type_specifier_token` is the one question behind
+  it -- it runs `c_ir_primitive_type_kind` over a single token, so no second
+  list of spellings can drift from the scans -- and it is asked of the words
+  the aggregate scan stepped over to reach the tag keyword, of a type word
+  left standing where a declarator belongs (which is also how a second
+  specifier after a typedef name is caught), and of each word in a token-walk
+  run that carries a tag. That run spans the tag's name, so `struct S int` is
+  one run and not two; a definition body ends it instead, leaving the
+  declarations inside the braces to be walked on their own. Before this,
+  `int struct S v` took the aggregate's layout under a spelling it never had
+  and `struct S int v` was accepted with no definition emitted at all.
+  Regressions:
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
 

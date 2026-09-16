@@ -17271,6 +17271,127 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
         BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
         scratch_end(temporary);
     }
+    // A tag specifier names a type exactly the way a primitive word does, so
+    // a set that spells both, or two tags, violates the same constraint the
+    // sets above do. `int struct S v` was accepted with the aggregate's
+    // layout under a spelling it never had, and `struct S int v` was
+    // accepted with no definition at all. The prelude occupies three lines,
+    // so every specifier below is spelled on line 4 and the declaration that
+    // must survive the refusal on line 5.
+    String8 tag_specifiers[] = {S8("int struct S"), S8("struct S int"), S8("unsigned struct S"), S8("struct S unsigned"),
+        S8("int union U"), S8("union U int"), S8("int enum E"), S8("enum E int"), S8("void struct S"),
+        S8("struct S enum E"), S8("double struct S"), S8("_Complex struct S"), S8("long struct S"), S8("char struct S"),
+        S8("_Float16 struct S"), S8("struct S _Complex")};
+    String8 tag_contexts[] = {
+        S8("{S8} v;\nint following;\n"),
+        S8("int f(void) {{ {S8} v; return 1; }}\nint following;\n"),
+        S8("int f({S8} v);\nint following;\n"),
+        S8("typedef {S8} T;\nint following;\n"),
+        S8("struct Holder {{ {S8} m; }};\nint following;\n"),
+        S8("int f(void) {{ return sizeof({S8}); }}\nint following;\n"),
+        S8("_Static_assert(sizeof({S8}) > 0, \"bad\");\nint following;\n"),
+        S8("static int unused(void) {{ return sizeof({S8}); }}\nint following;\n")
+    };
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(tag_specifiers); specifier += 1)
+    {
+        for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(tag_contexts); context += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 declaration = string_format(temporary.arena, tag_contexts[context], tag_specifiers[specifier]);
+            String8 source = string_format(temporary.arena,
+                S8("struct S {{ int a; int b; }};\nunion U {{ int a; }};\nenum E {{ A }};\n{S8}"), declaration);
+            CPreprocessResult tokens = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("invalid-tag-specifiers.c"), target_native, &tokens, &parse);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, parse.diagnostic_count != 0 || lowered.diagnostic_count != 0, source);
+            bool attributed = false;
+            bool blamed_following = false;
+            for (u32 diagnostic = 0; diagnostic < parse.diagnostic_count; diagnostic += 1)
+            {
+                attributed |= parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                              parse.diagnostics[diagnostic].location.line == 4;
+                blamed_following |= parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                                    parse.diagnostics[diagnostic].location.line > 4;
+            }
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+            {
+                attributed |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                              lowered.diagnostics[diagnostic].location.line == 4;
+                blamed_following |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                                    lowered.diagnostics[diagnostic].location.line > 4;
+            }
+            BUSTER_TEST_RAW(arguments, attributed, source);
+            BUSTER_TEST_RAW(arguments, !blamed_following, source);
+            scratch_end(temporary);
+        }
+    }
+    // The refusal recovers the way the primitive one does: the declaration
+    // after it is still parsed, and nothing on its line is blamed.
+    String8 tag_recovered[] = {
+        S8("int struct S v;\nint following;\n"),
+        S8("struct S int v, w;\nint following;\n"),
+        S8("int f(struct S int, int next);\nint following;\n"),
+        S8("int f(void) { int struct S v; int following_local = 2; return following_local; }\nint following;\n"),
+    };
+    for (u32 recovery = 0; recovery < BUSTER_ARRAY_LENGTH(tag_recovered); recovery += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena,
+            S8("struct S {{ int a; int b; }};\nunion U {{ int a; }};\nenum E {{ A }};\n{S8}"), tag_recovered[recovery]);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("invalid-tag-specifiers-recovery.c"),
+                                 .target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+        bool attributed = false;
+        for (u32 diagnostic = 0; diagnostic < syntax.diagnostic_count; diagnostic += 1)
+        {
+            attributed |= syntax.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                          syntax.diagnostics[diagnostic].location.line == 4;
+        }
+        BUSTER_TEST_RAW(arguments, attributed, source);
+        bool following_declared = false;
+        for (CParserDeclaration* declaration = syntax.first_declaration; declaration; declaration = declaration->next)
+        {
+            following_declared |= declaration->name_token != C_ID_UNDERLYING_INVALID &&
+                                  declaration->name_token < tokens.token_count &&
+                                  string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[declaration->name_token]),
+                                               S8("following"));
+        }
+        BUSTER_TEST_RAW(arguments, following_declared, source);
+        scratch_end(temporary);
+    }
+    String8 tag_control_specifiers[] = {S8("struct S"), S8("const struct S"), S8("struct S const"), S8("union U"),
+        S8("enum E"), S8("struct S volatile"), S8("__extension__ struct S")};
+    u64 tag_control_sizes[] = {8, 8, 8, 4, 4, 8, 8};
+    for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(tag_control_specifiers); control += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena,
+            S8("struct S {{ int a; int b; }};\nunion U {{ int a; }};\nenum E {{ A }};\n{S8} v;\nint take(void) {{ return sizeof(v); }}\n"),
+            tag_control_specifiers[control]);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("valid-tag-specifiers.c"), target_native, &tokens, &parse);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
+        bool lowered_v = false;
+        if (lowered.program && lowered.program->module_count)
+        {
+            IrModule* module = &lowered.program->modules[0];
+            for (u32 global = 0; global < module->global_count; global += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, module->globals[global].symbol);
+                if (symbol && string_equal(symbol->name, S8("v")))
+                {
+                    IrType* global_type = ir_type_from_id(&lowered.program->types, module->globals[global].type);
+                    lowered_v = global_type && global_type->layout.resolved && global_type->layout.size == tag_control_sizes[control];
+                }
+            }
+        }
+        BUSTER_TEST_RAW(arguments, lowered_v, source);
+        scratch_end(temporary);
+    }
     return result;
 }
 
