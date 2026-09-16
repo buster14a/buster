@@ -2,16 +2,120 @@
 """Controlled cross-platform tests for the immutable TCC bootstrap cache."""
 import json
 import os
+import platform
+import re
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+# These are harness deadlines, not compiler performance budgets. The Windows
+# lane in #701 spent ~48 s in a passing wrapper test; keep Unix's tighter limit.
+# See docs/ci-bootstrap-wrapper.md for the independent suite budget.
+WRAPPER_TIMEOUT_SECONDS = 120 if os.name == "nt" else 20
+CLEANUP_TIMEOUT_SECONDS = 10
+
+
+class WrapperProcess:
+    """Own one test child and its output, including assertion/timeout cleanup."""
+    def __init__(self, owner, command, cwd, environment):
+        self.started = time.monotonic()
+        self.test_id = owner.id()
+        self.cleaned = False
+        # File-backed capture cannot block on pipe capacity or an inherited
+        # pipe handle while another concurrent publisher is being collected.
+        self.stdout = tempfile.TemporaryFile()
+        owner.addCleanup(self.stdout.close)
+        self.stderr = tempfile.TemporaryFile()
+        owner.addCleanup(self.stderr.close)
+        self.process = subprocess.Popen(command, cwd=cwd, env=environment,
+                                        stdout=self.stdout, stderr=self.stderr,
+                                        start_new_session=os.name != "nt")
+        # Register each child immediately, before launching the next one or
+        # making any assertions. unittest cleans children before fixture files.
+        owner.addCleanup(self.cleanup)
+        print("BOOTSTRAP_PROCESS " + json.dumps({
+            "event": "start", "test": self.test_id, "pid": self.process.pid,
+            "argv": command, "timeout_seconds": WRAPPER_TIMEOUT_SECONDS,
+        }), flush=True)
+
+    def cleanup(self):
+        if not self.cleaned:
+            try:
+                if os.name == "nt":
+                    if self.process.poll() is None:
+                        taskkill = os.path.join(os.environ["SystemRoot"], "System32", "taskkill.exe")
+                        result = subprocess.run([taskkill, "/PID", str(self.process.pid), "/T", "/F"],
+                                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                timeout=CLEANUP_TIMEOUT_SECONDS)
+                        if result.returncode != 0:
+                            raise RuntimeError("bootstrap process-tree cleanup failed: " +
+                                               result.stdout.decode(errors="replace"))
+                else:
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            finally:
+                # Even a tree-cleanup error must reap the direct child. The
+                # error still propagates; a failed cleanup never becomes a pass.
+                if self.process.poll() is None:
+                    self.process.kill()
+                self.process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
+                self.cleaned = True
+
+    def finish(self, timeout_seconds=None):
+        # Each concurrent child's deadline starts at launch, not when its turn
+        # in the collection loop arrives. A completed child can be waited at 0.
+        remaining = (max(0, self.started + WRAPPER_TIMEOUT_SECONDS - time.monotonic())
+                     if timeout_seconds is None else timeout_seconds)
+        timed_out = False
+        try:
+            self.process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            self.cleanup()
+        self.stdout.seek(0)
+        self.stderr.seek(0)
+        stdout = self.stdout.read().decode(errors="replace")
+        stderr = self.stderr.read().decode(errors="replace")
+        print("BOOTSTRAP_PROCESS " + json.dumps({
+            "event": "finish", "test": self.test_id, "pid": self.process.pid,
+            "observed_elapsed_seconds": round(time.monotonic() - self.started, 3),
+            "returncode": self.process.returncode, "timed_out": timed_out,
+        }), flush=True)
+        if timed_out:
+            raise AssertionError("bootstrap child timed out: " + repr(self.process.args) +
+                                 "\nstdout:\n" + stdout + "\nstderr:\n" + stderr)
+        return subprocess.CompletedProcess(self.process.args, self.process.returncode, stdout, stderr)
+
+
+class BootstrapTimingResult(unittest.TextTestResult):
+    def startTest(self, test):
+        super().startTest(test)
+        self.started = time.monotonic()
+        print("BOOTSTRAP_TEST " + json.dumps({"event": "start", "test": test.id()}), flush=True)
+
+    def stopTest(self, test):
+        print("BOOTSTRAP_TEST " + json.dumps({
+            "event": "finish", "test": test.id(),
+            "elapsed_seconds": round(time.monotonic() - self.started, 3),
+        }), flush=True)
+        super().stopTest(test)
+
+
+class BootstrapTestRunner(unittest.TextTestRunner):
+    resultclass = BootstrapTimingResult
 
 
 FAKE_TCC = r'''#!/usr/bin/env python3
@@ -94,7 +198,7 @@ class BootstrapWrapperTests(unittest.TestCase):
             command = [self.shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.root / "build.ps1"), *arguments]
         else:
             command = ["bash", str(self.root / "build.sh"), *arguments]
-        return subprocess.run(command, cwd=self.root.parent, env=active_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return WrapperProcess(self, command, self.root.parent, active_environment).finish()
 
     def launch_count(self):
         return len(self.log.read_text().splitlines())
@@ -206,12 +310,11 @@ class BootstrapWrapperTests(unittest.TestCase):
                 command = [self.shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.root / "build.ps1"), *arguments]
             else:
                 command = ["bash", str(self.root / "build.sh"), *arguments]
-            processes.append(subprocess.Popen(command, cwd=self.root, env=self.environment, text=True,
-                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+            processes.append(WrapperProcess(self, command, self.root, self.environment))
         for index, process in enumerate(processes):
-            stdout, stderr = process.communicate(timeout=20)
-            self.assertEqual(process.returncode, 0, stderr)
-            self.assertIn("cmd.exe" if os.name == "nt" else "concurrent-%d" % index, stdout)
+            result = process.finish()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("cmd.exe" if os.name == "nt" else "concurrent-%d" % index, result.stdout)
         artifacts = self.cache_artifacts()
         self.assertGreaterEqual(len(artifacts), 1)
         self.assertEqual(len(artifacts), len({path.name for path in artifacts}))
@@ -221,6 +324,92 @@ class BootstrapWrapperTests(unittest.TestCase):
                 self.assertTrue((marker.parent / data["artifact"]).is_file())
             else:
                 self.assertEqual(marker.read_text().splitlines()[-1], "END")
+
+
+class BootstrapProcessTests(unittest.TestCase):
+    def test_nonzero_status_and_both_streams_are_preserved(self):
+        command = [sys.executable, "-c",
+                   "import sys; print('stdout-marker'); print('stderr-marker', file=sys.stderr); sys.exit(37)"]
+        result = WrapperProcess(self, command, ROOT, os.environ.copy()).finish()
+        self.assertEqual(result.returncode, 37)
+        self.assertEqual(result.stdout.strip(), "stdout-marker")
+        self.assertEqual(result.stderr.strip(), "stderr-marker")
+
+    def test_timeout_is_a_failure_and_reaps_the_child(self):
+        child = WrapperProcess(self, [sys.executable, "-c", "import time; time.sleep(60)"],
+                               ROOT, os.environ.copy())
+        with self.assertRaisesRegex(AssertionError, "bootstrap child timed out"):
+            child.finish(timeout_seconds=0.05)
+        self.assertIsNotNone(child.process.poll())
+        child.cleanup()  # A later unittest cleanup must be harmless.
+
+    def test_collection_does_not_restart_an_expired_launch_deadline(self):
+        child = WrapperProcess(self, [sys.executable, "-c", "import time; time.sleep(60)"],
+                               ROOT, os.environ.copy())
+        child.started -= WRAPPER_TIMEOUT_SECONDS + 1
+        with self.assertRaisesRegex(AssertionError, "bootstrap child timed out"):
+            child.finish()
+        self.assertIsNotNone(child.process.poll())
+
+    def test_early_failure_cleanup_reaps_all_launched_children(self):
+        owner = unittest.TestCase()
+        self.addCleanup(owner.doCleanups)
+        children = [WrapperProcess(owner, [sys.executable, "-c", "import time; time.sleep(60)"],
+                                   ROOT, os.environ.copy()) for _ in range(3)]
+        # Exercise the cleanup path used when publication fails before any
+        # result is collected, rather than explicitly finishing every child.
+        self.assertTrue(owner.doCleanups())
+        for child in children:
+            self.assertIsNotNone(child.process.poll())
+            self.assertTrue(child.stdout.closed)
+            self.assertTrue(child.stderr.closed)
+
+
+class BootstrapWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)",
+                                     self.desktop))
+
+    def test_wrapper_step_has_an_independent_bounded_budget_and_retained_log(self):
+        block = self.steps["Bootstrap wrapper regression tests"]
+        self.assertIn("id: bootstrap_wrappers", block)
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", block)
+        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", block)
+        self.assertIn("set -euo pipefail", block)
+        self.assertIn('tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"', block)
+        self.assertNotIn("continue-on-error:", block)
+        self.assertEqual(self.desktop.count("tests/bootstrap_wrapper_test.py -v"), 1)
+        policy = self.steps["Workflow tool regression tests"]
+        self.assertIn("timeout-minutes: 2", policy)
+        self.assertNotIn("bootstrap_wrapper_test.py", policy)
+        for suite in ("tests/ci_tools_test.py", "tools/analyzer_selection_test.py", "tools/differential_ci_policy_test.py"):
+            self.assertIn(suite + " -v", policy)
+        self.assertIn("path: ${{ runner.temp }}/buster-ci/", self.steps["Retain desktop logs"])
+        self.assertEqual(len(re.findall(r"(?m)^          - name:", self.desktop)), 6)
+
+    def test_both_desktop_required_lists_reject_unsuccessful_wrapper_work(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        self.addCleanup(sys.path.pop, 0)
+        import ci_summary
+        summary = self.steps["Desktop result and reproduction"]
+        self.assertIn("always()", summary)
+        self.assertIn("tools/ci_summary.py", summary)
+        expression = re.search(r"BUSTER_CI_REQUIRED: (.+)", summary).group(1)
+        lists = re.findall(r"'(workflow_tools[^']*)'", expression)
+        self.assertEqual(lists, ["workflow_tools bootstrap_wrappers zig combinations_unix",
+                                 "workflow_tools bootstrap_wrappers zig combinations_windows"])
+        for required in lists:
+            for outcome in (None, "skipped", "cancelled", "failure", "timed_out", "success"):
+                with self.subTest(required=required, outcome=outcome):
+                    steps = {name: {"outcome": "success"} for name in required.split()}
+                    if outcome is None:
+                        del steps["bootstrap_wrappers"]
+                    else:
+                        steps["bootstrap_wrappers"] = {"outcome": outcome, "conclusion": "success"}
+                    self.assertEqual(ci_summary.assess(steps, required.split()),
+                                     [] if outcome == "success" else ["bootstrap_wrappers"])
 
 
 class BootstrapBuildGraphTests(unittest.TestCase):
@@ -235,4 +424,11 @@ class BootstrapBuildGraphTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    print("BOOTSTRAP_ENVIRONMENT " + json.dumps({
+        "os": platform.system(), "machine": platform.machine(),
+        "python": sys.executable, "python_version": platform.python_version(),
+        "shell": (shutil.which("powershell.exe") or shutil.which("pwsh.exe"))
+                 if os.name == "nt" else shutil.which("bash"),
+        "wrapper_timeout_seconds": WRAPPER_TIMEOUT_SECONDS,
+    }), flush=True)
+    unittest.main(testRunner=BootstrapTestRunner)

@@ -3513,11 +3513,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
         {
             String8 node_arguments[] = {node, S8("tests/wasm_integer_execution.js"), output};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+                                                       (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                                             .use_process_environment = 1});
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
             {
+                u64 start = os_now_microseconds();
                 ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                // A bare success assertion loses the distinction between a deadline, a runtime crash and a failed Wasm check.
+                arguments->show(arguments, S8("WASM_INTEGER_PROCESS result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64} node={S8} module={S8}\nstdout:\n{S8}\nstderr:\n{S8}\n"),
+                                (u32)wait.result, wait.platform_status, (u32)wait.timed_out, os_now_microseconds() - start, node, output,
+                                BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]));
                 BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
             }
         }
@@ -3827,16 +3833,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 }
                 else
                 {
-#if BUSTER_CPU_ARCH_AARCH64
                     // Read the reference's alias addresses directly from the
-                    // DSO, independently of system COPY-slot allocation.
+                    // DSO, independently of system COPY-slot allocation. GCC's
+                    // x86-64 -fPIE object addresses imported data directly, and
+                    // a -no-pie system link gives each strong alias its own
+                    // COPY slot, so writes through one alias miss the other.
                     command[command_count++] = S8("-fPIC");
                     command[command_count++] = S8("-pie");
                     command[command_count++] = main_source;
-#else
-                    command[command_count++] = S8("-no-pie");
-                    command[command_count++] = object_path;
-#endif
                     command[command_count++] = S8("-L");
                     command[command_count++] = directory;
                     command[command_count++] = S8("-ldataprobe");
@@ -6114,6 +6118,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ByteSlice string_bytes = string_map.bytes;
         BUSTER_TEST(arguments, string_bytes.length != 0);
         file_map_unmap(string_map);
+        String8 wchar_object_path =
+            buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-wchar"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+        String8 wchar_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wchar_object_path, S8("tests/issue36_target_wchar.c"),
+        };
+        CompilerDriverResult wchar_result = compiler_driver_execute_invocation(
+            cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wchar_command_line)));
+        BUSTER_TEST(arguments, wchar_result.error == COMPILER_DRIVER_ERROR_NONE);
+        FileMapRead wchar_map = file_map_read(cross_temp.arena, wchar_object_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, wchar_map.bytes.length != 0);
+        file_map_unmap(wchar_map);
         String8 nullptr_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-nullptr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 nullptr_command_line[] = {
@@ -7471,11 +7486,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(debug_parity_sources); source_index += 1)
             {
                 String8 source = debug_parity_sources[source_index];
+                String8 debug_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g.o"), target_index, source_index));
+                String8 stripped_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g0.o"), target_index, source_index));
                 String8 debug_command_line[] = {
-                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], source,
+                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], S8("-o"), debug_object_path, source,
                 };
                 String8 stripped_command_line[] = {
-                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], source,
+                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], S8("-o"), stripped_object_path, source,
                 };
                 CompilerDriverResult with_debug = compiler_driver_execute_invocation(
                     debug_parity_temporary.arena,
@@ -11241,8 +11262,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // ELF writer then splits that back into the `.init_array.NNNNN` sections
     // `ld` orders across translation units by.  Both halves are checked below.
     {
+        String8 constructor_array_object_path = buster_test_temporary_path(arguments->arena, S8("buster-c-constructor-array-object"), S8(".o"));
         String8 constructor_object_command_line[] = {
-            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_constructor.c"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), constructor_array_object_path, S8("tests/basic_c_constructor.c"),
         };
         CompilerDriverResult constructor_object = compiler_driver_execute_invocation(
             arguments->arena,
@@ -14358,9 +14380,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 allocator_flag =
                     string_format(thread_local_model_arena, S8("-fregister-allocator={S8}"), thread_local_model_allocators[allocator_index]);
                 String8 position_independent_flag = pic_index ? S8("-fPIC") : S8("-fno-pic");
+                String8 thread_local_model_object_path =
+                    buster_test_temporary_path(thread_local_model_arena, S8("buster-c-thread-local-models-object"),
+                                               string_format(thread_local_model_arena, S8("-{u32}-{u32}.o"), allocator_index, pic_index));
                 String8 thread_local_model_object_command_line[] = {
                     allocator_flag, position_independent_flag, S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"),
-                    S8("tests/basic_c_thread_local_models.c"),
+                    S8("-o"), thread_local_model_object_path, S8("tests/basic_c_thread_local_models.c"),
                 };
                 CompilerDriverResult thread_local_model_object = compiler_driver_execute_invocation(
                     thread_local_model_arena, compiler_driver_parse_arguments(thread_local_model_arena,

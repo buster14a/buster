@@ -36,9 +36,14 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
     "schema=2 journal=3 materialization-journal=2 legacy-journal=1 executor=linux-supervisor pending=8 jobs=64\n"
-    "recipes=fake-success-v1,fake-failure-v1,validate-buster-v1 workload=fake-steps-v1\n"
-    "profile=unmeasured validity=not-evaluated materialization=installed-read-only workspace=per-attempt\n"
-    "worker=fixed-systemd-scope recipe-execution=not-admitted transport=none authentication=none\n"
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 workload=not-admitted\n"
+    "profile=smoke-slice validity=not-evaluated materialization=installed-read-only workspace=per-attempt\n"
+    "worker=fixed-systemd-service recipe-execution=fixed-validate-buster-v1 validation=vertical-slice "
+#ifdef __linux__
+    "transport=unix-seqpacket authentication=peer-uid-gid\n"
+#else
+    "transport=unsupported authentication=none\n"
+#endif
 #ifdef _WIN32
     "storage=unsupported-on-windows\n";
 #else
@@ -109,6 +114,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             id = bq_u64(body);
             BqJob* job = bq_job(&queue->state, id);
             error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED : BQ_OK;
+            if (error == BQ_OK && job && job->result_bound && (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT))
+            {
+                error = bq_worker_result_binding_validate(job);
+                if (error == BQ_OK && schema == BQ_CONTROL_SCHEMA) output_size = BQ_CONTROL_BODY;
+            }
             if (error == BQ_OK && operation == BQ_OP_CANCEL)
             {
                 error = bq_cancel(queue, id);
@@ -163,7 +173,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
                     .boot_id_file = S8("/proc/sys/kernel/random/boot_id"),
                     .cgroup_root = S8("/sys/fs/cgroup"),
                     .limits = {cpu, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
-                    .quarantine = &bq_worker_quarantine
+                    .quarantine = &bq_worker_quarantine,
+                    .queue_root = string_from_pointer(queue->directory_path),
+                    .production_path = true
                 };
                 error = bq_worker_run(queue, &config, &id);
             }
@@ -210,7 +222,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             }
         }
     }
-    if (output_size == 120 || output_size == 124)
+    if (output_size == 120 || output_size == 124 || output_size == BQ_CONTROL_BODY)
     {
         BqJob const* job = bq_job(&queue->state, id);
         bq_put64(output + 4, job ? job->id : 0);
@@ -236,6 +248,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             {
                 error = failure;
             }
+        }
+        if (output_size == BQ_CONTROL_BODY && job && job->result_bound)
+        {
+            bq_put32(output + 124, (u32)strlen(job->result_root));
+            memcpy(output + 128, job->result_root, strlen(job->result_root));
+            memcpy(output + 320, job->result_manifest_digest, 64);
+            memcpy(output + 384, job->result_bundle_digest, 64);
+            memcpy(output + 448, job->result_full_digest, 64);
         }
     }
     bq_put32(output, (u32)error);

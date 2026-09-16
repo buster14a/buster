@@ -526,6 +526,7 @@ BUSTER_F_DECL bool target_cpu_feature_names_are_sorted(void);
 BUSTER_F_DECL String8 target_cpu_features_to_string(Arena* arena, Target target);
 BUSTER_F_DECL bool target_uses_llp64_data_model(Target target);
 BUSTER_F_DECL bool target_uses_16_bit_wchar(Target target);
+BUSTER_F_DECL bool target_uses_unsigned_wchar(Target target);
 BUSTER_F_DECL bool target_uses_pe_unwind(Target target);
 BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
 BUSTER_F_DECL bool target_data_layout_is_valid(TargetDataLayout layout);

@@ -227,7 +227,7 @@ BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling)
     {
         token_class |= C_TOKEN_CLASS_TYPEOF;
     }
-    if (string_equal(spelling, S8("vector_size")) || string_equal(spelling, S8("__vector_size")) || string_equal(spelling, S8("__vector_size__")))
+    if (c_parse_vector_size_word(spelling))
     {
         token_class |= C_TOKEN_CLASS_VECTOR_SIZE;
     }
@@ -822,10 +822,25 @@ BUSTER_C_SHARED bool c_parse_alignas_word(String8 spelling)
     return string_equal(spelling, S8("_Alignas"));
 }
 
+// The GNU alignment attribute alone, without C's `_Alignas` keyword. It is the
+// half of c_parse_alignment_word that is an attribute, so it is also the half
+// `__has_attribute` answers for; sharing the predicate is what keeps the query
+// and the layout that implements it from drifting apart (#639).
+BUSTER_C_SHARED bool c_parse_aligned_attribute_word(String8 spelling)
+{
+    return string_equal(spelling, S8("aligned")) || string_equal(spelling, S8("__aligned")) || string_equal(spelling, S8("__aligned__"));
+}
+
+// The three spellings of the GNU vector attribute, which reach the vector
+// types through C_TOKEN_CLASS_VECTOR_SIZE above.
+BUSTER_C_SHARED bool c_parse_vector_size_word(String8 spelling)
+{
+    return string_equal(spelling, S8("vector_size")) || string_equal(spelling, S8("__vector_size")) || string_equal(spelling, S8("__vector_size__"));
+}
+
 BUSTER_C_INTERNAL bool c_parse_alignment_word(String8 spelling)
 {
-    return c_parse_alignas_word(spelling) || string_equal(spelling, S8("aligned")) || string_equal(spelling, S8("__aligned")) ||
-           string_equal(spelling, S8("__aligned__"));
+    return c_parse_alignas_word(spelling) || c_parse_aligned_attribute_word(spelling);
 }
 
 // Which spelling produced this record, which decides what a request below the
@@ -3041,7 +3056,14 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     }
     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
     {
-        return c_parse_expression_scalar_type(result, C_TYPE_INT);
+        String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+        CTypeKind kind = C_TYPE_INT;
+        if (spelling.length && spelling.pointer[0] == 'L')
+        {
+            kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+                   target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+        }
+        return c_parse_expression_scalar_type(result, kind);
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
     {
@@ -6589,7 +6611,7 @@ BUSTER_C_INTERNAL bool c_parse_attribute_group_at(CPreprocessResult preprocess, 
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_parse_packed_word(String8 spelling)
+BUSTER_C_SHARED bool c_parse_packed_word(String8 spelling)
 {
     return string_equal(spelling, S8("packed")) || string_equal(spelling, S8("__packed")) || string_equal(spelling, S8("__packed__"));
 }

@@ -51,9 +51,8 @@
 //   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
 //   c_include_read .. c_include_name           include resolution and the
 //                                              builtin resource headers
-//   CIncludeGuardState, CIncludeGuardTable     the multiple-include
-//                                              optimization for #ifndef
-//                                              guard-shaped headers
+//   CIncludeGuardState, CIncludeFileTable      shared #import, #pragma once,
+//                                              and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
 //                                              parsing
@@ -5275,9 +5274,79 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
     return result;
 }
 
+// `__has_attribute` answers for the GNU attributes whose semantics this
+// frontend actually implements, by asking the parser's own spelling
+// predicates rather than keeping a second list beside them: `packed` and
+// `aligned` are collected by c_parse_layout_attributes and change the record
+// layout, `vector_size` builds the vector types. An attribute whose spelling
+// is merely accepted and stepped over is not supported and answers 0, so
+// source that selects a layout on this query cannot silently lose it (#639).
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)
 {
-    return string_equal(name, S8("vector_size")) || string_equal(name, S8("__vector_size")) || string_equal(name, S8("__vector_size__"));
+    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name);
+}
+
+// `__has_c_attribute` is a different operator over a different namespace, and
+// is deliberately not the query above. It asks about C's bracketed attributes,
+// answering the standard attribute's version number -- clang 18 answers
+// 202003L for `nodiscard` and 201910L for `fallthrough` -- 1 for a supported
+// vendor attribute written with its namespace (`gnu::packed`), and 0
+// otherwise, including for every GNU attribute named without one: clang
+// answers 0 for a bare `packed`, `aligned` and `vector_size`.
+//
+// This frontend recognizes `[[ ... ]]` in c_parse_c23_attribute_at and steps
+// over it; no bracketed attribute changes layout, diagnostics or code
+// generation here, and c_parse_layout_attributes only ever reads
+// `__attribute__` groups. Nothing is implemented, so the truthful answer is 0
+// for every spelling, and a bare GNU name answers 0 here even though the GNU
+// query above answers 1 for it. Implementing one of these attributes means
+// returning its version number from here, not 1.
+BUSTER_C_INTERNAL bool c_conditional_c_attribute_supported(void)
+{
+    return false;
+}
+
+// `__is_target_os` asks about the selected compilation target, and answers the
+// spellings clang accepts for it rather than this compiler's internal enum
+// names. The alias sets were read back out of clang 18 with `-target` and
+// `-E`, which parses the spelling as a triple's OS component and compares it
+// with the target's own: a Windows target answers `windows` and `win32`; a
+// Darwin target answers `darwin` as well as its own `macos`/`macosx` or `ios`;
+// UEFI answers `uefi`.
+//
+// Android is the case that cannot be answered from the enum name. Its triple
+// carries Linux as the OS and Android as the environment, so clang answers
+// `linux` for an Android target and never answers `android` at all -- the
+// spelling is not an OS. A freestanding target has no triple OS and answers
+// nothing (#640).
+BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, String8 spelling)
+{
+    bool result;
+    switch (os)
+    {
+    case OPERATING_SYSTEM_LINUX:
+    case OPERATING_SYSTEM_ANDROID:
+        result = string_equal(spelling, S8("linux"));
+        break;
+    case OPERATING_SYSTEM_MACOS:
+        result = string_equal(spelling, S8("macos")) || string_equal(spelling, S8("macosx")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_IOS:
+        result = string_equal(spelling, S8("ios")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_WINDOWS:
+        result = string_equal(spelling, S8("windows")) || string_equal(spelling, S8("win32"));
+        break;
+    case OPERATING_SYSTEM_UEFI:
+        result = string_equal(spelling, S8("uefi"));
+        break;
+    case OPERATING_SYSTEM_FREESTANDING:
+    case OPERATING_SYSTEM_COUNT:
+    default:
+        result = false;
+        break;
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
@@ -5318,8 +5387,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool has_include = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include"));
         bool has_include_next = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include_next"));
         bool has_builtin = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_builtin"));
-        bool has_attribute =
-            token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_attribute")) || c_token_spelling_equal(base, token, S8("__has_c_attribute")));
+        bool has_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_attribute"));
+        bool has_c_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_c_attribute"));
         bool has_feature =
             token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_feature")) || c_token_spelling_equal(base, token, S8("__has_extension")) ||
                                                  c_token_spelling_equal(base, token, S8("__building_module")));
@@ -5327,8 +5396,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool is_target_environment = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_environment"));
         bool is_target_os = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_os"));
         bool is_target_vendor = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_vendor"));
-        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_feature && !is_target_arch && !is_target_environment && !is_target_os &&
-            !is_target_vendor)
+        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_c_attribute && !has_feature && !is_target_arch &&
+            !is_target_environment && !is_target_os && !is_target_vendor)
         {
             continue;
         }
@@ -5385,6 +5454,15 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]))
                                     : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
         }
+        else if (has_c_attribute && argument_count)
+        {
+            // Any non-empty argument shape the balanced scan above accepted,
+            // so that the namespaced spelling this operator's own contract
+            // admits -- `__has_c_attribute(gnu::packed)` -- answers 0 instead
+            // of failing the directive, however the `::` is tokenized. An
+            // empty argument list is still malformed and still fails below.
+            supported = c_conditional_c_attribute_supported();
+        }
         else if ((is_target_arch || is_target_environment || is_target_os || is_target_vendor) && argument_count == 1 &&
                  arguments[0].kind == C_TOKEN_IDENTIFIER && options)
         {
@@ -5396,13 +5474,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
                                                             string_equal(argument, S8("ebpf"))
                                                       : string_equal(argument, S8("x86_64")))
-                        : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
-                                                       ? string_equal(argument, S8("macos"))
-                                                   : options->target.os == OPERATING_SYSTEM_IOS
-                                                       ? string_equal(argument, S8("ios"))
-                                                   : options->target.os == OPERATING_SYSTEM_LINUX
-                                                       ? string_equal(argument, S8("linux"))
-                                                       : false)
+                        : is_target_os          ? c_conditional_target_os_supported(options->target.os, argument)
                         : is_target_vendor      ? (options->target.os == OPERATING_SYSTEM_MACOS || options->target.os == OPERATING_SYSTEM_IOS) &&
                                                       string_equal(argument, S8("apple"))
                         : is_target_environment ? false
@@ -5889,6 +5961,11 @@ struct CPreprocessSourceFrame
     // frame is pushed, read by every per-line scan of the driver.
     CPpClassMasks class_masks;
     String8 path;
+    // Suppression keys are deliberately separate from diagnostic/source-map
+    // spellings. The resolved path is the current portable identity authority;
+    // a future physical-file identity can replace this key without changing
+    // which spelling users see.
+    CIncludeFileIdentity identity;
     String8 logical_path;
     s64 line_delta;
     u64 token_index;
@@ -5907,57 +5984,183 @@ struct CPreprocessSourceFrame
     CIncludeSearchOrigin include_origin;
 };
 
-// Files whose completed lex proved the guard shape above, keyed by resolved
-// path with the guard macro as its interned symbol id. A later #include of
-// the path is dropped without re-reading or re-lexing when that macro is
-// still defined — the multiple-include optimization, the include-guard
-// counterpart of the #pragma once suppression list. Symbol 0 doubles as
-// "absent" because interned ids start at 1.
-typedef struct CIncludeGuardTable CIncludeGuardTable;
-struct CIncludeGuardTable
-{
-    String8* paths;
-    u32* symbols;
-    u32 count;
-    u32 capacity;
-};
+// Test instrumentation observes the real probe loops without adding state or
+// work to tests-disabled compiler builds.
+#if BUSTER_INCLUDE_TESTS
+#define C_INCLUDE_FILE_SLOT_HASH(table, entries, slot) ((table)->probe_count += 1, (entries)[slot].hash)
+#else
+#define C_INCLUDE_FILE_SLOT_HASH(table, entries, slot) ((entries)[slot].hash)
+#endif
 
-BUSTER_C_INTERNAL u32 c_include_guard_symbol(CIncludeGuardTable const* table, String8 path)
+// The table stays at most half full. Growth first proves both the u32 doubling
+// and this arena's remaining reservation, so neither an overflowing capacity
+// nor a short allocation can turn into a smaller table followed by writes.
+BUSTER_C_INTERNAL bool c_include_file_table_grow(CIncludeFileTable* table)
 {
-    u32 result = 0;
-    for (u32 index = 0; index < table->count && !result; index += 1)
+    bool result = false;
+    u32 capacity = C_INCLUDE_FILE_INITIAL_CAPACITY;
+    if (table->capacity)
     {
-        if (string_equal(table->paths[index], path))
+        if (table->capacity <= UINT32_MAX / 2)
         {
-            result = table->symbols[index];
+            capacity = table->capacity * 2;
+        }
+        else
+        {
+            capacity = 0;
         }
     }
-
+    u64 byte_count = (u64)capacity * sizeof(*table->entries);
+    u64 position = align_forward(table->arena->position, BUSTER_ALIGN_OF(CIncludeFileEntry));
+    bool allocation_fits = capacity && position <= table->arena->reserved_size && byte_count <= table->arena->reserved_size - position;
+    if (allocation_fits)
+    {
+        CIncludeFileEntry* entries = arena_allocate_zeroed(table->arena, CIncludeFileEntry, capacity);
+        for (u32 old_slot = 0; old_slot < table->capacity; old_slot += 1)
+        {
+            CIncludeFileEntry entry = table->entries[old_slot];
+            if (entry.hash)
+            {
+                u32 slot = (u32)entry.hash & (capacity - 1);
+                while (C_INCLUDE_FILE_SLOT_HASH(table, entries, slot))
+                {
+                    slot = (slot + 1) & (capacity - 1);
+                }
+                entries[slot] = entry;
+            }
+        }
+        table->entries = entries;
+        table->capacity = capacity;
+        result = true;
+    }
     return result;
 }
 
-BUSTER_C_INTERNAL void c_include_guard_record(Arena* arena, CIncludeGuardTable* table, String8 path, u32 symbol)
+// The existing include resolver's resolved spelling is the only portable key
+// available on this revision. This explicit constructor is the integration
+// seam for descriptor identity: after the shared file API lands, filesystem
+// includes can fill device/index/physical while builtin headers keep this path
+// fallback, without changing the table or any of its consumers.
+BUSTER_C_INTERNAL CIncludeFileIdentity c_include_file_path_identity(String8 path)
 {
-    if (!c_include_guard_symbol(table, path))
+    CIncludeFileIdentity result = {
+        .path = path,
+    };
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_include_file_identity_equal(CIncludeFileEntry const* entry, CIncludeFileIdentity identity)
+{
+    bool result = entry->physical == identity.physical;
+    if (result)
     {
-        if (table->count == table->capacity)
-        {
-            u32 capacity = table->capacity ? table->capacity * 2 : 64;
-            String8* paths = arena_allocate(arena, String8, capacity);
-            u32* symbols = arena_allocate(arena, u32, capacity);
-            if (table->count)
-            {
-                memcpy(paths, table->paths, table->count * sizeof(*paths));
-                memcpy(symbols, table->symbols, table->count * sizeof(*symbols));
-            }
-            table->paths = paths;
-            table->symbols = symbols;
-            table->capacity = capacity;
-        }
-        table->paths[table->count] = path;
-        table->symbols[table->count] = symbol;
-        table->count += 1;
+        result = identity.physical ? entry->device == identity.device && entry->index == identity.index : string_equal(entry->spelling, identity.path);
     }
+    return result;
+}
+
+BUSTER_C_INTERNAL u64 c_include_file_identity_hash(CIncludeFileIdentity identity)
+{
+    u64 result;
+    if (identity.physical)
+    {
+        u64 words[2] = {identity.device, identity.index};
+        result = buster_hash_64((u8*)words, sizeof(words));
+    }
+    else
+    {
+        result = buster_hash_64((u8*)identity.path.pointer, identity.path.length);
+    }
+    // Zero marks an empty table entry. Preserve every bit of nonzero hashes
+    // instead of forcing all home buckets odd.
+    return result ? result : 1;
+}
+
+// Find or create the record for `identity`. The output is cleared on failure;
+// callers must diagnose the status rather than silently losing once semantics.
+BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling,
+                                                          CIncludeFileEntry** entry_out)
+{
+    CIncludeFileStatus result = C_INCLUDE_FILE_INVALID_IDENTITY;
+    *entry_out = 0;
+    bool valid_identity = identity.physical || (identity.path.pointer && identity.path.length);
+    if (valid_identity)
+    {
+        u64 hash = c_include_file_identity_hash(identity);
+        u32 slot = 0;
+        bool found = false;
+        if (table->capacity)
+        {
+            slot = (u32)hash & (table->capacity - 1);
+            while (!found && C_INCLUDE_FILE_SLOT_HASH(table, table->entries, slot))
+            {
+                CIncludeFileEntry* entry = table->entries + slot;
+                found = entry->hash == hash && c_include_file_identity_equal(entry, identity);
+                if (!found)
+                {
+                    slot = (slot + 1) & (table->capacity - 1);
+                }
+            }
+        }
+        bool capacity_ready = found || (table->capacity && table->count + 1 <= table->capacity / 2);
+        if (!capacity_ready)
+        {
+            capacity_ready = c_include_file_table_grow(table);
+            if (capacity_ready)
+            {
+                slot = (u32)hash & (table->capacity - 1);
+                while (C_INCLUDE_FILE_SLOT_HASH(table, table->entries, slot))
+                {
+                    slot = (slot + 1) & (table->capacity - 1);
+                }
+            }
+        }
+        if (capacity_ready)
+        {
+            if (!found)
+            {
+                table->entries[slot] = (CIncludeFileEntry){
+                    .spelling = spelling,
+                    .hash = hash,
+                    .device = identity.device,
+                    .index = identity.index,
+                    .physical = identity.physical,
+                };
+                table->count += 1;
+            }
+            *entry_out = table->entries + slot;
+            result = C_INCLUDE_FILE_OK;
+        }
+        else
+        {
+            result = C_INCLUDE_FILE_ALLOCATION_FAILED;
+        }
+    }
+    return result;
+}
+
+#undef C_INCLUDE_FILE_SLOT_HASH
+
+#if BUSTER_INCLUDE_TESTS
+CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling,
+                                            CIncludeFileEntry** entry_out)
+{
+    return c_include_file_entry(table, identity, spelling, entry_out);
+}
+
+bool c_test_include_file_table_grow(CIncludeFileTable* table)
+{
+    return c_include_file_table_grow(table);
+}
+#endif
+
+BUSTER_C_INTERNAL void c_include_file_diagnostic(Arena* arena, CPreprocessResult* preprocess, CSourceLocation location,
+                                                  CIncludeFileStatus status, String8 spelling)
+{
+    String8 message = status == C_INCLUDE_FILE_INVALID_IDENTITY
+                          ? string_format(arena, S8("included file has no usable identity: {S8}"), spelling)
+                          : string_format(arena, S8("included-file tracking allocation failed: {S8}"), spelling);
+    c_preprocess_diagnostic_push(arena, preprocess, location, C_DIAGNOSTIC_INVALID_INCLUDE, message);
 }
 
 typedef struct CPragmaPackStack CPragmaPackStack;
@@ -6029,6 +6232,7 @@ typedef struct CPreprocessPragmaContext CPreprocessPragmaContext;
 struct CPreprocessPragmaContext
 {
     Arena* arena;
+    CPreprocessResult* preprocess;
     CSymbolTable* symbols;
     CMacro** first_macro;
     CMacro** last_macro;
@@ -6036,10 +6240,10 @@ struct CPreprocessPragmaContext
     CPragmaPackStack** pack_stack;
     u16* pack_alignment;
     CPackAlignmentRecorder* pack_changes;
-    String8* once_paths;
-    u32* once_path_count;
-    u32 once_path_capacity;
+    CIncludeFileTable* include_files;
     String8 current_path;
+    CIncludeFileIdentity current_identity;
+    CSourceLocation current_location;
 };
 
 BUSTER_C_INTERNAL bool c_preprocess_pragma_macro_name(char8 const* base, CToken* tokens, u32 token_count, String8* name_out)
@@ -6223,16 +6427,16 @@ BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext conte
     {
         if (token_count == 1 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("once")))
         {
-            bool found = false;
-            for (u32 index = 0; index < *context.once_path_count; index += 1)
+            CIncludeFileEntry* entry = 0;
+            CIncludeFileStatus status =
+                c_include_file_entry(context.include_files, context.current_identity, context.current_path, &entry);
+            if (status == C_INCLUDE_FILE_OK)
             {
-                found |= string_equal(context.once_paths[index], context.current_path);
+                entry->once = true;
             }
-            if (!found && *context.once_path_count < context.once_path_capacity)
+            else
             {
-                u32 once_path_index = *context.once_path_count;
-                context.once_paths[once_path_index] = context.current_path;
-                *context.once_path_count = once_path_index + 1;
+                c_include_file_diagnostic(context.arena, context.preprocess, context.current_location, status, context.current_path);
             }
             return;
         }
@@ -6311,6 +6515,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     {
         if (node->token.token.kind == C_TOKEN_PRAGMA)
         {
+            context.current_location = c_pp_stamp_location(stamps, node->token.stamp);
             c_preprocess_pragma_marker(context, space->base, node->token.token);
             pack_pending = true;
             continue;
@@ -7966,7 +8171,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
+                      target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
@@ -7978,6 +8184,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__INT_WIDTH__", string_format(arena, S8("{u32}"), layout.integer.bit_width));
     C_DEFINE_TYPE_MACRO("__LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_integer.bit_width));
     C_DEFINE_TYPE_MACRO("__LONG_LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_long_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__SCHAR_MAX__", S8("127"));
+    C_DEFINE_TYPE_MACRO("__SHRT_MAX__", S8("32767"));
+    C_DEFINE_TYPE_MACRO("__INT_MAX__", S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__LONG_MAX__", layout.long_integer.bit_width == 64 ? S8("9223372036854775807L") : S8("2147483647L"));
+    C_DEFINE_TYPE_MACRO("__LONG_LONG_MAX__", S8("9223372036854775807LL"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_SHORT__", string_format(arena, S8("{u32}"), layout.short_integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_INT__", string_format(arena, S8("{u32}"), layout.integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG__", string_format(arena, S8("{u32}"), layout.long_integer.size));
@@ -8319,6 +8530,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .lex = root_lex,
         .class_masks = root_class_masks,
         .path = options.source_path.length ? options.source_path : S8("."),
+        .identity = c_include_file_path_identity(options.source_path.length ? options.source_path : S8(".")),
         .logical_path = options.source_path.length ? options.source_path : S8("."),
         .line_start = true,
     };
@@ -8341,14 +8553,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
     c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
-    String8* once_paths = arena_allocate(arena, String8, source.length + 1);
-    u32 once_path_count = 0;
-    CIncludeGuardTable guard_table = {0};
+    CIncludeFileTable include_files = {
+        .arena = arena,
+    };
     CPpStampTable stamps = {
         .arena = arena,
     };
     CPreprocessPragmaContext pragma_context = {
         .arena = arena,
+        .preprocess = &result,
         .symbols = symbol_table,
         .first_macro = &first_macro,
         .last_macro = &last_macro,
@@ -8356,13 +8569,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .pack_stack = &pack_stack,
         .pack_alignment = &pack_alignment,
         .pack_changes = &pack_changes,
-        .once_paths = once_paths,
-        .once_path_count = &once_path_count,
-        .once_path_capacity = (u32)BUSTER_MIN(source.length + 1, (u64)UINT32_MAX),
+        .include_files = &include_files,
     };
     while (source_frame)
     {
         pragma_context.current_path = source_frame->path;
+        pragma_context.current_identity = source_frame->identity;
         CLexResult lex = source_frame->lex;
         CPpClassMasks const* class_masks = &source_frame->class_masks;
         u64 token_index = source_frame->token_index;
@@ -8379,7 +8591,18 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             {
                 if (source_frame->guard_state == C_INCLUDE_GUARD_CLOSED)
                 {
-                    c_include_guard_record(arena, &guard_table, source_frame->path, source_frame->guard_symbol);
+                    CIncludeFileEntry* entry = 0;
+                    CIncludeFileStatus status =
+                        c_include_file_entry(&include_files, source_frame->identity, source_frame->path, &entry);
+                    if (status == C_INCLUDE_FILE_OK)
+                    {
+                        entry->guard_symbol = source_frame->guard_symbol;
+                    }
+                    else
+                    {
+                        CSourceLocation location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, token));
+                        c_include_file_diagnostic(arena, &result, location, status, source_frame->path);
+                    }
                 }
                 file_map_unmap(source_frame->source_map);
             }
@@ -8601,82 +8824,97 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         }
                         else
                         {
-                            bool include_once = false;
-                            for (u32 once_index = 0; once_index < once_path_count; once_index += 1)
+                            // The resolved path is the current frontend identity
+                            // authority. Keep it distinct from the spelling so
+                            // descriptor identity can replace only this key when
+                            // the shared file layer exposes it.
+                            CIncludeFileIdentity include_identity = c_include_file_path_identity(include_path);
+                            CIncludeFileEntry* include_file = 0;
+                            CIncludeFileStatus include_file_status =
+                                c_include_file_entry(&include_files, include_identity, include_path, &include_file);
+                            if (include_file_status != C_INCLUDE_FILE_OK)
                             {
-                                include_once |= string_equal(once_paths[once_index], include_path);
-                            }
-                            if (is_import && !include_once)
-                            {
-                                once_paths[once_path_count++] = include_path;
-                            }
-                            if (!include_once)
-                            {
-                                // The multiple-include optimization: a file
-                                // that proved the whole-file guard shape on an
-                                // earlier lex produces no tokens while its
-                                // guard macro is defined, so it is dropped
-                                // like a #pragma once re-include.
-                                u32 guard_symbol = c_include_guard_symbol(&guard_table, include_path);
-                                CMacro* guard_macro = guard_symbol ? c_macro_find(first_macro, guard_symbol) : 0;
-                                include_once = guard_macro && guard_macro->definition.defined;
-                            }
-                            CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
-                            // A suppressed include lexed nothing and adds
-                            // zeroes; its path was already counted by the
-                            // inclusion that did the lexing, and its
-                            // attribution row keeps that lex count.
-                            c_source_metrics_add(&result.detail->source_lexed, &include_lex.metrics);
-                            u32 include_row = c_source_metrics_file_row(arena, &metrics_files, include_path);
-                            if (metrics_files.rows[include_row].lex_count == 0)
-                            {
-                                c_source_metrics_add(&result.detail->source_unique, &include_lex.metrics);
-                            }
-                            if (!include_once)
-                            {
-                                metrics_files.rows[include_row].translated_bytes = include_lex.metrics.translated_bytes;
-                                metrics_files.rows[include_row].lex_count += 1;
-                            }
-                            c_symbols_intern_tokens(symbol_table, include_lex.spelling_base, include_lex.tokens, include_lex.token_shapes, include_lex.token_count);
-                            CPpClassMasks include_class_masks;
-                            c_pp_class_masks_build(arena, &include_class_masks, include_lex.token_shapes, include_lex.token_count);
-                            for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
-                            {
-                                CDiagnostic diagnostic = include_lex.diagnostics[index];
-                                c_preprocess_diagnostic_copy(arena, &result, diagnostic);
-                            }
-                            if (!include_once)
-                            {
-                                include_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
-                                *include_frame = (CPreprocessSourceFrame){
-                                    .previous = source_frame,
-                                    .conditional_base = conditional,
-                                    .lex = include_lex,
-                                    .class_masks = include_class_masks,
-                                    .path = include_path,
-                                    .logical_path = include_path,
-                                    .source_map = include_source_map,
-                                    .depth = source_frame->depth + 1,
-                                    .line_start = true,
-                                    .include_origin = include_origin,
-                                };
-                                include_frame->map_entry = map.count;
-                                c_source_map_append(&map, (IrSourceRegion){
-                                                              .start = include_lex.translated_offset,
-                                                              .source = UINT32_MAX,
-                                                              .checkpoints = include_lex.checkpoints,
-                                                              .checkpoint_offsets = include_lex.checkpoint_offsets,
-                                                              .checkpoint_pages = include_lex.checkpoint_pages,
-                                                              .checkpoint_page_count = include_lex.checkpoint_page_count,
-                                                              .checkpoint_count = include_lex.checkpoint_count,
-                                                              .base = include_lex.translated_offset,
-                                                              .kind = IR_SOURCE_REGION_TEXT,
-                                                          });
-                                c_source_map_name(&map, include_path, include_path);
+                                c_include_file_diagnostic(arena, &result, directive_location, include_file_status, include_path);
+                                file_map_unmap(include_source_map);
                             }
                             else
                             {
-                                file_map_unmap(include_source_map);
+                                bool include_once = include_file->once;
+                                if (is_import)
+                                {
+                                    // Mark before descending so a recursive
+                                    // #import of this identity is suppressed.
+                                    include_file->once = true;
+                                }
+                                if (!include_once)
+                                {
+                                    // The multiple-include optimization: a file
+                                    // that proved the whole-file guard shape on
+                                    // an earlier lex produces no tokens while
+                                    // its guard macro is defined, so it shares
+                                    // the same identity lookup as once files.
+                                    u32 guard_symbol = include_file->guard_symbol;
+                                    CMacro* guard_macro = guard_symbol ? c_macro_find(first_macro, guard_symbol) : 0;
+                                    include_once = guard_macro && guard_macro->definition.defined;
+                                }
+                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
+                                // A suppressed include lexed nothing and adds
+                                // zeroes; its path was already counted by the
+                                // inclusion that did the lexing, and its
+                                // attribution row keeps that lex count.
+                                c_source_metrics_add(&result.detail->source_lexed, &include_lex.metrics);
+                                u32 include_row = c_source_metrics_file_row(arena, &metrics_files, include_path);
+                                if (metrics_files.rows[include_row].lex_count == 0)
+                                {
+                                    c_source_metrics_add(&result.detail->source_unique, &include_lex.metrics);
+                                }
+                                if (!include_once)
+                                {
+                                    metrics_files.rows[include_row].translated_bytes = include_lex.metrics.translated_bytes;
+                                    metrics_files.rows[include_row].lex_count += 1;
+                                }
+                                c_symbols_intern_tokens(symbol_table, include_lex.spelling_base, include_lex.tokens, include_lex.token_shapes, include_lex.token_count);
+                                CPpClassMasks include_class_masks;
+                                c_pp_class_masks_build(arena, &include_class_masks, include_lex.token_shapes, include_lex.token_count);
+                                for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
+                                {
+                                    CDiagnostic diagnostic = include_lex.diagnostics[index];
+                                    c_preprocess_diagnostic_copy(arena, &result, diagnostic);
+                                }
+                                if (!include_once)
+                                {
+                                    include_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
+                                    *include_frame = (CPreprocessSourceFrame){
+                                        .previous = source_frame,
+                                        .conditional_base = conditional,
+                                        .lex = include_lex,
+                                        .class_masks = include_class_masks,
+                                        .path = include_path,
+                                        .identity = include_identity,
+                                        .logical_path = include_path,
+                                        .source_map = include_source_map,
+                                        .depth = source_frame->depth + 1,
+                                        .line_start = true,
+                                        .include_origin = include_origin,
+                                    };
+                                    include_frame->map_entry = map.count;
+                                    c_source_map_append(&map, (IrSourceRegion){
+                                                                  .start = include_lex.translated_offset,
+                                                                  .source = UINT32_MAX,
+                                                                  .checkpoints = include_lex.checkpoints,
+                                                                  .checkpoint_offsets = include_lex.checkpoint_offsets,
+                                                                  .checkpoint_pages = include_lex.checkpoint_pages,
+                                                                  .checkpoint_page_count = include_lex.checkpoint_page_count,
+                                                                  .checkpoint_count = include_lex.checkpoint_count,
+                                                                  .base = include_lex.translated_offset,
+                                                                  .kind = IR_SOURCE_REGION_TEXT,
+                                                              });
+                                    c_source_map_name(&map, include_path, include_path);
+                                }
+                                else
+                                {
+                                    file_map_unmap(include_source_map);
+                                }
                             }
                         }
                     }
@@ -8693,6 +8931,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     u32 expanded_pragma_count = c_preprocess_tokens_from_nodes(first_pragma, arena, &pragma_tokens);
                     if (pragma_expanded)
                     {
+                        pragma_context.current_location = directive_location;
                         c_preprocess_handle_pragma(pragma_context, base, pragma_tokens, expanded_pragma_count);
                     }
                 }

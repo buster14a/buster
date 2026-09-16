@@ -1560,6 +1560,11 @@ struct MachineScheduleResult
     u8 reserved[7];
 };
 
+// A virtual register offset naming no frame home. The predicate bank drops the
+// home of every MASK value no predicate SPILL or RELOAD names; such a value
+// lives only in a k register, so it has no frame location.
+#define MACHINE_VIRTUAL_REGISTER_NO_HOME UINT32_MAX
+
 // MIR_STACK placement: every virtual register owns one 8-byte frame slot and
 // every operand round-trips through a fixed scratch register. This is the
 // selector/encoder verification mode, not an allocator.
@@ -1568,7 +1573,8 @@ struct MachineStackPlacement
 {
     MachineEdit* edits;
     // Frame offsets (positive displacements below the frame base) per vreg
-    // slot and per selector stack slot.
+    // slot and per selector stack slot. A vreg offset may be
+    // MACHINE_VIRTUAL_REGISTER_NO_HOME.
     u32* virtual_register_offsets;
     u32* stack_slot_offsets;
     u32 edit_count;
@@ -1996,7 +2002,13 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFu
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
-                                                    MachineFunction* machine_function);
+                                                    MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                    u32 const* value_indirect_slots);
+// Two-pass whole-array selection, for differential comparison against the
+// indexed builder the compiler actually runs.
+BUSTER_F_DECL bool machine_test_debug_values_build_dense(Arena* arena, IrProgram* program, IrFunction* function,
+                                                          MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                          u32 const* value_indirect_slots);
 BUSTER_F_DECL bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
 BUSTER_F_DECL bool machine_a64_test_expand_inline_short_branch(u8 kind, u32 word, u32 words[2]);
 BUSTER_F_DECL bool machine_a64_test_block_displacement(u32 target_offset, s64 addend, u32 place_offset, s64* displacement_out);
