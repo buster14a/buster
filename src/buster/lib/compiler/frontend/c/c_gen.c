@@ -11399,7 +11399,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
     {
         bool short_wchar = target_uses_16_bit_wchar(target);
         width = short_wchar ? 2 : 4;
-        element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT :
+                       target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
     }
     *shape_out = (CIrDecodedString){
         .element_width = width,
@@ -11574,7 +11575,8 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
         break;
     case 'L':
         width = target_uses_16_bit_wchar(target) ? 2 : 4;
-        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
+               target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
         break;
     default:
         return false;
@@ -24340,6 +24342,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             kind = c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                    : c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
                    : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                                                               : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
                                                                : C_TYPE_INT;
         }
         *type_out = builder->scalar_types[kind];
@@ -28875,6 +28878,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
                 kind = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                        : c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
                        : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                                                                   : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
                                                                    : C_TYPE_INT;
             }
             result = builder->scalar_types[kind];

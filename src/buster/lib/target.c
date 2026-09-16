@@ -199,6 +199,16 @@ bool target_uses_16_bit_wchar(Target target)
     return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI;
 }
 
+// Keep predefines, character literals, and string element types on the same
+// target ABI. Darwin retains signed int; Windows/UEFI use unsigned short.
+// The hosted AArch64 Linux and Android ABIs use unsigned int.
+bool target_uses_unsigned_wchar(Target target)
+{
+    return target_uses_16_bit_wchar(target) ||
+           (target.cpu_arch == CPU_ARCH_AARCH64 &&
+            (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID));
+}
+
 bool target_uses_pe_unwind(Target target)
 {
     return (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI) &&
