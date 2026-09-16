@@ -1,0 +1,35 @@
+name: PR645 isolated rebase helper
+on:
+  push:
+    branches: [codex/pr645-rebase-helper-20260916]
+    paths: [.github/workflows/pr645-rebase-helper.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export only the two pinned histories
+        shell: bash
+        run: |
+          set -euo pipefail
+          git branch rebase-main b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
+          git branch rebase-original e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b
+          mkdir -p "$RUNNER_TEMP/pr645-history"
+          git bundle create "$RUNNER_TEMP/pr645-history/history.bundle" rebase-main rebase-original
+          git bundle verify "$RUNNER_TEMP/pr645-history/history.bundle"
+          git log --oneline --no-merges rebase-main..rebase-original > "$RUNNER_TEMP/pr645-history/remaining-commits.txt"
+          git diff --stat rebase-main...rebase-original > "$RUNNER_TEMP/pr645-history/original-diff-stat.txt"
+          sha256sum "$RUNNER_TEMP/pr645-history/history.bundle"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr645-rebase-history
+          path: ${{ runner.temp }}/pr645-history/
+          retention-days: 1
+          if-no-files-found: error
