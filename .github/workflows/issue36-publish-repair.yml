@@ -1,0 +1,35 @@
+name: Publish issue 36 recovery repair
+on:
+  push:
+    branches: [work/36-recovered-integration-20260915]
+    paths: [.github/workflows/issue36-publish-repair.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+      - name: Verify, apply, and publish exact tested source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, pathlib, subprocess, zlib
+          payload = pathlib.Path('.github/issue36-repair.zlib.b64').read_text().strip()
+          patch = zlib.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '159e553cb6f2df66f2e590a6eea464b0fb76da1687d77d93689e8338a5c5e4ca'
+          subprocess.run(['git', 'apply', '--check', '--unidiff-zero', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '-'], input=patch, check=True)
+          PY
+          git diff --cached --check
+          git rm .github/issue36-repair.zlib.b64 .github/workflows/issue36-publish-repair.yml .github/workflows/issue36-recovery-export.yml
+          test "$(git write-tree)" = c65b09171a31088e3c65999d8a4f053ce1c1936b
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'compiler: repair recovered MIR-only build and target wchar ABI' -m 'Preserve recovered emitter retirement and nonzero-entry repair. Fix pointer-signedness, C17 label/declaration, and split-build linkage errors. Share wchar signedness through predefined macros, wide literal decoding, parser typeof, and IR type inference. Add 12-target, two-frontend registered coverage. Local Clang 17 Debug non-unity: 2664295/2664295 assertions, 52/52 modules; Node 22 memory64 enabled for Wasm checks. Full retirement, performance, sanitizer, and self-host acceptance remain pending.'
+          git push origin HEAD:refs/heads/work/36-recovered-integration-20260915
+          printf 'Published commit: %s\nSource tree: %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
