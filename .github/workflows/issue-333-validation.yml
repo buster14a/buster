@@ -7,48 +7,42 @@ permissions:
   contents: read
 jobs:
   validate:
-    name: Verify exact issue 333 candidate
+    name: Verify issue 333 setup repair
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - name: Read candidate payload
+      - name: Read repair payload
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: payload
           persist-credentials: false
-      - name: Read pinned production base
+      - name: Read exact published candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
+          ref: 9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf
           path: source
           persist-credentials: false
-      - name: Verify and apply exact patch
+      - name: Verify and apply setup repair
         working-directory: source
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/issue-333" build
           python3 - <<'PY'
-          import base64, hashlib, lzma, os, pathlib, subprocess
-          payload = pathlib.Path('../payload/.github/issue-333-payload')
-          encoded = ''.join((payload / f'part{i}.b64').read_text().strip() for i in range(4))
-          compressed = base64.b64decode(encoded, validate=True)
-          assert hashlib.sha256(compressed).hexdigest() == '94d574b8f54235819009e559cd04baf2665492e21f10b9e0ffcc5f3ba67d73af', 'compressed payload mismatch'
-          patch = lzma.decompress(compressed)
-          assert hashlib.sha256(patch).hexdigest() == '59a9f168f8681675532a010f2fad83e0d83ecade3e4fbe98dd236203c1e4707b', 'patch mismatch'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == 'b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f'
+          import hashlib, os, pathlib, subprocess
+          patch = pathlib.Path('../payload/.github/issue-333-payload/setup-fix.patch').read_bytes()
+          assert hashlib.sha256(patch).hexdigest() == 'ac9e5847e07fd803c601e8e104935448dea1e9fa3bf5c9fdd2381e41787c2594'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == '9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf'
           subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
           subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
-          actual = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
-          expected = ['.github/workflows/ci.yml', 'build.c', 'docs/ci-combination-shards.md', 'docs/ci-github-actions.md', 'docs/ci-suite-partition.md', 'docs/ci-workflow-audit.md', 'tools/ci_summary.py', 'tools/github_ci_time.py', 'tools/matrix_shard_test.py']
-          assert sorted(actual) == sorted(expected), actual
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'candidate.patch').write_bytes(patch)
-          print('Exact base and patch verified; changed files:', len(actual))
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert paths == ['.github/workflows/ci.yml', 'docs/ci-combination-shards.md', 'tools/matrix_shard_test.py'], paths
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'setup-fix.patch').write_bytes(patch)
           PY
           git diff --cached --check
-      - name: Native driver and six-platform policy self-test
+      - name: Native driver and policy tests
         working-directory: source
         shell: bash
         run: |
@@ -56,13 +50,14 @@ jobs:
           clang --version | tee "$RUNNER_TEMP/issue-333/clang-version.log"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build 2>&1 | tee "$RUNNER_TEMP/issue-333/clang-driver.log"
           BUSTER_CI_COVERAGE_OUTPUT="$RUNNER_TEMP/issue-333/coverage-self-test.json" ./build/build coverage_manifest_self_test 2>&1 | tee "$RUNNER_TEMP/issue-333/native-self-test.log"
-      - name: Policy and workflow regressions
+      - name: Complete wrapper and workflow regressions
         working-directory: source
         shell: bash
         env:
           BUSTER_MATRIX_SHARD: release
         run: |
           set -euo pipefail
+          python3 tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/bootstrap-wrapper.log"
           python3 tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/matrix-shard.log"
           python3 tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/coverage-manifest.log"
           python3 tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/issue-333/ci-tools.log"
@@ -100,7 +95,7 @@ jobs:
                   actual = json.load(response)['sha']
               assert actual == expected, (path, expected, actual)
               entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': actual, 'sha256': hashlib.sha256(data).hexdigest()})
-          result = {'base': 'b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f', 'patch_sha256': '59a9f168f8681675532a010f2fad83e0d83ecade3e4fbe98dd236203c1e4707b', 'entries': entries}
+          result = {'base': '9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf', 'patch_sha256': 'ac9e5847e07fd803c601e8e104935448dea1e9fa3bf5c9fdd2381e41787c2594', 'entries': entries}
           pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'verified-blobs.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
@@ -108,7 +103,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-333-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: issue-333-setup-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/issue-333/
           if-no-files-found: error
           retention-days: 7
