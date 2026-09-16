@@ -3005,7 +3005,14 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     }
     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
     {
-        return c_parse_expression_scalar_type(result, C_TYPE_INT);
+        String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+        CTypeKind kind = C_TYPE_INT;
+        if (spelling.length && spelling.pointer[0] == 'L')
+        {
+            kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+                   target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+        }
+        return c_parse_expression_scalar_type(result, kind);
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
     {

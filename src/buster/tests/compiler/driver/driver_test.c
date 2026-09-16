@@ -6332,6 +6332,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ByteSlice string_bytes = string_map.bytes;
         BUSTER_TEST(arguments, string_bytes.length != 0);
         file_map_unmap(string_map);
+        String8 wchar_object_path =
+            buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-wchar"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+        String8 wchar_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wchar_object_path, S8("tests/issue36_target_wchar.c"),
+        };
+        CompilerDriverResult wchar_result = compiler_driver_execute_invocation(
+            cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wchar_command_line)));
+        BUSTER_TEST(arguments, wchar_result.error == COMPILER_DRIVER_ERROR_NONE);
+        FileMapRead wchar_map = file_map_read(cross_temp.arena, wchar_object_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, wchar_map.bytes.length != 0);
+        file_map_unmap(wchar_map);
         String8 nullptr_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-nullptr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 nullptr_command_line[] = {
