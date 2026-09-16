@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths:
       - .github/workflows/throughput-real-source.yml
+      - .github/apt-inputs.json
+      - tools/ci_apt.py
+      - tests/ci_apt_test.py
       - tools/throughput/**
       - build.c
       - tests/basic_cjson_roundtrip.c
@@ -76,12 +79,12 @@ jobs:
           printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
           tar -xzf external/lua.tar.gz -C external
       - name: Prepare explicit native dependencies and descriptor inputs
+        id: native_dependencies
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes libreadline-dev
+          python3 tools/ci_apt.py readline --out evidence/apt-readline
           mkdir -p external/cjson-throughput/generated evidence
           cp external/cjson/cJSON.c external/cjson/cJSON.h external/cjson/cJSON_Utils.c external/cjson/cJSON_Utils.h external/cjson-throughput/
           cp tests/basic_cjson_roundtrip.c external/cjson-throughput/generated/roundtrip.c
@@ -106,7 +109,7 @@ jobs:
           # these freshly recorded transport hashes as expected identities.
       - name: Build trusted compiler and native harness serially
         id: compiler
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.native_dependencies.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -142,12 +145,13 @@ jobs:
         if: always()
         shell: bash
         env:
+          APT_INPUTS: ${{ steps.native_dependencies.outcome }}
           COMPILER: ${{ steps.compiler.outcome }}
           CJSON: ${{ steps.oracle_cjson.outcome }}
           LUA: ${{ steps.oracle_lua.outcome }}
           SQLITE: ${{ steps.oracle_sqlite.outcome }}
         run: |
-          printf 'compiler=%s\ncjson=%s\nlua=%s\nsqlite=%s\n' "$COMPILER" "$CJSON" "$LUA" "$SQLITE" | tee evidence/outcomes.txt
+          printf 'apt-inputs=%s\ncompiler=%s\ncjson=%s\nlua=%s\nsqlite=%s\n' "$APT_INPUTS" "$COMPILER" "$CJSON" "$LUA" "$SQLITE" | tee evidence/outcomes.txt
           printf 'Hosted functional qualification only; no dedicated-host timing acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
           cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Verify descriptor and staged-input preflights
@@ -249,6 +253,10 @@ jobs:
             local path
             path=$(ldconfig -p | awk -v name="$1" '$1 == name && !found { path = $NF; found = 1 } END { if (found) print path }')
             test -n "$path"
+            case "$1" in
+              libreadline.so.8|libtinfo.so.6)
+                test "$(readlink -f "$path")" = "$(readlink -f "/usr/lib/x86_64-linux-gnu/$1")" ;;
+            esac
             manifest_file "$2" "$path"
           }
           cjson_dependency="$closure/cjson-dependency.identity"
@@ -259,6 +267,10 @@ jobs:
 
           lua_dependency="$closure/lua-dependency.identity"
           manifest_begin "$lua_dependency" dependency libm+libdl+readline:native-toolchain source-to-linked-executable
+          # Bind the existing dependency manifest to authenticated provisioning.
+          manifest_file "$lua_dependency" "$PWD/evidence/apt-readline/lock.json"
+          manifest_file "$lua_dependency" "$PWD/evidence/apt-readline/pinned.identity.json"
+          manifest_file "$lua_dependency" "$PWD/evidence/apt-readline/selected.identity.json"
           for argument in -lm -ldl -lreadline; do
             manifest_argument "$lua_dependency" source-to-linked-executable "$argument"
           done
