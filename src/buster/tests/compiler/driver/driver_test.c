@@ -3513,11 +3513,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
         {
             String8 node_arguments[] = {node, S8("tests/wasm_integer_execution.js"), output};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+                                                       (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                                             .use_process_environment = 1});
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
             {
+                u64 start = os_now_microseconds();
                 ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                // A bare success assertion loses the distinction between a deadline, a runtime crash and a failed Wasm check.
+                arguments->show(arguments, S8("WASM_INTEGER_PROCESS result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64} node={S8} module={S8}\nstdout:\n{S8}\nstderr:\n{S8}\n"),
+                                (u32)wait.result, wait.platform_status, (u32)wait.timed_out, os_now_microseconds() - start, node, output,
+                                BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]));
                 BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
             }
         }
