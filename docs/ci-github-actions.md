@@ -49,18 +49,21 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains the six desktop runners and names above for the full
-combination matrix. Four independent `native` lanes run the Unix execution-mode
-and configuration-differential suites together, reusing their fresh Release
-compiler. The `mobile` matrix retains its three independent suite-level shards.
-`lint` validates every GitHub workflow. **Require the aggregate `CI complete`
-check**, which fails unless lint and every desktop, native and mobile lane
-succeed. The six desktop names alone do not include native or mobile results.
-See [suite partitioning](ci-suite-partition.md) for ownership and measurement.
+The `test` matrix retains all six desktop runner labels, with two internal
+combination jobs per platform: `<platform> release` and `<platform> checks`.
+Four independent `native` lanes retain the Unix execution-mode and
+configuration-differential suites together, reusing their fresh Release
+compiler. Mobile retains its three independent suite-level shards; lint,
+UEFI and the independent analyzer remain required. **Require `CI complete`**,
+which checks all groups and the exact 23-job inventory, including all twelve
+desktop partitions. The old six names alone do not prove coverage.
+See [combination sharding](ci-combination-shards.md) for native ownership,
+fail-closed completion, reproduction and mandatory performance qualification;
+[suite partitioning](ci-suite-partition.md) documents the earlier split.
 
 | Work | Runners | Command |
 |---|---|---|
-| Combination matrix | all six desktop lanes | `test_all_combinations_ci` |
+| Combination matrix | `release` and `checks` on each of six desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
 | Execution-mode matrix | the four independent Unix native lanes | `test_mode_matrix --config Release` |
 | Native differential matrix | the same four native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
@@ -274,8 +277,10 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all six desktop combination jobs, four
-native jobs, three mobile jobs and workflow lint.
+The aggregate `CI complete` requires all twelve desktop combination jobs, four
+native jobs, three mobile jobs, workflow lint, UEFI and the analyzer. Its
+read-only Actions inventory rejects missing shard identities even when a
+smaller surviving matrix group reports success.
 
 The Android summary also exposes the existing wrapper records from
 `RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
@@ -332,8 +337,8 @@ attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
-accepts historical six-, eleven- and fifteen-job workflows and the current
-seventeen-job suite-partitioned workflow; all applicable suites must succeed on
+accepts historical six-, eleven-, fifteen- and seventeen-job workflows and the
+current twenty-three-job combination-partitioned workflow; all applicable suites must succeed on
 a complete first attempt. The four native jobs must report both mode and
 differential success, and the UEFI and analyzer gates must report their key
 coverage steps. Their execution intervals and runner seconds are included. Workflow hashes
