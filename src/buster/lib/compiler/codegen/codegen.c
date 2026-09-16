@@ -45,6 +45,12 @@
 //   codegen_slot_costs_build,                    the attempt's per-type frame
 //   codegen_record_machine_line_marks            slot table and the line rows
 //                                                of a machine-emitted function
+//   codegen_machine_debug_index_build,           MIR debug values to native
+//   codegen_machine_debug_reference_timeline,    location ranges, event-driven:
+//   codegen_record_machine_locations             per-function indexes, one
+//                                                change-point timeline per
+//                                                referenced virtual register,
+//                                                seeds clipped from them
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
@@ -3208,46 +3214,68 @@ BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValue
     };
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result, u32 capacity, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
-                                                            DebugLocation location)
-{
-    if (!result || end <= start)
-    {
-        return false;
-    }
-    if (result->debug_location_count >= capacity)
-    {
-        result->error = CODEGEN_ERROR_CAPACITY;
-        return false;
-    }
-    result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
-        .function_symbol = symbol,
-        .local = local,
-        .start = start,
-        .end = end,
-        .location = location,
-    };
-    return true;
-}
+// Where recorded debug-location seeds land. Seeds are appended one at a time
+// and the array grows by doubling from its arena, so the storage a function
+// needs is its emitted seeds, never a worst case derived from its shape. A
+// null arena keeps a caller-owned fixed array instead: an overflow then
+// reports CODEGEN_ERROR_CAPACITY rather than reallocating storage the caller
+// owns.
+#define CODEGEN_DEBUG_LOCATION_SEED_MINIMUM 256u
 
-BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(Arena* arena, CodegenModule* result, u32* capacity, u64 additional)
+typedef struct CodegenDebugLocationSink CodegenDebugLocationSink;
+struct CodegenDebugLocationSink
+{
+    Arena* arena;
+    u32 capacity;
+    u8 reserved[4];
+};
+
+BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(CodegenModule* result, CodegenDebugLocationSink* sink, u64 additional)
 {
     u64 required = (u64)result->debug_location_count + additional;
-    if (required > UINT32_MAX)
+    bool reserved = required <= UINT32_MAX;
+    if (reserved && required > sink->capacity)
+    {
+        reserved = sink->arena != 0;
+        if (reserved)
+        {
+            u64 doubled = BUSTER_MAX((u64)sink->capacity * 2u, (u64)CODEGEN_DEBUG_LOCATION_SEED_MINIMUM);
+            u32 grown_capacity = (u32)BUSTER_MIN(BUSTER_MAX(required, doubled), (u64)UINT32_MAX);
+            DebugLocationSeed* grown = arena_allocate(sink->arena, DebugLocationSeed, grown_capacity);
+            if (result->debug_location_count)
+            {
+                memcpy(grown, result->debug_locations, (u64)result->debug_location_count * sizeof(*grown));
+            }
+            result->debug_locations = grown;
+            sink->capacity = grown_capacity;
+        }
+    }
+    if (!reserved)
     {
         result->error = CODEGEN_ERROR_CAPACITY;
-        return false;
     }
-    if (required > *capacity)
+    return reserved;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result, CodegenDebugLocationSink* sink, IrSymbolId symbol,
+                                                            IrLocalId local, u32 start, u32 end, DebugLocation location)
+{
+    bool appended = result && end > start;
+    if (appended && result->debug_location_count >= sink->capacity)
     {
-        u64 doubled = (u64)*capacity * 2u;
-        u32 new_capacity = (u32)BUSTER_MAX(required, BUSTER_MIN(doubled, (u64)UINT32_MAX));
-        DebugLocationSeed* grown = arena_allocate(arena, DebugLocationSeed, new_capacity);
-        memcpy(grown, result->debug_locations, (u64)result->debug_location_count * sizeof(*grown));
-        result->debug_locations = grown;
-        *capacity = new_capacity;
+        appended = codegen_debug_locations_reserve(result, sink, 1);
     }
-    return true;
+    if (appended)
+    {
+        result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
+            .function_symbol = symbol,
+            .local = local,
+            .start = start,
+            .end = end,
+            .location = location,
+        };
+    }
+    return appended;
 }
 
 // Block IDs are graph identities, not an execution order. Keep the entry
@@ -3259,7 +3287,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_layout_block(IrFunction* function, u32
 
 BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* result, IrFunction* function, u32* value_offsets, u32* block_offsets,
                                                              u32 function_start, u32 function_end, Target target, u32 frame_size,
-                                                             s32 frame_base_offset, u32 capacity)
+                                                             s32 frame_base_offset, CodegenDebugLocationSink* sink)
 {
     if (!result || !function || !function->debug_local_count || !result->debug_locations)
     {
@@ -3302,7 +3330,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
         }
         if (place.value != IR_ID_UNDERLYING_INVALID)
         {
-            codegen_canonical_location_append(result, capacity, function->symbol, local->id, function_start, function_end,
+            codegen_canonical_location_append(result, sink, function->symbol, local->id, function_start, function_end,
                                               codegen_debug_canonical_value_location(place, function, value_offsets, target, frame_size, frame_base_offset));
             emitted = true;
         }
@@ -3337,14 +3365,14 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                 u32 start = BUSTER_MAX(block_offsets[block_index], function_start);
                 u32 end = ordinal + 1 < function->block_count ? block_offsets[codegen_canonical_layout_block(function, ordinal + 1)] : function_end;
                 end = BUSTER_MIN(end, function_end);
-                codegen_canonical_location_append(result, capacity, function->symbol, local->id, start, end,
+                codegen_canonical_location_append(result, sink, function->symbol, local->id, start, end,
                                                   codegen_debug_canonical_value_location(value, function, value_offsets, target, frame_size, frame_base_offset));
                 emitted |= end > start;
             }
         }
         if (!emitted)
         {
-            codegen_canonical_location_append(result, capacity, function->symbol, local->id, function_start, function_end,
+            codegen_canonical_location_append(result, sink, function->symbol, local->id, function_start, function_end,
                                               (DebugLocation){
                                                   .kind = DEBUG_LOCATION_UNAVAILABLE,
                                               });
@@ -8995,7 +9023,1136 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* function, MachineDebugValue const* value, u32* first_row, u32* end_row,
+// MIR debug-location recording. Recording turns MIR debug values into native
+// location ranges. The work is event-driven: one pass over the finished
+// function builds the indexes below, and each referenced virtual register is
+// then replayed only at the rows that can change the location it is tracking.
+// Between those rows the sampled location is constant, so a replay produces a
+// change-point timeline instead of a row-sized array, and emission clips those
+// timelines to each value's span.
+//
+// Map:
+//   codegen_machine_debug_groups_build       u32 key -> ascending rows
+//   codegen_machine_debug_index_build        per-function row/edit/mark facts
+//   codegen_machine_debug_span               one value's span -> MIR row range
+//   codegen_machine_debug_reference_timeline one reference's change points
+//   codegen_record_machine_locations         clip timelines, emit seeds
+//
+// Physical register identities fit the allocator's u64 clobber masks, so the
+// register index only has to span that width. The one extra bucket collects
+// every identity outside it -- an edit location outside the architectural
+// file, and the -1 a frame-selected sample compares against -- so a malformed
+// edit stream still reaches the same answer as a whole-function replay instead
+// of silently skipping the row that carries it.
+#define CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT 64u
+BUSTER_CT_CHECK(MACHINE_X64_REGISTER_COUNT <= CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT);
+BUSTER_CT_CHECK(MACHINE_A64_REGISTER_COUNT <= CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT);
+// The predicate bank numbers above the unified file and reaches recording
+// through the merged edit stream. Keeping it inside the range gives it real
+// buckets; past the range it would still be correct through the extra bucket,
+// but every predicate edit would become an event for every tracked register.
+BUSTER_CT_CHECK(MACHINE_PREDICATE_REGISTER_BASE + MACHINE_PREDICATE_REGISTER_COUNT <= CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT);
+
+typedef struct CodegenMachineDebugRowGroups CodegenMachineDebugRowGroups;
+struct CodegenMachineDebugRowGroups
+{
+    // Open-addressed key -> group, then group -> ascending row range. Keys are
+    // frame home offsets and immediate indexes: sparse u32s with no useful
+    // dense range, and every lookup is a single exact key.
+    u32* slot_keys;
+    u32* slot_groups;
+    u32* offsets;
+    u32* rows;
+    u32 slot_mask;
+    u32 group_count;
+};
+
+typedef struct CodegenMachineDebugIndex CodegenMachineDebugIndex;
+struct CodegenMachineDebugIndex
+{
+    // Rows that can change one virtual register's own tracked state: its
+    // operand occurrences and the SPILL/RELOAD edits naming it as subject.
+    u32* subject_offsets;
+    u32* subject_rows;
+    // Rows that write, clobber, or copy out of one physical register.
+    u32* physical_offsets;
+    u32* physical_rows;
+    // Rows whose SPILL edits publish one frame home, keyed by the home offset.
+    CodegenMachineDebugRowGroups homes;
+    // Rows whose REMATERIALIZE edits name one immediate subject.
+    CodegenMachineDebugRowGroups remats;
+    // First edit at each row; the last entry is one past every edit.
+    u32* row_edits;
+    // Line marks in IR-instruction order, with the smallest and largest mark
+    // index over every suffix of that order.
+    u32* mark_order;
+    u32* mark_suffix_first;
+    u32* mark_suffix_last;
+    bool edits_valid;
+    bool marks_valid;
+    // Strictly ascending block starts. A replay skipping a run of block starts
+    // that cannot change its state then jumps the cursor instead of stepping.
+    bool blocks_ascending;
+    u8 reserved;
+};
+
+typedef enum CodegenMachineDebugSelectionKind
+{
+    CODEGEN_MACHINE_DEBUG_SELECTION_NONE,
+    CODEGEN_MACHINE_DEBUG_SELECTION_FRAME,
+    CODEGEN_MACHINE_DEBUG_SELECTION_REGISTER,
+} CodegenMachineDebugSelectionKind;
+
+// One change point: the sampled location from `row` until the next entry's
+// row. The physical register is kept unmapped because the architectural
+// mapping depends on the piece size the value asks for, not on the reference.
+typedef struct CodegenMachineDebugSelection CodegenMachineDebugSelection;
+struct CodegenMachineDebugSelection
+{
+    u32 row;
+    s32 frame_offset;
+    s32 physical_register;
+    u8 kind;
+    u8 reserved[3];
+};
+
+typedef struct CodegenMachineDebugTimeline CodegenMachineDebugTimeline;
+struct CodegenMachineDebugTimeline
+{
+    CodegenMachineDebugSelection const* entries;
+    u32 entry_count;
+    bool built;
+    bool valid;
+    u8 reserved[2];
+};
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_group_slot(u32 key, u32 slot_mask)
+{
+    // Fibonacci-ratio multiply-shift. Home offsets are frame-size multiples,
+    // so their low bits alone collide in every slot table.
+    return ((key * UINT32_C(2654435761)) >> 8) & slot_mask;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_group_find(CodegenMachineDebugRowGroups const* groups, u32 key)
+{
+    u32 slot = codegen_machine_debug_group_slot(key, groups->slot_mask);
+    u32 group = groups->slot_groups[slot];
+    while (group != UINT32_MAX && groups->slot_keys[slot] != key)
+    {
+        slot = (slot + 1u) & groups->slot_mask;
+        group = groups->slot_groups[slot];
+    }
+    return group;
+}
+
+// `keys` and `rows` are parallel and `rows` ascends, so filling each group in
+// input order leaves every group's rows ascending for the replay's cursors.
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_groups_build(Arena* arena, CodegenMachineDebugRowGroups* groups, u32 const* keys, u32 const* rows,
+                                                             u32 count)
+{
+    u32 slot_count = 8u;
+    while (slot_count / 2u < count && slot_count < (1u << 30))
+    {
+        slot_count *= 2u;
+    }
+    groups->slot_mask = slot_count - 1u;
+    groups->slot_keys = arena_allocate(arena, u32, slot_count);
+    groups->slot_groups = arena_allocate(arena, u32, slot_count);
+    memset(groups->slot_groups, 0xff, sizeof(u32) * (u64)slot_count);
+    u32* entry_groups = arena_allocate(arena, u32, count ? count : 1u);
+    u32* group_cursors = arena_allocate(arena, u32, count ? count : 1u);
+    groups->group_count = 0;
+    for (u32 entry = 0; entry < count; entry += 1)
+    {
+        u32 key = keys[entry];
+        u32 slot = codegen_machine_debug_group_slot(key, groups->slot_mask);
+        while (groups->slot_groups[slot] != UINT32_MAX && groups->slot_keys[slot] != key)
+        {
+            slot = (slot + 1u) & groups->slot_mask;
+        }
+        if (groups->slot_groups[slot] == UINT32_MAX)
+        {
+            groups->slot_keys[slot] = key;
+            groups->slot_groups[slot] = groups->group_count;
+            group_cursors[groups->group_count] = 0;
+            groups->group_count += 1;
+        }
+        entry_groups[entry] = groups->slot_groups[slot];
+        group_cursors[entry_groups[entry]] += 1;
+    }
+    groups->offsets = arena_allocate(arena, u32, (u64)groups->group_count + 1u);
+    u32 cursor = 0;
+    for (u32 group = 0; group < groups->group_count; group += 1)
+    {
+        u32 group_count = group_cursors[group];
+        groups->offsets[group] = cursor;
+        group_cursors[group] = cursor;
+        cursor += group_count;
+    }
+    groups->offsets[groups->group_count] = cursor;
+    groups->rows = arena_allocate(arena, u32, count ? count : 1u);
+    for (u32 entry = 0; entry < count; entry += 1)
+    {
+        u32 group = entry_groups[entry];
+        groups->rows[group_cursors[group]] = rows[entry];
+        group_cursors[group] += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_physical_bucket(s32 physical_register)
+{
+    return physical_register >= 0 && (u32)physical_register < CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT ? (u32)physical_register
+                                                                                                   : CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_append(u32* cursors, u32* rows, u32 bucket, u32 row)
+{
+    if (rows)
+    {
+        rows[cursors[bucket]] = row;
+    }
+    cursors[bucket] += 1u;
+}
+
+// One pass over the function that either counts bucket entries or writes them,
+// selected by whether the row arrays are present. Both passes visit the same
+// rows in the same order, so the second one fills every bucket ascending.
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_scan(MachineFunction const* function, MachineStackPlacement const* placement,
+                                                           CodegenMachineDebugIndex const* index, u8 const* referenced, u32* subject_cursors,
+                                                           u32* physical_cursors, u32* subject_rows, u32* physical_rows)
+{
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        MachineInstruction const* instruction = function->instructions + row;
+        MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
+        u64 clobbers = opcode_row.clobber_mask;
+        while (clobbers)
+        {
+            u32 physical = trailing_zeroes_u64(clobbers);
+            clobbers &= clobbers - 1u;
+            codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)physical), row);
+        }
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
+        {
+            u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            MachineRef operand = instruction->operands[operand_index];
+            if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER &&
+                machine_ref_payload(operand) < function->virtual_register_count && referenced[machine_ref_payload(operand)])
+            {
+                codegen_machine_debug_index_append(subject_cursors, subject_rows, machine_ref_payload(operand), row);
+            }
+            if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+            {
+                u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+                codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)physical), row);
+            }
+        }
+        for (u32 edit_index = index->row_edits[row]; edit_index < index->row_edits[row + 1u]; edit_index += 1)
+        {
+            MachineEdit const* edit = placement->edits + edit_index;
+            if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD) && edit->subject < function->virtual_register_count &&
+                referenced[edit->subject])
+            {
+                codegen_machine_debug_index_append(subject_cursors, subject_rows, edit->subject, row);
+            }
+            if (codegen_machine_debug_edit_writes_register(edit))
+            {
+                codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)edit->location),
+                                                   row);
+            }
+            if (edit->kind == MACHINE_EDIT_COPY)
+            {
+                codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)edit->subject),
+                                                   row);
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, MachineFunction const* function, MachineStackPlacement const* placement,
+                                                            CodegenMachineDebugIndex* index)
+{
+    u32 row_count = function->instruction_count;
+    u32 edit_count = placement->edit_count;
+    // A whole-function replay consumes every edit as the BEFORE or AFTER part
+    // of the row it walks, and rejects the stream when any edit is left over.
+    // The same fact is a sorted, in-range, two-phase check made once here.
+    index->edits_valid = true;
+    MachinePoint previous_point = 0;
+    for (u32 edit_index = 0; edit_index < edit_count; edit_index += 1)
+    {
+        MachinePoint point = placement->edits[edit_index].point;
+        MachinePointPhase phase = machine_point_phase(point);
+        index->edits_valid = index->edits_valid && (phase == MACHINE_POINT_BEFORE || phase == MACHINE_POINT_AFTER) &&
+                             machine_point_instruction(point) < row_count && point >= previous_point;
+        previous_point = point;
+    }
+    index->row_edits = arena_allocate(arena, u32, (u64)row_count + 1u);
+    u32 edit_cursor = 0;
+    for (u32 row = 0; row < row_count; row += 1)
+    {
+        while (edit_cursor < edit_count && machine_point_instruction(placement->edits[edit_cursor].point) < row)
+        {
+            edit_cursor += 1;
+        }
+        index->row_edits[row] = edit_cursor;
+    }
+    index->row_edits[row_count] = index->edits_valid ? edit_count : edit_cursor;
+    // Only virtual registers a debug value names are ever replayed. Indexing
+    // the rest would scatter several writes per row across the whole register
+    // file for lists nothing reads.
+    u8* referenced = arena_allocate(arena, u8, function->virtual_register_count ? function->virtual_register_count : 1u);
+    memset(referenced, 0, sizeof(u8) * (u64)(function->virtual_register_count ? function->virtual_register_count : 1u));
+    for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + value_index;
+        for (u32 piece_index = 0; piece_index < BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces)); piece_index += 1)
+        {
+            MachineRef piece = value->pieces[piece_index];
+            if (machine_ref_kind(piece) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(piece) < function->virtual_register_count)
+            {
+                referenced[machine_ref_payload(piece)] = 1u;
+            }
+        }
+    }
+    u32 subject_bucket_count = function->virtual_register_count ? function->virtual_register_count : 1u;
+    u32 physical_bucket_count = CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u;
+    index->subject_offsets = arena_allocate(arena, u32, (u64)subject_bucket_count + 1u);
+    index->physical_offsets = arena_allocate(arena, u32, (u64)physical_bucket_count + 1u);
+    u32* subject_cursors = arena_allocate(arena, u32, subject_bucket_count);
+    u32* physical_cursors = arena_allocate(arena, u32, physical_bucket_count);
+    memset(subject_cursors, 0, sizeof(u32) * (u64)subject_bucket_count);
+    memset(physical_cursors, 0, sizeof(u32) * (u64)physical_bucket_count);
+    codegen_machine_debug_index_scan(function, placement, index, referenced, subject_cursors, physical_cursors, 0, 0);
+    u32 subject_total = 0;
+    for (u32 bucket = 0; bucket < subject_bucket_count; bucket += 1)
+    {
+        u32 bucket_count = subject_cursors[bucket];
+        index->subject_offsets[bucket] = subject_total;
+        subject_cursors[bucket] = subject_total;
+        subject_total += bucket_count;
+    }
+    index->subject_offsets[subject_bucket_count] = subject_total;
+    u32 physical_total = 0;
+    for (u32 bucket = 0; bucket < physical_bucket_count; bucket += 1)
+    {
+        u32 bucket_count = physical_cursors[bucket];
+        index->physical_offsets[bucket] = physical_total;
+        physical_cursors[bucket] = physical_total;
+        physical_total += bucket_count;
+    }
+    index->physical_offsets[physical_bucket_count] = physical_total;
+    index->subject_rows = arena_allocate(arena, u32, subject_total ? subject_total : 1u);
+    index->physical_rows = arena_allocate(arena, u32, physical_total ? physical_total : 1u);
+    codegen_machine_debug_index_scan(function, placement, index, referenced, subject_cursors, physical_cursors, index->subject_rows,
+                                     index->physical_rows);
+    u32 spill_edits = 0;
+    u32 remat_edits = 0;
+    for (u32 edit_index = 0; edit_index < edit_count; edit_index += 1)
+    {
+        spill_edits += placement->edits[edit_index].kind == MACHINE_EDIT_SPILL;
+        remat_edits += placement->edits[edit_index].kind == MACHINE_EDIT_REMATERIALIZE;
+    }
+    u32* home_keys = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
+    u32* home_rows = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
+    u32* remat_keys = arena_allocate(arena, u32, remat_edits ? remat_edits : 1u);
+    u32* remat_rows = arena_allocate(arena, u32, remat_edits ? remat_edits : 1u);
+    u32 home_count = 0;
+    u32 remat_count = 0;
+    for (u32 edit_index = 0; edit_index < edit_count; edit_index += 1)
+    {
+        MachineEdit const* edit = placement->edits + edit_index;
+        u32 row = machine_point_instruction(edit->point);
+        if (edit->kind == MACHINE_EDIT_SPILL)
+        {
+            home_keys[home_count] = edit->subject < function->virtual_register_count ? placement->virtual_register_offsets[edit->subject]
+                                                                                    : UINT32_MAX;
+            home_rows[home_count] = row;
+            home_count += 1;
+        }
+        else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
+        {
+            remat_keys[remat_count] = edit->subject;
+            remat_rows[remat_count] = row;
+            remat_count += 1;
+        }
+    }
+    codegen_machine_debug_groups_build(arena, &index->homes, home_keys, home_rows, home_count);
+    codegen_machine_debug_groups_build(arena, &index->remats, remat_keys, remat_rows, remat_count);
+    index->blocks_ascending = true;
+    for (u32 block_index = 1; block_index < function->block_count; block_index += 1)
+    {
+        index->blocks_ascending = index->blocks_ascending &&
+                                  function->blocks[block_index - 1u].first_instruction < function->blocks[block_index].first_instruction;
+    }
+    index->marks_valid = true;
+    for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
+    {
+        MachineLineMark mark = function->line_marks[mark_index];
+        index->marks_valid = index->marks_valid && mark.row <= row_count &&
+                             (!mark_index || mark.row >= function->line_marks[mark_index - 1u].row);
+    }
+    u32 mark_count = function->line_mark_count;
+    index->mark_order = arena_allocate(arena, u32, mark_count ? mark_count : 1u);
+    u32* mark_scratch = arena_allocate(arena, u32, mark_count ? mark_count : 1u);
+    for (u32 mark_index = 0; mark_index < mark_count; mark_index += 1)
+    {
+        index->mark_order[mark_index] = mark_index;
+    }
+    u32 mark_instruction_limit = 0;
+    for (u32 mark_index = 0; mark_index < mark_count; mark_index += 1)
+    {
+        mark_instruction_limit = BUSTER_MAX(mark_instruction_limit, function->line_marks[mark_index].instruction);
+    }
+    // Least-significant-digit radix sort on the IR instruction. It is stable,
+    // so marks sharing an instruction keep ascending mark order, and it never
+    // allocates against the key range the way a counting sort would. Digits
+    // above the largest instruction cannot reorder anything, and a function
+    // small enough to index in one or two bytes is the common case.
+    u32 mark_shift_end = 8u;
+    while (mark_shift_end < 32u && (mark_instruction_limit >> mark_shift_end))
+    {
+        mark_shift_end += 8u;
+    }
+    for (u32 shift = 0; mark_count && shift < mark_shift_end; shift += 8u)
+    {
+        u32 digit_counts[256] = {0};
+        for (u32 order_index = 0; order_index < mark_count; order_index += 1)
+        {
+            digit_counts[(function->line_marks[index->mark_order[order_index]].instruction >> shift) & 0xffu] += 1u;
+        }
+        u32 digit_cursor = 0;
+        for (u32 digit = 0; digit < BUSTER_ARRAY_LENGTH(digit_counts); digit += 1)
+        {
+            u32 digit_count = digit_counts[digit];
+            digit_counts[digit] = digit_cursor;
+            digit_cursor += digit_count;
+        }
+        for (u32 order_index = 0; order_index < mark_count; order_index += 1)
+        {
+            u32 mark_index = index->mark_order[order_index];
+            u32 digit = (function->line_marks[mark_index].instruction >> shift) & 0xffu;
+            mark_scratch[digit_counts[digit]] = mark_index;
+            digit_counts[digit] += 1u;
+        }
+        memcpy(index->mark_order, mark_scratch, sizeof(u32) * (u64)mark_count);
+    }
+    index->mark_suffix_first = arena_allocate(arena, u32, (u64)mark_count + 1u);
+    index->mark_suffix_last = arena_allocate(arena, u32, (u64)mark_count + 1u);
+    index->mark_suffix_first[mark_count] = UINT32_MAX;
+    index->mark_suffix_last[mark_count] = 0;
+    for (u32 order_index = mark_count; order_index; order_index -= 1)
+    {
+        index->mark_suffix_first[order_index - 1u] = BUSTER_MIN(index->mark_order[order_index - 1u], index->mark_suffix_first[order_index]);
+        index->mark_suffix_last[order_index - 1u] = BUSTER_MAX(index->mark_order[order_index - 1u], index->mark_suffix_last[order_index]);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_mark_lower_bound(MachineFunction const* function, CodegenMachineDebugIndex const* index,
+                                                                u32 instruction)
+{
+    u32 low = 0;
+    u32 high = function->line_mark_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2u;
+        if (function->line_marks[index->mark_order[middle]].instruction < instruction)
+        {
+            low = middle + 1u;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+// The value's IR instruction span, resolved to the MIR row range the line
+// marks place it in. Definition-to-end spans reach the end of the mark order
+// and answer from the suffix summaries; a block range answers from its own
+// slice of that order, which holds only the marks inside the block.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* function, CodegenMachineDebugIndex const* index,
+                                                     MachineDebugValue const* value, u32* first_row, u32* end_row, bool* malformed)
+{
+    bool result = value->first_instruction == UINT32_MAX;
+    *first_row = 0;
+    *end_row = function->instruction_count;
+    if (!result)
+    {
+        bool rejected = value->first_instruction > UINT32_MAX - value->instruction_count || !index->marks_valid;
+        u32 instruction_end = rejected ? 0 : value->first_instruction + value->instruction_count;
+        u32 low = rejected ? 0 : codegen_machine_debug_mark_lower_bound(function, index, value->first_instruction);
+        u32 high = rejected ? 0 : codegen_machine_debug_mark_lower_bound(function, index, instruction_end);
+        if (!rejected && low < high)
+        {
+            u32 first_mark = index->mark_suffix_first[low];
+            u32 last_mark = index->mark_suffix_last[low];
+            if (high < function->line_mark_count)
+            {
+                first_mark = UINT32_MAX;
+                last_mark = 0;
+                for (u32 order_index = low; order_index < high; order_index += 1)
+                {
+                    first_mark = BUSTER_MIN(first_mark, index->mark_order[order_index]);
+                    last_mark = BUSTER_MAX(last_mark, index->mark_order[order_index]);
+                }
+            }
+            *first_row = function->line_marks[first_mark].row;
+            *end_row = last_mark + 1u < function->line_mark_count ? function->line_marks[last_mark + 1u].row : function->instruction_count;
+            result = *first_row < *end_row;
+        }
+        else
+        {
+            *malformed = true;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(CodegenMachineDebugReference const* state, u32 row, s32 frame_offset,
+                                                                              bool has_home)
+{
+    CodegenMachineDebugSelection result = {.row = row, .physical_register = -1, .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE};
+    bool selected_frame = state->frame_valid && (state->prefer_frame || state->physical_register < 0);
+    if (selected_frame && has_home)
+    {
+        result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
+        result.frame_offset = frame_offset;
+    }
+    else if (!selected_frame && state->physical_register >= 0)
+    {
+        result.kind = CODEGEN_MACHINE_DEBUG_SELECTION_REGISTER;
+        result.physical_register = state->physical_register;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_selection_push(CodegenMachineDebugSelection* entries, u32* entry_count, u32 capacity,
+                                                               CodegenMachineDebugSelection selection, u32 row_count)
+{
+    // A sample taken at a row supersedes the steady state the row before it
+    // published for that same row, so the superseded entry goes before the
+    // comparison rather than after it. Comparing against an entry that is
+    // about to be overwritten answers for the wrong neighbour: a row whose
+    // sample differs from its own steady state then keeps one entry per row,
+    // all carrying the same location, and every value that names the register
+    // walks them. That is the whole function again, once per value.
+    u32 count = *entry_count && entries[*entry_count - 1u].row == selection.row ? *entry_count - 1u : *entry_count;
+    bool same = count && entries[count - 1u].kind == selection.kind && entries[count - 1u].frame_offset == selection.frame_offset &&
+                entries[count - 1u].physical_register == selection.physical_register;
+    if (selection.row < row_count && count < capacity)
+    {
+        if (!same)
+        {
+            entries[count] = selection;
+            count += 1u;
+        }
+        *entry_count = count;
+    }
+}
+
+// The first row at or after `row` that writes the register, with a one-entry
+// cursor cache: a replay usually asks about the same register at successive
+// rows, and walking forward from the last answer beats searching again.
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_physical_next(CodegenMachineDebugIndex const* index, s32 physical_register, u32 row,
+                                                             u32* cached_bucket, u32* cached_cursor)
+{
+    u32 bucket = codegen_machine_debug_physical_bucket(physical_register);
+    u32 end = index->physical_offsets[bucket + 1u];
+    u32 low = index->physical_offsets[bucket];
+    if (bucket == *cached_bucket && *cached_cursor >= low && *cached_cursor <= end)
+    {
+        low = *cached_cursor;
+        while (low < end && index->physical_rows[low] < row)
+        {
+            low += 1u;
+        }
+    }
+    else
+    {
+        u32 high = end;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2u;
+            if (index->physical_rows[middle] < row)
+            {
+                low = middle + 1u;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+    }
+    *cached_bucket = bucket;
+    *cached_cursor = low;
+    return low < end ? index->physical_rows[low] : UINT32_MAX;
+}
+
+// The row the block cursor can still match, or none once it has fallen behind:
+// a whole-function replay consumes one block per row, so a block start the
+// walk has passed never matches again.
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_block_row(MachineFunction const* function, u32 block_cursor, u32 row)
+{
+    return block_cursor < function->block_count && function->blocks[block_cursor].first_instruction >= row
+               ? function->blocks[block_cursor].first_instruction
+               : UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_block_lower_bound(MachineFunction const* function, u32 row)
+{
+    u32 low = 0;
+    u32 high = function->block_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2u;
+        if (function->blocks[middle].first_instruction < row)
+        {
+            low = middle + 1u;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_group_next(CodegenMachineDebugRowGroups const* groups, u32 group, u32* cursor, u32 row)
+{
+    u32 next = UINT32_MAX;
+    if (group != UINT32_MAX)
+    {
+        u32 end = groups->offsets[group + 1u];
+        while (*cursor < end && groups->rows[*cursor] < row)
+        {
+            *cursor += 1u;
+        }
+        next = *cursor < end ? groups->rows[*cursor] : UINT32_MAX;
+    }
+    return next;
+}
+
+// One virtual register's sampled location over the whole function, as change
+// points. The row body below is the whole-function replay's, run only at rows
+// the indexes say can change this register's state; between them the row-start
+// sample is unchanged and no invalidation can happen, so the location holds.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunction const* function, MachineStackPlacement const* placement,
+                                                                   CodegenMachineDebugIndex const* index, u32 payload, u32 frame_base_offset,
+                                                                   Target target, CodegenMachineDebugSelection* entries, u32 capacity,
+                                                                   u32* entry_count)
+{
+    s32 frame_offset = 0;
+    // A homeless register is a value without a frame location, not invalid IR:
+    // a sample that would select its frame copy stays unavailable instead. The
+    // dense reference clips the same way. An offset that really is out of
+    // range is still rejected.
+    u32 home = payload < function->virtual_register_count ? placement->virtual_register_offsets[payload] : MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    bool has_home = home != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    bool result = payload < function->virtual_register_count && index->edits_valid &&
+                  (!has_home || codegen_machine_debug_frame_offset(home, frame_base_offset, target, &frame_offset));
+    *entry_count = 0;
+    if (result)
+    {
+        u32 remat_group = UINT32_MAX;
+        MachinePoint definition = function->virtual_registers[payload].definition_point;
+        u32 definition_row = definition == MACHINE_POINT_INVALID ? UINT32_MAX : machine_point_instruction(definition);
+        if (definition_row < function->instruction_count)
+        {
+            MachineInstruction const* instruction = function->instructions + definition_row;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            if (info && info->operand_count >= 2 && machine_ref_kind(instruction->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                machine_ref_payload(instruction->operands[0]) == payload &&
+                machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE)
+            {
+                remat_group = codegen_machine_debug_group_find(&index->remats, machine_ref_payload(instruction->operands[1]));
+            }
+        }
+        // Every homeless register carries the marker as its key, and a spill of
+        // one of the others never invalidates this value, so there is no row
+        // here worth stopping at.
+        u32 home_group = has_home ? codegen_machine_debug_group_find(&index->homes, home) : UINT32_MAX;
+        u32 home_cursor = home_group == UINT32_MAX ? 0 : index->homes.offsets[home_group];
+        u32 remat_cursor = remat_group == UINT32_MAX ? 0 : index->remats.offsets[remat_group];
+        u32 subject_cursor = index->subject_offsets[payload];
+        u32 subject_end = index->subject_offsets[payload + 1u];
+        CodegenMachineDebugReference state = {.physical_register = -1};
+        u32 physical_bucket = UINT32_MAX;
+        u32 physical_cursor = 0;
+        u32 unmapped_cursor = index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT];
+        u32 block_cursor = 0;
+        u32 row = 0;
+        codegen_machine_debug_selection_push(entries, entry_count, capacity, codegen_machine_debug_sample(&state, 0, frame_offset, has_home),
+                                             function->instruction_count);
+        while (row < function->instruction_count)
+        {
+            while (subject_cursor < subject_end && index->subject_rows[subject_cursor] < row)
+            {
+                subject_cursor += 1u;
+            }
+            u32 next = subject_cursor < subject_end ? index->subject_rows[subject_cursor] : UINT32_MAX;
+            next = BUSTER_MIN(next, codegen_machine_debug_group_next(&index->remats, remat_group, &remat_cursor, row));
+            if (state.frame_valid)
+            {
+                next = BUSTER_MIN(next, codegen_machine_debug_group_next(&index->homes, home_group, &home_cursor, row));
+            }
+            next = BUSTER_MIN(next, codegen_machine_debug_physical_next(index, state.physical_register, row, &physical_bucket, &physical_cursor));
+            if (unmapped_cursor < index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u])
+            {
+                // Identities outside the architectural file share one bucket,
+                // which a frame-selected sample also compares against. It is
+                // empty for everything an allocator emits.
+                while (unmapped_cursor < index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u] &&
+                       index->physical_rows[unmapped_cursor] < row)
+                {
+                    unmapped_cursor += 1u;
+                }
+                next = BUSTER_MIN(next, unmapped_cursor < index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u]
+                                            ? index->physical_rows[unmapped_cursor]
+                                            : UINT32_MAX);
+            }
+            // A block start clears any held register and republishes the home
+            // preference. The first block changes nothing -- the replay this
+            // stands in for skips it -- and neither does any other while
+            // nothing is held and the preference already matches the home. Skip
+            // those without stopping: the cursor still advances, because the
+            // replay consumes exactly one block per row.
+            u32 block_row = codegen_machine_debug_block_row(function, block_cursor, row);
+            if (!block_cursor && block_row < next)
+            {
+                row = block_row + 1u;
+                block_cursor += 1u;
+                block_row = codegen_machine_debug_block_row(function, block_cursor, row);
+            }
+            if (block_row < next && state.physical_register < 0 && state.prefer_frame == state.frame_valid)
+            {
+                if (index->blocks_ascending)
+                {
+                    block_cursor = codegen_machine_debug_block_lower_bound(function, next);
+                    row = BUSTER_MIN(next, function->instruction_count);
+                }
+                else
+                {
+                    while (block_row < next)
+                    {
+                        row = block_row + 1u;
+                        block_cursor += 1u;
+                        block_row = codegen_machine_debug_block_row(function, block_cursor, row);
+                    }
+                }
+                block_row = codegen_machine_debug_block_row(function, block_cursor, row);
+            }
+            {
+                next = BUSTER_MIN(next, block_row);
+                if (next >= function->instruction_count)
+                {
+                    row = function->instruction_count;
+                }
+                else
+                {
+                    if (block_cursor < function->block_count && function->blocks[block_cursor].first_instruction == next)
+                    {
+                        if (block_cursor)
+                        {
+                            // Physical ownership is edge-specific. A published
+                            // home is path-independent: every executing
+                            // definition spilled the same vreg there, and reuse
+                            // writes invalidate it explicitly.
+                            state.physical_register = -1;
+                            state.prefer_frame = state.frame_valid;
+                        }
+                        block_cursor += 1u;
+                    }
+                    bool selected_frame = state.frame_valid && (state.prefer_frame || state.physical_register < 0);
+                    s32 selected_register = selected_frame ? -1 : state.physical_register;
+                    bool selected_invalid = false;
+                    u32 edit_cursor = index->row_edits[next];
+                    MachinePoint before = machine_point_make(next, MACHINE_POINT_BEFORE);
+                    while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
+                    {
+                        codegen_machine_debug_edit_state(function, placement, payload, placement->edits + edit_cursor, &state, selected_frame,
+                                                         selected_register, &selected_invalid);
+                        edit_cursor += 1u;
+                    }
+                    MachineInstruction const* instruction = function->instructions + next;
+                    MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
+                    if (selected_register >= 0 && selected_register < 64 && (opcode_row.clobber_mask & (UINT64_C(1) << selected_register)))
+                    {
+                        selected_invalid = true;
+                    }
+                    if (state.physical_register >= 0 && state.physical_register < 64 &&
+                        (opcode_row.clobber_mask & (UINT64_C(1) << state.physical_register)))
+                    {
+                        state.physical_register = -1;
+                    }
+                    MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                    for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
+                    {
+                        u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                        MachineRef operand = instruction->operands[operand_index];
+                        bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
+                        u32 physical = placement->operand_registers[(u64)next * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+                        if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0)
+                        {
+                            // Entry/CFG parameters intentionally have no
+                            // definition row. Their first allocated use is
+                            // nevertheless a certified read of the incoming
+                            // value; publish it only after that row.
+                            state.physical_register = (s32)physical;
+                            state.prefer_frame = false;
+                            state.epoch += 1;
+                        }
+                        if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                        {
+                            if (selected_register == (s32)physical)
+                            {
+                                selected_invalid = true;
+                            }
+                            if (state.physical_register == (s32)physical)
+                            {
+                                state.physical_register = -1;
+                            }
+                            if (own)
+                            {
+                                state.physical_register = (s32)physical;
+                                state.prefer_frame = false;
+                                state.epoch += 1;
+                            }
+                        }
+                    }
+                    MachinePoint after = machine_point_make(next, MACHINE_POINT_AFTER);
+                    while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
+                    {
+                        codegen_machine_debug_edit_state(function, placement, payload, placement->edits + edit_cursor, &state, selected_frame,
+                                                         selected_register, &selected_invalid);
+                        edit_cursor += 1u;
+                    }
+                    CodegenMachineDebugSelection sampled = {.row = next, .physical_register = -1,
+                                                            .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE};
+                    if (!selected_invalid && selected_frame && has_home)
+                    {
+                        sampled.kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME;
+                        sampled.frame_offset = frame_offset;
+                    }
+                    else if (!selected_invalid && selected_register >= 0)
+                    {
+                        sampled.kind = CODEGEN_MACHINE_DEBUG_SELECTION_REGISTER;
+                        sampled.physical_register = selected_register;
+                    }
+                    codegen_machine_debug_selection_push(entries, entry_count, capacity, sampled, function->instruction_count);
+                    codegen_machine_debug_selection_push(entries, entry_count, capacity,
+                                                         codegen_machine_debug_sample(&state, next + 1u, frame_offset, has_home),
+                                                         function->instruction_count);
+                    row = next + 1u;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_timeline_seek(CodegenMachineDebugTimeline const* timeline, u32 row)
+{
+    u32 low = 0;
+    u32 high = timeline->entry_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2u;
+        if (timeline->entries[middle].row <= row)
+        {
+            low = middle + 1u;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low ? low - 1u : 0;
+}
+
+BUSTER_GLOBAL_LOCAL DebugLocationPiece codegen_machine_debug_piece(MachineFunction const* function, MachineRef reference, u32 value_size,
+                                                                    Target target, CodegenMachineDebugSelection selection, bool* available)
+{
+    DebugLocationPiece piece = {0};
+    bool present = false;
+    if (selection.kind == CODEGEN_MACHINE_DEBUG_SELECTION_FRAME)
+    {
+        piece.kind = DEBUG_LOCATION_FRAME;
+        piece.frame_offset = selection.frame_offset;
+        present = true;
+    }
+    else if (selection.kind == CODEGEN_MACHINE_DEBUG_SELECTION_REGISTER)
+    {
+        DebugRegister reg = codegen_machine_debug_register(function, machine_ref_payload(reference), (u32)selection.physical_register, value_size,
+                                                           target);
+        piece.kind = DEBUG_LOCATION_REGISTER;
+        piece.reg = reg;
+        present = reg != DEBUG_REGISTER_NONE;
+    }
+    *available = present;
+    return piece;
+}
+
+// One reference's timeline, built on first use and reused by every value that
+// names the same virtual register. A stack slot has no state to replay: its
+// location is the same frame offset for the whole function.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_timeline_for(Arena* arena, MachineFunction const* function, MachineStackPlacement const* placement,
+                                                              CodegenMachineDebugIndex const* index, CodegenMachineDebugTimeline* timelines,
+                                                              CodegenMachineDebugTimeline* slot_timelines, CodegenMachineDebugSelection* scratch,
+                                                              u32 scratch_capacity, MachineRef reference, u32 frame_base_offset, Target target,
+                                                              CodegenMachineDebugTimeline const** timeline_out)
+{
+    MachineRefKind kind = machine_ref_kind(reference);
+    u32 payload = machine_ref_payload(reference);
+    bool stack_slot = kind == MACHINE_REF_STACK_SLOT;
+    CodegenMachineDebugTimeline* timeline = 0;
+    if (stack_slot && payload < function->stack_slot_count)
+    {
+        timeline = slot_timelines + payload;
+    }
+    else if (kind == MACHINE_REF_VIRTUAL_REGISTER && payload < function->virtual_register_count)
+    {
+        timeline = timelines + payload;
+    }
+    if (timeline && !timeline->built)
+    {
+        u32 entry_count = 0;
+        if (stack_slot)
+        {
+            s32 frame_offset = 0;
+            timeline->valid =
+                codegen_machine_debug_frame_offset(placement->stack_slot_offsets[payload], frame_base_offset, target, &frame_offset);
+            scratch[0] = (CodegenMachineDebugSelection){
+                .row = 0, .frame_offset = frame_offset, .physical_register = -1, .kind = CODEGEN_MACHINE_DEBUG_SELECTION_FRAME};
+            entry_count = timeline->valid && function->instruction_count ? 1u : 0;
+        }
+        else
+        {
+            timeline->valid = codegen_machine_debug_reference_timeline(function, placement, index, payload, frame_base_offset, target, scratch,
+                                                                       scratch_capacity, &entry_count);
+        }
+        CodegenMachineDebugSelection* entries = arena_allocate(arena, CodegenMachineDebugSelection, entry_count ? entry_count : 1u);
+        memcpy(entries, scratch, sizeof(*entries) * (u64)entry_count);
+        timeline->entries = entries;
+        timeline->entry_count = entry_count;
+        timeline->built = true;
+    }
+    *timeline_out = timeline;
+    return timeline != 0 && timeline->valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_locations_equal(DebugLocation const* left, DebugLocation const* right)
+{
+    bool equal = left->kind == right->kind && left->piece_count == right->piece_count;
+    if (equal && left->kind == DEBUG_LOCATION_REGISTER)
+    {
+        equal = left->reg == right->reg;
+    }
+    else if (equal && left->kind == DEBUG_LOCATION_FRAME)
+    {
+        equal = left->frame_offset == right->frame_offset;
+    }
+    else if (equal && left->kind == DEBUG_LOCATION_CONSTANT)
+    {
+        equal = left->constant == right->constant;
+    }
+    else if (equal && left->kind == DEBUG_LOCATION_PIECEWISE)
+    {
+        for (u32 index = 0; index < left->piece_count; index += 1)
+        {
+            DebugLocationPiece a = left->pieces[index];
+            DebugLocationPiece b = right->pieces[index];
+            equal = equal && a.kind == b.kind && a.reg == b.reg && a.frame_offset == b.frame_offset && a.value_offset == b.value_offset &&
+                    a.size == b.size;
+        }
+    }
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenModule* result, CodegenDebugLocationSink* sink,
+                                                           IrFunction* ir_function, MachineFunction const* function,
+                                                           MachineStackPlacement const* placement, u32 const* row_offsets, u32 function_start,
+                                                           u32 function_end, u32 frame_base_offset, Target target)
+{
+    bool recorded = result && result->debug_locations && function && placement && row_offsets && function_end >= function_start;
+    for (u32 row = 0; recorded && row < function->instruction_count; row += 1)
+    {
+        if (row_offsets[row] > function_end - function_start || (row && row_offsets[row] < row_offsets[row - 1u]))
+        {
+            result->error = CODEGEN_ERROR_INVALID_IR;
+            recorded = false;
+        }
+    }
+    if (recorded && function->debug_value_count)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        CodegenMachineDebugIndex index = {0};
+        codegen_machine_debug_index_build(scratch.arena, function, placement, &index);
+        u32 register_timeline_count = function->virtual_register_count ? function->virtual_register_count : 1u;
+        u32 slot_timeline_count = function->stack_slot_count ? function->stack_slot_count : 1u;
+        CodegenMachineDebugTimeline* register_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, register_timeline_count);
+        CodegenMachineDebugTimeline* slot_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, slot_timeline_count);
+        memset(register_timelines, 0, sizeof(*register_timelines) * (u64)register_timeline_count);
+        memset(slot_timelines, 0, sizeof(*slot_timelines) * (u64)slot_timeline_count);
+        // A replay records at most the row it stops at and the steady state
+        // that follows it, and it stops at most once per row.
+        u32 scratch_capacity = 2u * function->instruction_count + 2u;
+        CodegenMachineDebugSelection* selection_scratch = arena_allocate(scratch.arena, CodegenMachineDebugSelection, scratch_capacity);
+        for (u32 value_index = 0; recorded && value_index < function->debug_value_count; value_index += 1)
+        {
+            MachineDebugValue const* value = function->debug_values + value_index;
+            u32 first_row = 0;
+            u32 end_row = 0;
+            bool malformed = false;
+            if (!codegen_machine_debug_span(function, &index, value, &first_row, &end_row, &malformed))
+            {
+                if (malformed)
+                {
+                    result->error = CODEGEN_ERROR_INVALID_IR;
+                    recorded = false;
+                }
+                else if (function_end > function_start &&
+                         !codegen_canonical_location_append(result, sink, ir_function->symbol, value->local, function_start, function_end,
+                                                            (DebugLocation){.kind = DEBUG_LOCATION_UNAVAILABLE}))
+                {
+                    recorded = false;
+                }
+                continue;
+            }
+            u32 piece_count = value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE
+                                  ? BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces))
+                                  : 0;
+            CodegenMachineDebugTimeline const* piece_timelines[BUSTER_ARRAY_LENGTH(value->pieces)] = {0};
+            u32 piece_cursors[BUSTER_ARRAY_LENGTH(value->pieces)] = {0};
+            for (u32 piece_index = 0; recorded && piece_index < piece_count; piece_index += 1)
+            {
+                if (!codegen_machine_debug_timeline_for(scratch.arena, function, placement, &index, register_timelines, slot_timelines,
+                                                        selection_scratch, scratch_capacity, value->pieces[piece_index], frame_base_offset,
+                                                        target, piece_timelines + piece_index))
+                {
+                    result->error = CODEGEN_ERROR_INVALID_IR;
+                    recorded = false;
+                }
+            }
+            for (u32 piece_index = 0; recorded && piece_index < piece_count; piece_index += 1)
+            {
+                piece_cursors[piece_index] = codegen_machine_debug_timeline_seek(piece_timelines[piece_index], first_row);
+            }
+            DebugLocation pending = {.kind = DEBUG_LOCATION_UNAVAILABLE};
+            DebugLocationPiece pending_pieces[BUSTER_ARRAY_LENGTH(value->pieces)] = {0};
+            u32 pending_start = first_row;
+            u32 row = first_row;
+            bool done = !recorded;
+            while (!done)
+            {
+                for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
+                {
+                    CodegenMachineDebugTimeline const* timeline = piece_timelines[piece_index];
+                    while (piece_cursors[piece_index] + 1u < timeline->entry_count &&
+                           timeline->entries[piece_cursors[piece_index] + 1u].row <= row)
+                    {
+                        piece_cursors[piece_index] += 1u;
+                    }
+                }
+                DebugLocation location = {.kind = DEBUG_LOCATION_UNAVAILABLE};
+                DebugLocationPiece pieces[BUSTER_ARRAY_LENGTH(value->pieces)] = {0};
+                bool available[BUSTER_ARRAY_LENGTH(value->pieces)] = {false};
+                for (u32 piece_index = 0; row < end_row && piece_index < piece_count; piece_index += 1)
+                {
+                    CodegenMachineDebugTimeline const* timeline = piece_timelines[piece_index];
+                    pieces[piece_index] = timeline->entry_count
+                                              ? codegen_machine_debug_piece(function, value->pieces[piece_index], value->piece_sizes[piece_index],
+                                                                            target, timeline->entries[piece_cursors[piece_index]],
+                                                                            available + piece_index)
+                                              : (DebugLocationPiece){0};
+                }
+                if (row < end_row && value->kind == MACHINE_DEBUG_VALUE_CONSTANT)
+                {
+                    location.kind = DEBUG_LOCATION_CONSTANT;
+                    location.constant = value->constant;
+                }
+                else if (row < end_row && value->kind == MACHINE_DEBUG_VALUE_REFERENCE && piece_count && available[0])
+                {
+                    location.kind = pieces[0].kind;
+                    location.reg = pieces[0].reg;
+                    location.frame_offset = pieces[0].frame_offset;
+                }
+                else if (row < end_row && value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
+                {
+                    bool all = value->piece_count == 2;
+                    u32 piece_offset = 0;
+                    for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
+                    {
+                        all = all && available[piece_index];
+                        pieces[piece_index].value_offset = piece_offset;
+                        pieces[piece_index].size = value->piece_sizes[piece_index];
+                        piece_offset += value->piece_sizes[piece_index];
+                    }
+                    if (all)
+                    {
+                        location.kind = DEBUG_LOCATION_PIECEWISE;
+                        location.pieces = pieces;
+                        location.piece_count = value->piece_count;
+                    }
+                }
+                if (row == end_row || !codegen_machine_debug_locations_equal(&pending, &location))
+                {
+                    u32 start = pending_start < function->instruction_count ? function_start + row_offsets[pending_start] : function_end;
+                    u32 end = row < function->instruction_count ? function_start + row_offsets[row] : function_end;
+                    if (end > start)
+                    {
+                        if (pending.kind == DEBUG_LOCATION_PIECEWISE)
+                        {
+                            DebugLocationPiece* stable = arena_allocate(arena, DebugLocationPiece, pending.piece_count);
+                            memcpy(stable, pending.pieces, sizeof(*stable) * pending.piece_count);
+                            pending.pieces = stable;
+                        }
+                        if (!codegen_canonical_location_append(result, sink, ir_function->symbol, value->local, start, end, pending))
+                        {
+                            recorded = false;
+                            done = true;
+                        }
+                    }
+                    pending = location;
+                    if (location.kind == DEBUG_LOCATION_PIECEWISE)
+                    {
+                        memcpy(pending_pieces, pieces, sizeof(*pieces) * location.piece_count);
+                        pending.pieces = pending_pieces;
+                    }
+                    pending_start = row;
+                }
+                if (row == end_row)
+                {
+                    done = true;
+                }
+                else if (!done)
+                {
+                    u32 next = end_row;
+                    for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
+                    {
+                        CodegenMachineDebugTimeline const* timeline = piece_timelines[piece_index];
+                        if (piece_cursors[piece_index] + 1u < timeline->entry_count)
+                        {
+                            next = BUSTER_MIN(next, timeline->entries[piece_cursors[piece_index] + 1u].row);
+                        }
+                    }
+                    row = next;
+                }
+            }
+        }
+        scratch_end(scratch);
+    }
+    return recorded;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// Whole-function reference recording, kept as the differential reference for
+// the event-driven routine above. Every debug value replays every row of the
+// function for each of its pieces; the event-driven routine must agree with it
+// seed for seed. Production never calls it.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span_dense(MachineFunction const* function, MachineDebugValue const* value, u32* first_row, u32* end_row,
                                                      bool* malformed)
 {
     bool result = value->first_instruction == UINT32_MAX;
@@ -9039,7 +10196,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* funct
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction const* function,
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunction const* function,
                                                                MachineStackPlacement const* placement, MachineRef reference, u32 value_size,
                                                                u32 frame_base_offset, Target target, DebugLocationPiece* rows, bool* available)
 {
@@ -9170,35 +10327,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows(MachineFunction co
     return edit_cursor == placement->edit_count;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_locations_equal(DebugLocation const* left, DebugLocation const* right)
-{
-    if (left->kind != right->kind || left->piece_count != right->piece_count)
-    {
-        return false;
-    }
-    if (left->kind == DEBUG_LOCATION_REGISTER)
-        return left->reg == right->reg;
-    if (left->kind == DEBUG_LOCATION_FRAME)
-        return left->frame_offset == right->frame_offset;
-    if (left->kind == DEBUG_LOCATION_CONSTANT)
-        return left->constant == right->constant;
-    if (left->kind == DEBUG_LOCATION_PIECEWISE)
-    {
-        for (u32 index = 0; index < left->piece_count; index += 1)
-        {
-            DebugLocationPiece a = left->pieces[index];
-            DebugLocationPiece b = right->pieces[index];
-            if (a.kind != b.kind || a.reg != b.reg || a.frame_offset != b.frame_offset || a.value_offset != b.value_offset || a.size != b.size)
-                return false;
-        }
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
-                                                           MachineFunction const* function, MachineStackPlacement const* placement,
-                                                           u32 const* row_offsets, u32 function_start, u32 function_end,
-                                                           u32 frame_base_offset, Target target)
+BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations_dense(Arena* arena, CodegenModule* result, CodegenDebugLocationSink* sink,
+                                                                 IrFunction* ir_function, MachineFunction const* function,
+                                                                 MachineStackPlacement const* placement, u32 const* row_offsets,
+                                                                 u32 function_start, u32 function_end, u32 frame_base_offset, Target target)
 {
     if (!result || !result->debug_locations || !function || !placement || !row_offsets || function_end < function_start)
     {
@@ -9219,10 +10351,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
     for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
     {
         MachineDebugValue const* value = function->debug_values + value_index;
+        // The row buffers hold one entry per piece the layout can describe, so
+        // a record claiming more pieces than that is clipped rather than read
+        // past them. The event-driven routine clips the same way.
+        u32 piece_count = BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces));
         u32 first_row = 0;
         u32 end_row = 0;
         bool malformed = false;
-        if (!codegen_machine_debug_span(function, value, &first_row, &end_row, &malformed))
+        if (!codegen_machine_debug_span_dense(function, value, &first_row, &end_row, &malformed))
         {
             if (malformed)
             {
@@ -9230,7 +10366,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
                 return false;
             }
             if (function_end > function_start &&
-                !codegen_canonical_location_append(result, capacity, ir_function->symbol, value->local, function_start, function_end,
+                !codegen_canonical_location_append(result, sink, ir_function->symbol, value->local, function_start, function_end,
                                                    (DebugLocation){.kind = DEBUG_LOCATION_UNAVAILABLE}))
             {
                 return false;
@@ -9241,9 +10377,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
         memset(piece_available[1], 0, sizeof(**piece_available) * row_capacity);
         if (value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
         {
-            for (u32 piece_index = 0; piece_index < value->piece_count; piece_index += 1)
+            for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
             {
-                if (!codegen_machine_debug_reference_rows(function, placement, value->pieces[piece_index], value->piece_sizes[piece_index],
+                if (!codegen_machine_debug_reference_rows_dense(function, placement, value->pieces[piece_index], value->piece_sizes[piece_index],
                                                           frame_base_offset, target, piece_rows[piece_index], piece_available[piece_index]))
                 {
                     result->error = CODEGEN_ERROR_INVALID_IR;
@@ -9273,7 +10409,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
             {
                 bool all = value->piece_count == 2;
                 u32 piece_offset = 0;
-                for (u32 piece_index = 0; piece_index < value->piece_count; piece_index += 1)
+                for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
                 {
                     all = all && piece_available[piece_index][row];
                     pieces[piece_index] = piece_rows[piece_index][row];
@@ -9300,7 +10436,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
                         memcpy(stable, pending.pieces, sizeof(*stable) * pending.piece_count);
                         pending.pieces = stable;
                     }
-                    if (!codegen_canonical_location_append(result, capacity, ir_function->symbol, value->local, start, end, pending))
+                    if (!codegen_canonical_location_append(result, sink, ir_function->symbol, value->local, start, end, pending))
                     {
                         return false;
                     }
@@ -9318,13 +10454,75 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
     return true;
 }
 
-#if BUSTER_INCLUDE_TESTS
+
 bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
                                             MachineFunction const* function, MachineStackPlacement const* placement,
                                             u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset, Target target)
 {
-    return codegen_record_machine_locations(arena, result, capacity, ir_function, function, placement, row_offsets, function_start, function_end,
+    CodegenDebugLocationSink sink = {.capacity = capacity};
+    return codegen_record_machine_locations(arena, result, &sink, ir_function, function, placement, row_offsets, function_start, function_end,
                                             frame_base_offset, target);
+}
+
+// Recording into arena-owned seed storage, which grows with what it emits.
+bool codegen_test_record_machine_locations_growing(Arena* arena, CodegenModule* result, u32* capacity, IrFunction* ir_function,
+                                                    MachineFunction const* function, MachineStackPlacement const* placement,
+                                                    u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset,
+                                                    Target target)
+{
+    CodegenDebugLocationSink sink = {.arena = arena, .capacity = *capacity};
+    bool recorded = codegen_record_machine_locations(arena, result, &sink, ir_function, function, placement, row_offsets, function_start,
+                                                     function_end, frame_base_offset, target);
+    *capacity = sink.capacity;
+    return recorded;
+}
+
+// The widest change-point timeline the event-driven recording would build for
+// this function. Sparsity is the whole point of the routine: a timeline that
+// holds an entry per row is walked again by every value that names the
+// register, which is the whole-function replay the routine replaced.
+u32 codegen_test_machine_debug_widest_timeline(Arena* arena, MachineFunction const* function, MachineStackPlacement const* placement,
+                                                u32 frame_base_offset, Target target)
+{
+    u32 widest = 0;
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    CodegenMachineDebugIndex index = {0};
+    codegen_machine_debug_index_build(scratch.arena, function, placement, &index);
+    u32 register_timeline_count = function->virtual_register_count ? function->virtual_register_count : 1u;
+    u32 slot_timeline_count = function->stack_slot_count ? function->stack_slot_count : 1u;
+    CodegenMachineDebugTimeline* register_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, register_timeline_count);
+    CodegenMachineDebugTimeline* slot_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, slot_timeline_count);
+    memset(register_timelines, 0, sizeof(*register_timelines) * (u64)register_timeline_count);
+    memset(slot_timelines, 0, sizeof(*slot_timelines) * (u64)slot_timeline_count);
+    u32 scratch_capacity = 2u * function->instruction_count + 2u;
+    CodegenMachineDebugSelection* selection_scratch = arena_allocate(scratch.arena, CodegenMachineDebugSelection, scratch_capacity);
+    for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + value_index;
+        u32 piece_count = value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE
+                              ? BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces))
+                              : 0;
+        for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
+        {
+            CodegenMachineDebugTimeline const* timeline = 0;
+            codegen_machine_debug_timeline_for(scratch.arena, function, placement, &index, register_timelines, slot_timelines,
+                                               selection_scratch, scratch_capacity, value->pieces[piece_index], frame_base_offset, target,
+                                               &timeline);
+            widest = timeline && timeline->entry_count > widest ? timeline->entry_count : widest;
+        }
+    }
+    scratch_end(scratch);
+    return widest;
+}
+
+bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
+                                                  MachineFunction const* function, MachineStackPlacement const* placement,
+                                                  u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset,
+                                                  Target target)
+{
+    CodegenDebugLocationSink sink = {.capacity = capacity};
+    return codegen_record_machine_locations_dense(arena, result, &sink, ir_function, function, placement, row_offsets, function_start,
+                                                  function_end, frame_base_offset, target);
 }
 #endif
 
@@ -9624,7 +10822,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u64 probe_count = (function_value_bytes + A64_SP_ADJUST_CHUNK - 1) / A64_SP_ADJUST_CHUNK;
         stack_probe_capacity += probe_count * 11;
     }
-    u32 debug_location_capacity = (u32)debug_location_capacity_64;
+    CodegenDebugLocationSink debug_location_sink = {.arena = arena, .capacity = (u32)debug_location_capacity_64};
     u32 global_relocation_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -9723,7 +10921,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // DWARF builder; doing it here is what lets the writer alias the array.
     u32 line_source_limit = BUSTER_MIN(program->sources.count, (u32)UINT16_MAX + 1);
     result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
-    result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_capacity) : 0;
+    result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_sink.capacity) : 0;
     result.debug_info = options.debug_info;
     if (options.record_fallbacks && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
     {
@@ -10589,19 +11787,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (machine_inline_relocations_valid)
                             {
-                                // For one debug record, each MIR row can end
-                                // at most one pending segment. A zero-row or
-                                // unmapped span adds at most one UNAVAILABLE
-                                // segment. Edits only change the state sampled
-                                // at their row and cannot add another boundary,
-                                // so records * (rows + 1) is an exact bound.
-                                u64 machine_debug_bound = (u64)selected.function.debug_value_count *
-                                                          ((u64)selected.function.instruction_count + 1u);
+                                // Seed storage grows with what recording
+                                // actually emits. Reserving the records-times-
+                                // rows worst case instead put gigabytes of
+                                // unused array in the translation-unit arena
+                                // for a few thousand emitted ranges.
                                 if (options.debug_info &&
-                                    (!codegen_debug_locations_reserve(arena, &result, &debug_location_capacity, machine_debug_bound) ||
-                                     !codegen_record_machine_locations(arena, &result, debug_location_capacity, function, &selected.function,
+                                    !codegen_record_machine_locations(arena, &result, &debug_location_sink, function, &selected.function,
                                                                       &placement, encoded.row_offsets, (u32)buffer.count,
-                                                                      (u32)buffer.count + encoded.byte_count, 0, target)))
+                                                                      (u32)buffer.count + encoded.byte_count, 0, target))
                                 {
                                     result.error = result.error == CODEGEN_ERROR_NONE ? CODEGEN_ERROR_INVALID_IR : result.error;
                                     scratch_end(machine_scratch);
@@ -10790,15 +11984,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             if (machine_inline_relocations_valid)
                             {
                                 u32 machine_frame_base_offset = encoded.frame_pointer_offset ? placement.frame_size : 0;
-                                // Same per-record/per-row proof as the AArch64
-                                // path above; allocator edit count is irrelevant.
-                                u64 machine_debug_bound = (u64)selected.function.debug_value_count *
-                                                          ((u64)selected.function.instruction_count + 1u);
+                                // Same emitted-range sizing as the AArch64 path
+                                // above.
                                 if (options.debug_info &&
-                                    (!codegen_debug_locations_reserve(arena, &result, &debug_location_capacity, machine_debug_bound) ||
-                                     !codegen_record_machine_locations(arena, &result, debug_location_capacity, function, &selected.function,
+                                    !codegen_record_machine_locations(arena, &result, &debug_location_sink, function, &selected.function,
                                                                       &placement, encoded.row_offsets, (u32)buffer.count,
-                                                                      (u32)buffer.count + encoded.byte_count, machine_frame_base_offset, target)))
+                                                                      (u32)buffer.count + encoded.byte_count, machine_frame_base_offset, target))
                                 {
                                     result.error = result.error == CODEGEN_ERROR_NONE ? CODEGEN_ERROR_INVALID_IR : result.error;
                                     scratch_end(machine_scratch);
@@ -21294,7 +22485,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         if (options.debug_info)
         {
             codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, descriptor->code_offset, (u32)buffer.count, target, frame_size,
-                                               (s32)canonical_x64_frame_base_offset, debug_location_capacity);
+                                               (s32)canonical_x64_frame_base_offset, &debug_location_sink);
         }
     }
     for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
