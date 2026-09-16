@@ -46,13 +46,17 @@ _ANDROID_LOG_MAX_BYTES = 64 * 1024 * 1024
 _ANDROID_LOG_LINE_BYTES = 4096
 _ANDROID_STATUS = r"(?:0|[1-9][0-9]{0,2})"
 _ANDROID_CONFIG = r"(?P<config>Debug|Release)"
+_ANDROID_DEADLINE = r"[1-9][0-9]{0,8}"
+_ANDROID_SECONDS = r"(?:0|[1-9][0-9]{0,8})"
+# Producer statuses GNU timeout reports for an exhausted payload deadline.
+_ANDROID_DEADLINE_STATUSES = ("124", "137")
 _ANDROID_RECORDS = {
     "ANDROID_CONFIG_RESULT": ("config", re.compile(
         rf"ANDROID_CONFIG_RESULT config={_ANDROID_CONFIG} status=(?P<status>{_ANDROID_STATUS}|not-run)")),
     "ANDROID_PAYLOAD_RESULT": ("payload", re.compile(
         rf"ANDROID_PAYLOAD_RESULT config={_ANDROID_CONFIG} phase=(?P<phase>wait-device|install|launch|monitor) status=(?P<status>{_ANDROID_STATUS})")),
     "ANDROID_MONITOR_RESULT": ("monitor", re.compile(
-        rf"ANDROID_MONITOR_RESULT config={_ANDROID_CONFIG} reader_status=(?P<reader_status>{_ANDROID_STATUS}) producer_status=(?P<producer_status>{_ANDROID_STATUS}) timeout_seconds=(?P<timeout_seconds>[1-9][0-9]{{0,8}})")),
+        rf"ANDROID_MONITOR_RESULT config={_ANDROID_CONFIG} reader_status=(?P<reader_status>{_ANDROID_STATUS}) producer_status=(?P<producer_status>{_ANDROID_STATUS}) timeout_seconds=(?P<timeout_seconds>{_ANDROID_DEADLINE}) elapsed_seconds=(?P<elapsed_seconds>{_ANDROID_SECONDS}) headroom_seconds=(?P<headroom_seconds>{_ANDROID_SECONDS}) headroom_warning=(?P<headroom_warning>yes|no)")),
     "ANDROID_BATCH_RESULT": ("batch", re.compile(
         rf"ANDROID_BATCH_RESULT phase=(?P<phase>configure|build|boot-wait|tests) config=(?P<config>none|Debug|Release) status=(?P<status>{_ANDROID_STATUS}) cleanup_status=(?P<cleanup_status>{_ANDROID_STATUS}|not-run)")),
     "ANDROID_CI_RESULT": ("ci", re.compile(
@@ -111,15 +115,27 @@ def _android_summary(diagnostics):
     lines = ["", "### Android configuration and cleanup diagnostics", "",
              "Reported exit statuses from android.log; the workflow step outcome above remains authoritative.",
              "A later Release success does not clear an earlier Debug failure. Missing or ambiguous records are not proof of success.", "",
-             "| Configuration | Batch config status | Payload phase | Payload status | Monitor reader / producer | Deadline (s) |",
-             "|---|---|---|---|---|---|"]
+             "| Configuration | Batch config status | Payload phase | Payload status | Monitor reader / producer | Deadline (s) | Payload elapsed (s) | Headroom (s) |",
+             "|---|---|---|---|---|---|---|---|"]
+    deadlines = []
     for config, records in diagnostics["configurations"].items():
         config_result = records.get("config") or {}
         payload = records.get("payload") or {}
         monitor = records.get("monitor") or {}
         lines.append(f"| {config} | {config_result.get('status', 'missing')} | {payload.get('phase', 'missing')} | "
                      f"{payload.get('status', 'missing')} | {monitor.get('reader_status', 'missing')} / "
-                     f"{monitor.get('producer_status', 'missing')} | {monitor.get('timeout_seconds', 'missing')} |")
+                     f"{monitor.get('producer_status', 'missing')} | {monitor.get('timeout_seconds', 'missing')} | "
+                     f"{monitor.get('elapsed_seconds', 'missing')} | {monitor.get('headroom_seconds', 'missing')} |")
+        if monitor.get("reader_status") == "0" and monitor.get("producer_status") in _ANDROID_DEADLINE_STATUSES:
+            deadlines.append(f"{config} exhausted its {monitor['timeout_seconds']}s payload deadline without a terminal "
+                             f"result (monitor producer status {monitor['producer_status']}). This is a payload timeout; "
+                             "emulator cleanup runs afterwards and is not this failure.")
+        elif monitor.get("headroom_warning") == "yes":
+            deadlines.append(f"{config} passed {monitor['headroom_seconds']}s inside its {monitor['timeout_seconds']}s "
+                             f"payload deadline ({monitor['elapsed_seconds']}s elapsed). The wrapper flagged this margin "
+                             "as thin: a slower runner or added tests can cross it.")
+    if deadlines:
+        lines += [""] + [f"Payload deadline: {note}" for note in deadlines]
     batch = diagnostics["batch"]
     ci = diagnostics["ci"]
     if batch:

@@ -106,8 +106,9 @@
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
-  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses and the
-  monitor deadline), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
+  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses, the monitor
+  deadline, and the payload's `elapsed_seconds`, `headroom_seconds` and
+  `headroom_warning`), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
   configuration, `not-run` when a configuration never reached execution), and
   `ANDROID_BATCH_RESULT` (test_ci.sh batch phase, first failed configuration,
   preserved overall status, and emulator cleanup status). The workflow step
@@ -123,6 +124,15 @@
   alongside the frozen shared mobile suite to cover both attribution and
   cancellation through the real workflow body. Android/workflow changes also
   schedule the unchanged frozen-support contract checks automatically.
+  Reader status 0 with producer status 124/137 is the payload exhausting its own
+  `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` deadline, not emulator teardown: the
+  wrapper names that at the failure, reports how many log lines the payload
+  emitted with a truncated last line, and the summary repeats it as a
+  `Payload deadline:` note. A payload that passes with less than
+  `BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT` (default 25) of its deadline
+  left reports `headroom_warning=yes` and a wrapper warning while still passing.
+  Treat that as a signal to find the payload regression, not as a reason to
+  raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
   this path deterministically. Unknown process-state queries remain fail-closed.
