@@ -5,11 +5,17 @@ on:
 permissions:
   contents: read
 jobs:
-  contract-and-source:
+  validate-repair:
     if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
+      - name: Check out diagnostic recipe
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Check out exact PR head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -22,67 +28,35 @@ jobs:
           ref: e98111a4a557f7b4c7b24bfef01c9156ed5f4e12
           path: integration-base
           persist-credentials: false
-      - name: Check out PR merge base
+      - name: Check out original merge base
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf
           path: original-base
           persist-credentials: false
-      - name: Preserve exact source for conflict resolution and local regression tests
+      - name: Integrate and verify exact repair bytes
+        run: python3 tools/pr686_repair.py prepare
+      - name: Validate Android regression suite
+        working-directory: integration-base
         shell: bash
+        env:
+          BUSTER_MOBILE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/pr686-evidence
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/pr686"
-          for source in candidate integration-base original-base; do
-            git -C "$source" rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr686/$source.identity"
-            git -C "$source" archive --format=tar.gz -o "$RUNNER_TEMP/pr686/$source.tar.gz" HEAD
-          done
-          sha256sum "$RUNNER_TEMP/pr686/"*.tar.gz > "$RUNNER_TEMP/pr686/SHA256SUMS"
-      - name: Run unchanged contract commands on exact candidate
-        working-directory: candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang --version
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
-          "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
-          python3 tools/native_retirement_contract.py self-test
-          python3 tools/native_retirement_contract_test.py -v
-          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
-          python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
-          printf '\n' >> tests/basic_c_operations.c
-          if "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/drift; then
-            echo 'error: changed input was admitted without a contract update' >&2
-            exit 1
-          fi
-          test -f evidence/drift/summary.txt
-          grep -Fx 'io_failed=1' evidence/drift/summary.txt
-          git restore -- tests/basic_c_operations.c
-          resource_include="$(clang -print-resource-dir)/include"
-          if "$RUNNER_TEMP/retirement-build" native_retirement_census \
-            --ide /bin/false \
-            --compiler-revision c0647ec99beb9e98dfb0e2b827bf8255fbc4a6a5 \
-            --baseline-ide /bin/false \
-            --baseline-revision c0647ec99beb9e98dfb0e2b827bf8255fbc4a6a5 \
-            --fixture basic_c_operations.c \
-            --target x86_64-unknown-linux-gnu \
-            --resource-include "$resource_include" \
-            --out evidence/resource-smoke; then
-            echo 'error: the deliberately failing compiler was accepted' >&2
-            exit 1
-          fi
-          test -s evidence/resource-smoke/dependencies.tsv
-          test -s evidence/resource-smoke/environment.tsv
-          grep -Fx 'unfrozen_dependencies=none-for-object-census' evidence/resource-smoke/manifest.txt
-          grep -q -F $'resource-header\t' evidence/resource-smoke/dependencies.tsv
-          python3 tools/native_retirement_contract.py validate evidence/resource-smoke
-      - name: Retain diagnostics and credential-free source archives
+          bash -n android/run_tests.sh android/run_tests_test.sh android/test_ci.sh android/start_emulator_ci.sh
+          bash android/run_tests_test.sh 2>&1 | tee "$RUNNER_TEMP/pr686-android.log"
+      - name: Publish verified Git blobs only, without updating any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/pr686_repair.py publish
+      - name: Retain validation evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr686-diagnostics-${{ github.run_id }}
+          name: pr686-repair-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/pr686/
-            candidate/evidence/
+            ${{ runner.temp }}/pr686-android.log
+            ${{ runner.temp }}/pr686-evidence/
+            ${{ runner.temp }}/pr686-uploaded-blobs.json
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
