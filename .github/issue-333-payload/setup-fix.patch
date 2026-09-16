@@ -1,0 +1,120 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -183,11 +183,17 @@
+       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
+       - name: Bootstrap wrapper regression tests
+         id: bootstrap_wrappers
+-        if: ${{ !cancelled() && matrix.shard == 'release' && steps.checkout.outcome == 'success' }}
++        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+         timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
+         shell: bash
+         run: |
+           set -euo pipefail
++          # Preserve the wrapper lifecycle guard on every shard, but run its
++          # expensive regression suite only in its canonical Release owner.
++          if [[ "$BUSTER_MATRIX_SHARD" == checks ]]; then
++            printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'
++            exit 0
++          fi
+           mkdir -p "$RUNNER_TEMP/buster-ci"
+           "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+ 
+@@ -219,6 +225,8 @@
+           ZIG_TARGET: ${{ matrix.zig_target }}
+         run: |
+           set -euo pipefail
++          # This step also runs without the Release-only preflight steps.
++          mkdir -p "$RUNNER_TEMP/buster-ci"
+           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
+ 
+       # Publish immediately after verification, before compiler build/tests.
+@@ -308,7 +316,7 @@
+         env:
+           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+           BUSTER_CI_RUNNER: ${{ matrix.runner }}
+-          BUSTER_CI_REQUIRED: ${{ format('{0}zig {1}', matrix.shard == 'release' && 'workflow_tools bootstrap_wrappers ' || '', matrix.platform == 'unix' && 'combinations_unix' || 'combinations_windows') }}
++          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows') || (matrix.platform == 'unix' && 'zig combinations_unix' || 'zig combinations_windows') }}
+           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
+           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
+           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
+--- a/docs/ci-combination-shards.md
++++ b/docs/ci-combination-shards.md
+@@ -37,6 +37,12 @@
+ Unix native mode/differential suites still share their own pre-existing
+ producer; mobile, UEFI and the independent analyzer jobs are unchanged.
+ Intel macOS retains its existing direct-matrix/self-host exception.
++
++The wrapper step keeps its checkout/cancellation lifecycle guard on both
++shards. Its checks-shard body reports `owned-by-release-shard` and exits
++without running the suite or writing a wrapper-test verdict; only Release
++requires that verdict. Verified-Zig setup creates its own log directory and
++does not depend on a Release-only preflight side effect.
+ 
+ Shards necessarily duplicate runner allocation, checkout, the small hosted
+ build-driver bootstrap, tool discovery and verified-Zig setup. They keep full
+--- a/tools/matrix_shard_test.py
++++ b/tools/matrix_shard_test.py
+@@ -239,6 +239,63 @@
+             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+ 
+ 
++class WorkflowSetupTests(unittest.TestCase):
++    """Run the actual step bodies with controlled tools and empty log roots."""
++    def setUp(self):
++        self.temporary = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temporary.cleanup)
++        self.root = Path(self.temporary.name).resolve()
++        self.shell = shutil.which("bash")
++        if not self.shell:
++            self.fail("The desktop workflow requires bash")
++        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
++        desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
++        self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
++        self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
++                                RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
++                                ZIG_TARGET="fixture", FIXTURE_EXIT="0")
++
++    def run_step(self, name):
++        body = self.steps[name].split("        run: |\n", 1)[1]
++        script = "\n".join(line[10:] for line in body.splitlines() if line.startswith("          "))
++        return subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
++                              cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
++
++    def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
++        tools = self.root / "tools"
++        tools.mkdir()
++        (tools / "ci_zig.py").write_text("import os, sys\nprint('ZIG_SETUP fixture')\nsys.exit(int(os.environ['FIXTURE_EXIT']))\n")
++        for code in (0, 7):
++            with self.subTest(exit_code=code):
++                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
++                self.environment["FIXTURE_EXIT"] = str(code)
++                result = self.run_step("Install verified Zig")
++                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
++                self.assertIn("ZIG_SETUP fixture", (self.root / "buster-ci/zig.log").read_text())
++
++    def test_wrapper_suite_executes_only_in_release_and_keeps_failure_status(self):
++        tests = self.root / "tests"
++        tests.mkdir()
++        (tests / "bootstrap_wrapper_test.py").write_text(
++            "import os, pathlib, sys\npathlib.Path('wrapper-called').touch()\n"
++            "print('BOOTSTRAP_TEST fixture')\nsys.exit(int(os.environ['FIXTURE_EXIT']))\n")
++        for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
++            with self.subTest(shard=shard, exit_code=code):
++                marker = self.root / "wrapper-called"
++                if marker.exists():
++                    marker.unlink()
++                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
++                self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code))
++                result = self.run_step("Bootstrap wrapper regression tests")
++                self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
++                self.assertEqual(marker.exists(), shard == "release")
++                if shard == "checks":
++                    self.assertIn("owned-by-release-shard", result.stdout)
++                    self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
++                else:
++                    self.assertIn("BOOTSTRAP_TEST fixture", (self.root / "buster-ci/bootstrap-wrapper.log").read_text())
++
++
+ class CompletionGateTests(unittest.TestCase):
+     def sample(self):
+         jobs = []
