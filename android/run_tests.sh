@@ -11,7 +11,10 @@ apk=$2
 package=$3
 activity=$4
 test_args=$5
-timeout_seconds=${BUSTER_ANDROID_TEST_TIMEOUT_SECONDS:-60}
+# This watchdog bounds the complete suite, not each adb operation. Debug
+# compiler-driver fixtures can exceed one minute while still making progress.
+# A terminal result still ends monitoring immediately; missing results fail.
+timeout_seconds=${BUSTER_ANDROID_TEST_TIMEOUT_SECONDS:-180}
 adb_wait_timeout_seconds=${BUSTER_ANDROID_ADB_WAIT_TIMEOUT_SECONDS:-60}
 adb_command_timeout_seconds=${BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS:-30}
 adb_install_timeout_seconds=${BUSTER_ANDROID_ADB_INSTALL_TIMEOUT_SECONDS:-60}

@@ -241,7 +241,9 @@ run_case() {
     local scenario=$1
     local expected_status=$2
     local max_elapsed_ms=$3
-    local state=$test_root/$scenario
+    local selected_timeout=${4-3}
+    local case_name=${5:-$scenario}
+    local state=$test_root/$case_name
     local start_ns
     local end_ns
     local elapsed_ms
@@ -265,7 +267,7 @@ run_case() {
         BUSTER_ANDROID_FAKE_SCENARIO="$scenario" \
         BUSTER_ANDROID_FAKE_LAUNCH_STATUS="$launch_status" \
         BUSTER_ANDROID_FAKE_INSTALL_STATUS="$install_status" \
-        BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=3 \
+        BUSTER_ANDROID_TEST_TIMEOUT_SECONDS="$selected_timeout" \
         BUSTER_ANDROID_ADB_WAIT_TIMEOUT_SECONDS=2 \
         BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS=2 \
         BUSTER_ANDROID_ADB_INSTALL_TIMEOUT_SECONDS=2 \
@@ -280,7 +282,7 @@ run_case() {
     end_ns=$(date +%s%N)
     elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-    printf 'CASE %s status=%s elapsed_ms=%s\n' "$scenario" "$status" "$elapsed_ms"
+    printf 'CASE %s status=%s elapsed_ms=%s\n' "$case_name" "$status" "$elapsed_ms"
     if [[ $status -ne $expected_status ]]; then
         echo "assertion failed: $scenario returned $status, expected $expected_status" >&2
         return 1
@@ -290,6 +292,9 @@ run_case() {
         return 1
     fi
     assert_no_owned_producer "$state"
+    if [[ $scenario != install_failure && $scenario != launch_failure ]]; then
+        assert_log_contains "ANDROID_MONITOR_START config=standalone timeout_seconds=${selected_timeout:-180}" "$state"
+    fi
 
     case "$scenario" in
         success)
@@ -320,7 +325,7 @@ run_case() {
     if [[ $scenario == success ]]; then
         marker_ns=$(<"$state/marker.ns")
         marker_tail_ms=$(( (end_ns - marker_ns) / 1000000 ))
-        printf 'CASE %s marker_to_wrapper_ms=%s\n' "$scenario" "$marker_tail_ms"
+        printf 'CASE %s marker_to_wrapper_ms=%s\n' "$case_name" "$marker_tail_ms"
         if (( marker_tail_ms >= 2000 )); then
             echo "assertion failed: success marker tail was ${marker_tail_ms}ms" >&2
             return 1
@@ -335,6 +340,11 @@ run_case malformed 1 6000
 run_case missing_marker 1 2000
 run_case launch_failure 23 2000
 run_case install_failure 24 2000
+# The normal whole-suite budget must not delay either terminal result. Keep
+# the short explicit timeout/malformed-marker controls above as real failures.
+run_case success 0 2000 '' default_deadline_success
+run_case failure 1 2000 '' default_deadline_failure
+run_case success 0 2000 5 override_deadline_success
 
 state=$test_root/interrupt
 mkdir -p "$state"

@@ -116,6 +116,14 @@
   failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
   Release — plus the batch line's `status=` field; a missing per-config line or
   `status=not-run` is itself evidence of an incomplete run.
+  `android/run_tests.sh` bounds each complete suite with a 180-second monitor
+  watchdog, independently of adb command/install/boot deadlines. Debug compiler
+  fixtures exceeded the former 60-second budget while still reporting progress
+  in PR #687's run `35157195321`; this is a correctness-suite execution budget,
+  not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
+  overrides it. Terminal markers end monitoring immediately, and timeout,
+  malformed or missing markers still fail; the fake monitor suite checks the
+  default and override without lengthening its short timeout failure controls.
   Payload interruption statuses 130/143 stop the batch immediately and remain
   the workflow status even when emulator cleanup also fails; unstarted
   configurations remain `not-run`. Ordinary test failures still run the later
