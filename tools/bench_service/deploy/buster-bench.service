@@ -10,6 +10,7 @@ ConditionPathIsDirectory=/var/lib/buster-bench/workspaces
 Type=oneshot
 User=buster-bench
 Group=buster-bench
+SupplementaryGroups=buster-bench-candidate
 UMask=0077
 ExecStart=/usr/local/libexec/buster-bench-service worker-run /var/lib/buster-bench/queue /opt/buster-bench/installed /var/lib/buster-bench/workspaces /var/lib/buster-bench/host.lock 2
 NoNewPrivileges=yes
@@ -43,4 +44,4 @@ SystemCallErrorNumber=EPERM
 
 # This unit is intentionally not enabled by repository automation. The
 # operator must install the fixed binary and authorize only its transient
-# buster-bench.slice scope operation before a live qualification review.
+# buster-bench.slice service operation before a live qualification review.
