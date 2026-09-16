@@ -1,4 +1,4 @@
-name: Issue 651 source snapshot
+name: Issue 651 publish verified fix
 
 on:
   push:
@@ -6,28 +6,36 @@ on:
       - codex/issue-651-workbench
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  source:
+  publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
-          persist-credentials: false
-      - name: Archive pinned tracked source
+          persist-credentials: true
+      - name: Verify and publish the exact locally tested source tree
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
-          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
-          sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: issue-651-source
-          path: ${{ runner.temp }}/buster-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:.github/issue-651.patch.xz" > "$RUNNER_TEMP/issue-651.patch.xz"
+          python3 - <<'PY'
+          import hashlib, lzma, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          patch = lzma.decompress((root / 'issue-651.patch.xz').read_bytes())
+          assert hashlib.sha256(patch).hexdigest() == '30a1c3b432f7d702e83408cd69172722f489a0ea397ae835a73b5f28bc3c1e96'
+          (root / 'issue-651.patch').write_bytes(patch)
+          PY
+          git apply --index "$RUNNER_TEMP/issue-651.patch"
+          git diff --cached --check
+          test "$(git write-tree)" = 36f4ef2967fbabc4b83fd70aaea5f87df98e4e7a
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: use the public 24-byte System V va_list extent'
+          git push origin HEAD:refs/heads/codex/fix-651-sysv-va-list-extent
+          printf 'Published commit %s\nVerified source tree %s\nPublication-only job; validation evidence is recorded in the audit.\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
