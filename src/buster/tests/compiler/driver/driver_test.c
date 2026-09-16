@@ -3788,16 +3788,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 }
                 else
                 {
-#if BUSTER_CPU_ARCH_AARCH64
                     // Read the reference's alias addresses directly from the
-                    // DSO, independently of system COPY-slot allocation.
+                    // DSO, independently of system COPY-slot allocation. GCC's
+                    // x86-64 -fPIE object addresses imported data directly, and
+                    // a -no-pie system link gives each strong alias its own
+                    // COPY slot, so writes through one alias miss the other.
                     command[command_count++] = S8("-fPIC");
                     command[command_count++] = S8("-pie");
                     command[command_count++] = main_source;
-#else
-                    command[command_count++] = S8("-no-pie");
-                    command[command_count++] = object_path;
-#endif
                     command[command_count++] = S8("-L");
                     command[command_count++] = directory;
                     command[command_count++] = S8("-ldataprobe");
