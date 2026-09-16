@@ -15,6 +15,14 @@ or byte-changed test input makes manifest generation fail. Updating the contract
 is therefore a reviewed support decision, not an automatic side effect of adding
 a fixture. Merging a contract change is the maintainer approval record.
 
+The September 16, 2026 rebase retains the `tests/issue36_target_wchar.c`
+subject already admitted on `main` by #694. It adds that subject to #645's
+original 548-input/402-subject census rather than dropping it: the integrated
+profile has 549 inputs, 403 subjects, 19,344 groups and 77,376 rows. The original
+192-row historical gap ledger and all 341 applicability classifications remain
+unchanged. The rebase makes no fixture edits: it retains main's expanded SIMD
+fixture and refreshes that input's two existing iOS applicability hashes.
+
 ```sh
 ./build.sh native_retirement_census --self-test
 ./build.sh native_retirement_census --manifest-only --out build/census-inventory
@@ -153,21 +161,21 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 548 input rows, 402 subject inputs (396 supported-object subjects and six
-non-object controls), 77,184 support-contract identities,
+the 549 input rows, 403 subject inputs (397 supported-object subjects and six
+non-object controls), 77,376 support-contract identities,
 or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
 generated data, or any other non-repo dependency remain visible diagnostic rows
 until their owning gate supplies that setup.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`f45cd452eb02b56b06f91db70064c735ab55810ad8fdc690e2a6be7d3c92a562`, materializer
+`65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379`, materializer
 receipt SHA-256
-`9102b77674285f04e4d4fd781d80f273051674a9f911dab2c868adcf5922523c`, project
+`b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30`, project
 closure SHA-256
-`f370491368b6f7b013619f412640126454681043f27a2b9fb9f92f2465555a3d`, and
+`37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a`, and
 materializer ledger SHA-256
-`60953f97c4968a4888863ebd0ab72dc17be550cb2d7f70b94c71455d8d6d9344`.
+`943194234417ac65971f1ba756613b05e542c33bf19eb2d2d5b10a4f99d2f47d`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
@@ -191,8 +199,8 @@ The full product is:
 - frontend SSA enabled and disabled;
 - PIC enabled and disabled.
 
-The current 402-subject support contract therefore freezes exactly
-`402 x 12 x 2 x 2 x 4 = 77,184` row identities. Applicability evidence is an
+The current 403-subject support contract therefore freezes exactly
+`403 x 12 x 2 x 2 x 4 = 77,376` row identities. Applicability evidence is an
 additional validator-owned projection; it never removes a row or changes the
 input-byte ledger.
 
@@ -356,7 +364,7 @@ zero-artifact/zero-counter shape; malformed status, process, fallback, object
 or telemetry evidence remains fatal, and a caller-supplied disposition cannot
 select the skip path. A production manifest is admitted only as
 `profile=full-census`: it must bind
-the exact 548-input/402-subject/77,184-row, four-shard population. The producer
+the exact 549-input/403-subject/77,376-row, four-shard population. The producer
 also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
 directory and binds its SHA-256 in the manifest. The validator checks that
 authenticated seven-column ledger, including all 192 immutable row identities,
@@ -369,7 +377,7 @@ For the full profile it must contain the exact authenticated 341 fixture/target
 entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
 Only this projection can classify a target-specific residual as
 `platform-inapplicable` or `unavailable`; a result disposition, row count,
-fallback counter or diagnostic cannot forge applicability. Every 77,184 row
+fallback counter or diagnostic cannot forge applicability. Every 77,376 row
 identity and input byte remains in the manifest and validation partition.
 The six whole-fixture non-object controls are authenticated by the support
 contract instead of receiving row outcome classes in this fixture/target

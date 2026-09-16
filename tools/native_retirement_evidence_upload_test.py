@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/native-retirement-evidence.yml"
 UPLOAD_PATHS = (
     "candidate/evidence/",
+    "candidate/evidence-candidate.txt",
     "candidate/build/CMakeCache.txt",
     "candidate/build/compile_commands.json",
     "reference/build/CMakeCache.txt",

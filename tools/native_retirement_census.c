@@ -31,14 +31,14 @@ BUSTER_GLOBAL_LOCAL NrcTarget const nrc_targets[] = {
 };
 
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_manifest_name = S8_INITIALIZER("docs/native-retirement-dependencies-v1.json");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("f45cd452eb02b56b06f91db70064c735ab55810ad8fdc690e2a6be7d3c92a562");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("9102b77674285f04e4d4fd781d80f273051674a9f911dab2c868adcf5922523c");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("f370491368b6f7b013619f412640126454681043f27a2b9fb9f92f2465555a3d");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("60953f97c4968a4888863ebd0ab72dc17be550cb2d7f70b94c71455d8d6d9344");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("943194234417ac65971f1ba756613b05e542c33bf19eb2d2d5b10a4f99d2f47d");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
-BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("6edc25e9b09884bf7c1f2e4711909120667503e22e84025316d9cd94eb77b4ad");
+BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("86cf28ef3b630a265335dacf8c795db31c012f793d183d3a23cdf8f24116efe7");
 BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 341;
 
 typedef struct NrcInput NrcInput;
@@ -1526,8 +1526,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             subject_count += string_equal(inputs[index].role, S8("subject"));
         }
         bool full_profile = !settings.fixture_filter.length && !settings.target_filter.length && settings.shard_count == 4 &&
-                            input_count == 548 && subject_count == 402 && groups == 19296 &&
-                            groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77184;
+                            input_count == 549 && subject_count == 403 && groups == 19344 &&
+                            groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77376;
         bool dependency_required = !settings.manifest_only && (full_profile || settings.project_include.length != 0);
         if (dependency_required && (!settings.project_include.length || !settings.dependency_receipt.length))
         {

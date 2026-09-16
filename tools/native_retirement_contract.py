@@ -18,8 +18,8 @@ from pathlib import Path
 ALLOCATORS = ("none", "mir-stack", "fast", "quality")
 FULL_CENSUS_PROFILE = "full-census"
 SELF_TEST_PROFILE = "self-test"
-FULL_SUBJECT_COUNT = 402
-FULL_ROW_COUNT = 77184
+FULL_SUBJECT_COUNT = 403
+FULL_ROW_COUNT = 77376
 FULL_SHARD_COUNT = 4
 FULL_SUPPORTED_GAP_COUNT = 192
 # This is the SHA-256 of the canonical JSON list of full-census row numbers
@@ -27,7 +27,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"
-FULL_SUPPORT_CONTRACT_SHA256 = "24ae23cff2ab5bd6ff46304a878ed4dc3e5d639422751de93ea74dabde7e437e"
+FULL_SUPPORT_CONTRACT_SHA256 = "b80a5a0b2dab8c7738e5e3ef2b35be2b160f5011e021eba385899481a3119187"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -42,11 +42,11 @@ SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", 
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 341
-FULL_APPLICABILITY_LEDGER_SHA256 = "6edc25e9b09884bf7c1f2e4711909120667503e22e84025316d9cd94eb77b4ad"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "f45cd452eb02b56b06f91db70064c735ab55810ad8fdc690e2a6be7d3c92a562"
-FULL_DEPENDENCY_RECEIPT_SHA256 = "9102b77674285f04e4d4fd781d80f273051674a9f911dab2c868adcf5922523c"
-FULL_DEPENDENCY_PROJECT_SHA256 = "f370491368b6f7b013619f412640126454681043f27a2b9fb9f92f2465555a3d"
-FULL_DEPENDENCY_LEDGER_SHA256 = "60953f97c4968a4888863ebd0ab72dc17be550cb2d7f70b94c71455d8d6d9344"
+FULL_APPLICABILITY_LEDGER_SHA256 = "86cf28ef3b630a265335dacf8c795db31c012f793d183d3a23cdf8f24116efe7"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30"
+FULL_DEPENDENCY_PROJECT_SHA256 = "37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a"
+FULL_DEPENDENCY_LEDGER_SHA256 = "943194234417ac65971f1ba756613b05e542c33bf19eb2d2d5b10a4f99d2f47d"
 FULL_EXTERNAL_CHECKOUTS = (
     {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
     {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
@@ -526,7 +526,7 @@ def validate_profile(manifest, inputs, row_count):
     if profile == FULL_CENSUS_PROFILE:
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") == FULL_SUPPORT_CONTRACT_SHA256
-        assert manifest.get("inputs") == "548"
+        assert manifest.get("inputs") == "549"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
         assert manifest.get("subjects") == str(FULL_SUBJECT_COUNT)
@@ -534,7 +534,7 @@ def validate_profile(manifest, inputs, row_count):
         assert row_count == FULL_ROW_COUNT, "full census row count is incomplete"
     elif profile == SELF_TEST_PROFILE:
         # Small fixtures are intentionally accepted only with this explicit
-        # profile; they may not masquerade as the full 402-subject inventory.
+        # profile; they may not masquerade as the full 403-subject inventory.
         assert subjects and row_count
     return profile, subjects
 
