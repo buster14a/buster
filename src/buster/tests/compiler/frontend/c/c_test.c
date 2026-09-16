@@ -4554,6 +4554,174 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* ar
     return result;
 }
 
+// #665: query the real preprocessor with an independent exact-name census.
+// Do not infer support from a prefix or advertise native atomic IR to the
+// Wasm64/eBPF backends, which explicitly reject it.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 native_targets = (1U << CPU_ARCH_X86_64) | (1U << CPU_ARCH_AARCH64);
+    u32 floating_targets = native_targets | (1U << CPU_ARCH_WASM64);
+    u32 all_targets = floating_targets | (1U << CPU_ARCH_BPFEL);
+    typedef struct CBuiltinQueryCase CBuiltinQueryCase;
+    struct CBuiltinQueryCase
+    {
+        String8 name;
+        u32 targets;
+    };
+    CBuiltinQueryCase queries[] = {
+        {S8("__builtin_offsetof"), all_targets},
+        {S8("__builtin_complex"), floating_targets},
+        {S8("__c11_atomic_load"), native_targets},
+        {S8("__c11_atomic_store"), native_targets},
+        {S8("__c11_atomic_init"), native_targets},
+        {S8("__c11_atomic_fetch_add"), native_targets},
+        {S8("__c11_atomic_fetch_sub"), native_targets},
+        {S8("__c11_atomic_fetch_and"), native_targets},
+        {S8("__c11_atomic_fetch_or"), native_targets},
+        {S8("__c11_atomic_fetch_xor"), native_targets},
+        {S8("__c11_atomic_exchange"), native_targets},
+        {S8("__c11_atomic_compare_exchange_strong"), native_targets},
+        {S8("__c11_atomic_compare_exchange_weak"), native_targets},
+        {S8("__c11_atomic_is_lock_free"), native_targets},
+        {S8("__c11_atomic_thread_fence"), native_targets},
+        {S8("__c11_atomic_signal_fence"), native_targets},
+        {S8("__sync_synchronize"), native_targets},
+        {S8("__atomic_load_n"), native_targets},
+        {S8("__atomic_store_n"), native_targets},
+        {S8("__atomic_exchange_n"), native_targets},
+        {S8("__atomic_fetch_add"), native_targets},
+        {S8("__atomic_fetch_sub"), native_targets},
+        {S8("__atomic_fetch_and"), native_targets},
+        {S8("__atomic_fetch_or"), native_targets},
+        {S8("__atomic_fetch_xor"), native_targets},
+        {S8("__atomic_add_fetch"), native_targets},
+        {S8("__atomic_sub_fetch"), native_targets},
+        {S8("__atomic_and_fetch"), native_targets},
+        {S8("__atomic_or_fetch"), native_targets},
+        {S8("__atomic_xor_fetch"), native_targets},
+        {S8("__atomic_compare_exchange_n"), native_targets},
+        {S8("__atomic_thread_fence"), native_targets},
+        {S8("__atomic_signal_fence"), native_targets},
+        {S8("__atomic_is_lock_free"), native_targets},
+        {S8("__atomic_always_lock_free"), native_targets},
+        {S8("__atomic_test_and_set"), native_targets},
+        {S8("__atomic_clear"), native_targets},
+        {S8("__builtin_types_compatible_p"), all_targets},
+        {S8("__builtin_choose_expr"), all_targets},
+        {S8("__builtin_expect"), all_targets},
+        {S8("__builtin_memcpy"), all_targets},
+        {S8("__is_target_arch"), all_targets},
+        {S8("not_a_builtin"), 0},
+        {S8("__atomic_"), 0},
+        {S8("__atomic_load"), 0},
+        {S8("__atomic_store"), 0},
+        {S8("__atomic_exchange"), 0},
+        {S8("__atomic_compare_exchange"), 0},
+        {S8("__atomic_fetch_nand"), 0},
+        {S8("__atomic_nand_fetch"), 0},
+        {S8("__atomic_load_n_extra"), 0},
+        {S8("__atomic_thread_fence_extra"), 0},
+        {S8("__c11_atomic_"), 0},
+        {S8("__c11_atomic_add_fetch"), 0},
+        {S8("__c11_atomic_fetch_nand"), 0},
+        {S8("__c11_atomic_load_extra"), 0},
+        {S8("__sync_fetch_and_add"), 0},
+        {S8("__sync_synchronize_extra"), 0},
+        {S8("__builtin_offsetof__"), 0},
+        {S8("__builtin_complex__"), 0},
+        {S8("_Generic"), 0},
+        {S8("__va_start"), 0},
+        {S8("_mm_pause"), 0},
+        {S8("__builtin_buster_simd_load"), 0},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING},
+        {.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(queries); query_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CBuiltinQueryCase query = queries[query_index];
+            u32 expected = (query.targets & (1U << target.cpu_arch)) != 0;
+            String8 source = string_format(temporary.arena,
+                S8("#if __has_builtin({S8}) != {u32}\n#error unexpected builtin capability\n#endif\nint builtin_query_probe;\n"),
+                query.name, expected);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && preprocess.token_count == 4))
+            {
+                c_test_preprocessed_token(arguments, &result, preprocess, 1, C_TOKEN_IDENTIFIER, S8("builtin_query_probe"));
+                CParseResult parse = c_parse(temporary.arena, preprocess);
+                BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, source);
+            }
+            scratch_end(temporary);
+        }
+    }
+    // Calling a fence in a single-threaded executable cannot prove that it
+    // survived lowering. Require all five advertised spellings to emit their
+    // actual canonical fence, including the thread/signal distinction.
+    for (u32 target_index = 0; target_index < 2; target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 source = S8(
+                "#if !__has_builtin(__atomic_thread_fence) || !__has_builtin(__atomic_signal_fence) || "
+                "!__has_builtin(__c11_atomic_thread_fence) || !__has_builtin(__c11_atomic_signal_fence) || "
+                "!__has_builtin(__sync_synchronize)\n#error hidden fence\n#endif\n"
+                "void query_fences(void) {\n"
+                " __atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
+                " __atomic_signal_fence(__ATOMIC_SEQ_CST);\n"
+                " __c11_atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
+                " __c11_atomic_signal_fence(__ATOMIC_SEQ_CST);\n"
+                " __sync_synchronize();\n}\n");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("has-builtin-fences.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query_fences"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 thread_fences = 0;
+                        u32 signal_fences = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            if (instruction->opcode == IR_OPCODE_ATOMIC_FENCE)
+                            {
+                                BUSTER_TEST(arguments, instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL);
+                                thread_fences += !instruction->atomic_signal_fence;
+                                signal_fences += instruction->atomic_signal_fence != 0;
+                            }
+                        }
+                        BUSTER_TEST(arguments, thread_fences == 3 && signal_fences == 2);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -17286,6 +17454,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
+    BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
     BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);

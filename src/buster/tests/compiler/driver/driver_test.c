@@ -4930,6 +4930,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
     return result;
 }
 
+// #665: a positive query must reach the selected non-native backend too.
+// Atomic queries stay false on both; complex construction remains usable on
+// Wasm64, whereas eBPF has no floating-point operations.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 target_names[] = {S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 body = S8(
+        "#if __has_builtin(__builtin_offsetof) != 1\n#error hidden offsetof\n#endif\n"
+        "#if __has_builtin(__builtin_complex) != QUERY_COMPLEX\n#error wrong complex support\n#endif\n"
+        "#if __has_builtin(__atomic_load_n) || __has_builtin(__c11_atomic_load) || __has_builtin(__sync_synchronize)\n"
+        "#error unsupported atomic IR advertised\n#endif\n"
+        "struct query_record { char tag; int values[3]; };\n"
+        "int query_offset(void) { return __builtin_offsetof(struct query_record, values[2]); }\n"
+        "#if QUERY_COMPLEX\n"
+        "double query_complex(double real, double imag) {\n"
+        " double _Complex value = __builtin_complex(real, imag);\n"
+        " return __real__ value + __imag__ value;\n}\n#endif\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 source = string_format(arena, S8("#define QUERY_COMPLEX {u32}\n{S8}"), (u32)(target_index == 0), body);
+            String8 input = buster_test_temporary_path(arena, S8("buster-has-builtin-target"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-has-builtin-target"), S8(".bin"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-target"), target_names[target_index], S8("-nostdinc"), forms[form], S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    BUSTER_TEST(arguments, target_index == 0 ? compiled.has_wasm64 : compiled.has_ebpf);
+                    BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4954,6 +5000,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
@@ -13428,6 +13475,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_local_promotion.c"),
         S8("tests/basic_c_frontend_ssa.c"),
         S8("tests/basic_c_frontend_ssa.c"),
+        S8("tests/basic_c_has_builtin.c"),
+        S8("tests/basic_c_has_builtin.c"),
     };
     String8 c_differential_regression_names[] = {
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -13442,6 +13491,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-local-promotion"),
         S8("buster-c-frontend-ssa"),
         S8("buster-c-frontend-ssa-reference"),
+        S8("buster-c-has-builtin"),
+        S8("buster-c-has-builtin-reference"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
     {
@@ -13459,7 +13510,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
             fixture_invocation.disable_target_local_promotion = frontend_ssa ||
                 string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
-            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference"));
+            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
+                string_equal(c_differential_regression_names[fixture_index], S8("buster-c-has-builtin-reference"));
+            // #665: every newly advertised builtin is used under both frontend
+            // SSA paths and every allocator, with canonical/codegen validation.
+            fixture_invocation.verify_codegen = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_has_builtin.c"));
             CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (frontend_ssa && fixture.error == COMPILER_DRIVER_ERROR_NONE)
