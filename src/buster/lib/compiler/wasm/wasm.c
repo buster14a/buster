@@ -1,4 +1,4 @@
-#include <buster/lib/compiler/wasm/wasm.h>
+#include <buster/lib/compiler/wasm/wasm_internal.h>
 
 // This file is deliberately self-contained.  The only state shared with the
 // rest of the compiler is the canonical IR model; all temporary vectors and
@@ -8,13 +8,16 @@
 // an earlier value. Function ABIs and block parameters remain scalar-only.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
-// address zero, and the shadow stack gets its own 64 KiB above the data.
-// The equal values are coincidence, not a shared constant.
+// address zero. Its aligned end is the initial pointer and inclusive lower
+// bound of a 64 KiB upward-growing shadow stack; stack_limit is exclusive.
+// The equal data-base and stack-size values are coincidence, not one constant.
 enum
 {
     WASM64_DATA_BASE = 0x10000,
     WASM64_STACK_SIZE = 0x10000,
 };
+
+#define WASM64_MAX_MEMORY_PAGES (UINT64_C(1) << 48)
 
 typedef enum Wasm64ValType
 {
@@ -113,6 +116,7 @@ struct Wasm64Context
     u8* symbol_seen;
     u64 data_cursor;
     u64 stack_base;
+    u64 stack_limit;
     u32 stack_global_index;
     u32 memory_export_count;
 };
@@ -334,16 +338,29 @@ static void wasm64_buffer_u64_fixed(Wasm64Buffer* buffer, u64 value, u32 byte_co
     }
 }
 
-static void wasm64_align_cursor(u64* cursor, u64 alignment)
+static bool wasm64_u64_add(u64 left, u64 right, u64* sum)
 {
-    if (alignment > 1)
+    bool result = left <= UINT64_MAX - right;
+    if (result)
     {
-        u64 mask = alignment - 1;
-        if (*cursor <= UINT64_MAX - mask)
-        {
-            *cursor = (*cursor + mask) & ~mask;
-        }
+        *sum = left + right;
     }
+    return result;
+}
+
+static bool wasm64_align_cursor(u64* cursor, u64 alignment)
+{
+    bool result = alignment && !(alignment & (alignment - 1));
+    u64 aligned = 0;
+    if (result)
+    {
+        result = wasm64_u64_add(*cursor, alignment - 1, &aligned);
+    }
+    if (result)
+    {
+        *cursor = aligned & ~(alignment - 1);
+    }
+    return result;
 }
 
 static void wasm64_fail(Wasm64Context* context, Wasm64ErrorCode code, String8 message, IrFunction* function, IrBlock* block,
@@ -954,18 +971,24 @@ static bool wasm64_data_add_global(Wasm64Context* context, IrGlobal* global, u32
         return false;
     }
     u64 alignment = global->alignment ? global->alignment : type->layout.alignment;
-    if (!alignment || (alignment & (alignment - 1)))
+    if (!wasm64_align_cursor(&context->data_cursor, alignment))
     {
-        alignment = 1;
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 static-data alignment overflow"), 0, 0, 0, global->symbol);
+        return false;
     }
-    wasm64_align_cursor(&context->data_cursor, alignment);
+    u64 data_end = 0;
+    if (!wasm64_u64_add(context->data_cursor, size, &data_end))
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 static-data size overflow"), 0, 0, 0, global->symbol);
+        return false;
+    }
     Wasm64DataRecord record = {.global = global, .symbol = symbol, .bytes = bytes, .size = size, .offset = context->data_cursor, .module_index = module_index,
                                .has_bytes = false};
     if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count))
     {
         record.has_bytes = true;
     }
-    context->data_cursor += size;
+    context->data_cursor = data_end;
     wasm64_vec_reserve(context->arena, (void**)&context->data_records, &context->data_capacity, context->data_count + 1, sizeof(*context->data_records));
     context->data_records[context->data_count] = record;
     context->symbol_data_indices[global->symbol.value] = context->data_count;
@@ -1017,23 +1040,31 @@ static bool wasm64_collect_data(Wasm64Context* context)
                     return false;
                 }
                 String8 literal = ir_instruction_extra(function, ir_instruction_self_id(function, instruction)).literal;
-                wasm64_align_cursor(&context->data_cursor, 1);
+                u64 string_size = 0;
+                u64 string_end = 0;
+                if (!wasm64_u64_add(literal.length, 1, &string_size) || !wasm64_u64_add(context->data_cursor, string_size, &string_end))
+                {
+                    wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 string-data size overflow"), function, 0, instruction,
+                                IR_SYMBOL_ID_INVALID);
+                    return false;
+                }
                 Wasm64StringRecord record = {.function = function, .instruction = ir_instruction_self_id(function, instruction), .literal = literal, .offset = context->data_cursor};
-                context->data_cursor += literal.length + 1;
+                context->data_cursor = string_end;
                 wasm64_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1, sizeof(*context->strings));
                 context->strings[context->string_count] = record;
                 context->string_count += 1;
             }
         }
     }
-    wasm64_align_cursor(&context->data_cursor, 16);
-    context->stack_base = context->data_cursor + WASM64_STACK_SIZE;
-    if (context->stack_base < context->data_cursor)
+    if (!wasm64_align_cursor(&context->data_cursor, 16) || !wasm64_u64_add(context->data_cursor, WASM64_STACK_SIZE, &context->stack_limit))
     {
         wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 memory layout overflow"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
         return false;
     }
+    context->stack_base = context->data_cursor;
     context->stats.static_data_bytes = context->data_cursor;
+    context->stats.stack_lower_bound = context->stack_base;
+    context->stats.stack_upper_bound = context->stack_limit;
     return true;
 }
 
@@ -1175,15 +1206,46 @@ static bool wasm64_build_function_payload(Wasm64Context* context)
     return true;
 }
 
-static u64 wasm64_pages_for_bytes(u64 bytes)
+static bool wasm64_memory_page_count_is_valid(u64 pages)
 {
-    u64 page_size = 65536;
-    return bytes > UINT64_MAX - (page_size - 1) ? UINT64_MAX / page_size : (bytes + page_size - 1) / page_size;
+    return pages <= WASM64_MAX_MEMORY_PAGES;
 }
+
+static bool wasm64_pages_for_bytes(u64 bytes, u64* pages)
+{
+    u64 const page_size = 65536;
+    u64 result_pages = bytes / page_size + (bytes % page_size != 0);
+    bool result = wasm64_memory_page_count_is_valid(result_pages);
+    if (result)
+    {
+        *pages = result_pages;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+Wasm64CheckedArithmeticProbe wasm64_test_checked_arithmetic(void)
+{
+    Wasm64CheckedArithmeticProbe result = {0};
+    u64 value = UINT64_MAX - 7;
+    result.alignment_overflow_rejected = !wasm64_align_cursor(&value, 16);
+    result.frame_addition_overflow_rejected = !wasm64_u64_add(UINT64_MAX - 15, 16, &value);
+    result.maximum_byte_count_rounded_up = wasm64_pages_for_bytes(UINT64_MAX, &value) && value == WASM64_MAX_MEMORY_PAGES;
+    result.excessive_page_count_rejected = !wasm64_memory_page_count_is_valid(WASM64_MAX_MEMORY_PAGES + 1);
+    return result;
+}
+#endif
 
 static bool wasm64_build_memory_payload(Wasm64Context* context)
 {
-    u64 minimum = wasm64_pages_for_bytes(context->stack_base + 1);
+    u64 minimum = 0;
+    if (!wasm64_pages_for_bytes(context->stack_limit, &minimum) || !wasm64_memory_page_count_is_valid(context->options.initial_pages) ||
+        !wasm64_memory_page_count_is_valid(context->options.maximum_pages))
+    {
+        wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 memory page count exceeds the Memory64 limit"), 0, 0, 0,
+                    IR_SYMBOL_ID_INVALID);
+        return false;
+    }
     if (context->options.initial_pages > minimum)
     {
         minimum = context->options.initial_pages;
@@ -1898,7 +1960,12 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
             wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid Wasm64 local frame layout"), function, 0, instruction, IR_SYMBOL_ID_INVALID);
             return false;
         }
-        wasm64_align_cursor(&frame_cursor, alignment);
+        if (!wasm64_align_cursor(&frame_cursor, alignment))
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 local-frame alignment overflow"), function, 0, instruction,
+                        IR_SYMBOL_ID_INVALID);
+            return false;
+        }
         if (frame_cursor > UINT32_MAX - size)
         {
             wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 local frame exceeds 32-bit offset"), function, 0, instruction,
@@ -1908,8 +1975,7 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         emitter->value_offsets[instruction->result.value] = (u32)frame_cursor;
         frame_cursor += size;
     }
-    wasm64_align_cursor(&frame_cursor, 16);
-    if (frame_cursor > UINT32_MAX)
+    if (!wasm64_align_cursor(&frame_cursor, 16) || frame_cursor > UINT32_MAX)
     {
         wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("Wasm64 local frame exceeds 32-bit offset"), function, 0, 0, IR_SYMBOL_ID_INVALID);
         return false;
@@ -1958,13 +2024,44 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     return true;
 }
 
+static void wasm64_fe_emit_stack_trap_if(Wasm64FunctionEmitter* emitter)
+{
+    wasm64_fe_u8(emitter, 0x04); // if
+    wasm64_fe_u8(emitter, 0x40);
+    // Restore this function's entry pointer before the deliberate trap.
+    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
+    wasm64_fe_u8(emitter, 0x00); // unreachable
+    wasm64_fe_u8(emitter, 0x0b); // end if
+}
+
+static void wasm64_fe_emit_stack_bounds_check(Wasm64FunctionEmitter* emitter, u32 local)
+{
+    wasm64_fe_local_get(emitter, local);
+    wasm64_fe_i64_const(emitter, (s64)emitter->context->stack_base);
+    wasm64_fe_u8(emitter, 0x54); // i64.lt_u
+    wasm64_fe_emit_stack_trap_if(emitter);
+    wasm64_fe_local_get(emitter, local);
+    wasm64_fe_i64_const(emitter, (s64)emitter->context->stack_limit);
+    wasm64_fe_u8(emitter, 0x56); // i64.gt_u
+    wasm64_fe_emit_stack_trap_if(emitter);
+}
+
 static void wasm64_fe_emit_prologue(Wasm64FunctionEmitter* emitter)
 {
     wasm64_fe_global_get(emitter, emitter->context->stack_global_index);
-    wasm64_fe_local_tee(emitter, emitter->fp_local);
+    wasm64_fe_local_set(emitter, emitter->fp_local);
+    wasm64_fe_emit_stack_bounds_check(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->fp_local);
     wasm64_fe_i64_const(emitter, emitter->frame_size);
     wasm64_fe_u8(emitter, 0x7c); // i64.add
-    wasm64_fe_local_tee(emitter, emitter->sp_local);
+    wasm64_fe_local_set(emitter, emitter->sp_local);
+    wasm64_fe_local_get(emitter, emitter->sp_local);
+    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_u8(emitter, 0x54); // i64.lt_u: addition wrapped
+    wasm64_fe_emit_stack_trap_if(emitter);
+    wasm64_fe_emit_stack_bounds_check(emitter, emitter->sp_local);
+    wasm64_fe_local_get(emitter, emitter->sp_local);
     wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
     for (u32 index = 0; index < emitter->function->value_count; index += 1)
     {
@@ -1982,34 +2079,50 @@ static void wasm64_fe_emit_prologue(Wasm64FunctionEmitter* emitter)
 
 static void wasm64_fe_emit_stack_allocate(Wasm64FunctionEmitter* emitter, IrInstruction* instruction)
 {
-    IrType* pointer_type = wasm64_type(emitter->context, instruction->canonical_type);
     u64 alignment = instruction->immediate_count == 1 ? instruction->immediates[0] : 1;
-    if (alignment == 0 || (alignment & (alignment - 1)) || alignment > UINT32_MAX)
+    bool valid = alignment && !(alignment & (alignment - 1)) && alignment <= UINT32_MAX;
+    if (!valid)
     {
         wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid Wasm64 dynamic stack alignment"), emitter->function, 0, instruction,
                     IR_SYMBOL_ID_INVALID);
-        return;
     }
-    wasm64_fe_local_get(emitter, emitter->sp_local);
-    wasm64_fe_i64_const(emitter, (s64)(alignment - 1));
-    wasm64_fe_u8(emitter, 0x7c); // add
-    wasm64_fe_i64_const(emitter, (s64)~(alignment - 1));
-    wasm64_fe_u8(emitter, 0x83); // and
-    wasm64_fe_local_tee(emitter, emitter->scratch_local);
-    wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
-    wasm64_fe_local_get(emitter, emitter->scratch_local);
-    wasm64_fe_emit_value(emitter, instruction->operands[0]);
-    IrType* size_type = wasm64_fe_value_ir_type(emitter, instruction->operands[0]);
-    Wasm64ValType size_valtype = 0;
-    wasm64_valtype_for_type(size_type, false, &size_valtype);
-    if (size_valtype == WASM64_VALTYPE_I32)
+    if (valid)
     {
-        wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+        wasm64_fe_emit_stack_bounds_check(emitter, emitter->sp_local);
+        wasm64_fe_local_get(emitter, emitter->sp_local);
+        wasm64_fe_i64_const(emitter, (s64)(alignment - 1));
+        wasm64_fe_u8(emitter, 0x7c); // add
+        wasm64_fe_local_set(emitter, emitter->scratch_local);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
+        wasm64_fe_local_get(emitter, emitter->sp_local);
+        wasm64_fe_u8(emitter, 0x54); // i64.lt_u: alignment addition wrapped
+        wasm64_fe_emit_stack_trap_if(emitter);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
+        wasm64_fe_i64_const(emitter, (s64)~(alignment - 1));
+        wasm64_fe_u8(emitter, 0x83); // i64.and
+        wasm64_fe_local_set(emitter, emitter->scratch_local);
+        wasm64_fe_emit_stack_bounds_check(emitter, emitter->scratch_local);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
+        wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
+        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        IrType* size_type = wasm64_fe_value_ir_type(emitter, instruction->operands[0]);
+        Wasm64ValType size_valtype = 0;
+        wasm64_valtype_for_type(size_type, false, &size_valtype);
+        if (size_valtype == WASM64_VALTYPE_I32)
+        {
+            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+        }
+        wasm64_fe_u8(emitter, 0x7c); // add
+        wasm64_fe_local_set(emitter, emitter->sp_local);
+        wasm64_fe_local_get(emitter, emitter->sp_local);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
+        wasm64_fe_u8(emitter, 0x54); // i64.lt_u: allocation addition wrapped
+        wasm64_fe_emit_stack_trap_if(emitter);
+        wasm64_fe_emit_stack_bounds_check(emitter, emitter->sp_local);
+        wasm64_fe_local_get(emitter, emitter->sp_local);
+        wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
     }
-    wasm64_fe_u8(emitter, 0x7c); // add
-    wasm64_fe_local_tee(emitter, emitter->sp_local);
-    wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
-    BUSTER_UNUSED(pointer_type);
 }
 
 static void wasm64_fe_emit_address_add(Wasm64FunctionEmitter* emitter, u64 offset)
@@ -2270,6 +2383,15 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_STACK_RESTORE:
         wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        wasm64_fe_local_set(emitter, emitter->scratch_local);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
+        wasm64_fe_local_get(emitter, emitter->fp_local);
+        wasm64_fe_i64_const(emitter, emitter->frame_size);
+        wasm64_fe_u8(emitter, 0x7c); // i64.add
+        wasm64_fe_u8(emitter, 0x54); // i64.lt_u: never restore into the fixed frame
+        wasm64_fe_emit_stack_trap_if(emitter);
+        wasm64_fe_emit_stack_bounds_check(emitter, emitter->scratch_local);
+        wasm64_fe_local_get(emitter, emitter->scratch_local);
         wasm64_fe_local_tee(emitter, emitter->sp_local);
         wasm64_fe_global_set(emitter, context->stack_global_index);
         break;

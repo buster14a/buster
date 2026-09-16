@@ -28,6 +28,7 @@ on:
       - tools/native_retirement_result_input_test.py
       - tools/native_retirement_performance_binding.py
       - tools/native_retirement_performance_binding_test.py
+      - tools/native_retirement_performance_identity_test.py
       - tools/throughput/**
       - src/buster/lib/arena.c
       - src/buster/lib/arena.h
@@ -78,7 +79,9 @@ jobs:
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
-      - name: Build and self-test the #619 retirement adapter
+      - name: Validate checked-in support identity and partition capacity
+        run: python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+      - name: 'Build and self-test the #619 retirement adapter'
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv \
             -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 \
@@ -122,7 +125,7 @@ jobs:
         run: |
           mkdir -p evidence/binding-source/tools evidence/binding-source/docs
           git rev-parse HEAD HEAD^{tree} > evidence/binding-source/revision.txt
-          cp tools/native_retirement_performance_binding.py tools/native_retirement_performance_binding_test.py tools/native_retirement_result_input.py tools/native_retirement_result_input_test.py tools/native_retirement_contract.py evidence/binding-source/tools/
+          cp tools/native_retirement_performance_binding.py tools/native_retirement_performance_binding_test.py tools/native_retirement_performance_identity_test.py tools/native_retirement_result_input.py tools/native_retirement_result_input_test.py tools/native_retirement_contract.py evidence/binding-source/tools/
           cp docs/native-retirement-support-v1.tsv docs/native-retirement-performance-contract.md evidence/binding-source/docs/
       - name: Retain seven-day contract diagnostics
         if: ${{ !cancelled() }}
