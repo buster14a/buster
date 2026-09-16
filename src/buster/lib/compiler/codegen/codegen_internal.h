@@ -232,6 +232,10 @@ BUSTER_F_DECL bool codegen_test_record_machine_locations_growing(Arena* arena, C
                                                                   MachineFunction const* function, MachineStackPlacement const* placement,
                                                                   u32 const* row_offsets, u32 function_start, u32 function_end,
                                                                   u32 frame_base_offset, Target target);
+// The widest change-point timeline the event-driven recording builds for a
+// function, so a test can assert the timelines stay sparse.
+BUSTER_F_DECL u32 codegen_test_machine_debug_widest_timeline(Arena* arena, MachineFunction const* function,
+                                                              MachineStackPlacement const* placement, u32 frame_base_offset, Target target);
 // Whole-function reference recording, for differential comparison against the
 // event-driven routine the compiler actually runs.
 BUSTER_F_DECL bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,

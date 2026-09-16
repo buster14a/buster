@@ -1369,6 +1369,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_seed_sizing(UnitTe
     BUSTER_TEST(arguments, recorded && module.error == CODEGEN_ERROR_NONE);
     // One range per value: the vreg is defined at row 0 and never disturbed.
     BUSTER_TEST(arguments, module.debug_location_count == VALUE_COUNT);
+    // One register holding one location for the whole function is one change
+    // point. A timeline that instead grew an entry per row would be walked
+    // again by each of the values naming it, which is the whole-function
+    // replay this routine replaced.
+    BUSTER_TEST(arguments, codegen_test_machine_debug_widest_timeline(temporary.arena, &function, &placement, 64u,
+                                                                     (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}) <= 4u);
     BUSTER_TEST(arguments, capacity < 4u * VALUE_COUNT);
     BUSTER_TEST(arguments, retained < (u64)8u * VALUE_COUNT * sizeof(DebugLocationSeed));
     scratch_end(temporary);

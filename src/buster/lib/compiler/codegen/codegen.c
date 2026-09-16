@@ -9531,17 +9531,24 @@ BUSTER_GLOBAL_LOCAL CodegenMachineDebugSelection codegen_machine_debug_sample(Co
 BUSTER_GLOBAL_LOCAL void codegen_machine_debug_selection_push(CodegenMachineDebugSelection* entries, u32* entry_count, u32 capacity,
                                                                CodegenMachineDebugSelection selection, u32 row_count)
 {
-    bool same = *entry_count && entries[*entry_count - 1u].kind == selection.kind &&
-                entries[*entry_count - 1u].frame_offset == selection.frame_offset &&
-                entries[*entry_count - 1u].physical_register == selection.physical_register;
-    if (selection.row < row_count && !same && *entry_count < capacity)
+    // A sample taken at a row supersedes the steady state the row before it
+    // published for that same row, so the superseded entry goes before the
+    // comparison rather than after it. Comparing against an entry that is
+    // about to be overwritten answers for the wrong neighbour: a row whose
+    // sample differs from its own steady state then keeps one entry per row,
+    // all carrying the same location, and every value that names the register
+    // walks them. That is the whole function again, once per value.
+    u32 count = *entry_count && entries[*entry_count - 1u].row == selection.row ? *entry_count - 1u : *entry_count;
+    bool same = count && entries[count - 1u].kind == selection.kind && entries[count - 1u].frame_offset == selection.frame_offset &&
+                entries[count - 1u].physical_register == selection.physical_register;
+    if (selection.row < row_count && count < capacity)
     {
-        if (*entry_count && entries[*entry_count - 1u].row == selection.row)
+        if (!same)
         {
-            *entry_count -= 1u;
+            entries[count] = selection;
+            count += 1u;
         }
-        entries[*entry_count] = selection;
-        *entry_count += 1u;
+        *entry_count = count;
     }
 }
 
@@ -10455,6 +10462,44 @@ bool codegen_test_record_machine_locations_growing(Arena* arena, CodegenModule* 
                                                      function_end, frame_base_offset, target);
     *capacity = sink.capacity;
     return recorded;
+}
+
+// The widest change-point timeline the event-driven recording would build for
+// this function. Sparsity is the whole point of the routine: a timeline that
+// holds an entry per row is walked again by every value that names the
+// register, which is the whole-function replay the routine replaced.
+u32 codegen_test_machine_debug_widest_timeline(Arena* arena, MachineFunction const* function, MachineStackPlacement const* placement,
+                                                u32 frame_base_offset, Target target)
+{
+    u32 widest = 0;
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    CodegenMachineDebugIndex index = {0};
+    codegen_machine_debug_index_build(scratch.arena, function, placement, &index);
+    u32 register_timeline_count = function->virtual_register_count ? function->virtual_register_count : 1u;
+    u32 slot_timeline_count = function->stack_slot_count ? function->stack_slot_count : 1u;
+    CodegenMachineDebugTimeline* register_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, register_timeline_count);
+    CodegenMachineDebugTimeline* slot_timelines = arena_allocate(scratch.arena, CodegenMachineDebugTimeline, slot_timeline_count);
+    memset(register_timelines, 0, sizeof(*register_timelines) * (u64)register_timeline_count);
+    memset(slot_timelines, 0, sizeof(*slot_timelines) * (u64)slot_timeline_count);
+    u32 scratch_capacity = 2u * function->instruction_count + 2u;
+    CodegenMachineDebugSelection* selection_scratch = arena_allocate(scratch.arena, CodegenMachineDebugSelection, scratch_capacity);
+    for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + value_index;
+        u32 piece_count = value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE
+                              ? BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces))
+                              : 0;
+        for (u32 piece_index = 0; piece_index < piece_count; piece_index += 1)
+        {
+            CodegenMachineDebugTimeline const* timeline = 0;
+            codegen_machine_debug_timeline_for(scratch.arena, function, placement, &index, register_timelines, slot_timelines,
+                                               selection_scratch, scratch_capacity, value->pieces[piece_index], frame_base_offset, target,
+                                               &timeline);
+            widest = timeline && timeline->entry_count > widest ? timeline->entry_count : widest;
+        }
+    }
+    scratch_end(scratch);
+    return widest;
 }
 
 bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
