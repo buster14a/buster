@@ -1,0 +1,76 @@
+name: PR 600 bounded repair validation
+
+on:
+  push:
+    branches: [codex/repair-600-work-20260916]
+    paths: ['.repair-600/**', '.github/workflows/repair-600-once.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/repair-600-work-20260916' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Construct the bounded candidate from the exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/repair600" 39f0cc5dd4abd606ec83e8229d3c99c542155c97
+          python3 .repair-600/repair.py "$RUNNER_TEMP/repair600"
+          cd "$RUNNER_TEMP/repair600"
+          git diff --check
+          test "$(git diff --name-only | wc -l)" -eq 3
+          git diff --stat
+          git config user.name 'David'
+          git config user.email '39247043+davidgmbb@users.noreply.github.com'
+          git add src/buster/lib/compiler/frontend/c/c_source.c src/buster/lib/compiler/frontend/c/c_source_internal.h src/buster/tests/compiler/frontend/c/once_test.c
+          git commit -m 'c: preserve once-table hash bits and add probe/failure oracles (#600)'
+      - name: Split-source syntax and registered owned slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repair600"
+          flags=(-std=c11 -O0 -g -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_CI=1 -DBUSTER_LINK_LIBC=1 -DBUSTER_SINGLE_THREADED=0 -Isrc)
+          gcc "${flags[@]}" -DBUSTER_UNITY_BUILD=0 -Wall -Wextra -Werror -fsyntax-only src/buster/lib/compiler/frontend/c/c_source.c src/buster/tests/compiler/frontend/c/once_test.c
+          gcc "${flags[@]}" -DBUSTER_UNITY_BUILD=1 src/buster/apps/ide/ide.c -o "$RUNNER_TEMP/ide600" -pthread -ldl -lm
+          python3 "$GITHUB_WORKSPACE/.repair-600/run_slice.py" "$RUNNER_TEMP/ide600" "$RUNNER_TEMP/once-fixed.log" pass
+      - name: Hash-bit regression negative control
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repair600"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/buster/lib/compiler/frontend/c/c_source.c')
+          text = p.read_text()
+          old = '    return result ? result : 1;'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, '    return result | 1;', 1))
+          PY
+          gcc -std=c11 -O0 -g -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_UNITY_BUILD=1 -DBUSTER_CI=1 -DBUSTER_LINK_LIBC=1 -DBUSTER_SINGLE_THREADED=0 -Isrc src/buster/apps/ide/ide.c -o "$RUNNER_TEMP/ide600-control" -pthread -ldl -lm
+          python3 "$GITHUB_WORKSPACE/.repair-600/run_slice.py" "$RUNNER_TEMP/ide600-control" "$RUNNER_TEMP/once-control.log" fail
+          git restore src/buster/lib/compiler/frontend/c/c_source.c
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Preserve only the validated candidate on its result branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repair600"
+          test "$(git rev-parse HEAD^)" = 39f0cc5dd4abd606ec83e8229d3c99c542155c97
+          test "$(git diff HEAD^ HEAD --name-only | wc -l)" -eq 3
+          git push origin HEAD:refs/heads/codex/repair-600-result-20260916
+          printf 'Candidate: `%s`\n\nThe candidate contains three source/test files only. No helper, workflow, permissions, registry or shared OS changes are included. Full hosted PR gates remain separate.\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve scoped validation logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr600-once-repair-${{ github.run_id }}
+          path: ${{ runner.temp }}/once-*.log
+          if-no-files-found: ignore
+          retention-days: 7
