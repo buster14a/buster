@@ -113,6 +113,24 @@ timeout/descendant cleanup, argv, diagnostics and dedicated-host locking.
 SHA-256 and recoverable file/path contracts also run in the registered hash and
 OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 
+## Bench service self-test
+
+`./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
+POSIX queue, materializer, journal-replay and fake-worker regressions plus the
+Linux lease-handoff and result-evidence suites; see
+`tools/bench_service/README.md` for the full contract. Interrupted workers
+retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
+index, a bundle-only crash prefix completes idempotently, and invalid
+published controls are never repaired. The coordinator removes the
+`.lease-handoff` socket before the worker is continued. On Linux the suite
+also runs a materializer-to-recipe bridge: a real `bq_materialize` fixture
+feeds the real `bench_service_recipe` build graph through
+`bench_service_recipe_self_test JOB TOKEN WORKSPACE BASE CANDIDATE RESULT`,
+with only the external build and throughput programs stubbed, followed by the
+fixed no-argument recipe suite. These tests are fake-backend and
+stubbed-external evidence; privileged live-systemd and deployment
+qualification remain explicit operator gates and are not covered here.
+
 ## Configured external compiler fixtures
 
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied

@@ -332,13 +332,41 @@ BUSTER_GLOBAL_LOCAL bool bq_test_source(char const* installed, char const* revis
     snprintf(manifest, sizeof(manifest), "%s/source.manifest", root);
     bool file_ok = false;
     bool ok = (mkdir(sources, 0700) == 0 || errno == EEXIST) && mkdir(root, 0700) == 0 && mkdir(source, 0700) == 0;
-    if (ok)
+    if (ok && defect == 9)
+    {
+        char manifest_text[8192];
+        int header = snprintf(manifest_text, sizeof(manifest_text),
+                              "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n", revision);
+        ok = header > 0 && (u32)header < sizeof(manifest_text);
+        u64 used = ok ? (u64)header : 0;
+        for (u32 index = 0; ok && index < 80; index += 1)
+        {
+            char name[64], body[128], file_path[4096];
+            int name_length = snprintf(name, sizeof(name), "file-%03u.c", index);
+            int body_length = snprintf(body, sizeof(body), "int bq_fixture_%03u(void){return %u;}\n", index, index);
+            int path_length = snprintf(file_path, sizeof(file_path), "%s/%s", source, name);
+            char8 file_digest[SHA256_HEX_CAPACITY];
+            ok = name_length > 0 && body_length > 0 && path_length > 0 && (u32)path_length < sizeof(file_path) &&
+                 bq_test_write_path(file_path, body, 0400);
+            if (ok)
+            {
+                bq_digest(body, (u32)body_length, file_digest);
+                int line = snprintf(manifest_text + used, sizeof(manifest_text) - used,
+                                    "%.64s src/%s\n", file_digest, name);
+                ok = line > 0 && (u64)line < sizeof(manifest_text) - used;
+                if (ok) used += (u64)line;
+            }
+        }
+        ok = ok && used > 4096 && bq_test_write_path(manifest, manifest_text, 0400) &&
+             chmod(source, 0500) == 0 && chmod(root, 0500) == 0;
+    }
+    if (ok && defect != 9)
     {
         file_ok = defect == 8 ? mkfifo(file, 0400) == 0 : bq_test_write_path(file, contents, 0400);
         ok = file_ok;
     }
     char8 digest[SHA256_HEX_CAPACITY];
-    if (ok)
+    if (ok && defect != 9)
     {
         bq_digest(contents, (u32)strlen(contents), digest);
         if (defect == 3)
@@ -527,6 +555,22 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
                  workspace_info.st_gid == workspace_root_info.st_gid);
         BQ_CHECK(stat(base_source, &base) == 0 && stat(candidate_source, &candidate) == 0 && base.st_ino != candidate.st_ino);
         BQ_CHECK((base.st_mode & 0222) == 0 && (candidate.st_mode & 0222) == 0);
+        struct stat attempt_info = {0}, base_subject = {0}, candidate_subject = {0};
+        char base_subject_path[1024], candidate_subject_path[1024], base_source_dir[1024], candidate_source_dir[1024];
+        snprintf(base_subject_path, sizeof(base_subject_path), "%s/base", workspace);
+        snprintf(candidate_subject_path, sizeof(candidate_subject_path), "%s/candidate", workspace);
+        snprintf(base_source_dir, sizeof(base_source_dir), "%s/base/source", workspace);
+        snprintf(candidate_source_dir, sizeof(candidate_source_dir), "%s/candidate/source", workspace);
+        BQ_CHECK(stat(workspace, &attempt_info) == 0 && stat(base_subject_path, &base_subject) == 0 &&
+                 stat(candidate_subject_path, &candidate_subject) == 0 &&
+                 (attempt_info.st_mode & 07777) == 02710 && attempt_info.st_gid == workspace_root_info.st_gid &&
+                 (base_subject.st_mode & 07777) == 02750 && base_subject.st_gid == workspace_root_info.st_gid &&
+                 (candidate_subject.st_mode & 07777) == 02710 &&
+                 candidate_subject.st_gid == workspace_root_info.st_gid);
+        struct stat base_source_info = {0}, candidate_source_info = {0};
+        BQ_CHECK(stat(base_source_dir, &base_source_info) == 0 && stat(candidate_source_dir, &candidate_source_info) == 0 &&
+                 (base_source_info.st_mode & 0222) == 0 && (candidate_source_info.st_mode & 0222) == 0 &&
+                 (base_source_info.st_mode & 0050) == 0050 && (candidate_source_info.st_mode & 0050) == 0050);
         BQ_CHECK(chmod(base_source, 0600) == 0);
         int same_euid_mutation = open(base_source, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
         BQ_CHECK(same_euid_mutation >= 0 && bq_write_all(same_euid_mutation, (u8 const*)"mutated\n", 8) &&
@@ -546,6 +590,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         snprintf(base_build, sizeof(base_build), "%s/base/build", workspace);
         snprintf(candidate_build, sizeof(candidate_build), "%s/candidate/build", workspace);
         BQ_CHECK(stat(base_build, &base) == 0 && stat(candidate_build, &candidate) == 0 && base.st_ino != candidate.st_ino);
+        BQ_CHECK((base.st_mode & 07777) == 02700 && (candidate.st_mode & 07777) == 02700 &&
+                 base.st_gid == workspace_root_info.st_gid && candidate.st_gid == workspace_root_info.st_gid);
         snprintf(sentinel, sizeof(sentinel), "%s/generated", base_build);
         BQ_CHECK(bq_test_write_path(sentinel, "base-only\n", 0600));
         snprintf(sentinel, sizeof(sentinel), "%s/generated", candidate_build);
@@ -1863,6 +1909,20 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
         BQ_CHECK(sent == BQ_OK && read_state == sizeof(state) && state == 1 && bq_test_worker_probe_locked(lease_path));
+        BQ_CHECK(handoff.listener < 0 && handoff.parent < 0);
+        struct stat missing = {0};
+        BQ_CHECK(fstatat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, &missing, AT_SYMLINK_NOFOLLOW) != 0 &&
+                 errno == ENOENT);
+        char empty_bundle[] = "BQ-BUNDLE-V1\nentries=0\nbytes=0\n";
+        char empty_bundle_digest[SHA256_HEX_CAPACITY];
+        bq_digest(empty_bundle, (u32)strlen(empty_bundle), empty_bundle_digest);
+        char bundle_path[BQ_PATH_CAP + 64];
+        int bundle_length = snprintf(bundle_path, sizeof(bundle_path), "%s/validate-buster-v1.bundle", result_root);
+        bool bundle_ok = bundle_length > 0 && (u32)bundle_length < sizeof(bundle_path) &&
+                         bq_test_write_path(bundle_path, empty_bundle, 0400);
+        BQ_CHECK(bundle_ok && bq_worker_bundle_validate_full(result_directory, empty_bundle_digest, NULL) == BQ_OK &&
+                 bq_test_worker_probe_locked(lease_path));
+        if (bundle_length > 0 && (u32)bundle_length < sizeof(bundle_path)) unlink(bundle_path);
         char release = 1;
         BQ_CHECK(write(release_pipe[1], &release, sizeof(release)) == sizeof(release));
         bq_worker_sleep_until(bq_worker_deadline(bq_worker_monotonic_milliseconds(), 20));
@@ -1890,7 +1950,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
 {
     char root[] = "/tmp/buster-lease-handoff-negative-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1], socket_path[BQ_PATH_CAP + 1];
-    int result_directory = -1, ready_pipe[2] = {-1, -1};
+    int result_directory = -1, ready_pipe[2] = {-1, -1}, hold_pipe[2] = {-1, -1};
     pid_t child = -1;
     BqWorkerLease lease = {.descriptor = -1};
     BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
@@ -1902,11 +1962,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
          (result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) >= 0 &&
          bq_worker_lease_acquire(lease_path, &lease) == 0 &&
          bq_worker_lease_handoff_open(result_root, result_directory, &handoff) &&
-         bq_worker_lease_socket_path(result_root, socket_path) && pipe(ready_pipe) == 0;
+         bq_worker_lease_socket_path(result_root, socket_path) && pipe(ready_pipe) == 0 &&
+         pipe(hold_pipe) == 0;
     if (ok) child = fork();
     if (child == 0)
     {
         close(ready_pipe[0]);
+        close(hold_pipe[1]);
         close(handoff.listener);
         close(handoff.parent);
         close(result_directory);
@@ -1955,7 +2017,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
             received_ok = received_ok && received_fd >= 3;
         }
         u8 state = received_ok ? 1 : 0;
-        if (received_ok && mode != 0)
+        if (received_ok && mode == 1)
         {
             BqWorkerLeaseMessage invalid = response;
             invalid.phase = BQ_WORKER_LEASE_ACK;
@@ -1964,17 +2026,32 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
         }
         if (received_fd >= 0) close(received_fd);
         if (write(ready_pipe[1], &state, sizeof(state)) != sizeof(state)) received_ok = false;
+        if (received_ok && mode == 2)
+        {
+            char hold = 0;
+            received_ok = read(hold_pipe[0], &hold, sizeof(hold)) == sizeof(hold);
+        }
         if (client >= 0) close(client);
         close(ready_pipe[1]);
+        close(hold_pipe[0]);
         _exit(received_ok ? 0 : 1);
     }
     if (child > 0)
     {
         close(ready_pipe[1]);
+        close(hold_pipe[0]);
+        hold_pipe[0] = -1;
         BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
+        bool coordinator_valid = lease.descriptor >= 0 && fcntl(lease.descriptor, F_GETFD) >= 0;
         BQ_CHECK(sent != BQ_OK && read_state == sizeof(state) && state == 1 && bq_test_worker_probe_locked(lease_path));
+        BQ_CHECK(mode != 2 || (sent != BQ_OK && coordinator_valid && bq_test_worker_probe_locked(lease_path)));
+        if (mode == 2 && read_state == sizeof(state) && state == 1)
+        {
+            char release = 1;
+            BQ_CHECK(write(hold_pipe[1], &release, sizeof(release)) == sizeof(release));
+        }
         bq_worker_lease_release(&lease);
     }
     if (child > 0)
@@ -1986,6 +2063,103 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
     if (child < 0 && ok) BQ_CHECK(false);
     if (ready_pipe[0] >= 0) close(ready_pipe[0]);
     if (ready_pipe[1] >= 0) close(ready_pipe[1]);
+    if (hold_pipe[0] >= 0) close(hold_pipe[0]);
+    if (hold_pipe[1] >= 0) close(hold_pipe[1]);
+    bq_worker_lease_handoff_close(&handoff);
+    bq_worker_lease_release(&lease);
+    if (result_directory >= 0) close(result_directory);
+    unlink(lease_path);
+    rmdir(result_root);
+    rmdir(root);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
+{
+    char root[] = "/tmp/buster-lease-cleanup-XXXXXX";
+    char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1];
+    int result_directory = -1;
+    int ready_pipe[2] = {-1, -1}, hold_pipe[2] = {-1, -1};
+    pid_t child = -1;
+    BqWorkerLease lease = {.descriptor = -1};
+    BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
+    bool ok = bq_test_mkdtemp_physical(root, sizeof(root));
+    int result_length = snprintf(result_root, sizeof(result_root), "%s/result", root);
+    int lease_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    ok = ok && result_length > 0 && (u32)result_length < sizeof(result_root) &&
+         lease_length > 0 && (u32)lease_length < sizeof(lease_path) && mkdir(result_root, 0700) == 0 &&
+         (result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) >= 0 &&
+         bq_worker_lease_acquire(lease_path, &lease) == 0 &&
+         bq_worker_lease_handoff_open(result_root, result_directory, &handoff) &&
+         pipe(ready_pipe) == 0 && pipe(hold_pipe) == 0;
+    if (ok) child = fork();
+    if (child == 0)
+    {
+        close(ready_pipe[0]);
+        close(hold_pipe[1]);
+        close(handoff.listener);
+        close(handoff.parent);
+        close(result_directory);
+        if (lease.descriptor >= 0) close(lease.descriptor);
+        lease.descriptor = -1;
+        BqWorkerLease transferred = {.descriptor = -1};
+        BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
+                                                            S8("1"), S8("2"), &transferred);
+        u8 state = received == BQ_OK ? 1 : 0;
+        ssize_t written = write(ready_pipe[1], &state, sizeof(state));
+        char hold = 0;
+        ssize_t released = written == sizeof(state) ? read(hold_pipe[0], &hold, sizeof(hold)) : -1;
+        if (released == sizeof(hold)) bq_worker_lease_release(&transferred);
+        close(ready_pipe[1]);
+        close(hold_pipe[0]);
+        _exit(received == BQ_OK && released == sizeof(hold) ? 0 : 1);
+    }
+    if (child > 0)
+    {
+        close(ready_pipe[1]);
+        close(hold_pipe[0]);
+        hold_pipe[0] = -1;
+        ready_pipe[1] = -1;
+        bq_worker_test_handoff_unlink_failure = mode == 0;
+        bq_worker_test_handoff_fsync_failure = mode == 1;
+        bq_worker_test_handoff_listener_close_failure = mode == 2;
+        bq_worker_test_handoff_parent_close_failure = mode == 3;
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        bq_worker_test_handoff_unlink_failure = false;
+        bq_worker_test_handoff_fsync_failure = false;
+        bq_worker_test_handoff_listener_close_failure = false;
+        bq_worker_test_handoff_parent_close_failure = false;
+        u8 state = 0;
+        ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
+        BQ_CHECK(sent == BQ_IO && read_state == sizeof(state) && state == 1 &&
+                 bq_test_worker_probe_locked(lease_path));
+        BQ_CHECK(handoff.listener < 0 && handoff.parent < 0);
+        BQ_CHECK(bq_worker_lease_handoff_close(&handoff));
+        struct stat missing = {0};
+        errno = 0;
+        bool still_present = fstatat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, &missing,
+                                     AT_SYMLINK_NOFOLLOW) == 0;
+        if (still_present) unlinkat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, 0);
+        errno = 0;
+        BQ_CHECK(fstatat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, &missing, AT_SYMLINK_NOFOLLOW) != 0 &&
+                 errno == ENOENT);
+        if (read_state == sizeof(state) && state == 1)
+        {
+            char release = 1;
+            BQ_CHECK(write(hold_pipe[1], &release, sizeof(release)) == sizeof(release));
+        }
+        bq_worker_lease_release(&lease);
+    }
+    if (child > 0)
+    {
+        int status = 0;
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        BQ_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0 && !bq_test_worker_probe_locked(lease_path));
+    }
+    if (child < 0 && ok) BQ_CHECK(false);
+    if (ready_pipe[0] >= 0) close(ready_pipe[0]);
+    if (ready_pipe[1] >= 0) close(ready_pipe[1]);
+    if (hold_pipe[0] >= 0) close(hold_pipe[0]);
+    if (hold_pipe[1] >= 0) close(hold_pipe[1]);
     bq_worker_lease_handoff_close(&handoff);
     bq_worker_lease_release(&lease);
     if (result_directory >= 0) close(result_directory);
@@ -3647,12 +3821,504 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_failure_bundle_replay(void)
         bq_test_worker_end(&fixture);
     }
 }
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_failure_bundle_coverage(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(86);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1};
+        BQ_CHECK(job && bq_worker_result_open(&fixture.config, job, &finalization, true) == BQ_OK);
+        char prepare[BQ_PATH_CAP + 80], stage[BQ_PATH_CAP + 80], throughput_dir[BQ_PATH_CAP + 64];
+        char nested_dir[BQ_PATH_CAP + 80], first_file[BQ_PATH_CAP + 96], second_file[BQ_PATH_CAP + 96];
+        char bundle[BQ_PATH_CAP + 64], manifest[BQ_PATH_CAP + 64];
+        snprintf(prepare, sizeof(prepare), "%s/validate-buster-v1.prepare.manifest", finalization.result_root);
+        snprintf(stage, sizeof(stage), "%s/validate-buster-v1.base-generate.manifest", finalization.result_root);
+        snprintf(throughput_dir, sizeof(throughput_dir), "%s/throughput", finalization.result_root);
+        snprintf(nested_dir, sizeof(nested_dir), "%s/throughput/nested", finalization.result_root);
+        snprintf(first_file, sizeof(first_file), "%s/throughput/result.txt", finalization.result_root);
+        snprintf(second_file, sizeof(second_file), "%s/throughput/nested/result.txt", finalization.result_root);
+        snprintf(bundle, sizeof(bundle), "%s/validate-buster-v1.bundle", finalization.result_root);
+        snprintf(manifest, sizeof(manifest), "%s/validate-buster-v1.manifest", finalization.result_root);
+        BQ_CHECK(bq_test_write_path(prepare, "schema=1\nstage=prepare\n", 0400) &&
+                 bq_test_write_path(stage, "schema=1\nstage=base-generate\n", 0400) &&
+                 mkdir(throughput_dir, 0700) == 0 && mkdir(nested_dir, 0700) == 0 &&
+                 bq_test_write_path(first_file, "first\n", 0400) &&
+                 bq_test_write_path(second_file, "second\n", 0400));
+        BQ_CHECK(bq_worker_result_evidence(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK);
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound);
+        char saved_result[SHA256_HEX_CAPACITY], saved_bundle[SHA256_HEX_CAPACITY], saved_full[SHA256_HEX_CAPACITY];
+        memcpy(saved_result, finalization.result_digest, sizeof(saved_result));
+        memcpy(saved_bundle, finalization.bundle_digest, sizeof(saved_bundle));
+        memcpy(saved_full, finalization.full_digest, sizeof(saved_full));
+        int bundle_fd = open(bundle, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        char bundle_body[8192] = {0};
+        ssize_t bundle_size = bundle_fd >= 0 ? read(bundle_fd, bundle_body, sizeof(bundle_body) - 1) : -1;
+        if (bundle_fd >= 0) close(bundle_fd);
+        BQ_CHECK(bundle_size > 0 && strstr(bundle_body, "validate-buster-v1.prepare.manifest") &&
+                 strstr(bundle_body, "validate-buster-v1.base-generate.manifest") &&
+                 strstr(bundle_body, "throughput/result.txt") &&
+                 strstr(bundle_body, "throughput/nested/result.txt") &&
+                 !strstr(bundle_body, "validate-buster-v1.outcome") &&
+                 !strstr(bundle_body, "validate-buster-v1.bundle") &&
+                 !strstr(bundle_body, "validate-buster-v1.manifest"));
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound &&
+                 !memcmp(saved_result, finalization.result_digest, sizeof(saved_result)) &&
+                 !memcmp(saved_bundle, finalization.bundle_digest, sizeof(saved_bundle)) &&
+                 !memcmp(saved_full, finalization.full_digest, sizeof(saved_full)));
+        BQ_CHECK(unlink(manifest) == 0);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound &&
+                 !memcmp(saved_result, finalization.result_digest, sizeof(saved_result)) &&
+                 !memcmp(saved_bundle, finalization.bundle_digest, sizeof(saved_bundle)) &&
+                 !memcmp(saved_full, finalization.full_digest, sizeof(saved_full)));
+        BQ_CHECK(unlink(bundle) == 0);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound && access(bundle, F_OK) != 0);
+        BQ_CHECK(unlink(manifest) == 0);
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound);
+        BQ_CHECK(unlink(bundle) == 0 && unlink(manifest) == 0);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_test_write_path(bundle, "BQ-BUNDLE-V1\nentries=0\nbytes=1\n", 0400) &&
+                 bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound);
+        BQ_CHECK(unlink(bundle) == 0);
+        char link_path[BQ_PATH_CAP + 64];
+        snprintf(link_path, sizeof(link_path), "%s/evil", finalization.result_root);
+        BQ_CHECK(symlink("throughput/result.txt", link_path) == 0 &&
+                 bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound && access(bundle, F_OK) != 0);
+        BQ_CHECK(unlink(link_path) == 0);
+        char fifo_path[BQ_PATH_CAP + 64];
+        snprintf(fifo_path, sizeof(fifo_path), "%s/pipe", finalization.result_root);
+        BQ_CHECK(mkfifo(fifo_path, 0400) == 0 &&
+                 bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound && access(bundle, F_OK) != 0);
+        BQ_CHECK(unlink(fifo_path) == 0);
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound);
+        close(finalization.result_directory);
+        finalization.result_directory = -1;
+        bq_test_worker_end(&fixture);
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(87);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1};
+        BQ_CHECK(job && bq_worker_result_open(&fixture.config, job, &finalization, true) == BQ_OK);
+        char payload_path[BQ_PATH_CAP + 64];
+        for (u32 index = 0; index < BQ_WORKER_BUNDLE_ENTRY_CAP - 3; index += 1)
+        {
+            int length = snprintf(payload_path, sizeof(payload_path), "%s/payload-%04u.txt",
+                                  finalization.result_root, index);
+            BQ_CHECK(length > 0 && (u32)length < sizeof(payload_path) &&
+                     bq_test_write_path(payload_path, "x\n", 0400));
+        }
+        char bundle[BQ_PATH_CAP + 64], manifest[BQ_PATH_CAP + 64];
+        snprintf(bundle, sizeof(bundle), "%s/validate-buster-v1.bundle", finalization.result_root);
+        snprintf(manifest, sizeof(manifest), "%s/validate-buster-v1.manifest", finalization.result_root);
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound);
+        struct stat bundle_info = {0};
+        BQ_CHECK(stat(bundle, &bundle_info) == 0 && bundle_info.st_size > 32768);
+        char saved_result[SHA256_HEX_CAPACITY], saved_bundle[SHA256_HEX_CAPACITY], saved_full[SHA256_HEX_CAPACITY];
+        memcpy(saved_result, finalization.result_digest, sizeof(saved_result));
+        memcpy(saved_bundle, finalization.bundle_digest, sizeof(saved_bundle));
+        memcpy(saved_full, finalization.full_digest, sizeof(saved_full));
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 !memcmp(saved_result, finalization.result_digest, sizeof(saved_result)) &&
+                 !memcmp(saved_bundle, finalization.bundle_digest, sizeof(saved_bundle)) &&
+                 !memcmp(saved_full, finalization.full_digest, sizeof(saved_full)));
+        BQ_CHECK(unlink(manifest) == 0);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound &&
+                 !memcmp(saved_result, finalization.result_digest, sizeof(saved_result)) &&
+                 !memcmp(saved_bundle, finalization.bundle_digest, sizeof(saved_bundle)) &&
+                 !memcmp(saved_full, finalization.full_digest, sizeof(saved_full)));
+        BQ_CHECK(bq_worker_result_evidence(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) == BQ_OK &&
+                 finalization.result_bound);
+        int overflow_length = snprintf(payload_path, sizeof(payload_path), "%s/payload-%04u.txt",
+                                       finalization.result_root, BQ_WORKER_BUNDLE_ENTRY_CAP - 3);
+        BQ_CHECK(overflow_length > 0 && (u32)overflow_length < sizeof(payload_path) &&
+                 bq_test_write_path(payload_path, "x\n", 0400));
+        BQ_CHECK(unlink(bundle) == 0 && unlink(manifest) == 0);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound && access(bundle, F_OK) != 0 && access(manifest, F_OK) != 0);
+        close(finalization.result_directory);
+        finalization.result_directory = -1;
+        bq_test_worker_end(&fixture);
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(88);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1};
+        BQ_CHECK(job && bq_test_worker_make_success_result(&fixture, job, &finalization));
+        char report[BQ_PATH_CAP + 64], bundle[BQ_PATH_CAP + 64], manifest[BQ_PATH_CAP + 64];
+        snprintf(report, sizeof(report), "%s/report.txt", finalization.result_root);
+        snprintf(bundle, sizeof(bundle), "%s/validate-buster-v1.bundle", finalization.result_root);
+        snprintf(manifest, sizeof(manifest), "%s/validate-buster-v1.manifest", finalization.result_root);
+        memset(finalization.result_digest, 0, sizeof(finalization.result_digest));
+        memset(finalization.bundle_digest, 0, sizeof(finalization.bundle_digest));
+        memset(finalization.full_digest, 0, sizeof(finalization.full_digest));
+        finalization.result_bound = false;
+        BQ_CHECK(unlink(report) == 0 && bq_test_write_path(report, "corrupted\n", 0400) &&
+                 bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound);
+        BQ_CHECK(unlink(report) == 0 && bq_test_write_path(report, "data\n", 0400));
+        BqJob mismatched_id = *job;
+        mismatched_id.id += 1;
+        BQ_CHECK(bq_worker_result_failure_artifacts(&mismatched_id, BQ_FAILED, BQ_WORKER_TIMEOUT,
+                                                  &finalization) != BQ_OK && !finalization.result_bound);
+        BqJob mismatched_token = *job;
+        mismatched_token.token += 1;
+        BQ_CHECK(bq_worker_result_failure_artifacts(&mismatched_token, BQ_FAILED, BQ_WORKER_TIMEOUT,
+                                                  &finalization) != BQ_OK && !finalization.result_bound);
+        BQ_CHECK(unlink(bundle) == 0 &&
+                 bq_worker_result_failure_artifacts(job, BQ_FAILED, BQ_WORKER_TIMEOUT, &finalization) != BQ_OK &&
+                 !finalization.result_bound);
+        BQ_CHECK(unlink(manifest) == 0 && unlink(report) == 0);
+        close(finalization.result_directory);
+        finalization.result_directory = -1;
+        bq_test_worker_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_preparing_recovery(u32 new_boot)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_EXECUTION_FAILED, false))
+    {
+        fixture.config.production_path = true;
+        u32 inaccessible_root_length = (u32)strlen(fixture.root);
+        u32 inaccessible_lease_length = (u32)strlen(fixture.lease);
+        BQ_CHECK(inaccessible_root_length + 1 + inaccessible_lease_length <
+                 sizeof(fixture.fake.observed.inaccessible_paths));
+        memcpy(fixture.fake.observed.inaccessible_paths, fixture.root, inaccessible_root_length);
+        fixture.fake.observed.inaccessible_paths[inaccessible_root_length] = ' ';
+        memcpy(fixture.fake.observed.inaccessible_paths + inaccessible_root_length + 1, fixture.lease,
+               inaccessible_lease_length + 1);
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(85 + new_boot);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_PREPARING);
+        BQ_CHECK(job && bq_test_worker_bind(&fixture, job));
+        BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1};
+        BQ_CHECK(job && bq_worker_result_open(&fixture.config, job, &finalization, true) == BQ_OK);
+        char prepare[BQ_PATH_CAP + 96], stage[BQ_PATH_CAP + 96], evidence_dir[BQ_PATH_CAP + 80];
+        char nested_dir[BQ_PATH_CAP + 96], first_file[BQ_PATH_CAP + 112], second_file[BQ_PATH_CAP + 128];
+        snprintf(prepare, sizeof(prepare), "%.200s/validate-buster-v1.prepare.manifest", finalization.result_root);
+        snprintf(stage, sizeof(stage), "%.200s/validate-buster-v1.base-generate.manifest", finalization.result_root);
+        snprintf(evidence_dir, sizeof(evidence_dir), "%.200s/throughput", finalization.result_root);
+        snprintf(nested_dir, sizeof(nested_dir), "%.200s/throughput/nested", finalization.result_root);
+        snprintf(first_file, sizeof(first_file), "%.200s/throughput/result.txt", finalization.result_root);
+        snprintf(second_file, sizeof(second_file), "%.200s/throughput/nested/result.txt", finalization.result_root);
+        BQ_CHECK(bq_test_write_path(prepare, "schema=1\nstage=prepare\nprocess-result=running\n", 0400) &&
+                 mkdir(evidence_dir, 0700) == 0 && mkdir(nested_dir, 0700) == 0 &&
+                 bq_test_write_path(first_file, "first\n", 0400) &&
+                 bq_test_write_path(second_file, "second\n", 0400));
+        if (new_boot)
+            BQ_CHECK(bq_test_write_path(stage, "schema=1\nstage=base-generate\nprocess-result=success\n", 0400));
+        if (!new_boot)
+        {
+            BqWorkerLeaseHandoff stale = {.listener = -1, .parent = -1};
+            BQ_CHECK(bq_worker_lease_handoff_open(finalization.result_root, finalization.result_directory, &stale));
+            if (stale.listener >= 0) close(stale.listener);
+            if (stale.parent >= 0) close(stale.parent);
+        }
+        if (finalization.result_directory >= 0)
+        {
+            close(finalization.result_directory);
+            finalization.result_directory = -1;
+        }
+        bq_close(queue);
+        BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+        if (new_boot)
+        {
+            int boot = open(fixture.boot, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+            char const changed[] = "bbbbbbbb-0000-0000-0000-000000000000\n";
+            BQ_CHECK(boot >= 0 && bq_write_all(boot, (u8 const*)changed, sizeof(changed) - 1) && fsync(boot) == 0);
+            if (boot >= 0) close(boot);
+        }
+        BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+        job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED && job->result_bound &&
+                 bq_worker_result_binding_validate(job) == BQ_OK &&
+                 bq_failure_evidence(queue, job) == (new_boot ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED) &&
+                 !queue->state.active_id && !queue->needs_reconciliation &&
+                 !bq_test_worker_probe_locked(fixture.lease));
+        char result_root[BQ_PATH_CAP + 64], bundle[BQ_PATH_CAP + 96], manifest[BQ_PATH_CAP + 96];
+        char socket_path[BQ_PATH_CAP + 96];
+        int root_length = snprintf(result_root, sizeof(result_root), "%.140s/results/job-%" PRIu64 "-attempt-%" PRIu64,
+                                   fixture.material.workspaces, (uint64_t)id, (uint64_t)token);
+        int bundle_length = snprintf(bundle, sizeof(bundle), "%.200s/validate-buster-v1.bundle", result_root);
+        int manifest_length = snprintf(manifest, sizeof(manifest), "%.200s/validate-buster-v1.manifest", result_root);
+        int socket_length = snprintf(socket_path, sizeof(socket_path), "%.200s/.lease-handoff", result_root);
+        BQ_CHECK(root_length > 0 && bundle_length > 0 && manifest_length > 0 && socket_length > 0 &&
+                 access(manifest, F_OK) == 0 && access(bundle, F_OK) == 0 &&
+                 access(socket_path, F_OK) != 0 && errno == ENOENT);
+        int bundle_fd = open(bundle, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        char bundle_body[8192] = {0};
+        ssize_t bundle_size = bundle_fd >= 0 ? read(bundle_fd, bundle_body, sizeof(bundle_body) - 1) : -1;
+        if (bundle_fd >= 0) close(bundle_fd);
+        BQ_CHECK(bundle_size > 0 && strstr(bundle_body, "validate-buster-v1.prepare.manifest") &&
+                 strstr(bundle_body, "throughput/result.txt") &&
+                 strstr(bundle_body, "throughput/nested/result.txt") &&
+                 (!new_boot || strstr(bundle_body, "validate-buster-v1.base-generate.manifest")));
+        char result_digest[SHA256_HEX_CAPACITY], bundle_digest[SHA256_HEX_CAPACITY], full_digest[SHA256_HEX_CAPACITY];
+        if (job)
+        {
+            memcpy(result_digest, job->result_manifest_digest, sizeof(result_digest));
+            memcpy(bundle_digest, job->result_bundle_digest, sizeof(bundle_digest));
+            memcpy(full_digest, job->result_full_digest, sizeof(full_digest));
+        }
+        bq_close(queue);
+        BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK);
+        job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED && job->result_bound &&
+                 !memcmp(result_digest, job->result_manifest_digest, sizeof(result_digest)) &&
+                 !memcmp(bundle_digest, job->result_bundle_digest, sizeof(bundle_digest)) &&
+                 !memcmp(full_digest, job->result_full_digest, sizeof(full_digest)) &&
+                 bq_worker_result_binding_validate(job) == BQ_OK && !queue->state.active_id);
+        BqRequest second = bq_test_real_request(96 + new_boot);
+        u64 second_id = 0, second_token = 0;
+        BQ_CHECK(bq_submit(queue, &second, &second_id) == BQ_OK && second_id != 0 &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root,
+                                &second_id, &second_token) == BQ_OK && second_id != id &&
+                 queue->state.active_id == second_id);
+        BqJob* second_job = bq_job(&queue->state, second_id);
+        BQ_CHECK(second_job && bq_failure_write(queue, second_job, BQ_WORKER_INTERRUPTED) == BQ_OK);
+        queue->needs_reconciliation = true;
+        BQ_CHECK(bq_workspace_reconcile(queue, fixture.config.workspace_root, second_id, second_token) == BQ_OK);
+        bq_test_worker_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* const arguments[])
+{
+    pid_t child = driver && driver[0] == '/' ? fork() : -1;
+    if (child == 0)
+    {
+        if (setpgid(0, 0) != 0) _exit(126);
+        execv(driver, arguments);
+        _exit(127);
+    }
+    int status = 0;
+    bool reaped = false, exited = false;
+    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 120000);
+    while (child > 0 && !reaped)
+    {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child)
+        {
+            reaped = true;
+            exited = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        }
+        else if (waited < 0 && errno != EINTR)
+        {
+            reaped = true;
+        }
+        else if (waited == 0 && bq_worker_monotonic_milliseconds() >= deadline)
+        {
+            reaped = true;
+        }
+        else
+        {
+            bq_worker_sleep_until(bq_worker_deadline(bq_worker_monotonic_milliseconds(), 20));
+        }
+        if (reaped && !exited)
+        {
+            kill(-child, SIGKILL);
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        }
+    }
+    return child > 0 && reaped && exited;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
+{
+    bool ok = driver != NULL;
+    if (!ok)
+    {
+        printf("BENCH_SERVICE_RECIPE_MATERIALIZED_BRIDGE result=unavailable\n");
+    }
+    BqMaterialFixture fixture;
+    memset(&fixture, 0, sizeof(fixture));
+    if (ok) ok = bq_material_test_begin(&fixture, 9);
+    char id_text[32] = {0}, token_text[32] = {0};
+    char workspace[BQ_PATH_CAP + 1] = {0}, result_root[BQ_PATH_CAP + 1] = {0};
+    if (ok)
+    {
+        BqRequest request = bq_test_real_request(93);
+        u64 id = 0, token = 0;
+        ok = bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK &&
+             bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
+                            string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK;
+        BqJob* job = ok ? bq_job(&fixture.queue.queue.state, id) : NULL;
+        BqWorkerConfig config = {0};
+        config.workspace_root = string_from_pointer(fixture.workspaces);
+        BqWorkerFinalization finalization = {.config = &config, .result_directory = -1};
+        ok = ok && job && bq_worker_result_open(&config, job, &finalization, true) == BQ_OK;
+        int id_length = snprintf(id_text, sizeof(id_text), "%" PRIu64, (uint64_t)id);
+        int token_length = snprintf(token_text, sizeof(token_text), "%" PRIu64, (uint64_t)token);
+        int workspace_length = snprintf(workspace, sizeof(workspace), "%.120s/job-%.20s-attempt-%.20s",
+                                        fixture.workspaces, id_text, token_text);
+        int result_length = snprintf(result_root, sizeof(result_root), "%.120s/results/job-%.20s-attempt-%.20s",
+                                     fixture.workspaces, id_text, token_text);
+        ok = ok && id_length > 0 && (u32)id_length < sizeof(id_text) && token_length > 0 &&
+             (u32)token_length < sizeof(token_text) && workspace_length > 0 &&
+             (u32)workspace_length < sizeof(workspace) && result_length > 0 &&
+             (u32)result_length < sizeof(result_root);
+        if (finalization.result_directory >= 0) close(finalization.result_directory);
+        BQ_CHECK(ok);
+    }
+    if (ok)
+    {
+        char copied_manifest[BQ_PATH_CAP + 64], base_subject[BQ_PATH_CAP + 16], candidate_subject[BQ_PATH_CAP + 16];
+        int manifest_length = snprintf(copied_manifest, sizeof(copied_manifest), "%.160s/base/source/.source-manifest",
+                                       workspace);
+        int base_length = snprintf(base_subject, sizeof(base_subject), "%.180s/base", workspace);
+        int candidate_length = snprintf(candidate_subject, sizeof(candidate_subject), "%.180s/candidate", workspace);
+        struct stat manifest_info = {0}, attempt_info = {0}, base_info = {0}, candidate_info = {0};
+        ok = manifest_length > 0 && base_length > 0 && candidate_length > 0 &&
+             stat(copied_manifest, &manifest_info) == 0 && manifest_info.st_size > 4096 &&
+             stat(workspace, &attempt_info) == 0 && (attempt_info.st_mode & 07777) == 02710 &&
+             stat(base_subject, &base_info) == 0 && (base_info.st_mode & 07777) == 02750 &&
+             stat(candidate_subject, &candidate_info) == 0 && (candidate_info.st_mode & 07777) == 02710;
+        BQ_CHECK(ok);
+    }
+    if (ok)
+    {
+        char* arguments[] = {(char*)driver, (char*)"bench_service_recipe_self_test", id_text, token_text,
+                             fixture.workspaces,
+                             (char*)"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                             (char*)"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                             result_root, NULL};
+        ok = bq_test_recipe_driver_run(driver, arguments);
+        BQ_CHECK(ok);
+    }
+    if (ok)
+    {
+        int result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int bundle = result_directory >= 0 ? openat(result_directory, "validate-buster-v1.bundle",
+                                                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        struct stat bundle_info = {0};
+        ok = bundle >= 0 && fstat(bundle, &bundle_info) == 0 && bundle_info.st_size > 0 &&
+             (u64)bundle_info.st_size <= BQ_WORKER_BUNDLE_CAP;
+        u8* body = ok ? mmap(NULL, (size_t)bundle_info.st_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : NULL;
+        ok = body != NULL && body != MAP_FAILED;
+        u64 used = 0;
+        while (ok && used < (u64)bundle_info.st_size)
+        {
+            ssize_t count = read(bundle, body + used, (size_t)((u64)bundle_info.st_size - used));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) ok = false;
+            else used += (u64)count;
+        }
+        char bundle_digest[SHA256_HEX_CAPACITY];
+        if (ok) bq_digest(body, (u32)used, bundle_digest);
+        ok = ok && bq_worker_bundle_validate_full(result_directory, bundle_digest, NULL) == BQ_OK;
+        if (body && body != MAP_FAILED) munmap(body, (size_t)bundle_info.st_size);
+        if (bundle >= 0) close(bundle);
+        if (result_directory >= 0) close(result_directory);
+        BQ_CHECK(ok);
+    }
+    if (ok)
+    {
+        char* fixed[] = {(char*)driver, (char*)"bench_service_recipe_self_test", NULL};
+        ok = bq_test_recipe_driver_run(driver, fixed);
+        BQ_CHECK(ok);
+    }
+    if (fixture.installed[0]) bq_material_test_end(&fixture);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 9))
+    {
+        BqQueue* queue = &fixture.queue.queue;
+        BqRequest request = bq_test_real_request(92);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, string_from_pointer(fixture.installed),
+                                string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        char name[64], workspace[BQ_PATH_CAP + 1], copied_manifest[BQ_PATH_CAP + 64];
+        BQ_CHECK(job && bq_workspace_name(name, id, token));
+        int workspace_length = snprintf(workspace, sizeof(workspace), "%.140s/%.48s", fixture.workspaces, name);
+        int manifest_length = snprintf(copied_manifest, sizeof(copied_manifest), "%.160s/base/source/.source-manifest",
+                                       workspace);
+        struct stat manifest_info = {0};
+        BQ_CHECK(workspace_length > 0 && (u32)workspace_length < sizeof(workspace) && manifest_length > 0 &&
+                 stat(copied_manifest, &manifest_info) == 0 && manifest_info.st_size > 4096);
+        BqWorkerConfig config = {0};
+        config.workspace_root = string_from_pointer(fixture.workspaces);
+        BqWorkerFinalization finalization = {.config = &config, .result_directory = -1};
+        BQ_CHECK(job && bq_worker_result_open(&config, job, &finalization, true) == BQ_OK);
+        if (finalization.result_directory >= 0) close(finalization.result_directory);
+        bq_material_test_end(&fixture);
+    }
+}
 #endif
 #endif
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
-    (void)argc;
 #ifdef __linux__
     char* executable = realpath(argv[0], NULL);
     u64 executable_length = executable ? (u64)strlen(executable) : UINT64_MAX;
@@ -3661,6 +4327,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
         memcpy(bq_test_executable, executable, (size_t)executable_length + 1);
     free(executable);
 #else
+    (void)argc;
     (void)argv;
 #endif
     bq_test_codec();
@@ -3696,6 +4363,11 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff();
     bq_test_worker_lease_handoff_negative(0);
     bq_test_worker_lease_handoff_negative(1);
+    bq_test_worker_lease_handoff_negative(2);
+    bq_test_worker_lease_handoff_cleanup_failure(0);
+    bq_test_worker_lease_handoff_cleanup_failure(1);
+    bq_test_worker_lease_handoff_cleanup_failure(2);
+    bq_test_worker_lease_handoff_cleanup_failure(3);
     bq_test_worker_success_and_tree_cleanup();
     bq_test_worker_term_grace();
     bq_test_worker_child_survives_parent_kill();
@@ -3718,6 +4390,11 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_transport_worker_signal_handoff();
     bq_test_worker_result_bundle_and_evidence();
     bq_test_worker_failure_bundle_replay();
+    bq_test_worker_failure_bundle_coverage();
+    bq_test_worker_preparing_recovery(0);
+    bq_test_worker_preparing_recovery(1);
+    bq_test_large_source_manifest();
+    bq_test_recipe_materialized_bridge(argc > 2 ? argv[2] : NULL);
 #endif
     char const* storage = "posix-real-journal";
 #else

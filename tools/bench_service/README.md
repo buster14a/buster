@@ -62,7 +62,10 @@ coordinator observes the same properties on the outer unit before continuing.
 For a fresh real job the server acquires the cooperative host lease before FIFO
 reservation and materialization. It transfers the descriptor over a private,
 peer-credential-checked result-root `SOCK_SEQPACKET` handoff and closes its own
-copy only after the worker acknowledges receipt. The worker then owns that
+copy only after the worker acknowledges receipt. The `.lease-handoff` socket is
+unlinked by device/inode identity and the result directory is fsynced before
+the helper is continued; a handoff cleanup failure fails the launch rather
+than signalling CONT over a stale socket. The worker then owns that
 descriptor while result or failure evidence becomes durable, while TERM/KILL
 escalation runs, until `cgroup.events` is unpopulated and workspace
 reconciliation durably releases the queue job. No later queue job can reserve
@@ -109,10 +112,17 @@ symlinks, traversal components and non-private directories, and enforces
 192-byte relative paths. The index itself is bounded to 8 MiB. The final
 manifest, bundle and failure/cancellation outcome record are separately bound
 control records, so later retrieval does not change the measured bundle. A
-failed, cancelled, or interrupted recipe publishes an empty, digest-bound
-control bundle and terminal manifest before workspace cleanup; restart replay
-therefore exposes the same artifact root and digests for every terminal
-outcome, not only successful measurements.
+failed, cancelled, or interrupted recipe publishes a digest-bound
+`BQ-BUNDLE-V1` index of every regular evidence file already present in the
+result root (prepare and stage manifests, nested payloads and other trusted
+non-control files), plus the terminal manifest, before workspace cleanup.
+Unsafe evidence such as symlinks, FIFOs, foreign-owned or other-writable
+objects fails closed instead of being silently skipped. A bundle-only crash
+prefix is completed idempotently: the byte-identical existing bundle is
+accepted and the manifest is generated against its digest. Invalid published
+controls are never repaired, rewritten or replaced. Restart replay therefore
+exposes the same artifact root and digests for every terminal outcome, not
+only successful measurements.
 
 All temporary publications use `O_EXCL`, `O_NOFOLLOW`, file fsync, a
 no-replace `linkat`, temporary unlink and parent-directory fsync. A planted
@@ -159,7 +169,12 @@ manifest record. Injected tests cover fixed argv/resource/sandbox propagation,
 ancestor verification, lease ordering, restart identity, reboot interruption,
 distinct terminal causes, retained outcome evidence, full bundle replay, a
 live `setsid` descendant that forces TERM/KILL cleanup, and a sibling stage
-that survives parent TERM/KILL until it is directly killed. They do not replace a
+that survives parent TERM/KILL until it is directly killed. On Linux the
+service self-test additionally drives a materializer-to-recipe bridge: a real
+`bq_materialize` workspace and result root feed the real
+`bench_service_recipe` build-graph entry, with only the external build and
+throughput executables replaced by temporary scripts, and the published
+bundle is validated by the worker's exhaustive validator. They do not replace a
 privileged live-systemd qualification; if systemd is unavailable, command
 construction and seams are the only validation and deployment remains explicit
 operator work. Reference deployment files are under `deploy/`; nothing in the

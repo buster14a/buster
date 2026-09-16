@@ -24,6 +24,8 @@ BUSTER_GLOBAL_LOCAL char const bq_real_recipe[] =
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define BQ_WORKSPACE_TRAVERSE_MODE 02710
+#define BQ_WORKSPACE_PRIVATE_BUILD_MODE 02700
 #define BQ_SOURCE_MANIFEST_CAP (64u * 1024u)
 #define BQ_SOURCE_FILE_CAP (64u * 1024u * 1024u)
 #define BQ_SOURCE_TOTAL_CAP (512u * 1024u * 1024u)
@@ -1136,8 +1138,8 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     }
     if (error == BQ_OK)
     {
-        created = mkdirat(workspaces, name, 02770) == 0;
-        if (created && fchmodat(workspaces, name, 02770, 0) != 0)
+        created = mkdirat(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE) == 0;
+        if (created && fchmodat(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE, 0) != 0)
         {
             created = false;
         }
@@ -1156,8 +1158,8 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     char const* subjects[] = {"base", "candidate"};
     for (u32 subject = 0; error == BQ_OK && subject < 2; subject += 1)
     {
-        mode_t subject_mode = subject == 0 ? 02750 : 02770;
-        mode_t build_mode = subject == 0 ? 02750 : 0700;
+        mode_t subject_mode = subject == 0 ? 02750 : BQ_WORKSPACE_TRAVERSE_MODE;
+        mode_t build_mode = BQ_WORKSPACE_PRIVATE_BUILD_MODE;
         bool made = mkdirat(workspace, subjects[subject], subject_mode) == 0;
         if (made && fchmodat(workspace, subjects[subject], subject_mode, 0) != 0)
         {

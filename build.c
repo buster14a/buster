@@ -22478,6 +22478,7 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments);
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments);
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena);
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments);
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
@@ -34200,6 +34201,12 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
 #endif
         executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"), name, suffix);
     }
+#if BUSTER_LINUX
+    char driver_path[4096] = {0};
+    ssize_t driver_length = service ? readlink("/proc/self/exe", driver_path, sizeof(driver_path) - 1) : -1;
+    bool driver_resolved = driver_length > 0 && (size_t)driver_length < sizeof(driver_path);
+    if (driver_resolved) driver_path[driver_length] = 0;
+#endif
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
     String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
@@ -34242,6 +34249,12 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     if (self_test)
     {
         os_argument_builder_append(&builder, service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests")));
+#if BUSTER_LINUX
+        if (service)
+        {
+            os_argument_builder_append(&builder, driver_resolved ? string_from_pointer(driver_path) : S8("/usr/bin/false"));
+        }
+#endif
     }
     else
     {
@@ -34778,11 +34791,6 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prefix(String8 path, char output[B
         if (count < 0) ok = false;
         else if (!count) break;
         else used += (u32)count;
-    }
-    if (ok)
-    {
-        char extra;
-        ok = read(original, &extra, 1) == 0;
     }
     if (resolved_fd >= 0 && close(resolved_fd) != 0) ok = false;
     if (original >= 0 && close(original) != 0) ok = false;
@@ -36906,11 +36914,49 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
     string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases, ok ? S8("pass") : S8("fail"));
     return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
+
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments)
+{
+    char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    bool ok = arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT &&
+              bench_service_recipe_test_script_setup(arena, script_root);
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (ok)
+    {
+        program.build_graph = (BuildGraph){0};
+        ProcessResult added = bench_service_recipe_add(arena, arguments);
+        result = added == PROCESS_RESULT_SUCCESS ? entry_point() : added;
+        program.build_graph = (BuildGraph){0};
+    }
+    if (ok)
+    {
+        String8 manifest = string_duplicate_arena(arena, path_join(arena, arguments.pointer[5],
+                                                                   S8("validate-buster-v1.manifest")), true);
+        String8 bundle = string_duplicate_arena(arena, path_join(arena, arguments.pointer[5],
+                                                                 S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME)), true);
+        ok = result == PROCESS_RESULT_SUCCESS &&
+             bench_service_recipe_test_contains((char const*)manifest.pointer, "status=succeeded") &&
+             access((char const*)bundle.pointer, F_OK) == 0;
+    }
+    bench_service_recipe_driver_override = (String8){0};
+    bench_service_recipe_throughput_override = (String8){0};
+    if (script_root[0]) remove_path_recursive(arena, string_from_pointer(script_root));
+    string_print(S8("BENCH_SERVICE_RECIPE_MATERIALIZED_SELF_TEST result={S8}\n"), ok ? S8("pass") : S8("fail"));
+    return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
 #else
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
 {
     BUSTER_UNUSED(arena);
     string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST result=unsupported\n"));
+    return PROCESS_RESULT_FAILED;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments)
+{
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(arguments);
+    string_print(S8("BENCH_SERVICE_RECIPE_MATERIALIZED_SELF_TEST result=unsupported\n"));
     return PROCESS_RESULT_FAILED;
 }
 #endif
@@ -37166,7 +37212,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     {
         String8 argument = arguments.pointer[argument_i];
         if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
-            command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
+            command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
+            command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
             string8_list_push(arena, &throughput_arguments, argument);
             argument_i += 1;
@@ -38102,7 +38149,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST:
         {
-            result = bench_service_recipe_self_test(arena);
+            SliceString8 recipe_self_test_arguments = string8_list_to_slice(arena, throughput_arguments);
+            result = recipe_self_test_arguments.length ?
+                     bench_service_recipe_materialized_self_test(arena, recipe_self_test_arguments) :
+                     bench_service_recipe_self_test(arena);
         }
         break;
         case BUILD_COMMAND_BENCH_THROUGHPUT:
