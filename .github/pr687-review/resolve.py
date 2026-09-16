@@ -1,20 +1,20 @@
 from pathlib import Path
 import json
+import os
 import subprocess
 import tempfile
 
 HEAD = '3be1d020ca33e9c52bc0afcf198c7ba4904c0c9c'
 MAIN = '939041b3d6b4b5c773318a5b494a28a4d9b829f1'
-EXPECTED = 'a0459b827c05cf288727c99a2563897eb79bfd36'
+EXPECTED = 'ea98242479b74fc8cff07b908797e364b36a22a9'
 def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 assert git('rev-parse', 'HEAD') == HEAD
 name = 'src/buster/tests/compiler/frontend/c/c_test.c'
 files = git('diff', '--name-only', '--diff-filter=U').splitlines()
 assert files == [name], files
-# The real history has multiple merge bases; Git's virtual base already
-# reconciles the landed binary16 predecessor. Preserve main's entire fixture
-# file and insert only the independently reviewed BF16 fixture/registration.
+# Preserve main's entire fixture file and insert only the BF16 fixture and
+# registration; the virtual merge base handles the landed predecessor.
 main = subprocess.check_output(['git', 'show', MAIN + ':' + name], text=True)
 head = subprocess.check_output(['git', 'show', HEAD + ':' + name], text=True)
 start = 'BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type'
@@ -36,5 +36,10 @@ subprocess.run(['git', 'add', '-A'], check=True)
 assert not git('ls-files', '-u')
 subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
 actual = git('write-tree')
-print(json.dumps({'head': HEAD, 'main': MAIN, 'tree': actual, 'expected_tree': EXPECTED, 'resolution': 'Preserve all main fixtures and splice BF16 fixture plus numeric expansion'}, indent=2))
+evidence = Path(os.environ['RUNNER_TEMP']) / 'pr687-evidence'
+# Preserve the complete exact candidate delta for independent review before
+# the source PR can be advanced; this workflow only writes a temporary branch.
+(evidence / 'candidate.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary', MAIN]))
+(evidence / 'candidate-objects.txt').write_text(git('diff', '--cached', '--raw', '--no-abbrev', MAIN) + '\n')
+print(json.dumps({'head': HEAD, 'main': MAIN, 'tree': actual, 'expected_tree': EXPECTED, 'resolution': 'Preserve main fixtures and insert expanded BF16 fixture; exact delta retained for independent review'}, indent=2))
 assert actual == EXPECTED, (actual, EXPECTED)
