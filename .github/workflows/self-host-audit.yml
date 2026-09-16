@@ -48,6 +48,75 @@ jobs:
       - name: Preserve ordinary bootstrap and alternate-backend gates
         id: ordinary_bootstrap
         run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
+      - name: Check out pinned event-recorder control
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 0b25c79dc5c72a4f971a0056307fa33cd2d16594
+          path: .ci-debug-reference
+          persist-credentials: false
+      - name: Build the pinned reference compiler
+        working-directory: .ci-debug-reference
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+        run: |
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+      - name: Compare frozen-input debug objects
+        env:
+          BUSTER_TEST_JOBS: '1'
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/679-object-parity"
+          mkdir -p "$evidence"
+          {
+            printf 'candidate_source=abf5bf1d3d32e7157c5fa70c3be17a254ee3802f\n'
+            printf 'reference_kind=event-recorder-before-homeless-reconciliation\n'
+            git rev-parse HEAD HEAD^{tree}
+            git -C .ci-debug-reference rev-parse HEAD HEAD^{tree}
+            clang --version
+            sha256sum "$(command -v clang)" build/Release/ide .ci-debug-reference/build/Release/ide
+            git ls-tree -r HEAD src
+          } > "$evidence/identity.txt"
+          status=0
+          for allocator in none mir-stack fast quality; do
+            for debug in g g0; do
+              pair_status=0
+              for variant in reference candidate; do
+                compiler=build/Release/ide
+                if [[ "$variant" == reference ]]; then compiler=.ci-debug-reference/build/Release/ide; fi
+                output="$evidence/$allocator-$debug-$variant.o"
+                args=(cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 "-$debug" "-fregister-allocator=$allocator" -c src/buster/apps/ide/ide.c -o "$output")
+                printf '%q ' "$compiler" "${args[@]}" >> "$evidence/commands.txt"
+                printf '\n' >> "$evidence/commands.txt"
+                if "$compiler" "${args[@]}" > "$evidence/$allocator-$debug-$variant.log" 2>&1; then
+                  sha256sum "$output" >> "$evidence/SHA256SUMS"
+                  printf 'COMPILE allocator=%s debug=%s variant=%s status=pass\n' "$allocator" "$debug" "$variant" | tee -a "$evidence/results.txt"
+                else
+                  compile_status=$?
+                  status=1
+                  pair_status=1
+                  printf 'COMPILE allocator=%s debug=%s variant=%s status=fail exit=%s\n' "$allocator" "$debug" "$variant" "$compile_status" | tee -a "$evidence/results.txt"
+                  cat "$evidence/$allocator-$debug-$variant.log"
+                fi
+              done
+              if [[ "$pair_status" == 0 && -f "$evidence/$allocator-$debug-reference.o" && -f "$evidence/$allocator-$debug-candidate.o" ]] && cmp "$evidence/$allocator-$debug-reference.o" "$evidence/$allocator-$debug-candidate.o"; then
+                printf 'PARITY allocator=%s debug=%s status=identical\n' "$allocator" "$debug" | tee -a "$evidence/results.txt"
+              else
+                status=1
+                printf 'PARITY allocator=%s debug=%s status=fail\n' "$allocator" "$debug" | tee -a "$evidence/results.txt"
+              fi
+            done
+          done
+          exit "$status"
+      - name: Retain debug object parity evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-679-object-parity-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/679-object-parity/
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 6
       - name: Verify each generation and repeat
         run: '"$RUNNER_TEMP/buster-build" test_self_host_audit --config Release'
       - name: Run compiler regressions
