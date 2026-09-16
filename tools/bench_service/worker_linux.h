@@ -10,9 +10,10 @@
 #define BQ_WORKER_UNIT_CAP 96u
 #define BQ_WORKER_BOOT_CAP 40u
 #define BQ_WORKER_CGROUP_CAP 192u
+#define BQ_WORKER_RELATION_CAP (BQ_WORKER_UNIT_CAP * 12u)
 #define BQ_WORKER_INVOCATION_CAP 40u
 #define BQ_WORKER_IDENTITY_CAP 64u
-#define BQ_WORKER_OUTPUT_CAP 4096u
+#define BQ_WORKER_OUTPUT_CAP 16384u
 #define BQ_WORKER_ARG_CAP 32u
 #define BQ_WORKER_BUNDLE_CAP (8u * 1024u * 1024u)
 #define BQ_WORKER_BUNDLE_ENTRY_CAP 4096u
@@ -48,6 +49,10 @@ typedef struct BqWorkerObserved
     char unit[BQ_WORKER_UNIT_CAP];
     char cgroup[BQ_WORKER_CGROUP_CAP];
     char invocation_id[BQ_WORKER_INVOCATION_CAP];
+    char part_of[BQ_WORKER_RELATION_CAP];
+    char binds_to[BQ_WORKER_RELATION_CAP];
+    char after[BQ_WORKER_RELATION_CAP];
+    char collect_mode[32];
     char user[BQ_WORKER_IDENTITY_CAP];
     char group[BQ_WORKER_IDENTITY_CAP];
     char allowed_cpus[64];

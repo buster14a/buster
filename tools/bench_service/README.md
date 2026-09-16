@@ -53,9 +53,9 @@ tree is never writable by the candidate identity and is replayed before success
 is acknowledged.
 
 Each fixed recipe stage helper uses a deterministic unit name linked with
-`PartOf=` to its owning worker unit, so worker cancellation also stops a
-stage service rather than leaving a candidate process outside the worker's
-lifetime. Every nested transient unit is placed in `buster-bench.slice` and
+`PartOf=`, `BindsTo=` and `After=` to its owning worker unit and uses
+`CollectMode=inactive-or-failed`. Every nested
+transient unit is placed in `buster-bench.slice` and
 repeats the admitted CPU, memory, swap, task and runtime limits; the
 coordinator observes the same properties on the outer unit before continuing.
 
@@ -70,8 +70,12 @@ while any of those steps is uncertain.
 
 Cleanup sends TERM, polls descriptor-validated recursive population every
 100 ms for the configured 10-second grace, then sends KILL and polls for at
-most another 10 seconds. It reaps the service helper only after recursive
-emptiness. A start/observation failure that cannot prove physical ownership
+most another 10 seconds. Once the outer unit can no longer launch work, the
+coordinator reacquires and retains the host lease, enumerates every deterministic
+stage name, validates any surviving stage's boot, invocation, relationship and
+cgroup identity, directly applies the same TERM/KILL escalation, and proves all
+five stage units and cgroups absent. It reaps the service helper only after
+those absence proofs. A start/observation failure that cannot prove physical ownership
 retains the active queue admission and the live helper's inherited host lock;
 it does not guess that a transient service disappeared.
 
@@ -153,8 +157,9 @@ The production systemd path is Linux-only. Windows and macOS return
 `unsupported`; those builds still compile the bounded codec and portable
 manifest record. Injected tests cover fixed argv/resource/sandbox propagation,
 ancestor verification, lease ordering, restart identity, reboot interruption,
-distinct terminal causes, retained outcome evidence, full bundle replay and a
-live `setsid` descendant that forces TERM/KILL cleanup. They do not replace a
+distinct terminal causes, retained outcome evidence, full bundle replay, a
+live `setsid` descendant that forces TERM/KILL cleanup, and a sibling stage
+that survives parent TERM/KILL until it is directly killed. They do not replace a
 privileged live-systemd qualification; if systemd is unavailable, command
 construction and seams are the only validation and deployment remains explicit
 operator work. Reference deployment files are under `deploy/`; nothing in the

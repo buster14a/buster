@@ -37,6 +37,13 @@ and the fixed system-service syscall filter are enabled. The build driver
 locks baseline/candidate build trees before throughput and retains result
 bundle plus failure/cancellation outcome evidence for retrieval.
 
+Recipe stages use deterministic sibling service names and bind their lifetime
+to the outer worker with `PartOf=`, `BindsTo=` and `After=` and are collected
+when inactive or failed. The coordinator
+does not rely on dependency propagation alone: while retaining the host lease,
+it explicitly cleans and proves absence of every stage unit and cgroup before
+another measurement may start.
+
 The candidate build handoff uses a separate `candidate/staging` directory with
 the candidate account as its only non-owner authority. The candidate transient
 service is allowed to read the group-readable materialized sources and baseline

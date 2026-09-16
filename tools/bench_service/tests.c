@@ -1998,6 +1998,7 @@ typedef struct BqWorkerFake
 {
     BqQueue* queue;
     BqWorkerObserved observed;
+    BqWorkerObserved child;
     BqWorkerResult completion;
     pid_t detached;
     pid_t launcher;
@@ -2009,6 +2010,11 @@ typedef struct BqWorkerFake
     u32 joins;
     u32 launcher_cleanups;
     u32 observes;
+    u32 child_observes;
+    u32 child_terms;
+    u32 child_kills;
+    u32 child_collect_polls;
+    u32 child_collect_after;
     u32 delays;
     u32 term_polls;
     u32 observe_failures;
@@ -2026,6 +2032,8 @@ typedef struct BqWorkerFake
     bool block_join;
     bool term_clears;
     bool kill_clears;
+    bool child_term_clears;
+    bool child_kill_clears;
     bool argv_valid;
     bool start_error;
     bool skip_inherited_lease;
@@ -2143,6 +2151,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_reap(BqWorkerFake* fake);
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_limits(char const* root, char const* unit);
+BUSTER_GLOBAL_LOCAL bool bq_test_worker_remove_cgroup(char const* root, char const* unit);
 
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_replace_slice(BqWorkerFake* fake)
 {
@@ -2159,31 +2168,48 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_observe(BqWorkerBackend* backend, cha
     BqWorkerFake* fake = backend->context;
     BqError error = BQ_OK;
     BQ_CHECK(fake->elapsed <= deadline);
-    fake->observes += 1;
-    if (fake->observe_failures)
+    bool outer = fake->observed.unit[0] && !strcmp(unit, fake->observed.unit);
+    bool child = fake->child.unit[0] && !strcmp(unit, fake->child.unit);
+    if (outer) fake->observes += 1;
+    else if (child) fake->child_observes += 1;
+    if (outer && fake->observe_failures)
     {
         if (fake->observe_failures != UINT32_MAX) fake->observe_failures -= 1;
         error = BQ_IO;
     }
     else
     {
-        if (fake->terms && !fake->kills && fake->observed.populated)
+        if (outer && fake->terms && !fake->kills && fake->observed.populated)
         {
             fake->term_polls += 1;
             if (fake->term_clear_after && fake->term_polls >= fake->term_clear_after) bq_test_worker_reap(fake);
         }
-        *observed = fake->observed;
-        if (fake->hide_unit) observed->unit_found = false;
-        if (fake->mismatch_unit) snprintf(observed->unit, sizeof(observed->unit), "%s", "foreign.scope");
-        if (fake->mismatch_resources) observed->memory_max -= 1;
-        if (fake->reuse_after_observe && fake->observes >= fake->reuse_after_observe)
+        if (child && fake->child_collect_after && fake->child_kills && fake->child.unit_found &&
+            !fake->child.active && !fake->child.populated)
+        {
+            fake->child_collect_polls += 1;
+            if (fake->child_collect_polls >= fake->child_collect_after) fake->child.unit_found = false;
+        }
+        *observed = outer ? fake->observed : child ? fake->child : (BqWorkerObserved){0};
+        if (outer && fake->hide_unit) observed->unit_found = false;
+        if (outer && fake->mismatch_unit) snprintf(observed->unit, sizeof(observed->unit), "%s", "foreign.scope");
+        if (outer && fake->mismatch_resources) observed->memory_max -= 1;
+        if (outer && fake->reuse_after_observe && fake->observes >= fake->reuse_after_observe)
             snprintf(observed->invocation_id, sizeof(observed->invocation_id), "%s",
                      "ffffffffffffffffffffffffffffffff");
-        if (fake->cancel_after_observe && fake->observes >= fake->cancel_after_observe)
+        if (outer && fake->cancel_after_observe && fake->observes >= fake->cancel_after_observe)
             BQ_CHECK(raise(SIGTERM) == 0);
     }
-    (void)unit;
     return error;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_reap_child(BqWorkerFake* fake)
+{
+    BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
+    if (fake->child.unit[0]) BQ_CHECK(bq_test_worker_remove_cgroup(fixture->root, fake->child.unit));
+    fake->child.active = false;
+    fake->child.populated = false;
+    if (!fake->child_collect_after) fake->child.unit_found = false;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_reap(BqWorkerFake* fake)
@@ -2225,8 +2251,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_signal(BqWorkerBackend* backend, char
 {
     BqWorkerFake* fake = backend->context;
     BQ_CHECK(fake->elapsed <= deadline);
-    (void)unit;
-    if (!strcmp(signal_name, "CONT"))
+    bool child = fake->child.unit[0] && !strcmp(unit, fake->child.unit);
+    if (child && !strcmp(signal_name, "TERM"))
+    {
+        fake->child_terms += 1;
+        if (fake->child_term_clears) bq_test_worker_reap_child(fake);
+    }
+    else if (child && !strcmp(signal_name, "KILL"))
+    {
+        fake->child_kills += 1;
+        if (fake->child_kill_clears) bq_test_worker_reap_child(fake);
+    }
+    else if (!strcmp(signal_name, "CONT"))
     {
         fake->continues += 1;
     }
@@ -2574,6 +2610,46 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_term_grace(void)
                  bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
         BQ_CHECK(fixture.fake.terms == 1 && fixture.fake.term_polls == 3 &&
                  fixture.fake.delays == 3 && fixture.fake.kills == 0 && fixture.fake.detached == 0);
+        bq_test_worker_end(&fixture);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, true))
+    {
+        BqRequest request = bq_test_real_request(141);
+        u64 id = 0;
+        fixture.fake.child = fixture.fake.observed;
+        snprintf(fixture.fake.child.unit, sizeof(fixture.fake.child.unit),
+                 "buster-bench-1-2-throughput.service");
+        snprintf(fixture.fake.child.cgroup, sizeof(fixture.fake.child.cgroup),
+                 "/buster-bench.slice/%s", fixture.fake.child.unit);
+        snprintf(fixture.fake.child.invocation_id, sizeof(fixture.fake.child.invocation_id),
+                 "%s", "fedcba9876543210fedcba9876543210");
+        snprintf(fixture.fake.child.part_of, sizeof(fixture.fake.child.part_of), "%s", fixture.unit);
+        snprintf(fixture.fake.child.binds_to, sizeof(fixture.fake.child.binds_to), "%s", fixture.unit);
+        snprintf(fixture.fake.child.after, sizeof(fixture.fake.child.after),
+                 "network.target %s basic.target", fixture.unit);
+        snprintf(fixture.fake.child.collect_mode, sizeof(fixture.fake.child.collect_mode),
+                 "%s", "inactive-or-failed");
+        fixture.fake.child.unit_found = true;
+        fixture.fake.child.active = true;
+        fixture.fake.child.populated = true;
+        fixture.fake.child.result = BQ_WORKER_RUNNING;
+        fixture.fake.child_kill_clears = true;
+        fixture.fake.child_collect_after = 3;
+        BQ_CHECK(bq_test_worker_limits(fixture.root, fixture.fake.child.unit));
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                 bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
+        BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_SUCCEEDED &&
+                 fixture.fake.terms == 1 && fixture.fake.kills == 1 &&
+                 fixture.fake.child_terms == 1 && fixture.fake.child_kills == 1 &&
+                 fixture.fake.child_collect_polls == 3 && fixture.fake.child_observes > 1 &&
+                 !fixture.fake.child.unit_found &&
+                 !fixture.fake.child.populated && !bq_test_worker_probe_locked(fixture.lease));
         bq_test_worker_end(&fixture);
     }
 }
@@ -3622,6 +3698,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff_negative(1);
     bq_test_worker_success_and_tree_cleanup();
     bq_test_worker_term_grace();
+    bq_test_worker_child_survives_parent_kill();
     bq_test_worker_late_cancel();
     bq_test_worker_cancel_during_finalization();
     bq_test_worker_post_publication_cancel();

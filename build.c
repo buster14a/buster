@@ -36005,7 +36005,12 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
     bool nested_relation = bench_service_recipe_argument_present(candidate_wrapped,
                                                                   S8("--unit=buster-bench-1-2-throughput.service")) &&
                            bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=PartOf=buster-bench-1-2.service"));
+                                                                  S8("--property=PartOf=buster-bench-1-2.service")) &&
+                           bench_service_recipe_argument_present(candidate_wrapped,
+                                                                  S8("--property=BindsTo=buster-bench-1-2.service")) &&
+                           bench_service_recipe_argument_present(candidate_wrapped,
+                                                                  S8("--property=After=buster-bench-1-2.service")) &&
+                           bench_service_recipe_argument_present(candidate_wrapped, S8("--collect"));
     program.build_graph = saved_graph;
     ok = ok && trusted_identity && candidate_identity && invalid_identity && nested_relation;
     return ok;
@@ -36046,6 +36051,9 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* 
                                                 stage->manifest->job_id, stage->manifest->attempt_token);
             string8_list_push(arena, &wrapped, string_format(arena, S8("--unit={S8}"), child_unit));
             string8_list_push(arena, &wrapped, string_format(arena, S8("--property=PartOf={S8}"), parent_unit));
+            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=BindsTo={S8}"), parent_unit));
+            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=After={S8}"), parent_unit));
+            string8_list_push(arena, &wrapped, S8("--collect"));
         }
         identity_ok = bench_service_recipe_identity_append(arena, &wrapped, identity);
         string8_list_push(arena, &wrapped, S8("--property=KillMode=control-group"));
