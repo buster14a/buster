@@ -14,7 +14,7 @@ jobs:
       ORIGINAL: e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b
       VERIFIED_MAIN: b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
       UPDATED_MAIN: 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
-      EXPECTED_TREE: 0c8e4915d4b1a7013ad5a2ad87dbcfa3886df517
+      EXPECTED_TREE: 319a5c96636deb444b0b53d62f6219c23caa982d
       DESTINATION: refs/heads/codex/569-canonical-landing-20260914
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -55,11 +55,19 @@ jobs:
           cd "$RUNNER_TEMP/pr645-candidate"
           python3 "$GITHUB_WORKSPACE/pr645_rebase_replay.py" > "$RUNNER_TEMP/pr645-validation/rebase.log" 2>&1
           python3 "$GITHUB_WORKSPACE/pr645_post_rebase.py" > "$RUNNER_TEMP/pr645-validation/rebind.jsonl"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/native_retirement_evidence_upload_test.py')
+          s = p.read_text()
+          old = '    "candidate/evidence/",\n'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, old + '    "candidate/evidence-candidate.txt",\n'))
+          PY
           git add -u
           test "$(git write-tree)" = "$EXPECTED_TREE"
           git diff --cached --check
           git commit -m 'ci: reconcile retirement evidence after PR645 rebase' \
-            -m 'Preserve current-main inputs and regressions, remove duplicate replayed test methods, and bind the integrated dependency and applicability bytes. Retain all acceptance classifications and the historical gap ledger.'
+            -m 'Preserve current-main inputs and regressions, remove duplicate replayed test methods, and bind the integrated dependency and applicability bytes. Retain all acceptance classifications and the historical gap ledger. Reconcile the exact upload allowlist with the candidate identity file.'
           git diff --unified=0 "$VERIFIED_MAIN" HEAD | git patch-id --stable | cut -d ' ' -f 1 > "$RUNNER_TEMP/pr645-validation/pr.patch-id"
           git fetch origin "$UPDATED_MAIN"
           git diff --name-only "$VERIFIED_MAIN" "$UPDATED_MAIN" > "$RUNNER_TEMP/pr645-validation/main-advance-files.txt"
@@ -84,6 +92,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/pr645-candidate"
           out="$RUNNER_TEMP/pr645-validation"
+          trap 's=$?; if [ "$s" -ne 0 ]; then tail -n 35 "$out"/*tests.log; fi' EXIT
           python3 tools/native_retirement_external.py prepare --manifest docs/native-retirement-dependencies-v1.json --source-root "$PWD" > "$out/integrated-external.json"
           python3 tools/native_retirement_contract_test.py -v > "$out/contract-tests.log" 2>&1
           python3 tools/native_retirement_materializer_test.py -v > "$out/materializer-tests.log" 2>&1
