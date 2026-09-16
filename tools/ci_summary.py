@@ -4,6 +4,8 @@
 Inputs are explicit step outcomes, required step IDs, runner metadata, and the
 driver-owned coverage manifest (BUSTER_CI_COVERAGE_MANIFEST or
 BUSTER_CI_COVERAGE_OUTPUT, required when BUSTER_CI_COVERAGE_REQUIRED=1).
+Android lanes also expose bounded wrapper diagnostics from android.log; these
+records explain, but never replace, the authoritative step outcome.
 """
 import html
 import hashlib
@@ -36,6 +38,124 @@ def assess(steps, required):
     missing = [name for name in required if steps.get(name, {}).get("outcome") != "success"]
     failed = [name for name, step in steps.items() if step.get("outcome") in ("failure", "cancelled")]
     return sorted(set(missing + failed))
+
+# Read only the wrapper's anchored records, never terminal-marker substrings,
+# emulator diagnostics, or workflow command echoes. This is an explanation of
+# the existing step outcome, not a second test oracle or a replacement gate.
+_ANDROID_LOG_MAX_BYTES = 64 * 1024 * 1024
+_ANDROID_LOG_LINE_BYTES = 4096
+_ANDROID_STATUS = r"(?:0|[1-9][0-9]{0,2})"
+_ANDROID_CONFIG = r"(?P<config>Debug|Release)"
+_ANDROID_DEADLINE = r"[1-9][0-9]{0,8}"
+_ANDROID_SECONDS = r"(?:0|[1-9][0-9]{0,8})"
+# Producer statuses GNU timeout reports for an exhausted payload deadline.
+_ANDROID_DEADLINE_STATUSES = ("124", "137")
+_ANDROID_RECORDS = {
+    "ANDROID_CONFIG_RESULT": ("config", re.compile(
+        rf"ANDROID_CONFIG_RESULT config={_ANDROID_CONFIG} status=(?P<status>{_ANDROID_STATUS}|not-run)")),
+    "ANDROID_PAYLOAD_RESULT": ("payload", re.compile(
+        rf"ANDROID_PAYLOAD_RESULT config={_ANDROID_CONFIG} phase=(?P<phase>wait-device|install|launch|monitor) status=(?P<status>{_ANDROID_STATUS})")),
+    "ANDROID_MONITOR_RESULT": ("monitor", re.compile(
+        rf"ANDROID_MONITOR_RESULT config={_ANDROID_CONFIG} reader_status=(?P<reader_status>{_ANDROID_STATUS}) producer_status=(?P<producer_status>{_ANDROID_STATUS}) timeout_seconds=(?P<timeout_seconds>{_ANDROID_DEADLINE}) elapsed_seconds=(?P<elapsed_seconds>{_ANDROID_SECONDS}) headroom_seconds=(?P<headroom_seconds>{_ANDROID_SECONDS}) headroom_warning=(?P<headroom_warning>yes|no)")),
+    "ANDROID_BATCH_RESULT": ("batch", re.compile(
+        rf"ANDROID_BATCH_RESULT phase=(?P<phase>configure|build|boot-wait|tests) config=(?P<config>none|Debug|Release) status=(?P<status>{_ANDROID_STATUS}) cleanup_status=(?P<cleanup_status>{_ANDROID_STATUS}|not-run)")),
+    "ANDROID_CI_RESULT": ("ci", re.compile(
+        rf"ANDROID_CI_RESULT phase=(?P<phase>start|tests) payload_status=(?P<payload_status>{_ANDROID_STATUS}) cleanup_status=(?P<cleanup_status>{_ANDROID_STATUS}|not-run) status=(?P<status>{_ANDROID_STATUS})")),
+}
+
+
+def _android_diagnostics(path):
+    result = {"configurations": {"Debug": {}, "Release": {}}, "batch": None, "ci": None, "warnings": []}
+    warnings = set()
+    seen = set()
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError("not a regular Android log")
+        with path.open("rb") as stream:
+            remaining = _ANDROID_LOG_MAX_BYTES
+            line_start = True
+            while remaining:
+                chunk = stream.readline(min(_ANDROID_LOG_LINE_BYTES, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                complete = chunk.endswith(b"\n")
+                if line_start and complete:
+                    line = chunk.rstrip(b"\r\n").decode("ascii", errors="replace")
+                    name = line.partition(" ")[0]
+                    if name in _ANDROID_RECORDS:
+                        kind, expression = _ANDROID_RECORDS[name]
+                        match = expression.fullmatch(line)
+                        record = match.groupdict() if match else None
+                        if record is None or any(int(value) > 255 for key, value in record.items()
+                                                 if key.endswith("status") and value != "not-run"):
+                            warnings.add(f"Malformed {name} record ignored.")
+                        else:
+                            config = record.get("config") if kind in ("config", "payload", "monitor") else None
+                            target = result["configurations"][config] if config else result
+                            identity = (kind, config)
+                            if identity in seen:
+                                target[kind] = None
+                                warnings.add(f"Duplicate {name} ({config or 'batch-wide'}) is ambiguous.")
+                            else:
+                                target[kind] = record
+                                seen.add(identity)
+                line_start = complete
+            if not line_start:
+                warnings.add("An overlong or unterminated Android log line was ignored.")
+            if remaining == 0 and stream.read(1):
+                warnings.add("Android diagnostic scan truncated at its byte limit; some records may be missing.")
+    except OSError:
+        warnings.add("Android log unavailable; no configuration or cleanup outcome can be inferred.")
+    result["warnings"] = sorted(warnings)
+    return result
+
+
+def _android_summary(diagnostics):
+    lines = ["", "### Android configuration and cleanup diagnostics", "",
+             "Reported exit statuses from android.log; the workflow step outcome above remains authoritative.",
+             "A later Release success does not clear an earlier Debug failure. Missing or ambiguous records are not proof of success.", "",
+             "| Configuration | Batch config status | Payload phase | Payload status | Monitor reader / producer | Deadline (s) | Payload elapsed (s) | Headroom (s) |",
+             "|---|---|---|---|---|---|---|---|"]
+    deadlines = []
+    for config, records in diagnostics["configurations"].items():
+        config_result = records.get("config") or {}
+        payload = records.get("payload") or {}
+        monitor = records.get("monitor") or {}
+        lines.append(f"| {config} | {config_result.get('status', 'missing')} | {payload.get('phase', 'missing')} | "
+                     f"{payload.get('status', 'missing')} | {monitor.get('reader_status', 'missing')} / "
+                     f"{monitor.get('producer_status', 'missing')} | {monitor.get('timeout_seconds', 'missing')} | "
+                     f"{monitor.get('elapsed_seconds', 'missing')} | {monitor.get('headroom_seconds', 'missing')} |")
+        if monitor.get("reader_status") == "0" and monitor.get("producer_status") in _ANDROID_DEADLINE_STATUSES:
+            deadlines.append(f"{config} exhausted its {monitor['timeout_seconds']}s payload deadline without a terminal "
+                             f"result (monitor producer status {monitor['producer_status']}). This is a payload timeout; "
+                             "emulator cleanup runs afterwards and is not this failure.")
+        elif monitor.get("headroom_warning") == "yes":
+            deadlines.append(f"{config} passed {monitor['headroom_seconds']}s inside its {monitor['timeout_seconds']}s "
+                             f"payload deadline ({monitor['elapsed_seconds']}s elapsed). The wrapper flagged this margin "
+                             "as thin: a slower runner or added tests can cross it.")
+    if deadlines:
+        lines += [""] + [f"Payload deadline: {note}" for note in deadlines]
+    batch = diagnostics["batch"]
+    ci = diagnostics["ci"]
+    if batch:
+        lines += ["", f"Batch result: phase={batch['phase']}, first failed configuration={batch['config']}, "
+                  f"status={batch['status']}, cleanup_status={batch['cleanup_status']}."]
+    else:
+        lines += ["", "Batch result: missing or ambiguous."]
+    if ci:
+        lines += ["", f"Final CI result: phase={ci['phase']}, payload_status={ci['payload_status']}, "
+                  f"cleanup_status={ci['cleanup_status']}, status={ci['status']}."]
+        if ci["payload_status"] != "0":
+            lines += ["", "Android CI failed before final emulator cleanup; cleanup output is not the original payload failure."]
+        elif ci["status"] != "0" and ci["cleanup_status"] not in ("0", "not-run"):
+            lines += ["", "Android CI required emulator cleanup failed after a successful payload."]
+    else:
+        lines += ["", "Final CI result: missing or ambiguous."]
+    if diagnostics["warnings"]:
+        lines += ["", "Diagnostic limitations: " + " ".join(diagnostics["warnings"])]
+    return lines
+
 
 def _coverage_row_id(identity, row):
     def state(name):
@@ -626,6 +746,8 @@ def write_report(environment, *, expected_coverage_mode="ci"):
               "unsatisfied_steps": failures, "success": not failures}
     output = Path(environment["RUNNER_TEMP"]) / "buster-ci"
     output.mkdir(parents=True, exist_ok=True)
+    if "android" in required:
+        report["android"] = _android_diagnostics(output / "android.log")
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     lines = ["## Buster CI", "", "**Result: " + ("FAILURE" if failures else "SUCCESS") + "**", ""]
     for key, value in metadata.items():
@@ -634,6 +756,8 @@ def write_report(environment, *, expected_coverage_mode="ci"):
     for name, step in steps.items():
         lines.append(f"| {html.escape(name).replace('|', '&#124;')} | "
                      f"{html.escape(step.get('outcome', 'missing'))} |")
+    if "android" in report:
+        lines += _android_summary(report["android"])
     if coverage_required:
         lines += _coverage_summary(coverage, coverage_errors)
     if failures:

@@ -11414,141 +11414,140 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
     {
         opening += 1;
     }
-    if (opening >= spelling.length || spelling.length < opening + 2 || spelling.pointer[spelling.length - 1] != delimiter)
+    bool result = opening < spelling.length && spelling.length - opening >= 2 &&
+                  spelling.pointer[spelling.length - 1] == delimiter && spelling.length <= UINT64_MAX / 4;
+    if (result)
     {
-        return false;
-    }
-    u64 capacity = 0;
-    if (spelling.length > UINT64_MAX / 4)
-    {
-        return false;
-    }
-    capacity = spelling.length * 4;
-    u8* bytes = arena_allocate(arena, u8, capacity ? capacity : 1);
-    u64 byte_count = 0;
-    u64 element_count = 0;
-    u64 index = opening + 1;
-    u64 end = spelling.length - 1;
-    while (index < end)
-    {
-        u32 codepoint = 0;
-        u8 byte = spelling.pointer[index];
-        if (byte != '\\')
+        u64 capacity = spelling.length * 4;
+        u8* bytes = arena_allocate(arena, u8, capacity);
+        u64 byte_count = 0;
+        u64 element_count = 0;
+        u64 index = opening + 1;
+        u64 end = spelling.length - 1;
+        while (result && index < end)
         {
-            if (!c_ir_decode_utf8_codepoint((u8 const*)spelling.pointer, end, &index, &codepoint))
+            u32 codepoint = 0;
+            u8 byte = spelling.pointer[index];
+            if (byte != '\\')
             {
-                return false;
+                result = c_ir_decode_utf8_codepoint((u8 const*)spelling.pointer, end, &index, &codepoint);
             }
-        }
-        else
-        {
-            index += 1;
-            if (index >= end)
+            else
             {
-                return false;
-            }
-            byte = spelling.pointer[index++];
-            switch (byte)
-            {
-            case '\'':
-            case '"':
-            case '?':
-            case '\\':
-                codepoint = byte;
-                break;
-            case 'a':
-                codepoint = 7;
-                break;
-            case 'b':
-                codepoint = 8;
-                break;
-            case 'e':
-                codepoint = 27;
-                break;
-            case 'f':
-                codepoint = 12;
-                break;
-            case 'n':
-                codepoint = 10;
-                break;
-            case 'r':
-                codepoint = 13;
-                break;
-            case 't':
-                codepoint = 9;
-                break;
-            case 'v':
-                codepoint = 11;
-                break;
-            case 'u':
-            case 'U':
-            {
-                u32 digit_count = byte == 'u' ? 4 : 8;
-                if ((u64)digit_count > end - index)
+                index += 1;
+                result = index < end;
+                if (result)
                 {
-                    return false;
-                }
-                for (u32 digit_index = 0; digit_index < digit_count; digit_index += 1)
-                {
-                    u32 digit = c_ir_hex_digit(spelling.pointer[index + digit_index]);
-                    if (digit >= 16)
+                    byte = spelling.pointer[index++];
+                    switch (byte)
                     {
-                        return false;
-                    }
-                    codepoint = codepoint * 16 + digit;
-                }
-                index += digit_count;
-            }
-            break;
-            case 'x':
-            {
-                u32 digits = 0;
-                while (index < end)
-                {
-                    u32 digit = c_ir_hex_digit(spelling.pointer[index]);
-                    if (digit >= 16 || codepoint > UINT32_MAX / 16)
-                    {
+                    case '\'':
+                    case '"':
+                    case '?':
+                    case '\\':
+                        codepoint = byte;
                         break;
+                    case 'a':
+                        codepoint = 7;
+                        break;
+                    case 'b':
+                        codepoint = 8;
+                        break;
+                    case 'e':
+                        codepoint = 27;
+                        break;
+                    case 'f':
+                        codepoint = 12;
+                        break;
+                    case 'n':
+                        codepoint = 10;
+                        break;
+                    case 'r':
+                        codepoint = 13;
+                        break;
+                    case 't':
+                        codepoint = 9;
+                        break;
+                    case 'v':
+                        codepoint = 11;
+                        break;
+                    case 'u':
+                    case 'U':
+                    {
+                        u32 digit_count = byte == 'u' ? 4 : 8;
+                        result = (u64)digit_count <= end - index;
+                        for (u32 digit_index = 0; result && digit_index < digit_count; digit_index += 1)
+                        {
+                            u32 digit = c_ir_hex_digit(spelling.pointer[index + digit_index]);
+                            result = digit < 16;
+                            if (result)
+                            {
+                                codepoint = codepoint * 16 + digit;
+                            }
+                        }
+                        if (result)
+                        {
+                            index += digit_count;
+                        }
                     }
-                    codepoint = codepoint * 16 + digit;
-                    index += 1;
-                    digits += 1;
-                }
-                if (!digits)
-                {
-                    return false;
+                    break;
+                    case 'x':
+                    {
+                        u64 first_digit = index;
+                        while (index < end)
+                        {
+                            u32 digit = c_ir_hex_digit(spelling.pointer[index]);
+                            if (digit >= 16)
+                            {
+                                break;
+                            }
+                            // Only a non-hex character terminates an escape normally.
+                            // Reject accumulator overflow before append/Unicode validation.
+                            if (codepoint > UINT32_MAX / 16)
+                            {
+                                result = false;
+                                break;
+                            }
+                            codepoint = codepoint * 16 + digit;
+                            index += 1;
+                        }
+                        result = result && index != first_digit;
+                    }
+                    break;
+                    default:
+                    {
+                        result = byte >= '0' && byte <= '7';
+                        if (result)
+                        {
+                            codepoint = byte - '0';
+                            u32 digits = 1;
+                            while (digits < 3 && index < end && spelling.pointer[index] >= '0' && spelling.pointer[index] <= '7')
+                            {
+                                codepoint = codepoint * 8 + (spelling.pointer[index] - '0');
+                                index += 1;
+                                digits += 1;
+                            }
+                        }
+                    }
+                    break;
+                    }
                 }
             }
-            break;
-            default:
+            if (result)
             {
-                if (byte < '0' || byte > '7')
-                {
-                    return false;
-                }
-                codepoint = byte - '0';
-                u32 digits = 1;
-                while (digits < 3 && index < end && spelling.pointer[index] >= '0' && spelling.pointer[index] <= '7')
-                {
-                    codepoint = codepoint * 8 + (spelling.pointer[index] - '0');
-                    index += 1;
-                    digits += 1;
-                }
-            }
-            break;
+                result = c_ir_append_wide_unit(bytes, capacity, &byte_count, &element_count, width, codepoint);
             }
         }
-        if (!c_ir_append_wide_unit(bytes, capacity, &byte_count, &element_count, width, codepoint))
+        if (result)
         {
-            return false;
+            *bytes_out = (ByteSlice){
+                .pointer = bytes,
+                .length = byte_count,
+            };
+            *element_count_out = element_count;
         }
     }
-    *bytes_out = (ByteSlice){
-        .pointer = bytes,
-        .length = byte_count,
-    };
-    *element_count_out = element_count;
-    return true;
+    return result;
 }
 
 // What a string-literal token range shares across its fragments: the
