@@ -7,5 +7,5 @@ MemoryMax=8G
 MemorySwapMax=0
 TasksMax=256
 
-# Per-job scopes repeat these values and add RuntimeMaxSec. The worker verifies
+# Per-job services repeat these values and add RuntimeMaxSec. The worker verifies
 # the leaf and every ancestor before allowing its fixed helper to run.

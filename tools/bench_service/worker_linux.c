@@ -1,18 +1,27 @@
 #include "worker_linux.h"
 
 #ifdef __linux__
+#include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
 
 #define BQ_WORKER_EXECUTABLE "/usr/local/libexec/buster-bench-service"
+#define BQ_RECIPE_EXECUTABLE "/usr/local/libexec/buster-bench-build"
 #define BQ_SYSTEMD_RUN "/usr/bin/systemd-run"
 #define BQ_SYSTEMCTL "/usr/bin/systemctl"
 #define BQ_WORKER_COMMAND_MILLISECONDS 5000u
 #define BQ_WORKER_STOP_MILLISECONDS 10000u
 #define BQ_WORKER_POLL_MILLISECONDS 100u
+#define BQ_WORKER_LEASE_HANDOFF_NAME ".lease-handoff"
+#define BQ_WORKER_LEASE_HANDOFF_MILLISECONDS 5000u
+#define BQ_WORKER_LEASE_MAGIC "BQ-LEASE-HANDOFF-V1"
 
 typedef struct BqSystemdContext
 {
@@ -21,6 +30,11 @@ typedef struct BqSystemdContext
 } BqSystemdContext;
 
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_cancel_signal;
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_shutdown_signal;
+/* Set by the transport handler while ownership is being handed to this
+ * worker.  Once bq_worker_run installs its own handlers, SIGTERM/SIGINT are
+ * observed directly there; this flag closes the small pre-install window. */
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_transport_stop_signal;
 
 BUSTER_GLOBAL_LOCAL u64 bq_worker_monotonic_milliseconds(void)
 {
@@ -62,11 +76,44 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_sleep_until(u64 deadline)
 
 BUSTER_GLOBAL_LOCAL void bq_worker_cancel_handler(int signal_number)
 {
-    (void)signal_number;
+    if (signal_number == SIGTERM || signal_number == SIGINT)
+    {
+        bq_worker_shutdown_signal = 1;
+    }
     bq_worker_cancel_signal = 1;
 }
 
 typedef struct BqWorkerLease { int descriptor; } BqWorkerLease;
+typedef struct BqWorkerLeaseHandoff BqWorkerLeaseHandoff;
+typedef struct BqWorkerLeaseMessage BqWorkerLeaseMessage;
+typedef struct BqWorkerFinalization BqWorkerFinalization;
+
+struct BqWorkerLeaseHandoff
+{
+    int listener;
+    int parent;
+    dev_t device;
+    ino_t inode;
+    char path[BQ_PATH_CAP + 1];
+};
+
+struct BqWorkerLeaseMessage
+{
+    char magic[32];
+    char lease_path[BQ_PATH_CAP + 1];
+    u64 job_id;
+    u64 attempt_token;
+    u64 device;
+    u64 inode;
+    u32 phase;
+};
+
+enum
+{
+    BQ_WORKER_LEASE_REQUEST = 1,
+    BQ_WORKER_LEASE_RESPONSE,
+    BQ_WORKER_LEASE_ACK,
+};
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_directory_owner(int fd, bool final_private, bool allow_sticky)
 {
@@ -77,6 +124,38 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_directory_owner(int fd, bool final_private, b
         ok = info.st_uid == geteuid() && (info.st_mode & 077) == 0;
     else if (ok && (info.st_mode & 022) != 0)
         ok = allow_sticky && info.st_uid == 0 && (info.st_mode & S_ISVTX) != 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_temp_name(char const* prefix, char* output, u32 capacity)
+{
+    char const digits[] = "0123456789abcdef";
+    u8 entropy[16] = {0};
+    int source = open("/dev/urandom", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    u32 used = 0;
+    bool ok = source >= 0;
+    while (ok && used < sizeof(entropy))
+    {
+        ssize_t count = read(source, entropy + used, sizeof(entropy) - used);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok) used += (u32)count;
+    }
+    if (source >= 0 && close(source) != 0) ok = false;
+    u32 prefix_length = prefix ? (u32)strlen(prefix) : 0;
+    u32 required = prefix_length + 1 + (u32)sizeof(entropy) * 2 + 4;
+    ok = ok && output && capacity > required;
+    if (ok)
+    {
+        memcpy(output, prefix, prefix_length);
+        output[prefix_length] = '.';
+        for (u32 index = 0; index < sizeof(entropy); index += 1)
+        {
+            output[prefix_length + 1 + index * 2] = digits[entropy[index] >> 4];
+            output[prefix_length + 2 + index * 2] = digits[entropy[index] & 15];
+        }
+        memcpy(output + prefix_length + 1 + sizeof(entropy) * 2, ".tmp", 5);
+    }
     return ok;
 }
 
@@ -136,7 +215,7 @@ BUSTER_GLOBAL_LOCAL int bq_worker_open_lease_parent(char const* path, char leaf[
             snprintf(leaf, BQ_PATH_CAP + 1, "%s", slash + 1);
             u64 length = (u64)(slash - validated);
             String8 directory = {(char8*)validated, length ? length : 1};
-            parent = bq_worker_open_trusted_directory(directory, true, false);
+            parent = bq_worker_open_trusted_directory(directory, false, false);
         }
     }
     return parent;
@@ -204,6 +283,23 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt(char const* path, int fd, BqWorker
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL int bq_worker_lease_adopt_transferred(int fd, u64 device, u64 inode,
+                                                           BqWorkerLease* lease)
+{
+    lease->descriptor = -1;
+    int flags = fd >= 3 ? fcntl(fd, F_GETFD) : -1;
+    struct stat info = {0};
+    int error = fd < 3 ? EINVAL : flags < 0 ? errno : fstat(fd, &info) != 0 ? errno : 0;
+    if (!error && (!S_ISREG(info.st_mode) || info.st_nlink != 1 || info.st_uid != geteuid() ||
+                   (info.st_mode & 077) != 0 || (u64)info.st_dev != device || (u64)info.st_ino != inode))
+        error = EACCES;
+    if (!error && flock(fd, LOCK_EX | LOCK_NB) != 0) error = errno;
+    if (!error && fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) error = errno;
+    if (!error) lease->descriptor = fd;
+    else if (fd >= 0) close(fd);
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_worker_lease_release(BqWorkerLease* lease)
 {
     if (lease->descriptor >= 0) close(lease->descriptor);
@@ -219,6 +315,350 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_text(String8 input, char* output, u32 capacit
         output[input.length] = 0;
     }
     return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_socket_path(char const* result_root,
+                                                       char output[BQ_PATH_CAP + 1])
+{
+    int length = result_root ? snprintf(output, BQ_PATH_CAP + 1, "%s/%s", result_root,
+                                        BQ_WORKER_LEASE_HANDOFF_NAME) : -1;
+    bool ok = length > 0 && (u32)length < BQ_PATH_CAP + 1 && output[0] == '/' &&
+             (u32)length < sizeof(((struct sockaddr_un*)0)->sun_path);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_message_make(BqWorkerLeaseMessage* message, u32 phase,
+                                                        char const* lease_path, u64 job_id,
+                                                        u64 attempt_token, u64 device, u64 inode)
+{
+    *message = (BqWorkerLeaseMessage){0};
+    int length = lease_path ? snprintf(message->lease_path, sizeof(message->lease_path), "%s", lease_path) : -1;
+    bool ok = length > 0 && (u32)length < sizeof(message->lease_path);
+    if (ok)
+    {
+        memcpy(message->magic, BQ_WORKER_LEASE_MAGIC, sizeof(BQ_WORKER_LEASE_MAGIC));
+        message->job_id = job_id;
+        message->attempt_token = attempt_token;
+        message->device = device;
+        message->inode = inode;
+        message->phase = phase;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_message_matches(BqWorkerLeaseMessage const* message, u32 phase,
+                                                           char const* lease_path, u64 job_id,
+                                                           u64 attempt_token, u64 device, u64 inode)
+{
+    bool ok = message && !memcmp(message->magic, BQ_WORKER_LEASE_MAGIC, sizeof(BQ_WORKER_LEASE_MAGIC)) &&
+              message->phase == phase && message->job_id == job_id && message->attempt_token == attempt_token &&
+              message->device == device && message->inode == inode && lease_path &&
+              !strcmp(message->lease_path, lease_path);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_worker_lease_handoff_close(BqWorkerLeaseHandoff* handoff)
+{
+    if (handoff->listener >= 0) close(handoff->listener);
+    if (handoff->parent >= 0)
+    {
+        struct stat info = {0};
+        bool owned = handoff->path[0] && fstatat(handoff->parent, BQ_WORKER_LEASE_HANDOFF_NAME, &info,
+                                                 AT_SYMLINK_NOFOLLOW) == 0 && S_ISSOCK(info.st_mode) &&
+                     info.st_dev == handoff->device && info.st_ino == handoff->inode;
+        if (owned && unlinkat(handoff->parent, BQ_WORKER_LEASE_HANDOFF_NAME, 0) == 0) fsync(handoff->parent);
+        close(handoff->parent);
+    }
+    *handoff = (BqWorkerLeaseHandoff){.listener = -1, .parent = -1};
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_handoff_open(char const* result_root, int result_directory,
+                                                        BqWorkerLeaseHandoff* handoff)
+{
+    *handoff = (BqWorkerLeaseHandoff){.listener = -1, .parent = -1};
+    char path[BQ_PATH_CAP + 1];
+    bool ok = result_root && bq_worker_lease_socket_path(result_root, path) && result_directory >= 0;
+    if (ok)
+    {
+        ok = bq_worker_directory_owner(result_directory, true, false) &&
+             (handoff->parent = fcntl(result_directory, F_DUPFD_CLOEXEC, 3)) >= 0;
+    }
+    struct stat existing = {0};
+    if (ok)
+    {
+        errno = 0;
+        bool present = fstatat(handoff->parent, BQ_WORKER_LEASE_HANDOFF_NAME, &existing, AT_SYMLINK_NOFOLLOW) == 0;
+        ok = !present && errno == ENOENT;
+    }
+    if (ok)
+    {
+        handoff->listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        ok = handoff->listener >= 0;
+    }
+    struct sockaddr_un address = {0};
+    if (ok)
+    {
+        size_t length = strlen(path);
+        address.sun_family = AF_UNIX;
+        memcpy(address.sun_path, path, length + 1);
+        socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
+        mode_t prior_umask = umask(0077);
+        int bound = bind(handoff->listener, (struct sockaddr*)&address, address_size);
+        int saved_errno = errno;
+        umask(prior_umask);
+        errno = saved_errno;
+        ok = bound == 0;
+    }
+    if (ok)
+    {
+        struct stat socket_info = {0};
+        ok = fstatat(handoff->parent, BQ_WORKER_LEASE_HANDOFF_NAME, &socket_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+             S_ISSOCK(socket_info.st_mode) && socket_info.st_uid == geteuid() && (socket_info.st_mode & 077) == 0;
+        if (ok)
+        {
+            handoff->device = socket_info.st_dev;
+            handoff->inode = socket_info.st_ino;
+            memcpy(handoff->path, path, strlen(path) + 1);
+        }
+    }
+    if (ok) ok = listen(handoff->listener, 1) == 0;
+    if (!ok) bq_worker_lease_handoff_close(handoff);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_peer_matches(int descriptor)
+{
+    struct ucred peer = {0};
+    socklen_t size = sizeof(peer);
+    bool ok = getsockopt(descriptor, SOL_SOCKET, SO_PEERCRED, &peer, &size) == 0 && size == sizeof(peer) &&
+              peer.uid == geteuid() && peer.gid == getegid();
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_handoff_poll(int descriptor, short events, u64 deadline)
+{
+    struct pollfd waiting = {descriptor, events, 0};
+    u32 remaining = bq_worker_remaining(deadline);
+    int result = remaining ? poll(&waiting, 1, remaining) : 0;
+    bool ok = result > 0 && (waiting.revents & (events | POLLERR | POLLHUP)) != 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* handoff, int lease_fd,
+                                                          char const* lease_path, u64 job_id,
+                                                          u64 attempt_token)
+{
+    BqError error = BQ_IO;
+    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
+    bool transferred = false;
+    while (!transferred && bq_worker_monotonic_milliseconds() < deadline)
+    {
+        int client = -1;
+        if (bq_worker_lease_handoff_poll(handoff->listener, POLLIN, deadline))
+            client = accept4(handoff->listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+        if (client < 0)
+        {
+            if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) break;
+        }
+        else if (!bq_worker_lease_peer_matches(client))
+        {
+            close(client);
+        }
+        else if (!bq_worker_lease_handoff_poll(client, POLLIN, deadline))
+        {
+            close(client);
+        }
+        else
+        {
+            BqWorkerLeaseMessage request = {0};
+            ssize_t received = recv(client, &request, sizeof(request), MSG_DONTWAIT);
+            struct stat lease_info = {0};
+            bool request_ok = received == (ssize_t)sizeof(request) &&
+                              bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST, lease_path,
+                                                               job_id, attempt_token, 0, 0) &&
+                              fstat(lease_fd, &lease_info) == 0 && S_ISREG(lease_info.st_mode) &&
+                              lease_info.st_nlink == 1 && lease_info.st_uid == geteuid() &&
+                              (lease_info.st_mode & 077) == 0;
+            if (request_ok)
+            {
+                BqWorkerLeaseMessage response;
+                request_ok = bq_worker_lease_message_make(&response, BQ_WORKER_LEASE_RESPONSE, lease_path, job_id,
+                                                           attempt_token, (u64)lease_info.st_dev, (u64)lease_info.st_ino);
+                char control[CMSG_SPACE(sizeof(lease_fd))] = {0};
+                struct iovec vector = {&response, sizeof(response)};
+                struct msghdr message = {0};
+                message.msg_iov = &vector;
+                message.msg_iovlen = 1;
+                message.msg_control = control;
+                message.msg_controllen = sizeof(control);
+                if (request_ok)
+                {
+                    struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+                    header->cmsg_level = SOL_SOCKET;
+                    header->cmsg_type = SCM_RIGHTS;
+                    header->cmsg_len = CMSG_LEN(sizeof(lease_fd));
+                    memcpy(CMSG_DATA(header), &lease_fd, sizeof(lease_fd));
+                    ssize_t sent = sendmsg(client, &message, MSG_NOSIGNAL);
+                    request_ok = sent == (ssize_t)sizeof(response);
+                }
+            }
+            if (request_ok && bq_worker_lease_handoff_poll(client, POLLIN, deadline))
+            {
+                BqWorkerLeaseMessage acknowledgement = {0};
+                ssize_t received = recv(client, &acknowledgement, sizeof(acknowledgement), MSG_DONTWAIT);
+                request_ok = received == (ssize_t)sizeof(acknowledgement) &&
+                             bq_worker_lease_message_matches(&acknowledgement, BQ_WORKER_LEASE_ACK, lease_path,
+                                                              job_id, attempt_token, (u64)lease_info.st_dev,
+                                                              (u64)lease_info.st_ino);
+            }
+            transferred = request_ok;
+            close(client);
+            if (!transferred) break;
+        }
+    }
+    if (transferred) error = BQ_OK;
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, String8 result_root,
+                                                              String8 job_id_text, String8 attempt_token_text,
+                                                              BqWorkerLease* lease)
+{
+    char lease_path[BQ_PATH_CAP + 1], result_path[BQ_PATH_CAP + 1], socket_path[BQ_PATH_CAP + 1];
+    IntegerParsingU64 job_value = string8_parse_u64_decimal(job_id_text);
+    IntegerParsingU64 token_value = string8_parse_u64_decimal(attempt_token_text);
+    bool valid = bq_worker_text(lease_file, lease_path, sizeof(lease_path)) && lease_path[0] == '/' &&
+                 bq_worker_text(result_root, result_path, sizeof(result_path)) && result_path[0] == '/' &&
+                 bq_worker_lease_socket_path(result_path, socket_path) &&
+                 job_value.status == INTEGER_PARSING_SUCCESS && job_value.length == job_id_text.length && job_value.value != 0 &&
+                 token_value.status == INTEGER_PARSING_SUCCESS && token_value.length == attempt_token_text.length && token_value.value != 0;
+    int result_directory = valid ? bq_worker_open_trusted_directory(string_from_pointer(result_path), true, false) : -1;
+    struct stat socket_info = {0};
+    if (valid)
+    {
+        valid = result_directory >= 0 && fstatat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, &socket_info,
+                                                 AT_SYMLINK_NOFOLLOW) == 0 && S_ISSOCK(socket_info.st_mode) &&
+                socket_info.st_uid == geteuid() && (socket_info.st_mode & 077) == 0;
+    }
+    if (result_directory >= 0) close(result_directory);
+    int client = -1;
+    bool connected = false;
+    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
+    while (valid && !connected && bq_worker_monotonic_milliseconds() < deadline)
+    {
+        client = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        if (client >= 0)
+        {
+            struct sockaddr_un address = {0};
+            size_t length = strlen(socket_path);
+            address.sun_family = AF_UNIX;
+            memcpy(address.sun_path, socket_path, length + 1);
+            socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
+            connected = connect(client, (struct sockaddr*)&address, address_size) == 0;
+            if (!connected)
+            {
+                int saved_errno = errno;
+                close(client);
+                client = -1;
+                if (saved_errno != ENOENT && saved_errno != ECONNREFUSED && saved_errno != EINTR)
+                    valid = false;
+                else
+                    bq_worker_sleep_until(bq_worker_deadline(bq_worker_monotonic_milliseconds(), 20));
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    BqError error = valid && connected ? BQ_IO : BQ_BAD_REQUEST;
+    if (error == BQ_IO)
+    {
+        BqWorkerLeaseMessage request;
+        bool made = bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_REQUEST, lease_path,
+                                                  job_value.value, token_value.value, 0, 0);
+        ssize_t sent = made ? send(client, &request, sizeof(request), MSG_NOSIGNAL) : -1;
+        error = sent == (ssize_t)sizeof(request) && bq_worker_lease_handoff_poll(client, POLLIN, deadline) ? BQ_OK : BQ_IO;
+    }
+    int received_fd = -1;
+    BqWorkerLease adopted = {.descriptor = -1};
+    if (error == BQ_OK)
+    {
+        BqWorkerLeaseMessage response = {0};
+        char control[CMSG_SPACE(sizeof(received_fd))] = {0};
+        struct iovec vector = {&response, sizeof(response)};
+        struct msghdr message = {0};
+        message.msg_iov = &vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control;
+        message.msg_controllen = sizeof(control);
+        ssize_t received = recvmsg(client, &message, MSG_CMSG_CLOEXEC);
+        bool response_ok = received == (ssize_t)sizeof(response) && !(message.msg_flags & MSG_CTRUNC) &&
+                           bq_worker_lease_message_matches(&response, BQ_WORKER_LEASE_RESPONSE, lease_path,
+                                                           job_value.value, token_value.value, response.device,
+                                                           response.inode);
+        for (struct cmsghdr* header = response_ok ? CMSG_FIRSTHDR(&message) : NULL; header;
+             header = CMSG_NXTHDR(&message, header))
+        {
+            if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
+                header->cmsg_len == CMSG_LEN(sizeof(received_fd)) && received_fd < 0)
+                memcpy(&received_fd, CMSG_DATA(header), sizeof(received_fd));
+        }
+        bool adopted_ok = false;
+        if (response_ok && received_fd >= 3)
+        {
+            adopted_ok = bq_worker_lease_adopt_transferred(received_fd, response.device, response.inode, &adopted) == 0;
+            received_fd = -1;
+        }
+        response_ok = adopted_ok;
+        if (response_ok)
+        {
+            BqWorkerLeaseMessage acknowledgement;
+            response_ok = bq_worker_lease_message_make(&acknowledgement, BQ_WORKER_LEASE_ACK, lease_path,
+                                                        job_value.value, token_value.value, response.device,
+                                                        response.inode) &&
+                          send(client, &acknowledgement, sizeof(acknowledgement), MSG_NOSIGNAL) ==
+                              (ssize_t)sizeof(acknowledgement);
+        }
+        if (response_ok)
+        {
+            *lease = adopted;
+            adopted.descriptor = -1;
+            error = BQ_OK;
+        }
+        else
+        {
+            error = BQ_CONFIGURATION_MISMATCH;
+        }
+    }
+    if (adopted.descriptor >= 0) bq_worker_lease_release(&adopted);
+    else if (received_fd >= 0) close(received_fd);
+    if (client >= 0) close(client);
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL int bq_worker_join_text(char* output, u32 capacity, char const* const parts[], u32 count)
+{
+    u64 length = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        u64 part_length = parts[index] ? strlen(parts[index]) : 0;
+        length = part_length <= UINT64_MAX - length ? length + part_length : UINT64_MAX;
+    }
+    bool ok = length < capacity && length <= INT_MAX;
+    u32 offset = 0;
+    if (ok)
+    {
+        for (u32 index = 0; index < count; index += 1)
+        {
+            char const* part = parts[index] ? parts[index] : "";
+            u32 part_length = (u32)strlen(part);
+            memcpy(output + offset, part, part_length);
+            offset += part_length;
+        }
+        output[offset] = 0;
+    }
+    return ok ? (int)length : -1;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_read_regular(char const* path, char* output, u32 capacity)
@@ -268,6 +708,21 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_read_regular(char const* path, char* output, 
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_path(String8 workspace_root, u64 id, u64 token,
+                                                char output[BQ_PATH_CAP + 1])
+{
+    char workspace[BQ_PATH_CAP + 1];
+    bool ok = bq_worker_text(workspace_root, workspace, sizeof(workspace)) &&
+              bq_string_path(workspace_root, workspace);
+    char id_text[32], token_text[32];
+    int id_length = snprintf(id_text, sizeof(id_text), "%" PRIu64, (uint64_t)id);
+    int token_length = snprintf(token_text, sizeof(token_text), "%" PRIu64, (uint64_t)token);
+    char const* parts[] = {workspace, "/results/job-", id_text, "-attempt-", token_text};
+    int length = ok && id_length > 0 && token_length > 0 ?
+                 bq_worker_join_text(output, BQ_PATH_CAP + 1, parts, BUSTER_ARRAY_LENGTH(parts)) : -1;
+    return length > 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_worker_boot_valid(char const* boot)
 {
     bool ok = strlen(boot) == 36;
@@ -290,7 +745,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_invocation_valid(char const* invocation)
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_unit_name(char output[BQ_WORKER_UNIT_CAP], u64 id, u64 token)
 {
-    int count = snprintf(output, BQ_WORKER_UNIT_CAP, "buster-bench-%" PRIu64 "-%" PRIu64 ".scope",
+    int count = snprintf(output, BQ_WORKER_UNIT_CAP, "buster-bench-%" PRIu64 "-%" PRIu64 ".service",
                          (uint64_t)id, (uint64_t)token);
     return count > 0 && count < (int)BQ_WORKER_UNIT_CAP;
 }
@@ -554,7 +1009,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_verify_cgroup(BqWorkerConfig const* config, B
     ok = directory >= 0;
     struct stat root_identity;
     if (ok && fstat(directory, &root_identity) != 0) ok = false;
-    if (ok && !config->backend)
+    if (ok && config->production_path && !config->backend)
     {
         struct statfs filesystem;
         ok = fstatfs(directory, &filesystem) == 0 && (u64)filesystem.f_type == 0x63677270ull;
@@ -580,7 +1035,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_verify_cgroup(BqWorkerConfig const* config, B
             directory = child;
             struct stat identity;
             ok = bq_worker_directory_owner(directory, false, false) && fstat(directory, &identity) == 0;
-            if (ok && !config->backend)
+            if (ok && config->production_path && !config->backend)
             {
                 struct statfs filesystem;
                 ok = fstatfs(directory, &filesystem) == 0 &&
@@ -629,12 +1084,35 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
                                              bool resources)
 {
     char cpu[32], expected_cgroup[BQ_WORKER_CGROUP_CAP];
+    char expected_inaccessible[BQ_PATH_CAP * 2 + 2];
+    char expected_read_only[BQ_PATH_CAP + 1], expected_read_write[BQ_PATH_CAP + 1];
     snprintf(cpu, sizeof(cpu), "%u", config->limits.cpu);
     snprintf(expected_cgroup, sizeof(expected_cgroup), "/buster-bench.slice/%s", unit);
+    String8 inaccessible_root = config->production_path ? config->queue_root : config->workspace_root;
+    char inaccessible_root_text[BQ_PATH_CAP + 1], lease_text[BQ_PATH_CAP + 1];
+    bool paths = bq_worker_text(inaccessible_root, inaccessible_root_text, sizeof(inaccessible_root_text)) &&
+                 bq_worker_text(config->lease_file, lease_text, sizeof(lease_text));
+    char const* inaccessible_parts[] = {inaccessible_root_text, " ", lease_text};
+    int inaccessible_length = paths ? bq_worker_join_text(expected_inaccessible, sizeof(expected_inaccessible),
+                                                            inaccessible_parts, BUSTER_ARRAY_LENGTH(inaccessible_parts)) : -1;
+    paths = paths && bq_worker_text(config->installed_root, expected_read_only, sizeof(expected_read_only)) &&
+            bq_worker_text(config->workspace_root, expected_read_write, sizeof(expected_read_write));
     bool ok = observed->unit_found && !strcmp(observed->boot_id, boot) && !strcmp(observed->unit, unit) &&
               !strcmp(observed->cgroup, expected_cgroup) &&
               bq_worker_invocation_valid(observed->invocation_id) &&
-              bq_worker_verify_cgroup(config, observed, resources);
+              bq_worker_verify_cgroup(config, observed, resources) && paths && observed->security_properties_valid &&
+              observed->paths_valid && inaccessible_length > 0 && !strcmp(observed->inaccessible_paths, expected_inaccessible) &&
+              !strcmp(observed->read_only_paths, expected_read_only) && !strcmp(observed->read_write_paths, expected_read_write) &&
+              !strcmp(observed->user, "buster-bench") && !strcmp(observed->group, "buster-bench") &&
+              observed->no_new_privileges && observed->private_tmp && observed->private_devices &&
+              observed->private_network && observed->protect_home && observed->protect_system &&
+              observed->protect_proc && observed->restrict_suidsgid && observed->protect_control_groups &&
+              observed->protect_kernel_tunables && observed->protect_kernel_modules && observed->protect_kernel_logs &&
+              observed->protect_clock && observed->protect_hostname && observed->lock_personality &&
+              observed->memory_deny_write_execute && observed->remove_ipc && observed->keyring_private &&
+              observed->restrict_namespaces && observed->restrict_realtime && observed->address_families_unix &&
+              observed->syscall_architectures_native && observed->syscall_filter_system_service &&
+              observed->syscall_error_number_eperm;
     if (ok && resources)
     {
         ok = !strcmp(observed->allowed_cpus, cpu) && observed->memory_max == config->limits.memory_max &&
@@ -642,6 +1120,9 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
              observed->tasks_max == config->limits.tasks_max &&
              observed->runtime_max_usec == config->limits.runtime_max_usec &&
              observed->timeout_stop_usec == 10ull * 1000000 && observed->send_sigkill &&
+             observed->no_new_privileges && observed->private_tmp && observed->private_devices &&
+             observed->private_network && observed->protect_home && observed->protect_system &&
+             observed->protect_proc && observed->restrict_suidsgid &&
              !strcmp(observed->kill_mode, "control-group") && observed->active && observed->populated &&
              observed->result == BQ_WORKER_RUNNING;
     }
@@ -864,16 +1345,32 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
         "--property=ActiveState", "--property=SubState", "--property=ControlGroup", "--property=AllowedCPUs",
         "--property=MemoryMax", "--property=MemorySwapMax", "--property=TasksMax", "--property=RuntimeMaxUSec",
         "--property=TimeoutStopUSec", "--property=KillMode", "--property=SendSIGKILL", "--property=InvocationID",
-        "--property=Result", unit, NULL};
+        "--property=Result", "--property=NoNewPrivileges", "--property=PrivateTmp", "--property=PrivateDevices",
+        "--property=PrivateNetwork", "--property=ProtectHome", "--property=ProtectSystem", "--property=ProtectProc",
+        "--property=RestrictSUIDSGID", "--property=ProtectControlGroups", "--property=ProtectKernelTunables",
+        "--property=ProtectKernelModules", "--property=ProtectKernelLogs", "--property=ProtectClock",
+        "--property=ProtectHostname", "--property=LockPersonality", "--property=MemoryDenyWriteExecute",
+        "--property=RemoveIPC", "--property=KeyringMode", "--property=RestrictNamespaces", "--property=RestrictRealtime",
+        "--property=RestrictAddressFamilies", "--property=SystemCallArchitectures", "--property=SystemCallFilter",
+        "--property=SystemCallErrorNumber", "--property=InaccessiblePaths", "--property=ReadOnlyPaths",
+        "--property=ReadWritePaths", "--property=User", "--property=Group", unit, NULL};
     int status = 0;
     u32 remaining = bq_worker_remaining(deadline);
     BqError error = remaining ? bq_worker_exec_capture(arguments, output, sizeof(output), &status, remaining) : BQ_IO;
     *observed = (BqWorkerObserved){0};
     bool missing = error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0);
-    char* fields[15] = {0};
+    enum { BQ_SYSTEMD_FIELD_COUNT = 44 };
+    char* fields[BQ_SYSTEMD_FIELD_COUNT] = {0};
     char const* names[] = {"Id", "LoadState", "ActiveState", "SubState", "ControlGroup", "AllowedCPUs",
                            "MemoryMax", "MemorySwapMax", "TasksMax", "RuntimeMaxUSec", "TimeoutStopUSec",
-                           "KillMode", "SendSIGKILL", "InvocationID", "Result"};
+                           "KillMode", "SendSIGKILL", "InvocationID", "Result", "NoNewPrivileges", "PrivateTmp",
+                           "PrivateDevices", "PrivateNetwork", "ProtectHome", "ProtectSystem", "ProtectProc",
+                           "RestrictSUIDSGID", "ProtectControlGroups", "ProtectKernelTunables", "ProtectKernelModules",
+                           "ProtectKernelLogs", "ProtectClock", "ProtectHostname", "LockPersonality",
+                           "MemoryDenyWriteExecute", "RemoveIPC", "KeyringMode", "RestrictNamespaces", "RestrictRealtime",
+                           "RestrictAddressFamilies", "SystemCallArchitectures", "SystemCallFilter", "SystemCallErrorNumber",
+                           "InaccessiblePaths", "ReadOnlyPaths", "ReadWritePaths", "User", "Group"};
+    _Static_assert(BUSTER_ARRAY_LENGTH(names) == BQ_SYSTEMD_FIELD_COUNT, "systemd property table mismatch");
     for (u32 i = 0; error == BQ_OK && !missing && i < BUSTER_ARRAY_LENGTH(fields); i += 1)
         fields[i] = bq_worker_property(output, names[i]);
     for (u32 i = 0; error == BQ_OK && !missing && i < BUSTER_ARRAY_LENGTH(fields); i += 1)
@@ -889,18 +1386,56 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
     {
         observed->unit_found = !strcmp(fields[1], "loaded");
         observed->active = !strcmp(fields[2], "active") || !strcmp(fields[2], "activating");
-        snprintf(observed->unit, sizeof(observed->unit), "%s", fields[0]);
-        snprintf(observed->cgroup, sizeof(observed->cgroup), "%s", fields[4]);
-        snprintf(observed->allowed_cpus, sizeof(observed->allowed_cpus), "%s", fields[5]);
+        int unit_length = snprintf(observed->unit, sizeof(observed->unit), "%s", fields[0]);
+        int cgroup_length = snprintf(observed->cgroup, sizeof(observed->cgroup), "%s", fields[4]);
+        int cpu_length = snprintf(observed->allowed_cpus, sizeof(observed->allowed_cpus), "%s", fields[5]);
         if (!bq_worker_number(fields[6], &observed->memory_max) || !bq_worker_number(fields[7], &observed->memory_swap_max) ||
             !bq_worker_number(fields[8], &observed->tasks_max) || !bq_worker_duration(fields[9], &observed->runtime_max_usec) ||
-            !bq_worker_duration(fields[10], &observed->timeout_stop_usec))
+            !bq_worker_duration(fields[10], &observed->timeout_stop_usec) || unit_length < 0 ||
+            (u32)unit_length >= sizeof(observed->unit) || cgroup_length < 0 || (u32)cgroup_length >= sizeof(observed->cgroup) ||
+            cpu_length < 0 || (u32)cpu_length >= sizeof(observed->allowed_cpus))
         {
             error = BQ_WORKER_MISMATCH;
         }
-        snprintf(observed->kill_mode, sizeof(observed->kill_mode), "%s", fields[11]);
+        int kill_mode_length = snprintf(observed->kill_mode, sizeof(observed->kill_mode), "%s", fields[11]);
         observed->send_sigkill = !strcmp(fields[12], "yes");
-        snprintf(observed->invocation_id, sizeof(observed->invocation_id), "%s", fields[13]);
+        int invocation_length = snprintf(observed->invocation_id, sizeof(observed->invocation_id), "%s", fields[13]);
+        observed->no_new_privileges = !strcmp(fields[15], "yes");
+        observed->private_tmp = !strcmp(fields[16], "yes");
+        observed->private_devices = !strcmp(fields[17], "yes");
+        observed->private_network = !strcmp(fields[18], "yes");
+        observed->protect_home = !strcmp(fields[19], "yes");
+        observed->protect_system = !strcmp(fields[20], "strict");
+        observed->protect_proc = !strcmp(fields[21], "invisible");
+        observed->restrict_suidsgid = !strcmp(fields[22], "yes");
+        observed->protect_control_groups = !strcmp(fields[23], "yes");
+        observed->protect_kernel_tunables = !strcmp(fields[24], "yes");
+        observed->protect_kernel_modules = !strcmp(fields[25], "yes");
+        observed->protect_kernel_logs = !strcmp(fields[26], "yes");
+        observed->protect_clock = !strcmp(fields[27], "yes");
+        observed->protect_hostname = !strcmp(fields[28], "yes");
+        observed->lock_personality = !strcmp(fields[29], "yes");
+        observed->memory_deny_write_execute = !strcmp(fields[30], "yes");
+        observed->remove_ipc = !strcmp(fields[31], "yes");
+        observed->keyring_private = !strcmp(fields[32], "private");
+        observed->restrict_namespaces = !strcmp(fields[33], "yes");
+        observed->restrict_realtime = !strcmp(fields[34], "yes");
+        observed->address_families_unix = !strcmp(fields[35], "AF_UNIX");
+        observed->syscall_architectures_native = !strcmp(fields[36], "native");
+        observed->syscall_filter_system_service = !strcmp(fields[37], "@system-service");
+        observed->syscall_error_number_eperm = !strcmp(fields[38], "EPERM");
+        int inaccessible_length = snprintf(observed->inaccessible_paths, sizeof(observed->inaccessible_paths), "%s", fields[39]);
+        int read_only_length = snprintf(observed->read_only_paths, sizeof(observed->read_only_paths), "%s", fields[40]);
+        int read_write_length = snprintf(observed->read_write_paths, sizeof(observed->read_write_paths), "%s", fields[41]);
+        int user_length = snprintf(observed->user, sizeof(observed->user), "%s", fields[42]);
+        int group_length = snprintf(observed->group, sizeof(observed->group), "%s", fields[43]);
+        observed->paths_valid = inaccessible_length > 0 && (u32)inaccessible_length < sizeof(observed->inaccessible_paths) &&
+                                read_only_length > 0 && (u32)read_only_length < sizeof(observed->read_only_paths) &&
+                                read_write_length > 0 && (u32)read_write_length < sizeof(observed->read_write_paths);
+        observed->security_properties_valid = kill_mode_length >= 0 && (u32)kill_mode_length < sizeof(observed->kill_mode) &&
+                                                invocation_length >= 0 && (u32)invocation_length < sizeof(observed->invocation_id) &&
+                                                user_length > 0 && (u32)user_length < sizeof(observed->user) &&
+                                                group_length > 0 && (u32)group_length < sizeof(observed->group);
         observed->result = !strcmp(fields[14], "oom-kill") ? BQ_WORKER_OOM :
                            !strcmp(fields[14], "timeout") ? BQ_WORKER_TIMED_OUT :
                            !strcmp(fields[14], "success") ? BQ_WORKER_SUCCEEDED :
@@ -1030,16 +1565,77 @@ void bq_worker_backend_systemd(BqWorkerBackend* backend)
                                 bq_systemd_delay, bq_systemd_clock};
 }
 
-typedef struct BqWorkerFinalization
+struct BqWorkerFinalization
 {
     sigset_t prior_mask;
     bool masked;
-} BqWorkerFinalization;
+    BqWorkerConfig const* config;
+    int result_directory;
+    dev_t result_device;
+    ino_t result_inode;
+    char result_root[BQ_PATH_CAP + 1];
+    bool result_bound;
+    char result_digest[SHA256_HEX_CAPACITY];
+    char bundle_digest[SHA256_HEX_CAPACITY];
+    char full_digest[SHA256_HEX_CAPACITY];
+};
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_open(BqWorkerConfig const* config, BqJob const* job,
+                                                   BqWorkerFinalization* finalization, bool create)
+{
+    char result_root[BQ_PATH_CAP + 1], name[64];
+    BqError error = config && job && finalization && bq_worker_result_path(config->workspace_root, job->id, job->token, result_root) &&
+                    bq_workspace_name(name, job->id, job->token) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    int workspace = error == BQ_OK ? bq_worker_open_trusted_directory(config->workspace_root, false, false) : -1;
+    int results = workspace >= 0 ? openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool made_results = false;
+    bool made_result = false;
+    if (results < 0 && create && workspace >= 0 && errno == ENOENT)
+    {
+        made_results = mkdirat(workspace, "results", 0700) == 0;
+        if (made_results)
+            results = openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    if (error == BQ_OK && (workspace < 0 || results < 0 || !bq_worker_directory_owner(results, true, false)))
+        error = BQ_CONFIGURATION_MISMATCH;
+    int result = error == BQ_OK ? openat(results, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (result < 0 && create && error == BQ_OK && errno == ENOENT)
+    {
+        made_result = mkdirat(results, name, 0700) == 0;
+        if (made_result)
+            result = openat(results, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    struct stat info = {0};
+    if (error == BQ_OK && (result < 0 || fstat(result, &info) != 0 || !bq_worker_directory_owner(result, true, false)))
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK && made_results && fsync(workspace) != 0) error = BQ_IO;
+    if (error == BQ_OK && made_result && fsync(results) != 0) error = BQ_IO;
+    if (error == BQ_OK)
+    {
+        if (finalization->result_directory >= 0) close(finalization->result_directory);
+        finalization->result_directory = result;
+        finalization->result_device = info.st_dev;
+        finalization->result_inode = info.st_ino;
+        snprintf(finalization->result_root, sizeof(finalization->result_root), "%s", result_root);
+        result = -1;
+    }
+    if (result >= 0) close(result);
+    if (results >= 0) close(results);
+    if (workspace >= 0) close(workspace);
+    return error;
+}
 
 #ifdef BUSTER_BENCH_SERVICE_TEST
 BUSTER_GLOBAL_LOCAL u32 bq_worker_test_finish_checkpoints;
 BUSTER_GLOBAL_LOCAL u32 bq_worker_test_cancel_during_finish;
 #endif
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
+                                                       BqWorkerFinalization* finalization);
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization);
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job, BqOutcome outcome,
+                                                                BqError reason, BqWorkerFinalization* finalization);
 
 BUSTER_GLOBAL_LOCAL void bq_worker_finish_checkpoint(void)
 {
@@ -1078,7 +1674,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_before_terminal(BqQueue* queue, BqJob* job
     if (error == BQ_OK && sigpending(&pending) != 0) error = BQ_IO;
     if (error == BQ_OK && (sigismember(&pending, SIGTERM) == 1 || sigismember(&pending, SIGINT) == 1))
         bq_worker_cancel_signal = 1;
+    if (error == BQ_OK && finalization->config && finalization->config->production_path)
+        error = bq_worker_result_validate(finalization->config, job, finalization);
+    if (error == BQ_OK && finalization->config && finalization->config->production_path && job && finalization->result_bound)
+        error = job->result_bound ? bq_worker_result_binding_validate(job) :
+                bq_result_bind(queue, job, string_from_pointer(finalization->result_root), finalization->result_digest,
+                               finalization->bundle_digest, finalization->full_digest);
+    bool cancelled = bq_worker_cancel_signal != 0;
     if (error == BQ_OK) error = bq_worker_finish_cancel(queue, &job);
+    if (error == BQ_OK && cancelled && finalization->config && finalization->config->production_path)
+    {
+        error = bq_worker_result_evidence(job, BQ_CANCELLED, BQ_WORKER_CANCEL_SIGNAL, finalization);
+        if (error == BQ_OK) error = bq_worker_result_failure_artifacts(job, BQ_CANCELLED,
+                                                                         BQ_WORKER_CANCEL_SIGNAL, finalization);
+    }
     return error;
 }
 
@@ -1093,11 +1702,1146 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finalization_restore(BqWorkerFinalization*
     return error;
 }
 
+#define BQ_WORKER_RESULT_CAP 32768u
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_line(char const* body, char const* expected)
+{
+    size_t length = strlen(expected);
+    char const* cursor = body;
+    bool found = false;
+    while (!found && cursor && *cursor)
+    {
+        char const* end = strchr(cursor, '\n');
+        size_t line_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        found = line_length == length && !memcmp(cursor, expected, length);
+        cursor = end ? end + 1 : NULL;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_hex(char const* bytes, u32 length)
+{
+    bool ok = length == SHA256_HEX_CAPACITY - 1;
+    for (u32 index = 0; ok && index < length; index += 1)
+    {
+        char value = bytes[index];
+        ok = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_digest_line(char const* body, char const* prefix,
+                                                      char output[SHA256_HEX_CAPACITY])
+{
+    size_t prefix_length = strlen(prefix);
+    char const* cursor = body;
+    bool found = false;
+    bool valid = true;
+    while (valid && cursor && *cursor)
+    {
+        char const* end = strchr(cursor, '\n');
+        size_t line_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (line_length >= prefix_length && !memcmp(cursor, prefix, prefix_length))
+        {
+            valid = !found && line_length == prefix_length + SHA256_HEX_CAPACITY - 1 &&
+                    bq_worker_result_hex(cursor + prefix_length, SHA256_HEX_CAPACITY - 1);
+            if (valid)
+            {
+                memcpy(output, cursor + prefix_length, SHA256_HEX_CAPACITY - 1);
+                output[SHA256_HEX_CAPACITY - 1] = 0;
+                found = true;
+            }
+        }
+        cursor = end ? end + 1 : NULL;
+    }
+    return valid && found;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_nonterminal_line(char const* body, char const* prefix)
+{
+    size_t prefix_length = strlen(prefix);
+    char const* cursor = body;
+    bool found = false;
+    bool valid = true;
+    while (valid && cursor && *cursor)
+    {
+        char const* end = strchr(cursor, '\n');
+        size_t line_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (line_length >= prefix_length && !memcmp(cursor, prefix, prefix_length))
+        {
+            char const* value = cursor + prefix_length;
+            size_t value_length = line_length - prefix_length;
+            bool terminal = value_length == strlen("success") && !memcmp(value, "success", value_length);
+            terminal = terminal || (value_length == strlen("running") && !memcmp(value, "running", value_length));
+            valid = !found && value_length > 0 && !terminal;
+            found = valid;
+        }
+        cursor = end ? end + 1 : NULL;
+    }
+    return valid && found;
+}
+
+typedef struct BqWorkerBundleEntry BqWorkerBundleEntry;
+struct BqWorkerBundleEntry
+{
+    char path[BQ_WORKER_BUNDLE_PATH_CAP + 1];
+    u64 size;
+    char digest[SHA256_HEX_CAPACITY];
+    bool seen;
+};
+
+typedef struct BqWorkerBundleFrame BqWorkerBundleFrame;
+struct BqWorkerBundleFrame
+{
+    DIR* stream;
+    char path[BQ_WORKER_BUNDLE_PATH_CAP + 1];
+    u32 depth;
+};
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_path_valid(char const* path)
+{
+    u64 length = path ? strlen(path) : 0;
+    bool ok = length > 0 && length <= BQ_WORKER_BUNDLE_PATH_CAP && path[0] != '/';
+    u64 component = 0;
+    for (u64 index = 0; ok && index <= length; index += 1)
+    {
+        if (index == length || path[index] == '/')
+        {
+            u64 component_length = index - component;
+            ok = component_length && !(component_length == 1 && path[component] == '.') &&
+                 !(component_length == 2 && path[component] == '.' && path[component + 1] == '.');
+            component = index + 1;
+        }
+        else
+        {
+            u8 value = (u8)path[index];
+            ok = value >= 0x21 && value <= 0x7e && value != '\\';
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_reserved(char const* path)
+{
+    char const* names[] = {
+        "validate-buster-v1.manifest", "validate-buster-v1.bundle", "validate-buster-v1.outcome",
+    };
+    bool reserved = false;
+    for (u32 index = 0; !reserved && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        reserved = !strcmp(path, names[index]);
+    return reserved;
+}
+
+BUSTER_GLOBAL_LOCAL int bq_worker_bundle_relative(char output[BQ_WORKER_BUNDLE_PATH_CAP + 1],
+                                                   char const* parent, char const* leaf)
+{
+    u32 parent_length = parent ? (u32)strlen(parent) : 0;
+    u32 leaf_length = leaf ? (u32)strlen(leaf) : 0;
+    u32 separator = parent_length != 0;
+    u64 length = (u64)parent_length + separator + leaf_length;
+    bool ok = length <= BQ_WORKER_BUNDLE_PATH_CAP && length <= INT_MAX;
+    if (ok && parent_length) memcpy(output, parent, parent_length);
+    if (ok && separator) output[parent_length] = '/';
+    if (ok) memcpy(output + parent_length + separator, leaf, leaf_length);
+    if (ok) output[length] = 0;
+    return ok ? (int)length : -1;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_next_line(u8 const* bytes, u64 size, u64* cursor,
+                                                     char output[BQ_WORKER_BUNDLE_LINE_CAP])
+{
+    u64 start = cursor ? *cursor : size;
+    u8 const* end = start < size ? memchr(bytes + start, '\n', (size_t)(size - start)) : NULL;
+    u64 length = end ? (u64)(end - (bytes + start)) : 0;
+    bool ok = end && length > 0 && length + 1 < BQ_WORKER_BUNDLE_LINE_CAP &&
+              !memchr(bytes + start, 0, (size_t)length);
+    if (ok)
+    {
+        memcpy(output, bytes + start, (size_t)length);
+        output[length] = 0;
+        *cursor = start + length + 1;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_decimal(char const* text, u64 maximum, u64* output)
+{
+    String8 value = string_from_pointer(text);
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
+    bool ok = parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == value.length && parsed.value <= maximum;
+    if (output) *output = ok ? parsed.value : 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_entry_parse(char const* line, BqWorkerBundleEntry* entry)
+{
+    char const* first_space = line ? strchr(line, ' ') : NULL;
+    char const* second_space = first_space ? strchr(first_space + 1, ' ') : NULL;
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    char size_text[32] = {0};
+    u64 size = 0;
+    bool ok = first_space && second_space && first_space - line == SHA256_HEX_CAPACITY - 1 &&
+              (u64)(second_space - first_space - 1) < sizeof(size_text) &&
+              strlen(second_space + 1) <= BQ_WORKER_BUNDLE_PATH_CAP &&
+              !strchr(second_space + 1, ' ');
+    if (ok)
+    {
+        memcpy(digest, line, SHA256_HEX_CAPACITY - 1);
+        digest[SHA256_HEX_CAPACITY - 1] = 0;
+        memcpy(size_text, first_space + 1, (size_t)(second_space - first_space - 1));
+        size_text[second_space - first_space - 1] = 0;
+        ok = bq_worker_result_hex(digest, SHA256_HEX_CAPACITY - 1) &&
+             bq_worker_bundle_decimal(size_text, BQ_WORKER_BUNDLE_FILE_CAP, &size) &&
+             bq_worker_bundle_path_valid(second_space + 1);
+    }
+    if (ok)
+    {
+        memcpy(entry->path, second_space + 1, strlen(second_space + 1) + 1);
+        memcpy(entry->digest, digest, sizeof(entry->digest));
+        entry->size = size;
+        entry->seen = false;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL int bq_worker_bundle_entry_compare(char const* left, char const* right)
+{
+    int result = strcmp(left, right);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int bq_worker_bundle_open_relative(int root, char const* path)
+{
+    int current = root >= 0 ? fcntl(root, F_DUPFD_CLOEXEC, 3) : -1;
+    u64 length = path ? strlen(path) : 0;
+    u64 offset = 0;
+    while (current >= 0 && offset < length)
+    {
+        u64 end = offset;
+        while (end < length && path[end] != '/') end += 1;
+        char name[BQ_WORKER_BUNDLE_PATH_CAP + 1];
+        u64 component_length = end - offset;
+        bool valid = component_length > 0 && component_length <= BQ_WORKER_BUNDLE_PATH_CAP;
+        if (valid)
+        {
+            memcpy(name, path + offset, (size_t)component_length);
+            name[component_length] = 0;
+            int flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | (end < length ? O_DIRECTORY : 0);
+            int next = openat(current, name, flags);
+            close(current);
+            current = next;
+        }
+        else
+        {
+            close(current);
+            current = -1;
+        }
+        offset = end + 1;
+    }
+    return current;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_file_digest(int root, char const* path, u64* size,
+                                                       char output[SHA256_HEX_CAPACITY])
+{
+    int descriptor = bq_worker_bundle_open_relative(root, path);
+    struct stat before = {0}, after = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
+              before.st_nlink == 1 && before.st_size >= 0 &&
+              (u64)before.st_size <= BQ_WORKER_BUNDLE_FILE_CAP &&
+              (before.st_uid == 0 || before.st_uid == geteuid());
+    Sha256 digest;
+    sha256_init(&digest);
+    u8 bytes[64 * 1024];
+    u64 total = 0;
+    while (ok)
+    {
+        ssize_t count = read(descriptor, bytes, sizeof(bytes));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = false;
+        else if (!count) break;
+        else if (total > BQ_WORKER_BUNDLE_FILE_CAP - (u64)count) ok = false;
+        else
+        {
+            sha256_add(&digest, bytes, (u64)count);
+            total += (u64)count;
+        }
+    }
+    if (ok)
+    {
+        ok = fstat(descriptor, &after) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino &&
+             after.st_size == before.st_size && total == (u64)before.st_size;
+        if (ok) sha256_finish_hex(&digest, (char8*)output);
+    }
+    if (!ok) output[0] = 0;
+    if (size) *size = ok ? total : 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_full(int result_directory,
+                                                            char const expected_digest[SHA256_HEX_CAPACITY],
+                                                            char full_digest[SHA256_HEX_CAPACITY])
+{
+    if (full_digest) full_digest[0] = 0;
+    int descriptor = result_directory >= 0 ? openat(result_directory, "validate-buster-v1.bundle",
+                                                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0}, expected_info = {0}, after = {0};
+    bool opened = expected_digest && descriptor >= 0 && fstatat(result_directory, "validate-buster-v1.bundle",
+                                                                 &expected_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) &&
+                  expected_info.st_dev == info.st_dev && expected_info.st_ino == info.st_ino && info.st_nlink == 1 &&
+                  info.st_size > 0 && (u64)info.st_size <= BQ_WORKER_BUNDLE_CAP &&
+                  (info.st_uid == 0 || info.st_uid == geteuid());
+    u8* bytes = NULL;
+    u64 size = opened ? (u64)info.st_size : 0;
+    if (opened)
+    {
+        bytes = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        opened = bytes != MAP_FAILED;
+    }
+    u64 used = 0;
+    while (opened && used < size)
+    {
+        ssize_t count = read(descriptor, bytes + used, (size_t)(size - used));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) opened = false;
+        else used += (u64)count;
+    }
+    if (opened)
+    {
+        char extra = 0;
+        opened = read(descriptor, &extra, 1) == 0 && fstat(descriptor, &after) == 0 &&
+                 after.st_dev == info.st_dev && after.st_ino == info.st_ino && after.st_size == info.st_size;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) opened = false;
+    BqWorkerBundleEntry* entries = NULL;
+    if (opened)
+    {
+        entries = mmap(NULL, sizeof(*entries) * BQ_WORKER_BUNDLE_ENTRY_CAP,
+                       PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        opened = entries != MAP_FAILED;
+    }
+    bool valid = opened;
+    u64 cursor = 0, declared_bytes = 0;
+    u64 declared_entries = 0;
+    char line[BQ_WORKER_BUNDLE_LINE_CAP];
+    if (valid)
+    {
+        valid = bq_worker_bundle_next_line(bytes, size, &cursor, line) && !strcmp(line, "BQ-BUNDLE-V1");
+        valid = valid && bq_worker_bundle_next_line(bytes, size, &cursor, line) &&
+                !strncmp(line, "entries=", 8) && bq_worker_bundle_decimal(line + 8,
+                                                                            BQ_WORKER_BUNDLE_ENTRY_CAP,
+                                                                            &declared_entries);
+        valid = valid && bq_worker_bundle_next_line(bytes, size, &cursor, line) &&
+                !strncmp(line, "bytes=", 6) && bq_worker_bundle_decimal(line + 6,
+                                                                          BQ_WORKER_BUNDLE_TOTAL_CAP,
+                                                                          &declared_bytes);
+    }
+    for (u64 index = 0; valid && index < declared_entries; index += 1)
+    {
+        valid = bq_worker_bundle_next_line(bytes, size, &cursor, line) &&
+                bq_worker_bundle_entry_parse(line, entries + index) &&
+                (index == 0 || bq_worker_bundle_entry_compare(entries[index - 1].path, entries[index].path) < 0);
+    }
+    if (valid) valid = cursor == size;
+    if (valid)
+    {
+        Sha256 digest;
+        char actual[SHA256_HEX_CAPACITY];
+        sha256_init(&digest);
+        sha256_add(&digest, bytes, size);
+        sha256_finish_hex(&digest, (char8*)actual);
+        valid = !memcmp(actual, expected_digest, SHA256_HEX_CAPACITY);
+    }
+    if (valid)
+    {
+        int root = fcntl(result_directory, F_DUPFD_CLOEXEC, 3);
+        valid = root >= 0;
+        u64 measured_bytes = 0;
+        for (u64 index = 0; valid && index < declared_entries; index += 1)
+        {
+            u64 actual_size = 0;
+            char actual_digest[SHA256_HEX_CAPACITY];
+            valid = bq_worker_bundle_file_digest(root, entries[index].path, &actual_size, actual_digest) &&
+                    actual_size == entries[index].size && !memcmp(actual_digest, entries[index].digest, SHA256_HEX_CAPACITY) &&
+                    measured_bytes <= BQ_WORKER_BUNDLE_TOTAL_CAP - actual_size;
+            if (valid) measured_bytes += actual_size;
+        }
+        valid = valid && measured_bytes == declared_bytes;
+        if (root >= 0) close(root);
+    }
+    if (valid)
+    {
+        int root = openat(result_directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int walk_root = openat(result_directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BqWorkerBundleFrame* frames = mmap(NULL, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP,
+                                            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        DIR* stream = root >= 0 ? fdopendir(root) : NULL;
+        u32 depth = stream ? 1 : 0;
+        u32 entry_count = 0;
+        valid = stream != NULL && frames != MAP_FAILED && walk_root >= 0;
+        if (valid)
+        {
+            memset(frames, 0, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
+            frames[0].stream = stream;
+            frames[0].depth = 1;
+        }
+        else
+        {
+            if (stream) closedir(stream);
+            else if (root >= 0) close(root);
+            if (walk_root >= 0) close(walk_root);
+            root = -1;
+            walk_root = -1;
+        }
+        while (valid && depth)
+        {
+            BqWorkerBundleFrame* frame = frames + depth - 1;
+            errno = 0;
+            struct dirent* item = readdir(frame->stream);
+            if (!item)
+            {
+                if (errno) valid = false;
+                else
+                {
+                    closedir(frame->stream);
+                    frame->stream = NULL;
+                    depth -= 1;
+                }
+            }
+            else if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, ".."))
+            {
+            }
+            else
+            {
+                entry_count += 1;
+                char relative[BQ_WORKER_BUNDLE_PATH_CAP + 1];
+                int length = bq_worker_bundle_relative(relative, frame->path, item->d_name);
+                valid = entry_count <= BQ_WORKER_BUNDLE_ENTRY_CAP && length > 0 &&
+                        (u32)length <= BQ_WORKER_BUNDLE_PATH_CAP && bq_worker_bundle_path_valid(relative);
+                int parent = valid ? dirfd(frame->stream) : -1;
+                struct stat child_info = {0};
+                valid = valid && parent >= 0 && fstatat(parent, item->d_name, &child_info, AT_SYMLINK_NOFOLLOW) == 0;
+                if (valid && S_ISDIR(child_info.st_mode))
+                {
+                    valid = depth < BQ_WORKER_BUNDLE_DEPTH_CAP &&
+                            (child_info.st_uid == 0 || child_info.st_uid == geteuid()) &&
+                            (child_info.st_mode & 022) == 0;
+                    int child = valid ? openat(parent, item->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                    DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
+                    struct stat child_opened = {0};
+                    valid = valid && child >= 0 && fstat(child, &child_opened) == 0 &&
+                            child_opened.st_dev == child_info.st_dev && child_opened.st_ino == child_info.st_ino;
+                    if (!child_stream && child >= 0) close(child);
+                    valid = valid && child_stream != NULL;
+                    if (valid)
+                    {
+                        BqWorkerBundleFrame* next = frames + depth;
+                        memset(next, 0, sizeof(*next));
+                        next->stream = child_stream;
+                        next->depth = frame->depth + 1;
+                        memcpy(next->path, relative, (size_t)length + 1);
+                        depth += 1;
+                    }
+                    else if (child_stream)
+                    {
+                        closedir(child_stream);
+                    }
+                }
+                else if (valid && S_ISREG(child_info.st_mode))
+                {
+                    if (!bq_worker_bundle_reserved(relative))
+                    {
+                        u64 actual_size = 0;
+                        char actual_digest[SHA256_HEX_CAPACITY];
+                        u64 index = 0;
+                        bool found = false;
+                        while (!found && index < declared_entries)
+                        {
+                            found = !strcmp(entries[index].path, relative);
+                            if (!found) index += 1;
+                        }
+                        bool file_ok = found && !entries[index].seen &&
+                                       bq_worker_bundle_file_digest(walk_root, relative, &actual_size, actual_digest) &&
+                                       actual_size == entries[index].size &&
+                                       !memcmp(actual_digest, entries[index].digest, SHA256_HEX_CAPACITY);
+                        valid = file_ok;
+                        if (valid) entries[index].seen = true;
+                    }
+                }
+                else if (valid)
+                {
+                    valid = false;
+                }
+            }
+        }
+        while (depth)
+        {
+            if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+            depth -= 1;
+        }
+        if (walk_root >= 0) close(walk_root);
+        if (valid)
+        {
+            for (u64 index = 0; valid && index < declared_entries; index += 1) valid = entries[index].seen;
+        }
+        if (frames != MAP_FAILED) munmap(frames, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
+    }
+    if (valid && full_digest)
+    {
+        Sha256 full;
+        sha256_init(&full);
+        sha256_add(&full, "BQ-FULL-BUNDLE-V1", 18);
+        sha256_add(&full, bytes, size);
+        for (u64 index = 0; index < declared_entries; index += 1)
+        {
+            u64 entry_size = entries[index].size;
+            sha256_add(&full, entries[index].path, strlen(entries[index].path));
+            sha256_add(&full, "\0", 1);
+            sha256_add(&full, entries[index].digest, 64);
+            sha256_add(&full, &entry_size, sizeof(entry_size));
+        }
+        sha256_finish_hex(&full, (char8*)full_digest);
+    }
+    if (entries && entries != MAP_FAILED) munmap(entries, sizeof(*entries) * BQ_WORKER_BUNDLE_ENTRY_CAP);
+    if (bytes && bytes != MAP_FAILED) munmap(bytes, (size_t)size);
+    return valid ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+}
+
+#ifdef BUSTER_BENCH_SERVICE_TEST
+BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate(int result_directory,
+                                                       char const expected_digest[SHA256_HEX_CAPACITY])
+{
+    BqError error = bq_worker_bundle_validate_full(result_directory, expected_digest, NULL);
+    return error;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
+{
+    BqWorkerBundleFrame* frames = mmap(NULL, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP,
+                                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int root = result_directory >= 0 ? fcntl(result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    DIR* stream = root >= 0 ? fdopendir(root) : NULL;
+    if (stream) root = -1;
+    bool ok = frames != MAP_FAILED && stream != NULL;
+    u32 depth = ok ? 1 : 0;
+    if (ok)
+    {
+        memset(frames, 0, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
+        frames[0].stream = stream;
+    }
+    else
+    {
+        if (stream) closedir(stream);
+        else if (root >= 0) close(root);
+        root = -1;
+    }
+    while (ok && depth)
+    {
+        BqWorkerBundleFrame* frame = frames + depth - 1;
+        errno = 0;
+        struct dirent* item = readdir(frame->stream);
+        if (!item)
+        {
+            if (errno) ok = false;
+            else
+            {
+                int directory = dirfd(frame->stream);
+                ok = fsync(directory) == 0;
+                closedir(frame->stream);
+                frame->stream = NULL;
+                depth -= 1;
+            }
+        }
+        else if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, ".."))
+        {
+        }
+        else
+        {
+            int parent = dirfd(frame->stream);
+            struct stat info = {0};
+            ok = parent >= 0 && fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
+            if (ok && S_ISDIR(info.st_mode))
+            {
+                int child = depth < BQ_WORKER_BUNDLE_DEPTH_CAP ?
+                            openat(parent, item->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
+                if (!child_stream && child >= 0) close(child);
+                struct stat opened = {0};
+                ok = child_stream != NULL && fstat(child, &opened) == 0 && opened.st_dev == info.st_dev &&
+                     opened.st_ino == info.st_ino;
+                if (ok)
+                {
+                    frames[depth].stream = child_stream;
+                    depth += 1;
+                }
+            }
+            else if (ok && S_ISREG(info.st_mode))
+            {
+                int descriptor = openat(parent, item->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+                struct stat opened = {0};
+                ok = descriptor >= 0 && fstat(descriptor, &opened) == 0 && opened.st_dev == info.st_dev &&
+                     opened.st_ino == info.st_ino && opened.st_size == info.st_size && fsync(descriptor) == 0;
+                if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+            }
+            else if (ok)
+            {
+                ok = false;
+            }
+        }
+    }
+    if (root >= 0 && close(root) != 0) ok = false;
+    if (frames != MAP_FAILED) munmap(frames, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
+    return ok;
+}
+
+BqError bq_worker_result_binding_validate(BqJob const* job)
+{
+    char path[BQ_PATH_CAP + 1];
+    BqError error = job && job->result_bound && bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
+                    path[0] == '/' ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    int result_directory = error == BQ_OK ? bq_worker_open_trusted_directory(string_from_pointer(path), true, false) : -1;
+    struct stat directory_info = {0};
+    if (error == BQ_OK)
+    {
+        error = result_directory >= 0 && fstat(result_directory, &directory_info) == 0 && S_ISDIR(directory_info.st_mode) &&
+                (directory_info.st_uid == 0 || directory_info.st_uid == geteuid()) &&
+                (directory_info.st_mode & 077) == 0 ?
+                BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    int manifest = error == BQ_OK ? openat(result_directory, "validate-buster-v1.manifest",
+                                            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char bytes[BQ_WORKER_RESULT_CAP + 1];
+    u32 used = 0;
+    struct stat manifest_info = {0};
+    if (error == BQ_OK)
+    {
+        struct stat expected_manifest = {0};
+        error = manifest >= 0 && fstatat(result_directory, "validate-buster-v1.manifest", &expected_manifest,
+                                         AT_SYMLINK_NOFOLLOW) == 0 && fstat(manifest, &manifest_info) == 0 &&
+                expected_manifest.st_dev == manifest_info.st_dev && expected_manifest.st_ino == manifest_info.st_ino &&
+                S_ISREG(manifest_info.st_mode) &&
+                manifest_info.st_nlink == 1 && (manifest_info.st_uid == 0 || manifest_info.st_uid == geteuid()) &&
+                (manifest_info.st_mode & 0222) == 0 && manifest_info.st_size > 0 &&
+                (u64)manifest_info.st_size <= BQ_WORKER_RESULT_CAP ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    while (error == BQ_OK && used < BQ_WORKER_RESULT_CAP)
+    {
+        ssize_t count = read(manifest, bytes + used, BQ_WORKER_RESULT_CAP - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) error = BQ_IO;
+        else if (!count) break;
+        else used += (u32)count;
+    }
+    if (error == BQ_OK)
+    {
+        char extra = 0;
+        error = read(manifest, &extra, 1) == 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (manifest >= 0 && close(manifest) != 0 && error == BQ_OK) error = BQ_IO;
+    char actual_manifest[SHA256_HEX_CAPACITY] = {0};
+    char expected_bundle[SHA256_HEX_CAPACITY] = {0};
+    char recursive_digest[SHA256_HEX_CAPACITY] = {0};
+    char actual_full[SHA256_HEX_CAPACITY] = {0};
+    char result_line[BQ_PATH_CAP + 16] = {0};
+    u32 result_line_length = 12 + (u32)strlen(path);
+    if (result_line_length < sizeof(result_line))
+    {
+        memcpy(result_line, "result-root=", 12);
+        memcpy(result_line + 12, path, strlen(path));
+    }
+    if (error == BQ_OK)
+    {
+        bytes[used] = 0;
+        Sha256 digest;
+        sha256_init(&digest);
+        sha256_add(&digest, bytes, used);
+        sha256_finish_hex(&digest, (char8*)actual_manifest);
+        bool lines = result_line_length < sizeof(result_line) && bq_worker_result_line((char const*)bytes, "schema=1") &&
+                     bq_worker_result_line((char const*)bytes, "recipe=validate-buster-v1") &&
+                     bq_worker_result_line((char const*)bytes, result_line);
+        if (lines)
+        {
+            lines = bq_worker_result_digest_line((char const*)bytes, "bundle-sha256=", expected_bundle);
+        }
+        error = lines && !memcmp(actual_manifest, job->result_manifest_digest, SHA256_HEX_CAPACITY) ?
+                BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (error == BQ_OK)
+        error = bq_worker_bundle_validate_full(result_directory, expected_bundle, recursive_digest);
+    if (error == BQ_OK)
+    {
+        Sha256 full;
+        sha256_init(&full);
+        sha256_add(&full, "BQ-RESULT-FULL-V1", 18);
+        sha256_add(&full, bytes, used);
+        sha256_add(&full, recursive_digest, 64);
+        sha256_finish_hex(&full, (char8*)actual_full);
+        error = !memcmp(expected_bundle, job->result_bundle_digest, SHA256_HEX_CAPACITY) &&
+                !memcmp(actual_full, job->result_full_digest, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (result_directory >= 0 && close(result_directory) != 0 && error == BQ_OK) error = BQ_IO;
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
+                                                       BqWorkerFinalization* finalization)
+{
+    char bytes[BQ_WORKER_RESULT_CAP + 1];
+    char job_line[64], token_line[64], workspace_line[BQ_PATH_CAP + 32], result_line[BQ_PATH_CAP + 32];
+    char base_line[100], candidate_line[100], base_binary_line[BQ_PATH_CAP + 64], candidate_binary_line[BQ_PATH_CAP + 64];
+    char base_digest[SHA256_HEX_CAPACITY], candidate_digest[SHA256_HEX_CAPACITY], bundle_digest[SHA256_HEX_CAPACITY];
+    char result_digest[SHA256_HEX_CAPACITY], recursive_digest[SHA256_HEX_CAPACITY];
+    char full_digest[SHA256_HEX_CAPACITY];
+    char workspace_text[BQ_PATH_CAP + 1], workspace_name[64], base_text[65], candidate_text[65];
+    BqError error = job && config && finalization && finalization->result_directory >= 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    int job_length = 0, token_length = 0, workspace_length = 0, result_length = 0, base_length = 0, candidate_length = 0;
+    int base_binary_length = 0, candidate_binary_length = 0;
+    if (error == BQ_OK && !bq_worker_result_sync_tree(finalization->result_directory)) error = BQ_IO;
+    if (error == BQ_OK)
+    {
+        String8 base = bq_field(&job->request, 3), candidate = bq_field(&job->request, 4);
+        bool workspace_valid = bq_worker_text(config->workspace_root, workspace_text, sizeof(workspace_text)) &&
+                               bq_workspace_name(workspace_name, job->id, job->token) &&
+                               bq_worker_text(base, base_text, sizeof(base_text)) &&
+                               bq_worker_text(candidate, candidate_text, sizeof(candidate_text));
+        job_length = snprintf(job_line, sizeof(job_line), "job-id=%" PRIu64, (uint64_t)job->id);
+        token_length = snprintf(token_line, sizeof(token_line), "attempt-token=%" PRIu64, (uint64_t)job->token);
+        char const* workspace_parts[] = {"workspace-root=", workspace_text};
+        workspace_length = workspace_valid ? bq_worker_join_text(workspace_line, sizeof(workspace_line),
+                                                                  workspace_parts, BUSTER_ARRAY_LENGTH(workspace_parts)) : -1;
+        result_length = snprintf(result_line, sizeof(result_line), "result-root=%s", finalization->result_root);
+        char const* base_parts[] = {"base-revision=", base_text};
+        char const* candidate_parts[] = {"candidate-revision=", candidate_text};
+        base_length = bq_worker_join_text(base_line, sizeof(base_line), base_parts, BUSTER_ARRAY_LENGTH(base_parts));
+        candidate_length = bq_worker_join_text(candidate_line, sizeof(candidate_line), candidate_parts,
+                                               BUSTER_ARRAY_LENGTH(candidate_parts));
+        char const* base_binary_parts[] = {"base-binary=", workspace_text, "/", workspace_name, "/base/build/Release/ide"};
+        char const* candidate_binary_parts[] = {"candidate-binary=", workspace_text, "/", workspace_name,
+                                                "/candidate/build/Release/ide"};
+        base_binary_length = workspace_valid ? bq_worker_join_text(base_binary_line, sizeof(base_binary_line),
+                                                                    base_binary_parts, BUSTER_ARRAY_LENGTH(base_binary_parts)) : -1;
+        candidate_binary_length = workspace_valid ? bq_worker_join_text(candidate_binary_line, sizeof(candidate_binary_line),
+                                                                         candidate_binary_parts,
+                                                                         BUSTER_ARRAY_LENGTH(candidate_binary_parts)) : -1;
+        if (!workspace_valid || job_length <= 0 || token_length <= 0 || workspace_length <= 0 || result_length <= 0 ||
+            base_length <= 0 || candidate_length <= 0 || base_binary_length <= 0 ||
+            (size_t)base_binary_length >= sizeof(base_binary_line) || candidate_binary_length <= 0 ||
+            (size_t)candidate_binary_length >= sizeof(candidate_binary_line))
+            error = BQ_CONFIGURATION_MISMATCH;
+    }
+    int descriptor = error == BQ_OK ? openat(finalization->result_directory, "validate-buster-v1.manifest",
+                                              O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat directory_info = {0}, file_info = {0}, expected_file_info = {0};
+    if (error == BQ_OK)
+    {
+        error = fstat(finalization->result_directory, &directory_info) == 0 && directory_info.st_dev == finalization->result_device &&
+                directory_info.st_ino == finalization->result_inode && descriptor >= 0 &&
+                fstatat(finalization->result_directory, "validate-buster-v1.manifest", &expected_file_info,
+                        AT_SYMLINK_NOFOLLOW) == 0 && fstat(descriptor, &file_info) == 0 &&
+                expected_file_info.st_dev == file_info.st_dev && expected_file_info.st_ino == file_info.st_ino &&
+                S_ISREG(file_info.st_mode) && file_info.st_nlink == 1 && (file_info.st_uid == 0 || file_info.st_uid == geteuid()) &&
+                (file_info.st_mode & 0222) == 0 &&
+                (u64)file_info.st_size <= BQ_WORKER_RESULT_CAP ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    u32 used = 0;
+    while (error == BQ_OK && used < BQ_WORKER_RESULT_CAP)
+    {
+        ssize_t count = read(descriptor, bytes + used, BQ_WORKER_RESULT_CAP - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) error = BQ_IO;
+        else if (!count) break;
+        else used += (u32)count;
+    }
+    if (error == BQ_OK)
+    {
+        char extra;
+        error = read(descriptor, &extra, 1) == 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
+    if (error == BQ_OK)
+    {
+        bytes[used] = 0;
+        char const* prefix = "schema=1\nrecipe=validate-buster-v1\nstatus=succeeded\nstage=throughput\nprocess-result=success\n";
+        bool lines = used >= strlen(prefix) && !memcmp(bytes, prefix, strlen(prefix)) &&
+                     bq_worker_result_line((char const*)bytes, job_line) && bq_worker_result_line((char const*)bytes, token_line) &&
+                     bq_worker_result_line((char const*)bytes, workspace_line) && bq_worker_result_line((char const*)bytes, result_line) &&
+                     bq_worker_result_line((char const*)bytes, base_line) && bq_worker_result_line((char const*)bytes, candidate_line) &&
+                     bq_worker_result_line((char const*)bytes, base_binary_line) &&
+                     bq_worker_result_line((char const*)bytes, candidate_binary_line) &&
+                     bq_worker_result_line((char const*)bytes, "driver=/usr/local/libexec/buster-bench-build") &&
+                     bq_worker_result_line((char const*)bytes, "throughput=/usr/local/libexec/buster-bench-throughput") &&
+                     bq_worker_result_line((char const*)bytes, "trusted-source-scope=operator-installed-read-only") &&
+                     bq_worker_result_line((char const*)bytes, "namespace-policy=private-workspace-post-run-identity") &&
+                     bq_worker_result_digest_line((char const*)bytes, "base-binary-sha256=", base_digest) &&
+                     bq_worker_result_digest_line((char const*)bytes, "candidate-binary-sha256=", candidate_digest) &&
+                     bq_worker_result_digest_line((char const*)bytes, "bundle-sha256=", bundle_digest);
+        error = lines ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    }
+    if (error == BQ_OK && memchr(bytes, 0, used) != NULL) error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK)
+    {
+        error = bq_worker_bundle_validate_full(finalization->result_directory, bundle_digest, recursive_digest);
+        if (error == BQ_OK)
+        {
+            Sha256 full;
+            sha256_init(&full);
+            sha256_add(&full, "BQ-RESULT-FULL-V1", 18);
+            sha256_add(&full, bytes, used);
+            sha256_add(&full, recursive_digest, 64);
+            sha256_finish_hex(&full, (char8*)full_digest);
+            memcpy(finalization->bundle_digest, bundle_digest, sizeof(finalization->bundle_digest));
+        }
+    }
+    if (error == BQ_OK)
+    {
+        Sha256 digest;
+        sha256_init(&digest);
+        sha256_add(&digest, bytes, used);
+        sha256_finish_hex(&digest, (char8*)result_digest);
+        if (finalization->result_bound)
+        {
+            error = !memcmp(finalization->result_digest, result_digest, SHA256_HEX_CAPACITY) &&
+                    !memcmp(finalization->bundle_digest, bundle_digest, SHA256_HEX_CAPACITY) &&
+                    !memcmp(finalization->full_digest, full_digest, SHA256_HEX_CAPACITY) ? BQ_OK :
+                    BQ_CONFIGURATION_MISMATCH;
+        }
+        else
+        {
+            memcpy(finalization->result_digest, result_digest, sizeof(finalization->result_digest));
+            memcpy(finalization->full_digest, full_digest, sizeof(finalization->full_digest));
+            finalization->result_bound = true;
+        }
+    }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL char const* bq_worker_outcome_name(BqOutcome outcome)
+{
+    char const* names[] = {"none", "succeeded", "failed", "cancelled", "interrupted"};
+    char const* result = (u32)outcome < BUSTER_ARRAY_LENGTH(names) ? names[outcome] : "unknown";
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_evidence_matches(int parent, char const* name, char const* body, u64 length)
+{
+    int descriptor = parent >= 0 ? openat(parent, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char bytes[BQ_WORKER_RESULT_CAP];
+    struct stat expected = {0}, info = {0}, after = {0};
+    bool ok = length <= sizeof(bytes) && descriptor >= 0 && fstatat(parent, name, &expected, AT_SYMLINK_NOFOLLOW) == 0 &&
+              fstat(descriptor, &info) == 0 && expected.st_dev == info.st_dev && expected.st_ino == info.st_ino &&
+              S_ISREG(info.st_mode) && info.st_nlink == 1 && info.st_size == (off_t)length &&
+              (info.st_uid == 0 || info.st_uid == geteuid());
+    u64 used = 0;
+    while (ok && used < length)
+    {
+        ssize_t count = read(descriptor, bytes + used, (size_t)(length - used));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) ok = false;
+        else used += (u64)count;
+    }
+    if (ok)
+    {
+        char extra = 0;
+        ok = read(descriptor, &extra, 1) == 0 && fstat(descriptor, &after) == 0 &&
+             fstatat(parent, name, &expected, AT_SYMLINK_NOFOLLOW) == 0 && after.st_dev == info.st_dev &&
+             after.st_ino == info.st_ino && after.st_size == info.st_size && expected.st_dev == info.st_dev &&
+             expected.st_ino == info.st_ino && !memcmp(bytes, body, (size_t)length);
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_control_read(int parent, char const* name, char* body,
+                                                       u32 capacity, u32* length)
+{
+    int descriptor = parent >= 0 ? openat(parent, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat expected = {0}, info = {0}, after = {0};
+    bool ok = descriptor >= 0 && body && capacity > 0 && fstatat(parent, name, &expected, AT_SYMLINK_NOFOLLOW) == 0 &&
+              fstat(descriptor, &info) == 0 && expected.st_dev == info.st_dev && expected.st_ino == info.st_ino &&
+              S_ISREG(info.st_mode) && info.st_nlink == 1 && (info.st_uid == 0 || info.st_uid == geteuid()) &&
+              (info.st_mode & 0222) == 0 && info.st_size > 0 && (u64)info.st_size <= capacity;
+    u64 used = 0;
+    while (ok && used < (u64)info.st_size)
+    {
+        ssize_t count = read(descriptor, body + used, (size_t)((u64)info.st_size - used));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) ok = false;
+        else used += (u64)count;
+    }
+    if (ok)
+    {
+        char extra = 0;
+        ok = read(descriptor, &extra, 1) == 0 && fstat(descriptor, &after) == 0 &&
+             after.st_dev == info.st_dev && after.st_ino == info.st_ino && after.st_size == info.st_size;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    if (length) *length = ok ? (u32)used : 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_entry_matches(int parent, char const* name, struct stat const* expected)
+{
+    struct stat actual = {0};
+    bool ok = parent >= 0 && name && expected && fstatat(parent, name, &actual, AT_SYMLINK_NOFOLLOW) == 0 &&
+              actual.st_dev == expected->st_dev && actual.st_ino == expected->st_ino && S_ISREG(actual.st_mode);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_unlink_if_same(int parent, char const* name, struct stat const* expected)
+{
+    bool ok = !name || !name[0] || bq_worker_entry_matches(parent, name, expected);
+    if (ok && name && name[0]) ok = unlinkat(parent, name, 0) == 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_control_publish(BqWorkerFinalization* finalization,
+                                                               char const* name, char const* body,
+                                                               u64 length, mode_t mode)
+{
+    int parent = -1;
+    int descriptor = -1;
+    char temporary[96] = {0};
+    struct stat temporary_info = {0};
+    bool temporary_ready = false;
+    bool published = false;
+    bool ok = finalization && name && body && length < BQ_WORKER_RESULT_CAP && finalization->result_directory >= 0;
+    if (ok)
+    {
+        struct stat info = {0};
+        ok = fstat(finalization->result_directory, &info) == 0 && S_ISDIR(info.st_mode) &&
+             (u64)info.st_dev == finalization->result_device && (u64)info.st_ino == finalization->result_inode &&
+             (parent = fcntl(finalization->result_directory, F_DUPFD_CLOEXEC, 3)) >= 0 &&
+             bq_worker_temp_name(name, temporary, sizeof(temporary));
+    }
+    if (ok)
+    {
+        descriptor = openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+        ok = descriptor >= 0;
+    }
+    for (u64 offset = 0; ok && offset < length;)
+    {
+        ssize_t wrote = write(descriptor, body + offset, (size_t)(length - offset));
+        if (wrote < 0 && errno == EINTR) continue;
+        ok = wrote > 0;
+        if (ok) offset += (u64)wrote;
+    }
+    if (descriptor >= 0)
+    {
+        if (ok && fchmod(descriptor, mode) != 0) ok = false;
+        if (ok && fsync(descriptor) != 0) ok = false;
+        if (ok && fstat(descriptor, &temporary_info) != 0) ok = false;
+        if (ok) ok = S_ISREG(temporary_info.st_mode) && temporary_info.st_nlink == 1 &&
+                       temporary_info.st_size == (off_t)length && (temporary_info.st_mode & 0222) == 0 &&
+                       bq_worker_entry_matches(parent, temporary, &temporary_info);
+        temporary_ready = ok;
+    }
+    if (ok)
+    {
+        if (linkat(parent, temporary, parent, name, 0) == 0)
+        {
+            struct stat published_info = {0};
+            ok = fstatat(parent, name, &published_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
+                 S_ISREG(published_info.st_mode) && published_info.st_nlink == 2 &&
+                 (published_info.st_mode & 0222) == 0;
+            published = ok;
+            if (ok) ok = bq_worker_unlink_if_same(parent, temporary, &temporary_info);
+            if (ok)
+            {
+                struct stat final_info = {0};
+                ok = fstatat(parent, name, &final_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                     final_info.st_dev == temporary_info.st_dev && final_info.st_ino == temporary_info.st_ino &&
+                     S_ISREG(final_info.st_mode) && final_info.st_nlink == 1;
+            }
+        }
+        else if (errno == EEXIST)
+        {
+            published = bq_worker_evidence_matches(parent, name, body, length);
+            if (published) ok = bq_worker_unlink_if_same(parent, temporary, &temporary_info);
+            else ok = false;
+        }
+        else
+        {
+            ok = false;
+        }
+    }
+    if (ok && published && fsync(parent) != 0) ok = false;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    if (parent >= 0 && temporary_ready && !published) bq_worker_unlink_if_same(parent, temporary, &temporary_info);
+    if (parent >= 0 && close(parent) != 0) ok = false;
+    return ok ? BQ_OK : BQ_IO;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization)
+{
+    char body[BQ_WORKER_EVIDENCE_CAP];
+    int body_length = job ? snprintf(body, sizeof(body),
+                                     "schema=1\nrecipe=validate-buster-v1\nstatus=%s\nerror=%s\n"
+                                     "job-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\n",
+                                     bq_worker_outcome_name(outcome), bq_error_name(reason),
+                                     (uint64_t)job->id, (uint64_t)job->token) : -1;
+    bool ok = job && finalization && body_length > 0 && (u32)body_length < sizeof(body) &&
+              bq_worker_result_control_publish(finalization, "validate-buster-v1.outcome", body,
+                                                (u64)body_length, 0400) == BQ_OK;
+    return ok ? BQ_OK : BQ_IO;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job, BqOutcome outcome,
+                                                                BqError reason, BqWorkerFinalization* finalization)
+{
+    char bundle_body[128] = {0};
+    char manifest_body[BQ_WORKER_RESULT_CAP + 1] = {0};
+    char bundle_digest[SHA256_HEX_CAPACITY] = {0};
+    char recursive_digest[SHA256_HEX_CAPACITY] = {0};
+    char manifest_digest[SHA256_HEX_CAPACITY] = {0};
+    char full_digest[SHA256_HEX_CAPACITY] = {0};
+    bool ok = job && finalization && finalization->result_directory >= 0;
+    bool existing = false;
+    int manifest_lookup = -1, bundle_lookup = -1;
+    int manifest_errno = 0, bundle_errno = 0;
+    struct stat manifest_entry = {0}, bundle_entry = {0};
+    u32 manifest_length = 0;
+    int bundle_length = -1;
+    bool existing_success = false;
+    if (ok)
+    {
+        manifest_lookup = fstatat(finalization->result_directory, "validate-buster-v1.manifest", &manifest_entry,
+                                  AT_SYMLINK_NOFOLLOW);
+        manifest_errno = errno;
+        bundle_lookup = fstatat(finalization->result_directory, "validate-buster-v1.bundle", &bundle_entry,
+                                AT_SYMLINK_NOFOLLOW);
+        bundle_errno = errno;
+        bool manifest_missing = manifest_lookup != 0 && manifest_errno == ENOENT;
+        bool bundle_missing = bundle_lookup != 0 && bundle_errno == ENOENT;
+        existing = manifest_lookup == 0 || bundle_lookup == 0;
+        ok = (manifest_lookup == 0 || manifest_missing) && (bundle_lookup == 0 || bundle_missing) &&
+             (!existing || (manifest_lookup == 0 && bundle_lookup == 0));
+    }
+    if (ok && existing)
+    {
+        char job_line[64], token_line[64], result_line[BQ_PATH_CAP + 16];
+        int job_length = snprintf(job_line, sizeof(job_line), "job-id=%" PRIu64, (uint64_t)job->id);
+        int token_length = snprintf(token_line, sizeof(token_line), "attempt-token=%" PRIu64, (uint64_t)job->token);
+        int result_length = snprintf(result_line, sizeof(result_line), "result-root=%s", finalization->result_root);
+        ok = bq_worker_result_control_read(finalization->result_directory, "validate-buster-v1.manifest",
+                                            manifest_body, BQ_WORKER_RESULT_CAP, &manifest_length) &&
+             job_length > 0 && (u32)job_length < sizeof(job_line) && token_length > 0 &&
+             (u32)token_length < sizeof(token_line) && result_length > 0 &&
+             (u32)result_length < sizeof(result_line);
+        if (ok)
+        {
+            manifest_body[manifest_length] = 0;
+            existing_success = bq_worker_result_line(manifest_body, "status=succeeded");
+            if (existing_success)
+            {
+                ok = finalization->config &&
+                     bq_worker_result_validate(finalization->config, job, finalization) == BQ_OK;
+            }
+            bool stage = bq_worker_result_line(manifest_body, "stage=prepare") ||
+                         bq_worker_result_line(manifest_body, "stage=base-generate") ||
+                         bq_worker_result_line(manifest_body, "stage=base-build") ||
+                         bq_worker_result_line(manifest_body, "stage=candidate-generate") ||
+                         bq_worker_result_line(manifest_body, "stage=candidate-build") ||
+                         bq_worker_result_line(manifest_body, "stage=throughput") ||
+                         bq_worker_result_line(manifest_body, "stage=worker");
+            bool status = bq_worker_result_line(manifest_body, "status=failed") ||
+                          bq_worker_result_line(manifest_body, "status=cancelled") ||
+                          bq_worker_result_line(manifest_body, "status=interrupted");
+            bool process = bq_worker_result_nonterminal_line(manifest_body, "process-result=");
+            ok = existing_success || (memchr(manifest_body, 0, manifest_length) == NULL &&
+                 bq_worker_result_line(manifest_body, "schema=1") &&
+                 bq_worker_result_line(manifest_body, "recipe=validate-buster-v1") &&
+                 status && stage && process &&
+                 bq_worker_result_line(manifest_body, job_line) && bq_worker_result_line(manifest_body, token_line) &&
+                 bq_worker_result_line(manifest_body, result_line) &&
+                 bq_worker_result_digest_line(manifest_body, "bundle-sha256=", bundle_digest));
+        }
+        if (ok && !existing_success)
+            ok = bq_worker_bundle_validate_full(finalization->result_directory, bundle_digest, recursive_digest) == BQ_OK;
+        if (ok)
+        {
+            bq_digest(manifest_body, manifest_length, manifest_digest);
+            Sha256 full;
+            sha256_init(&full);
+            sha256_add(&full, "BQ-RESULT-FULL-V1", 18);
+            sha256_add(&full, manifest_body, manifest_length);
+            sha256_add(&full, recursive_digest, 64);
+            sha256_finish_hex(&full, (char8*)full_digest);
+        }
+        if (ok && !existing_success && finalization->result_bound)
+            ok = !memcmp(finalization->result_digest, manifest_digest, sizeof(finalization->result_digest)) &&
+                 !memcmp(finalization->bundle_digest, bundle_digest, sizeof(finalization->bundle_digest)) &&
+                 !memcmp(finalization->full_digest, full_digest, sizeof(finalization->full_digest));
+        if (ok && !existing_success && !finalization->result_bound)
+        {
+            memcpy(finalization->result_digest, manifest_digest, sizeof(finalization->result_digest));
+            memcpy(finalization->bundle_digest, bundle_digest, sizeof(finalization->bundle_digest));
+            memcpy(finalization->full_digest, full_digest, sizeof(finalization->full_digest));
+            finalization->result_bound = true;
+        }
+    }
+    if (ok && !existing)
+    {
+        int generated_manifest_length = -1;
+        bundle_length = snprintf(bundle_body, sizeof(bundle_body), "BQ-BUNDLE-V1\nentries=0\nbytes=0\n");
+        ok = bundle_length > 0 && (u32)bundle_length < sizeof(bundle_body);
+        if (ok) bq_digest(bundle_body, (u32)bundle_length, bundle_digest);
+        if (ok)
+        {
+            generated_manifest_length = snprintf(
+                manifest_body, sizeof(manifest_body),
+                "schema=1\nrecipe=validate-buster-v1\nstatus=%s\nstage=worker\nprocess-result=%s\n"
+                "error=%s\njob-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\nresult-root=%s\n"
+                "bundle-sha256=%s\n",
+                bq_worker_outcome_name(outcome), bq_error_name(reason), bq_error_name(reason),
+                (uint64_t)job->id, (uint64_t)job->token, finalization->result_root, bundle_digest);
+            ok = generated_manifest_length > 0 && (u32)generated_manifest_length < sizeof(manifest_body);
+            if (ok) manifest_length = (u32)generated_manifest_length;
+        }
+        if (ok) ok = bq_worker_result_control_publish(finalization, "validate-buster-v1.bundle", bundle_body,
+                                                       (u64)bundle_length, 0400) == BQ_OK;
+        if (ok) ok = bq_worker_bundle_validate_full(finalization->result_directory, bundle_digest, recursive_digest) == BQ_OK;
+        if (ok) ok = bq_worker_result_control_publish(finalization, "validate-buster-v1.manifest", manifest_body,
+                                                       manifest_length, 0400) == BQ_OK;
+        if (ok)
+        {
+            bq_digest(manifest_body, manifest_length, manifest_digest);
+            Sha256 full;
+            sha256_init(&full);
+            sha256_add(&full, "BQ-RESULT-FULL-V1", 18);
+            sha256_add(&full, manifest_body, manifest_length);
+            sha256_add(&full, recursive_digest, 64);
+            sha256_finish_hex(&full, (char8*)full_digest);
+            memcpy(finalization->result_digest, manifest_digest, sizeof(finalization->result_digest));
+            memcpy(finalization->bundle_digest, bundle_digest, sizeof(finalization->bundle_digest));
+            memcpy(finalization->full_digest, full_digest, sizeof(finalization->full_digest));
+            finalization->result_bound = true;
+        }
+    }
+    return ok ? BQ_OK : BQ_IO;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig const* config, BqJob* job,
                                               BqOutcome outcome, BqError reason,
                                               BqWorkerFinalization* finalization)
 {
     BqError error = outcome == BQ_SUCCEEDED && !finalization ? BQ_BAD_REQUEST : BQ_OK;
+    BqError evidence = BQ_OK;
+    bool production = config && config->production_path;
+    if (error == BQ_OK && production && outcome == BQ_SUCCEEDED &&
+        (!finalization || finalization->result_directory < 0 || finalization->result_root[0] == 0))
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK && production && outcome == BQ_SUCCEEDED) error = bq_worker_result_validate(config, job, finalization);
+    if (production && outcome == BQ_SUCCEEDED && error != BQ_OK)
+    {
+        reason = error;
+        outcome = BQ_FAILED;
+        error = BQ_OK;
+    }
     if (outcome == BQ_SUCCEEDED)
     {
         for (BqPhase phase = (BqPhase)(job->phase + 1); error == BQ_OK && phase <= BQ_CLEANING; phase = (BqPhase)(phase + 1))
@@ -1122,6 +2866,24 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
         if (outcome != BQ_CANCELLED && prior == BQ_NOT_FOUND) error = bq_failure_write(queue, job, reason);
         else if (outcome != BQ_CANCELLED && (prior == BQ_CORRUPT || prior == BQ_IO)) error = prior;
         if (error == BQ_OK && job->phase < BQ_CLEANING) error = bq_real_advance(queue, job, BQ_CLEANING, outcome);
+        if (production && job && job->result_bound)
+        {
+            evidence = bq_worker_result_binding_validate(job);
+        }
+        else if (production && finalization && finalization->result_directory >= 0)
+        {
+            evidence = bq_worker_result_evidence(job, outcome, reason, finalization);
+            if (evidence == BQ_OK && !job->result_bound)
+                evidence = bq_worker_result_failure_artifacts(job, outcome, reason, finalization);
+        }
+    }
+    if (error == BQ_OK && evidence != BQ_OK) error = evidence;
+    if (error == BQ_OK && evidence == BQ_OK && production && outcome != BQ_SUCCEEDED && finalization &&
+        finalization->result_bound && job && !job->result_bound)
+    {
+        error = bq_result_bind(queue, job, string_from_pointer(finalization->result_root), finalization->result_digest,
+                               finalization->bundle_digest, finalization->full_digest);
+        job = bq_job(&queue->state, job->id);
     }
     if (error == BQ_OK)
     {
@@ -1153,7 +2915,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_cgroup_absent(BqWorkerConfig const* config,
                          identity->cgroup_slice_inode == (u64)slice_info.st_ino &&
                          (config->backend || (fstatfs(root, &filesystem) == 0 &&
                           (u64)filesystem.f_type == 0x63677270ull));
-    if (filesystem_ok && !config->backend)
+    if (filesystem_ok && config->production_path && !config->backend)
         filesystem_ok = fstatfs(slice, &filesystem) == 0 &&
                         (u64)filesystem.f_type == 0x63677270ull;
     errno = 0;
@@ -1219,7 +2981,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
     }
     if (error == BQ_OK && (observed->active || observed->populated))
     {
-        /* The fixed scope property grants ten seconds to TERM.  KILL then gets
+        /* The fixed service property grants ten seconds to TERM.  KILL then gets
          * the same bounded observation window; neither wait trusts unit names. */
         error = backend->signal(backend, identity->unit, "KILL",
                                 bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
@@ -1299,11 +3061,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
 
 BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
 {
+    sigset_t handoff_signals = {0};
+    sigset_t prior_signals = {0};
+    bool handoff_blocked = sigemptyset(&handoff_signals) == 0 &&
+                           sigaddset(&handoff_signals, SIGTERM) == 0 &&
+                           sigaddset(&handoff_signals, SIGINT) == 0 &&
+                           sigprocmask(SIG_BLOCK, &handoff_signals, &prior_signals) == 0;
+    bool handoff_failed = !handoff_blocked;
+    sig_atomic_t transport_stop = bq_worker_transport_stop_signal;
+    bq_worker_transport_stop_signal = 0;
     *id = queue->state.active_id;
-    char lease_path[BQ_PATH_CAP + 1], boot_path[BQ_PATH_CAP + 1], current_boot[BQ_WORKER_BOOT_CAP];
+    char lease_path[BQ_PATH_CAP + 1], boot_path[BQ_PATH_CAP + 1], queue_root[BQ_PATH_CAP + 1];
+    char current_boot[BQ_WORKER_BOOT_CAP];
     BqWorkerBackend systemd;
     BqWorkerBackend* backend = config ? config->backend : NULL;
-    bool production = config && !backend;
+    bool production = config && config->production_path;
     if (!backend)
     {
         bq_worker_backend_systemd(&systemd);
@@ -1311,11 +3083,13 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     }
     BqError error = !config || !bq_worker_text(config->lease_file, lease_path, sizeof(lease_path)) || lease_path[0] != '/' ||
                     !bq_worker_text(config->boot_id_file, boot_path, sizeof(boot_path)) || boot_path[0] != '/' ||
+                    (production && (!bq_worker_text(config->queue_root, queue_root, sizeof(queue_root)) || queue_root[0] != '/')) ||
                     config->limits.cpu >= CPU_SETSIZE || !config->limits.memory_max ||
                     !config->limits.tasks_max || !config->limits.runtime_max_usec ||
                     !backend->start || !backend->observe || !backend->signal || !backend->join ||
                     !backend->cleanup_launcher ||
                     !backend->delay || !backend->clock || !config->quarantine ? BQ_BAD_REQUEST : BQ_OK;
+    if (error == BQ_OK && production && handoff_failed) error = BQ_IO;
     if (error == BQ_OK && (!bq_worker_read_regular(boot_path, current_boot, sizeof(current_boot)) ||
                            !bq_worker_boot_valid(current_boot))) error = BQ_CONFIGURATION_MISMATCH;
     struct sigaction cancel_action = {0}, old_term = {0}, old_interrupt = {0};
@@ -1325,13 +3099,25 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     {
         cancel_action.sa_handler = bq_worker_cancel_handler;
         sigemptyset(&cancel_action.sa_mask);
-        bq_worker_cancel_signal = 0;
+        bq_worker_cancel_signal = transport_stop ? 1 : 0;
+        bq_worker_shutdown_signal = transport_stop ? 1 : 0;
         term_handler = sigaction(SIGTERM, &cancel_action, &old_term) == 0;
         interrupt_handler = term_handler && sigaction(SIGINT, &cancel_action, &old_interrupt) == 0;
         if (!interrupt_handler) error = BQ_IO;
     }
+    if (handoff_blocked && (!production || interrupt_handler || error != BQ_OK))
+    {
+        if (sigprocmask(SIG_SETMASK, &prior_signals, NULL) != 0) error = BQ_IO;
+        handoff_blocked = false;
+    }
+    if (transport_stop)
+    {
+        bq_worker_cancel_signal = 1;
+        bq_worker_shutdown_signal = 1;
+    }
     BqWorkerLease lease = {.descriptor = -1};
-    BqWorkerFinalization finalization = {0};
+    BqWorkerFinalization finalization = {.config = config, .result_directory = -1};
+    BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
     bool launched = false;
     bool instance_bound = false;
     BqJob* job = *id ? bq_job(&queue->state, *id) : NULL;
@@ -1353,6 +3139,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
             }
         }
     }
+    if (error == BQ_OK && recovering && production && job && job->phase >= BQ_FINALIZING)
+        error = bq_worker_result_open(config, job, &finalization, false);
     if (error == BQ_OK && recovering)
         error = bq_worker_recover(queue, config, backend, lease_path, current_boot, job, &lease,
                                   &finalization);
@@ -1361,6 +3149,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     u64 token = 0;
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
     if (!recovering) job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
+    if (error == BQ_OK && !recovering && job) error = bq_worker_result_open(config, job, &finalization, true);
     char unit[BQ_WORKER_UNIT_CAP];
     if (error == BQ_OK && !recovering && (!job || !bq_worker_unit_name(unit, job->id, job->token))) error = BQ_WORKER_MISMATCH;
     if (error == BQ_OK && !recovering) error = bq_worker_record_write(queue, job, current_boot, unit);
@@ -1371,10 +3160,37 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                                                      BQ_WORKER_CANCEL_SIGNAL, &finalization);
         recovering = true;
     }
-    int old_flags = error == BQ_OK && !recovering ? fcntl(lease.descriptor, F_GETFD) : -1;
-    if (error == BQ_OK && !recovering && (old_flags < 0 || fcntl(lease.descriptor, F_SETFD, old_flags & ~FD_CLOEXEC) != 0)) error = BQ_IO;
     char unit_option[128], cpu_property[64], memory_property[64], swap_property[64], tasks_property[64], runtime_property[64];
-    char lease_fd[32];
+    char queue_property[BQ_PATH_CAP * 2 + 64], installed_property[BQ_PATH_CAP + 64];
+    char workspace_property[BQ_PATH_CAP + 64], protect_property[64], tmp_property[64];
+    char devices_property[64], privileges_property[64], suid_property[64];
+    char home_property[64], cgroups_property[64], tunables_property[64], modules_property[64];
+    char kernel_logs_property[64], clock_property[64], hostname_property[64], proc_property[64];
+    char personality_property[64], write_execute_property[64], ipc_property[64], keyring_property[64];
+    char families_property[64], namespaces_property[64], realtime_property[64], architecture_property[64];
+    char syscall_property[64], syscall_error_property[64], network_property[64];
+    char job_id[32], attempt_token[32], workspace_root[BQ_PATH_CAP + 1], result_root[BQ_PATH_CAP + 1];
+    char base_revision_text[65], candidate_revision_text[65];
+    String8 base_revision = {0}, candidate_revision = {0};
+    if (error == BQ_OK && !recovering)
+    {
+        int workspace_length = bq_worker_text(config->workspace_root, workspace_root, sizeof(workspace_root)) ?
+                               (int)strlen(workspace_root) : -1;
+        int result_length = finalization.result_root[0] ? snprintf(result_root, sizeof(result_root), "%s", finalization.result_root) : -1;
+        int job_length = snprintf(job_id, sizeof(job_id), "%" PRIu64, (uint64_t)job->id);
+        int token_length = snprintf(attempt_token, sizeof(attempt_token), "%" PRIu64, (uint64_t)job->token);
+        base_revision = bq_field(&job->request, 3);
+        candidate_revision = bq_field(&job->request, 4);
+        if (workspace_length <= 0 || (size_t)workspace_length >= sizeof(workspace_root) || result_length <= 0 ||
+            (size_t)result_length >= sizeof(result_root) || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
+            token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) || !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
+            !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
+        {
+            error = BQ_WORKSPACE_MISMATCH;
+        }
+    }
+    if (error == BQ_OK && !recovering && production && !config->backend)
+        error = bq_worker_lease_handoff_open(result_root, finalization.result_directory, &handoff) ? BQ_OK : BQ_IO;
     if (error == BQ_OK && !recovering)
     {
         snprintf(unit_option, sizeof(unit_option), "--unit=%s", unit);
@@ -1383,15 +3199,61 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         snprintf(swap_property, sizeof(swap_property), "--property=MemorySwapMax=%" PRIu64, (uint64_t)config->limits.memory_swap_max);
         snprintf(tasks_property, sizeof(tasks_property), "--property=TasksMax=%" PRIu64, (uint64_t)config->limits.tasks_max);
         snprintf(runtime_property, sizeof(runtime_property), "--property=RuntimeMaxSec=%" PRIu64 "us", (uint64_t)config->limits.runtime_max_usec);
-        snprintf(lease_fd, sizeof(lease_fd), "%d", lease.descriptor);
-        char const* arguments[] = {BQ_SYSTEMD_RUN, "--quiet", "--scope", unit_option, "--slice=buster-bench.slice",
+        int queue_length = snprintf(queue_property, sizeof(queue_property), "--property=InaccessiblePaths=%s %s",
+                                     production ? queue_root : workspace_root, lease_path);
+        char installed_text[BQ_PATH_CAP + 1];
+        bool installed_valid = bq_worker_text(config->installed_root, installed_text, sizeof(installed_text));
+        char const* installed_parts[] = {"--property=ReadOnlyPaths=", installed_text};
+        int installed_length = installed_valid ? bq_worker_join_text(installed_property, sizeof(installed_property),
+                                                                       installed_parts, BUSTER_ARRAY_LENGTH(installed_parts)) : -1;
+        int workspace_property_length = snprintf(workspace_property, sizeof(workspace_property),
+                                                  "--property=ReadWritePaths=%s", workspace_root);
+        snprintf(protect_property, sizeof(protect_property), "--property=ProtectSystem=strict");
+        snprintf(tmp_property, sizeof(tmp_property), "--property=PrivateTmp=yes");
+        snprintf(devices_property, sizeof(devices_property), "--property=PrivateDevices=yes");
+        snprintf(privileges_property, sizeof(privileges_property), "--property=NoNewPrivileges=yes");
+        snprintf(suid_property, sizeof(suid_property), "--property=RestrictSUIDSGID=yes");
+        snprintf(home_property, sizeof(home_property), "--property=ProtectHome=yes");
+        snprintf(cgroups_property, sizeof(cgroups_property), "--property=ProtectControlGroups=yes");
+        snprintf(tunables_property, sizeof(tunables_property), "--property=ProtectKernelTunables=yes");
+        snprintf(modules_property, sizeof(modules_property), "--property=ProtectKernelModules=yes");
+        snprintf(kernel_logs_property, sizeof(kernel_logs_property), "--property=ProtectKernelLogs=yes");
+        snprintf(clock_property, sizeof(clock_property), "--property=ProtectClock=yes");
+        snprintf(hostname_property, sizeof(hostname_property), "--property=ProtectHostname=yes");
+        snprintf(proc_property, sizeof(proc_property), "--property=ProtectProc=invisible");
+        snprintf(personality_property, sizeof(personality_property), "--property=LockPersonality=yes");
+        snprintf(write_execute_property, sizeof(write_execute_property), "--property=MemoryDenyWriteExecute=yes");
+        snprintf(ipc_property, sizeof(ipc_property), "--property=RemoveIPC=yes");
+        snprintf(keyring_property, sizeof(keyring_property), "--property=KeyringMode=private");
+        snprintf(families_property, sizeof(families_property), "--property=RestrictAddressFamilies=AF_UNIX");
+        snprintf(namespaces_property, sizeof(namespaces_property), "--property=RestrictNamespaces=yes");
+        snprintf(realtime_property, sizeof(realtime_property), "--property=RestrictRealtime=yes");
+        snprintf(architecture_property, sizeof(architecture_property), "--property=SystemCallArchitectures=native");
+        snprintf(syscall_property, sizeof(syscall_property), "--property=SystemCallFilter=@system-service");
+        snprintf(syscall_error_property, sizeof(syscall_error_property), "--property=SystemCallErrorNumber=EPERM");
+        snprintf(network_property, sizeof(network_property), "--property=PrivateNetwork=yes");
+        char const* arguments[] = {BQ_SYSTEMD_RUN, "--quiet", "--wait", "--service-type=exec",
+            "--uid=buster-bench", "--gid=buster-bench", unit_option, "--slice=buster-bench.slice",
             "--property=KillMode=control-group", "--property=SendSIGKILL=yes", "--property=TimeoutStopSec=10s",
             cpu_property, memory_property, swap_property, tasks_property, runtime_property,
-            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, lease_fd, NULL};
-        error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
+            queue_property, installed_property, workspace_property, protect_property, tmp_property, devices_property,
+            privileges_property, suid_property, home_property, cgroups_property, tunables_property, modules_property,
+            kernel_logs_property, clock_property, hostname_property, proc_property, personality_property,
+            write_execute_property, ipc_property, keyring_property, families_property, namespaces_property,
+            realtime_property, architecture_property, syscall_property, syscall_error_property, network_property,
+            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, job_id, attempt_token, workspace_root,
+            base_revision_text, candidate_revision_text, result_root, NULL};
+        error = queue_length > 0 && (u32)queue_length < sizeof(queue_property) && installed_length > 0 &&
+                (u32)installed_length < sizeof(installed_property) && workspace_property_length > 0 &&
+                (u32)workspace_property_length < sizeof(workspace_property) ?
+                backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1) : BQ_CONFIGURATION_MISMATCH;
         launched = error == BQ_OK;
     }
-    if (!recovering && old_flags >= 0) fcntl(lease.descriptor, F_SETFD, old_flags);
+    if (error == BQ_OK && !recovering && handoff.listener >= 0)
+    {
+        error = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, job->id, job->token);
+        if (error == BQ_OK) bq_worker_lease_release(&lease);
+    }
     BqWorkerObserved observed = {0};
     BqWorkerObserved identity = {0};
     if (error == BQ_OK && !recovering) error = backend->observe(backend, unit, &observed,
@@ -1511,6 +3373,24 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         {
             BqError evidence_reason = error == BQ_CLEANUP_FAILED ? BQ_CLEANUP_FAILED :
                                       error == BQ_RESOURCE_MISMATCH ? BQ_RESOURCE_MISMATCH : BQ_WORKER_MISMATCH;
+            if (production && job->result_bound)
+            {
+                BqError retained = bq_worker_result_binding_validate(job);
+                if (retained != BQ_OK && error == BQ_OK) error = retained;
+            }
+            else if (production && finalization.result_directory >= 0)
+            {
+                BqOutcome retained_outcome = signal_cancelled ? BQ_CANCELLED : BQ_FAILED;
+                BqError retained_reason = signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL : evidence_reason;
+                BqError retained = bq_worker_result_evidence(job, retained_outcome, retained_reason, &finalization);
+                if (retained == BQ_OK && !job->result_bound)
+                    retained = bq_worker_result_failure_artifacts(job, retained_outcome, retained_reason, &finalization);
+                if (retained == BQ_OK && finalization.result_bound && !job->result_bound)
+                    retained = bq_result_bind(queue, job, string_from_pointer(finalization.result_root),
+                                              finalization.result_digest, finalization.bundle_digest,
+                                              finalization.full_digest);
+                if (retained != BQ_OK && error == BQ_OK) error = retained;
+            }
             BqError prior = bq_failure_evidence(queue, job);
             BqError evidence = prior == BQ_NOT_FOUND ? bq_failure_write(queue, job, evidence_reason) :
                                prior == BQ_CORRUPT || prior == BQ_IO ? prior : BQ_OK;
@@ -1531,22 +3411,41 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         snprintf(config->quarantine->lease_path, sizeof(config->quarantine->lease_path), "%s", lease_path);
         lease.descriptor = -1;
     }
+    bq_worker_lease_handoff_close(&handoff);
     bq_worker_lease_release(&lease);
+    if (finalization.result_directory >= 0) close(finalization.result_directory);
+    if (handoff_blocked && sigprocmask(SIG_SETMASK, &prior_signals, NULL) != 0) error = BQ_IO;
     return error;
 }
 
-BqError bq_worker_unit(String8 lease_file, int lease_fd)
+BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 workspace_root,
+                       String8 base_revision, String8 candidate_revision, String8 result_root)
 {
     char path[BQ_PATH_CAP + 1];
+    char job_id_text[32], attempt_token_text[32], workspace_text[BQ_PATH_CAP + 1], base_text[65], candidate_text[65], result_text[BQ_PATH_CAP + 1];
     BqWorkerLease lease = {.descriptor = -1};
-    BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' || lease_fd < 3 ? BQ_BAD_REQUEST : BQ_OK;
-    if (error == BQ_OK && bq_worker_lease_adopt(path, lease_fd, &lease) != 0) error = BQ_CONFIGURATION_MISMATCH;
+    BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' ||
+                    !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
+                    !bq_worker_text(workspace_root, workspace_text, sizeof(workspace_text)) || workspace_text[0] != '/' ||
+                    !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||
+                    !bq_worker_text(result_root, result_text, sizeof(result_text)) || result_text[0] != '/' ? BQ_BAD_REQUEST : BQ_OK;
+    if (error == BQ_OK && bq_worker_lease_handoff_receive(lease_file, result_root, job_id, attempt_token, &lease) != BQ_OK)
+        error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK)
+    {
+        int flags = fcntl(lease.descriptor, F_GETFD);
+        if (flags < 0 || fcntl(lease.descriptor, F_SETFD, flags & ~FD_CLOEXEC) != 0)
+        {
+            error = BQ_IO;
+        }
+    }
     if (error == BQ_OK)
     {
         raise(SIGSTOP);
-        /* PR3 installs the fixed recipe executor here.  Returning unsupported
-         * is intentional and can never be interpreted as a measurement. */
-        error = BQ_UNSUPPORTED;
+        char const* arguments[] = {BQ_RECIPE_EXECUTABLE, "bench_service_recipe", job_id_text, attempt_token_text,
+                                   workspace_text, base_text, candidate_text, result_text, NULL};
+        execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
+        error = BQ_CONFIGURATION_MISMATCH;
     }
     bq_worker_lease_release(&lease);
     return error;
@@ -1559,6 +3458,12 @@ void bq_worker_backend_systemd(BqWorkerBackend* backend)
     *backend = (BqWorkerBackend){0};
 }
 
+BqError bq_worker_result_binding_validate(BqJob const* job)
+{
+    (void)job;
+    return BQ_UNSUPPORTED;
+}
+
 BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
 {
     (void)queue;
@@ -1567,10 +3472,16 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     return BQ_UNSUPPORTED;
 }
 
-BqError bq_worker_unit(String8 lease_file, int lease_fd)
+BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 workspace_root,
+                       String8 base_revision, String8 candidate_revision, String8 result_root)
 {
     (void)lease_file;
-    (void)lease_fd;
+    (void)job_id;
+    (void)attempt_token;
+    (void)workspace_root;
+    (void)base_revision;
+    (void)candidate_revision;
+    (void)result_root;
     return BQ_UNSUPPORTED;
 }
 
