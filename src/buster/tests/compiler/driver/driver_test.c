@@ -9704,6 +9704,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // path, so the fixture runs the full lane checks natively and must
     // still produce objects for every cross target.
     buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_half_element_path"), false);
+    // A binary16 vector lane has no packed arithmetic on either backend --
+    // it needs AVX512-FP16's ADDPH, which is not selected here -- so the
+    // canonical emitters must refuse it rather than fall through to the
+    // binary32/binary64 encoding and add the vector as if its lanes were
+    // twice as wide. The `float` row beside it is the control: the widths
+    // that do have instructions still emit.
+    {
+        struct
+        {
+            String8 element;
+            bool supported;
+        } half_element_rows[] = {
+            {S8("_Float16"), false},
+            {S8("float"), true},
+            {S8("double"), true},
+            {S8("short"), true},
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(half_element_rows); row += 1)
+        {
+            String8 half_element_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-half-element"),
+                                                                          string_format(arguments->arena, S8("-{u32}.c"), row));
+            String8 half_element_source =
+                string_format(arguments->arena,
+                              S8("typedef {S8} lanes __attribute__((vector_size(16)));\nvoid add(lanes* p, lanes* q) {{ *p = *p + *q; }}\n"),
+                              half_element_rows[row].element);
+            BUSTER_TEST(arguments, file_write(half_element_source_path, BUSTER_SLICE_TO_BYTE_SLICE(half_element_source)));
+            String8 half_element_allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 half_element_targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu")};
+            for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(half_element_targets); target_index += 1)
+            {
+                for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(half_element_allocators); allocator += 1)
+                {
+                    String8 half_element_object = buster_test_temporary_path(
+                        arguments->arena, S8("buster-c-vector-half-element"),
+                        string_format(arguments->arena, S8("-{u32}-{u32}-{u32}.o"), row, target_index, allocator));
+                    String8 half_element_command_line[] = {
+                        S8("-c"), half_element_allocators[allocator], S8("-target"), half_element_targets[target_index], S8("-o"),
+                        half_element_object, half_element_source_path,
+                    };
+                    CompilerDriverResult half_element = compiler_driver_execute_invocation(
+                        arguments->arena,
+                        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(half_element_command_line)));
+                    if ((half_element.error == COMPILER_DRIVER_ERROR_NONE) != half_element_rows[row].supported)
+                    {
+                        arguments->show(arguments, S8("vector half element {S8} target {S8} allocator {S8}: error {u32}\n"),
+                                        half_element_rows[row].element, half_element_targets[target_index], half_element_allocators[allocator],
+                                        (u32)half_element.error);
+                    }
+                    BUSTER_TEST(arguments, (half_element.error == COMPILER_DRIVER_ERROR_NONE) == half_element_rows[row].supported);
+                    if (!half_element_rows[row].supported)
+                    {
+                        BUSTER_TEST(arguments, half_element.error == COMPILER_DRIVER_ERROR_CODEGEN && !half_element.has_object);
+                    }
+                }
+            }
+        }
+    }
+    buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_initializer_path"), false);
     String8 c_vector_initializer_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-initializer"),
 #if BUSTER_WINDOWS

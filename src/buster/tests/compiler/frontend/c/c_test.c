@@ -15330,6 +15330,211 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     return result;
 }
 
+// `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
+// only real floating type narrower than `float` this frontend has. The three
+// groups below are the contract: the layout every supported target gives it,
+// the binary16 encoding of its constants -- every expected byte string here
+// was taken from clang 18 compiling the same source -- and the specifier
+// combinations that are not a type at all.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    // The layout does not vary with the data model: binary16 is two naturally
+    // aligned bytes on LP64, LLP64 and Apple alike, and the complex and
+    // vector spellings are built out of it. The `long double` of each of
+    // these targets differs, which is what makes them worth asking.
+    String8 layout_targets[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("aarch64-apple-macos"),
+    };
+    String8 layout_source = S8("_Static_assert(sizeof(_Float16) == 2, \"size\");\n"
+                               "_Static_assert(_Alignof(_Float16) == 2, \"alignment\");\n"
+                               "_Static_assert(sizeof(_Float16 _Complex) == 4, \"complex size\");\n"
+                               "_Static_assert(_Alignof(_Float16 _Complex) == 2, \"complex alignment\");\n"
+                               "_Static_assert(sizeof(__SIZEOF_FLOAT16__ + 0) == sizeof(int), \"macro\");\n"
+                               "_Static_assert(__SIZEOF_FLOAT16__ == 2, \"sizeof macro\");\n"
+                               "_Static_assert(__FLT16_MANT_DIG__ == 11, \"mantissa digits\");\n"
+                               "_Static_assert(sizeof(__FLT16_MAX__) == 2, \"suffixed limit\");\n"
+                               "typedef _Float16 half32 __attribute__((__vector_size__(64), __aligned__(64)));\n"
+                               "_Static_assert(sizeof(half32) == 64, \"vector size\");\n"
+                               "_Static_assert(_Alignof(half32) == 64, \"vector alignment\");\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(layout_targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult parsed = target_parse_triple(layout_targets[target_index]);
+        BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed.error == TARGET_PARSE_ERROR_NONE)
+        {
+            TargetDataLayout layout = target_data_layout(parsed.target);
+            BUSTER_TEST(arguments, layout.float16_type.size == 2 && layout.float16_type.alignment == 2 && layout.float16_type.bit_width == 16);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, layout_source, S8("float16-layout.c"), parsed.target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        }
+        scratch_end(temporary);
+    }
+
+    // The two reductions issue #631 records: the scalar parameter whose body
+    // reported its own parameter undeclared, and the 32-lane vector the
+    // resource header builds `__m512h` out of. Both are `static __inline__`,
+    // so they are analyzed and then never emitted, which is exactly how the
+    // header's intrinsic bodies arrive.
+    String8 reductions[] = {
+        S8("static __inline__ _Float16 f(_Float16 a) { return a; }\n"),
+        S8("typedef _Float16 half32 __attribute__((__vector_size__(64), __aligned__(64)));\n"
+           "static __inline__ _Float16 g(half32 a) { return a[0]; }\n"),
+        S8("static __inline__ float h(_Float16 _Complex a) { return (float)__real__ a; }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(reductions); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, reductions[case_index], S8("float16-reduction.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+
+    // Constants, in the encoding clang writes for the same spellings. The
+    // interesting rows are the boundaries: the largest finite value, the
+    // first magnitude that rounds to infinity, the smallest subnormal, the
+    // exact half of it that ties to even and reaches zero, and a tie between
+    // two normals that rounds up to the even significand.
+    struct
+    {
+        String8 source;
+        String8 bytes;
+    } constants[] = {
+        {S8("_Float16 values[] = {0.0, -0.0, 1.0, -1.0, 0.5, 1.5};"), S8("\x00\x00\x00\x80\x00\x3c\x00\xbc\x00\x38\x00\x3e")},
+        {S8("_Float16 values[] = {0.1, 3.141592653589793, 0.333333333333};"), S8("\x66\x2e\x48\x42\x55\x35")},
+        {S8("_Float16 values[] = {65504.0, 65519.0, 65520.0, 1e10, -1e10};"), S8("\xff\x7b\xff\x7b\x00\x7c\x00\x7c\x00\xfc")},
+        {S8("_Float16 values[] = {6.103515625e-05, 6.0975551605224609e-05, 5.960464477539063e-08, 2.9802322387695312e-08};"),
+         S8("\x00\x04\xff\x03\x01\x00\x00\x00")},
+        {S8("_Float16 values[] = {2048.0, 2049.0, 2050.0, 2051.0};"), S8("\x00\x68\x00\x68\x01\x68\x02\x68")},
+        // The C23 suffix: the literal has the type, so no conversion stands
+        // between the spelling and these bytes.
+        {S8("_Float16 values[] = {1.5f16, 0.1f16, 65504.0F16, 65520.0f16, 1e-8f16, 0x1p-24f16};"),
+         S8("\x00\x3e\x66\x2e\xff\x7b\x00\x7c\x00\x00\x01\x00")},
+        // An integer source rounds at the destination's precision, and one
+        // past the largest finite half becomes an infinity.
+        {S8("_Float16 values[] = {1, -1, 100, 65504, 65505, 100000, -100000};"),
+         S8("\x00\x3c\x00\xbc\x40\x56\xff\x7b\xff\x7b\x00\x7c\x00\xfc")},
+        // A cast, a chain of conversions through wider types, and a const
+        // object read back all land on the same encoding.
+        {S8("const _Float16 seed = 3.5;\n_Float16 values[] = {(_Float16)(float)(double)0.1, seed, -0.0};"), S8("\x66\x2e\x00\x43\x00\x80")},
+    };
+    TargetParseResult constant_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, constant_target.error == TARGET_PARSE_ERROR_NONE);
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(constants); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, constants[case_index].source, S8("float16-constants.c"), constant_target.target,
+                                                     &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        IrGlobal* values = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("values")) : 0;
+        BUSTER_TEST(arguments, values && values->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+        BUSTER_TEST(arguments, values && values->bytes.length == constants[case_index].bytes.length);
+        if (values && values->bytes.pointer && values->bytes.length == constants[case_index].bytes.length)
+            BUSTER_TEST(arguments, memcmp(values->bytes.pointer, constants[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
+        scratch_end(temporary);
+    }
+
+    // A scalar global takes the FLOAT initializer rather than the byte one,
+    // so its encoding is checked where it is stored: as the sixteen bits, not
+    // the low two bytes of a binary64 the size rule would then truncate.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("_Float16 scalar = 1.5;"), S8("float16-scalar.c"), constant_target.target,
+                                                     &preprocess, &parse);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        IrGlobal* scalar = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("scalar")) : 0;
+        BUSTER_TEST(arguments, scalar && scalar->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+        BUSTER_TEST(arguments, scalar && scalar->initializer_bits == 0x3e00);
+        IrType* scalar_type = scalar && lowered.program ? ir_type_from_id(&lowered.program->types, scalar->type) : 0;
+        BUSTER_TEST(arguments, scalar_type && scalar_type->kind == IR_TYPE_FLOAT && scalar_type->bit_width == 16 && scalar_type->layout.size == 2);
+        scratch_end(temporary);
+    }
+
+    // The usual arithmetic conversions: `_Float16` ranks below every other
+    // real floating type and above every integer one, so only an operation
+    // with no wider float operand keeps the half type.
+    struct
+    {
+        String8 source;
+        u64 size;
+    } ranks[] = {
+        {S8("_Float16 a; _Float16 b; char rank[sizeof(a + b)];"), 2},
+        {S8("_Float16 a; int b; char rank[sizeof(a * b)];"), 2},
+        {S8("_Float16 a; unsigned long long b; char rank[sizeof(a - b)];"), 2},
+        {S8("_Float16 a; float b; char rank[sizeof(a + b)];"), 4},
+        {S8("_Float16 a; double b; char rank[sizeof(a + b)];"), 8},
+        {S8("_Float16 a; char rank[sizeof(+a)];"), 2},
+        {S8("_Float16 a; char rank[sizeof((_Float16)1.0)];"), 2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(ranks); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, ranks[case_index].source, S8("float16-rank.c"), constant_target.target, &preprocess,
+                                                     &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        IrGlobal* rank = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("rank")) : 0;
+        IrType* rank_type = rank && lowered.program ? ir_type_from_id(&lowered.program->types, rank->type) : 0;
+        BUSTER_TEST(arguments, rank_type && rank_type->kind == IR_TYPE_ARRAY && rank_type->layout.size == ranks[case_index].size);
+        scratch_end(temporary);
+    }
+
+    // `_Float16` combines with nothing but `_Complex`. Each of these names no
+    // type, so the specifier scan refuses it rather than silently dropping a
+    // word; a type name is where that refusal is observable, because a
+    // declaration whose specifiers name no type has its own recovery.
+    String8 invalid[] = {
+        S8("_Static_assert(sizeof(long _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(unsigned _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(signed _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 int) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 float) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 double) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(short _Float16) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 char) == 2, \"x\");"),
+        S8("_Static_assert(sizeof(long _Float16 _Complex) == 4, \"x\");"),
+        S8("_Static_assert(sizeof(_Float16 _Complex float) == 4, \"x\");"),
+        S8("_Static_assert(_Alignof(unsigned _Float16) == 2, \"x\");"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index],
+                                                    (CPreprocessOptions){
+                                                        .target = constant_target.target,
+                                                        .data_layout = target_data_layout(constant_target.target),
+                                                    });
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16736,6 +16941,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
+    BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
