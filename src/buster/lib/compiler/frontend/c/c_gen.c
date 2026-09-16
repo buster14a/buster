@@ -267,22 +267,22 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             else if (depth == 2 && inner.kind == C_TOKEN_IDENTIFIER)
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                                              C_SYMBOL_WELL_KNOWN_BIT(WEAK) | C_SYMBOL_WELL_KNOWN_BIT(WEAK_GNU));
+                                                              C_ATTRIBUTE_WORDS_WEAK);
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                              C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU)))
+                                              C_ATTRIBUTE_WORDS_CONSTRUCTOR))
                 {
                     binding->is_constructor = true;
                     binding->constructor_priority = c_declaration_initializer_priority(preprocess, item, end);
                 }
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                              C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU)))
+                                              C_ATTRIBUTE_WORDS_DESTRUCTOR))
                 {
                     binding->is_destructor = true;
                     binding->destructor_priority = c_declaration_initializer_priority(preprocess, item, end);
                 }
                 ByteSlice decoded = {0};
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                              C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU)) &&
+                                              C_ATTRIBUTE_WORDS_ALIAS) &&
                     item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                     preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
                     c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
@@ -1340,7 +1340,7 @@ CType* c_type_from_id(CParseResult* parse, CTypeId id)
 // it.
 BUSTER_C_INTERNAL bool c_ir_noreturn_spelling(String8 spelling)
 {
-    return string_equal(spelling, S8("noreturn")) || string_equal(spelling, S8("__noreturn__")) || string_equal(spelling, S8("_Noreturn"));
+    return c_attribute_noreturn_word(spelling) || string_equal(spelling, S8("_Noreturn"));
 }
 
 /* Whether an attribute in [start, end) marks the declaration noreturn. The
@@ -47411,7 +47411,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // one function of its own and eBPF has no startup at all -- so there the
     // attribute is a refusal rather than a silently dropped marker, which is
     // what it was everywhere before issue 771.
-    bool initializer_target = target.cpu_arch != CPU_ARCH_WASM64 && target.cpu_arch != CPU_ARCH_BPFEL;
+    bool initializer_target = c_attribute_native_binding_target(target);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
