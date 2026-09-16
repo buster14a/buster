@@ -13,23 +13,43 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 0
+          ref: e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b
           persist-credentials: false
-      - name: Export only the two pinned histories
+      - name: Verify pinned checkouts and export admitted header bytes
         shell: bash
         run: |
           set -euo pipefail
-          git branch rebase-main b8dd9857c0b8b5dcfc4f1e45159cf4155d26b19f
-          git branch rebase-original e6ed9e0a59a18566b9148a8fe1f8f6bbe844473b
-          mkdir -p "$RUNNER_TEMP/pr645-history"
-          git bundle create "$RUNNER_TEMP/pr645-history/history.bundle" rebase-main rebase-original
-          git bundle verify "$RUNNER_TEMP/pr645-history/history.bundle"
-          git log --oneline --no-merges rebase-main..rebase-original > "$RUNNER_TEMP/pr645-history/remaining-commits.txt"
-          git diff --stat rebase-main...rebase-original > "$RUNNER_TEMP/pr645-history/original-diff-stat.txt"
-          sha256sum "$RUNNER_TEMP/pr645-history/history.bundle"
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, sys, tarfile
+          sys.path.insert(0, 'tools')
+          import native_retirement_external as external
+          root = pathlib.Path.cwd()
+          descriptor = root / 'docs/native-retirement-dependencies-v1.json'
+          manifest = json.loads(descriptor.read_text())
+          for item in manifest['external_checkouts']:
+              checkout = root / item['path']
+              checkout.mkdir(parents=True)
+              def git(*args):
+                  subprocess.run(['git', '-C', str(checkout), *args], check=True)
+              git('init', '-q')
+              git('remote', 'add', 'origin', 'https://github.com/' + item['repository'] + '.git')
+              git('fetch', '--depth=1', 'origin', item['revision'])
+              git('checkout', '--detach', 'FETCH_HEAD')
+          result = external.prepare(descriptor, root)
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr645-external'
+          output.mkdir()
+          (output / 'original-prepare.json').write_text(json.dumps(result, sort_keys=True) + '\n')
+          records, _ = external.parse_manifest(manifest)
+          sources = sorted({r.source for r in records if r.source.startswith('external/')})
+          with tarfile.open(output / 'external-headers.tar.gz', 'w:gz') as archive:
+              for source in sources:
+                  archive.add(root / source, arcname=source, recursive=False)
+          print(json.dumps(result, sort_keys=True))
+          print('exported_sources=' + str(len(sources)))
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr645-rebase-history
-          path: ${{ runner.temp }}/pr645-history/
+          name: pr645-pinned-external-headers
+          path: ${{ runner.temp }}/pr645-external/
           retention-days: 1
           if-no-files-found: error
