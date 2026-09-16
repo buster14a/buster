@@ -183,11 +183,17 @@ jobs:
       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
       - name: Bootstrap wrapper regression tests
         id: bootstrap_wrappers
-        if: ${{ !cancelled() && matrix.shard == 'release' && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
+          # Preserve the wrapper lifecycle guard on every shard, but run its
+          # expensive regression suite only in its canonical Release owner.
+          if [[ "$BUSTER_MATRIX_SHARD" == checks ]]; then
+            printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
 
@@ -219,6 +225,8 @@ jobs:
           ZIG_TARGET: ${{ matrix.zig_target }}
         run: |
           set -euo pipefail
+          # This step also runs without the Release-only preflight steps.
+          mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
       # Publish immediately after verification, before compiler build/tests.
@@ -308,7 +316,7 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ format('{0}zig {1}', matrix.shard == 'release' && 'workflow_tools bootstrap_wrappers ' || '', matrix.platform == 'unix' && 'combinations_unix' || 'combinations_windows') }}
+          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows') || (matrix.platform == 'unix' && 'zig combinations_unix' || 'zig combinations_windows') }}
           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json

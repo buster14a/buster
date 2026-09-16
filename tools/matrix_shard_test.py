@@ -239,6 +239,71 @@ class NativePartitionTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
 
 
+class WorkflowSetupTests(unittest.TestCase):
+    """Run the actual step bodies with controlled tools and empty log roots."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.shell = shutil.which("bash")
+        if os.name == "nt":
+            # Match the existing CI tools harness: System32 bash is WSL,
+            # not the Git Bash used by the workflow's shell: bash steps.
+            git = shutil.which("git")
+            self.assertIsNotNone(git, "Git for Windows is a CI prerequisite")
+            self.shell = next((str(parent / "bin/bash.exe")
+                               for parent in Path(git).resolve().parents
+                               if (parent / "bin/bash.exe").is_file()), None)
+        if not self.shell:
+            self.fail("The desktop workflow requires bash")
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
+        self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
+                                RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
+                                ZIG_TARGET="fixture", FIXTURE_EXIT="0")
+
+    def run_step(self, name):
+        body = self.steps[name].split("        run: |\n", 1)[1]
+        script = "\n".join(line[10:] for line in body.splitlines() if line.startswith("          "))
+        return subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                              cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
+
+    def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "ci_zig.py").write_text("import os, sys\nprint('ZIG_SETUP fixture')\nsys.exit(int(os.environ['FIXTURE_EXIT']))\n")
+        for code in (0, 7):
+            with self.subTest(exit_code=code):
+                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
+                self.environment["FIXTURE_EXIT"] = str(code)
+                result = self.run_step("Install verified Zig")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn("ZIG_SETUP fixture", (self.root / "buster-ci/zig.log").read_text())
+
+    def test_wrapper_suite_executes_only_in_release_and_keeps_failure_status(self):
+        tests = self.root / "tests"
+        tests.mkdir()
+        (tests / "bootstrap_wrapper_test.py").write_text(
+            "import os, pathlib, sys\npathlib.Path('wrapper-called').touch()\n"
+            "print('BOOTSTRAP_TEST fixture')\nsys.exit(int(os.environ['FIXTURE_EXIT']))\n")
+        for shard, code in (("checks", 7), ("release", 0), ("release", 7)):
+            with self.subTest(shard=shard, exit_code=code):
+                marker = self.root / "wrapper-called"
+                if marker.exists():
+                    marker.unlink()
+                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
+                self.environment.update(BUSTER_MATRIX_SHARD=shard, FIXTURE_EXIT=str(code))
+                result = self.run_step("Bootstrap wrapper regression tests")
+                self.assertEqual(result.returncode, 0 if shard == "checks" else code, result.stdout + result.stderr)
+                self.assertEqual(marker.exists(), shard == "release")
+                if shard == "checks":
+                    self.assertIn("owned-by-release-shard", result.stdout)
+                    self.assertFalse((self.root / "buster-ci/bootstrap-wrapper.log").exists())
+                else:
+                    self.assertIn("BOOTSTRAP_TEST fixture", (self.root / "buster-ci/bootstrap-wrapper.log").read_text())
+
+
 class CompletionGateTests(unittest.TestCase):
     def sample(self):
         jobs = []

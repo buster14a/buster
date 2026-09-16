@@ -38,6 +38,12 @@ Unix native mode/differential suites still share their own pre-existing
 producer; mobile, UEFI and the independent analyzer jobs are unchanged.
 Intel macOS retains its existing direct-matrix/self-host exception.
 
+The wrapper step keeps its checkout/cancellation lifecycle guard on both
+shards. Its checks-shard body reports `owned-by-release-shard` and exits
+without running the suite or writing a wrapper-test verdict; only Release
+requires that verdict. Verified-Zig setup creates its own log directory and
+does not depend on a Release-only preflight side effect.
+
 Shards necessarily duplicate runner allocation, checkout, the small hosted
 build-driver bootstrap, tool discovery and verified-Zig setup. They keep full
 compiler capability detection/re-probing against the original policy in both
