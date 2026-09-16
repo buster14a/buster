@@ -3648,6 +3648,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
             }
         }
     }
+    ByteSlice narrow_observations[5] = {0};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(narrow_observations); variant += 1)
+    {
+        IrType narrow = {
+            .name = S8("same-narrow-name"),
+            .id = {.value = 0},
+            .element_type = IR_TYPE_ID_INVALID,
+            .return_type = IR_TYPE_ID_INVALID,
+            .unqualified_type = IR_TYPE_ID_INVALID,
+            .kind = IR_TYPE_FLOAT,
+            .bit_width = 16,
+            .float_format = variant == 1 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE,
+            .layout = {.size = 2, .alignment = 2, .resolved = true},
+        };
+        IrProgram narrow_program = {
+            .data_layout = target_data_layout(target_native),
+            .types = {.types = &narrow, .count = 1},
+        };
+        IrModule narrow_module = {.name = S8("narrow-format-probe")};
+        if (variant == 2) narrow_program.data_layout.bfloat16_type.alignment = 4;
+        if (variant == 3) narrow_program.data_layout.float16_type.alignment = 4;
+        String8 path = buster_test_temporary_path(arena, S8("bootstrap-narrow-float"), S8(".ir"));
+        BootstrapTrace trace = bootstrap_trace_open(arena, path, S8("canonical IR"));
+        BUSTER_TEST(arguments, !trace.failed);
+        bootstrap_trace_ir(&trace, &narrow_program, &narrow_module);
+        BUSTER_TEST(arguments, bootstrap_trace_close(&trace));
+        ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+        narrow_observations[variant] = bytes;
+        if (BUSTER_REQUIRE(arguments, bytes.pointer != 0 && bytes.length > 40))
+        {
+            BUSTER_TEST(arguments, memory_compare(bytes.pointer + bytes.length - 8, "BSTREND1", 8));
+            if (variant && BUSTER_REQUIRE(arguments, narrow_observations[0].pointer != 0))
+            {
+                ByteSlice first = narrow_observations[0];
+                bool equal = first.length == bytes.length && memory_compare(first.pointer, bytes.pointer, bytes.length);
+                BUSTER_TEST(arguments, variant == 4 ? equal : !equal);
+            }
+        }
+    }
     // Unsupported combinations fail before producing misleading empty traces.
     String8 bad_arguments[] = {S8("-fbootstrap-trace=unused"), S8("-E"), input};
     CompilerDriverResult rejected = compiler_driver_execute_invocation(arena,
