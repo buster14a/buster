@@ -103,6 +103,15 @@
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
   compilation and device/simulator execution remain separate CI gates.
+- On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
+  codesign deadline when the caller has not supplied one. This is separate
+  from the test-execution, boot, install, and shutdown deadlines. Local and
+  self-hosted defaults remain unchanged, and an explicit
+  `BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS` is preserved for launcher validation.
+  No signing retry or failure suppression is introduced. The policy and native
+  status propagation are covered by `python3 tests/ios_hosted_signing_budget_test.py`
+  in the mobile lifecycle workflow; actual Apple signing and simulator tests
+  remain a distinct native CI gate.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),

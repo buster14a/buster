@@ -64,6 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           /bin/bash --version
+          python3 tests/ios_hosted_signing_budget_test.py 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"
           bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"
       - name: Exercise Android monitor and batch status attribution
         id: android_status
@@ -84,7 +85,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**.\n\nReproduce: `bash tests/mobile_ci_scripts_test.sh` and `bash android/run_tests_test.sh` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**.\n\nReproduce: `python3 tests/ios_hosted_signing_budget_test.py`, `bash tests/mobile_ci_scripts_test.sh` and `bash android/run_tests_test.sh` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lifecycle log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -92,6 +93,7 @@ jobs:
           name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/mobile-lifecycle.log
+            ${{ runner.temp }}/ios-signing-budget.log
             ${{ runner.temp }}/android-status.log
             ${{ runner.temp }}/mobile-lifecycle-evidence/
           if-no-files-found: ignore
