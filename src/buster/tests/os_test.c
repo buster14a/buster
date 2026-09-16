@@ -648,6 +648,20 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Regression for #653: POSIX path helpers must accept bounded slices
+    // without reading past their length and must reject embedded NULs.
+    {
+        Arena* arena = arguments->arena;
+        char8 bounded[] = {'b', 'u', 's', 't', 'e', 'r', '-', '6', '5', '3', '-', 'm', 'i', 's', 's', 'i', 'n', 'g'};
+        BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){bounded, sizeof(bounded)}, true).length);
+        char8 invalid[] = {'a', 0, 'b'};
+        BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){invalid, sizeof(invalid)}, true).length);
+        BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){0}, true).length);
+        os_make_directory((String8){invalid, sizeof(invalid)});
+        os_make_directory((String8){0});
+        BUSTER_TEST(arguments, true);
+    }
+
     // Regression: draining captured stdout/stderr sequentially deadlocked when
     // the child filled one pipe while the parent blocked on the other. The
     // child writes far more than a pipe buffer to stderr before touching
