@@ -1,0 +1,82 @@
+--- bf16-before
++++ bf16-after
+@@ -94,33 +94,56 @@
+             "\x80\x00\x80\x00\x7f\x7f\x7f\x7f\x80\x7f\x80\x3f\x82\x3f\x81\x3f")},
+         {S8("__bf16 values[] = {((unsigned __int128)257 << 100), (((unsigned __int128)257 << 100) + 1)};"),
+          S8("\x80\x75\x81\x75")},
++        {S8("__bf16 values[] = {-0x1p-133, -0x1p-134, -0x1.0000000000001p-134, -0x1.fcp-127, -0x1.fep-127, -0x1p-126,"
++            " -0x1.fep127, -0x1.fefffffffffffp127, -0x1.ffp127, -0x1.01p0, -0x1.03p0, -0x1.0100000000001p0};"),
++         S8("\x01\x80\x00\x80\x01\x80\x7f\x80\x80\x80\x80\x80\x7f\xff\x7f\xff\x80\xff\x80\xbf\x82\xbf\x81\xbf")},
++        {S8("__bf16 values[] = {__builtin_inf(), -__builtin_inf(), __builtin_nan(\"\"), -__builtin_nan(\"\")};"),
++         S8("\x80\x7f\x80\xff\xc0\x7f\xc0\xff")},
++        {S8("__bf16 values[] = {-((__int128)257 << 100), -(((__int128)257 << 100) + 1), (unsigned __int128)-1};"),
++         S8("\x80\xf5\x81\xf5\x80\x7f")},
+     };
+     TargetParseResult constant_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+     BUSTER_TEST(arguments, constant_target.error == TARGET_PARSE_ERROR_NONE);
+     TargetDataLayout constant_layout = constant_target.error == TARGET_PARSE_ERROR_NONE ? target_data_layout(constant_target.target) : (TargetDataLayout){0};
+-    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(constants); case_index += 1)
+-    {
+-        for (u32 form = 0; form < 2; form += 1)
+-        {
+-            TemporalArena temporary = scratch_begin(0, 0);
+-            CPreprocessResult preprocess = c_preprocess(temporary.arena, constants[case_index].source,
+-                                                        (CPreprocessOptions){
+-                                                            .target = constant_target.target,
+-                                                            .data_layout = constant_layout,
+-                                                        });
+-            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+-            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-constants.c"), preprocess, syntax,
+-                                                            constant_target.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+-            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+-            BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+-            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+-            BUSTER_TEST(arguments, lowered.program != 0);
+-            IrGlobal* values = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("values")) : 0;
+-            BUSTER_TEST(arguments, values && values->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+-            BUSTER_TEST(arguments, values && values->bytes.length == constants[case_index].bytes.length);
+-            if (values && values->bytes.pointer && values->bytes.length == constants[case_index].bytes.length)
+-                BUSTER_TEST(arguments, memcmp(values->bytes.pointer, constants[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
+-            scratch_end(temporary);
++    // Encode the same source under all six target layouts and both frontend
++    // forms. The byte oracle includes signed boundaries, special values and
++    // signed/unsigned i128 cases, independently checked with Clang.
++    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(layout_targets); target_index += 1)
++    {
++        TargetParseResult parsed = target_parse_triple(layout_targets[target_index]);
++        BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
++        if (parsed.error == TARGET_PARSE_ERROR_NONE)
++        {
++            TargetDataLayout layout = target_data_layout(parsed.target);
++            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(constants); case_index += 1)
++            {
++                for (u32 form = 0; form < 2; form += 1)
++                {
++                    TemporalArena temporary = scratch_begin(0, 0);
++                    CPreprocessResult preprocess = c_preprocess(temporary.arena, constants[case_index].source,
++                                                                (CPreprocessOptions){
++                                                                    .target = parsed.target,
++                                                                    .data_layout = layout,
++                                                                });
++                    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
++                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bfloat16-constants.c"), preprocess, syntax,
++                                                                    parsed.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
++                    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
++                    BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
++                    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
++                    BUSTER_TEST(arguments, lowered.program != 0);
++                    if (lowered.program)
++                    {
++                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
++                    }
++                    IrGlobal* values = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("values")) : 0;
++                    BUSTER_TEST(arguments, values && values->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
++                    BUSTER_TEST(arguments, values && values->bytes.length == constants[case_index].bytes.length);
++                    if (values && values->bytes.pointer && values->bytes.length == constants[case_index].bytes.length)
++                        BUSTER_TEST(arguments, memcmp(values->bytes.pointer, constants[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
++                    scratch_end(temporary);
++                }
++            }
+         }
+     }
+ 

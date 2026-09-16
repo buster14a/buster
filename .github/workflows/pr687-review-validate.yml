@@ -1,0 +1,68 @@
+name: PR 687 integrated review validation
+on:
+  push:
+    branches: [codex/pr687-review-validation]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3be1d020ca33e9c52bc0afcf198c7ba4904c0c9c
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce reviewed integration tree and preserve candidate
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr687-evidence"
+          git config user.name 'PR 687 integration review'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config merge.conflictStyle merge
+          status=0
+          git merge --no-commit --no-ff 939041b3d6b4b5c773318a5b494a28a4d9b829f1 || status=$?
+          test "$status" -eq 1
+          python3 ../transport/.github/pr687-review/resolve.py | tee "$RUNNER_TEMP/pr687-evidence/resolutions.log"
+          tree=$(git write-tree)
+          commit=$(git commit-tree "$tree" -p 3be1d020ca33e9c52bc0afcf198c7ba4904c0c9c -p 939041b3d6b4b5c773318a5b494a28a4d9b829f1 -m 'Merge main into PR 687 and expand bfloat16 numeric regression coverage')
+          git -c credential.helper='!gh auth git-credential' push origin "$commit:refs/heads/codex/pr687-reviewed-integration"
+          git reset --hard "$commit"
+          printf 'commit=%s\ntree=%s\n' "$commit" "$tree" | tee "$RUNNER_TEMP/pr687-evidence/revision.txt"
+          git diff --stat 939041b3d6b4b5c773318a5b494a28a4d9b829f1 HEAD | tee "$RUNNER_TEMP/pr687-evidence/diff-stat.txt"
+      - name: Configure hosted compiler
+        id: configure
+        working-directory: source
+        run: |
+          set -euo pipefail
+          clang --version | tee "$RUNNER_TEMP/pr687-evidence/clang-version.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/pr687-evidence/configure.log"
+      - name: Run Release regressions including six-target bfloat16 cases
+        working-directory: source
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/pr687-evidence/test-all.log"
+      - name: Verify self-host fixed point
+        if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
+        working-directory: source
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/pr687-evidence/self-host.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: pr687-integrated-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr687-evidence
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 6
