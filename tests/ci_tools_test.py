@@ -836,6 +836,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         expected = ("  pull_request:", "  push:", "    branches: [main]",
                     "    tags: ['**']", "  merge_group:",
                     "    types: [checks_requested]", "  workflow_dispatch:")
+        ci_dispatch_input = (
+            "    inputs:",
+            "      cmake_profile:",
+            "        description: 'Diagnostic CMake profiles (not an uninstrumented timing run)'",
+            "        type: boolean",
+            "        required: false",
+            "        default: false",
+        )
         for name in ("ci.yml", "self-host-audit.yml"):
             with self.subTest(workflow=name):
                 text = (ROOT / ".github/workflows" / name).read_text()
@@ -843,7 +851,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIsNotNone(block)
                 lines = tuple(line.rstrip() for line in block.group(1).splitlines()
                               if line.strip() and not line.lstrip().startswith("#"))
-                self.assertEqual(lines, expected)
+                self.assertEqual(lines, expected + (ci_dispatch_input if name == "ci.yml" else ()))
                 # Default checkout is the PR/merge-group merge revision, not
                 # an independently selected head or a stale branch ref.
                 self.assertNotRegex(text, r"(?m)^\s+(ref|repository):")
