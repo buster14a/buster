@@ -1086,6 +1086,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
     UnitTestResult result = {0};
     enum
     {
+        CORPUS_ORIGINAL,
+        CORPUS_PAIRED_HOMELESS,
+        CORPUS_RANDOM_HOMELESS,
+        CORPUS_COUNT,
         CASE_COUNT = 160,
         ROW_COUNT = 40,
         REGISTER_COUNT = 10,
@@ -1107,14 +1111,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
     u16 edit_kinds[] = {MACHINE_EDIT_SPILL,       MACHINE_EDIT_RELOAD,      MACHINE_EDIT_COPY,
                         MACHINE_EDIT_REMATERIALIZE, MACHINE_EDIT_TEMP_SPILL, MACHINE_EDIT_FRAME_RELOAD};
     u32 random_state = 0x1234567u;
-    u32 recorded_cases = 0;
-    u32 recorded_seeds = 0;
-    u32 register_seeds = 0;
-    u32 homeless_registers = 0;
-    for (u32 case_index = 0; case_index < CASE_COUNT; case_index += 1)
+    u32 recorded_cases[CORPUS_COUNT] = {0};
+    u32 recorded_seeds[CORPUS_COUNT] = {0};
+    u32 register_seeds[CORPUS_COUNT] = {0};
+    u32 homeless_registers[CORPUS_COUNT] = {0};
+    // Keep the original and landed randomized corpora, each with its
+    // original random stream. The paired variant changes only homes.
+    for (u32 case_index = 0; case_index < CORPUS_COUNT * CASE_COUNT; case_index += 1)
     {
+        u32 corpus = case_index / CASE_COUNT;
+        u32 corpus_case = case_index % CASE_COUNT;
+        if (corpus_case == 0)
+        {
+            random_state = 0x1234567u;
+        }
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        Target target = targets[case_index % BUSTER_ARRAY_LENGTH(targets)];
+        Target target = targets[corpus_case % BUSTER_ARRAY_LENGTH(targets)];
         MachineInstruction* instructions = arena_allocate(temporary.arena, MachineInstruction, ROW_COUNT);
         memset(instructions, 0, sizeof(*instructions) * ROW_COUNT);
         for (u32 row = 0; row < ROW_COUNT; row += 1)
@@ -1171,9 +1183,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
             // names: those record unavailable where their frame copy would be
             // selected, and they all carry the same marker as a key, so a
             // spill of one must not invalidate another.
-            virtual_offsets[register_index] = codegen_test_debug_random(&random_state, 5u)
-                                                  ? 16u * codegen_test_debug_random(&random_state, REGISTER_COUNT / 2u + 1u)
-                                                  : MACHINE_VIRTUAL_REGISTER_NO_HOME;
+            bool homeless = corpus == CORPUS_RANDOM_HOMELESS && !codegen_test_debug_random(&random_state, 5u);
+            virtual_offsets[register_index] = homeless
+                                                  ? MACHINE_VIRTUAL_REGISTER_NO_HOME
+                                                  : 16u * codegen_test_debug_random(&random_state, REGISTER_COUNT / 2u + 1u);
         }
         u32* stack_offsets = arena_allocate(temporary.arena, u32, SLOT_COUNT);
         for (u32 slot_index = 0; slot_index < SLOT_COUNT; slot_index += 1)
@@ -1272,6 +1285,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
             offset += codegen_test_debug_random(&random_state, 3u);
         }
         u32 function_end = 200u + offset;
+        if (corpus == CORPUS_PAIRED_HOMELESS)
+        {
+            for (u32 register_index = 0; register_index < REGISTER_COUNT; register_index += 1)
+            {
+                if ((corpus_case + register_index) % 7u == 0)
+                {
+                    virtual_offsets[register_index] = MACHINE_VIRTUAL_REGISTER_NO_HOME;
+                }
+            }
+        }
         DebugLocationSeed* indexed_seeds = arena_allocate(temporary.arena, DebugLocationSeed, VALUE_COUNT * (ROW_COUNT + 1u));
         DebugLocationSeed* reference_seeds = arena_allocate(temporary.arena, DebugLocationSeed, VALUE_COUNT * (ROW_COUNT + 1u));
         CodegenModule indexed = {.debug_locations = indexed_seeds};
@@ -1290,24 +1313,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
             for (u32 seed_index = 0; seed_index < indexed.debug_location_count; seed_index += 1)
             {
                 same = same && codegen_test_debug_seeds_equal(indexed_seeds + seed_index, reference_seeds + seed_index);
-                register_seeds += indexed_seeds[seed_index].location.kind == DEBUG_LOCATION_REGISTER;
+                register_seeds[corpus] += indexed_seeds[seed_index].location.kind == DEBUG_LOCATION_REGISTER;
             }
             BUSTER_TEST(arguments, same);
         }
         for (u32 register_index = 0; register_index < REGISTER_COUNT; register_index += 1)
         {
-            homeless_registers += virtual_offsets[register_index] == MACHINE_VIRTUAL_REGISTER_NO_HOME;
+            homeless_registers[corpus] += virtual_offsets[register_index] == MACHINE_VIRTUAL_REGISTER_NO_HOME;
         }
-        recorded_cases += indexed_ok;
-        recorded_seeds += indexed.debug_location_count;
+        recorded_cases[corpus] += indexed_ok;
+        recorded_seeds[corpus] += indexed.debug_location_count;
         scratch_end(temporary);
     }
     // Agreement is only evidence when the fixtures record. A generator that
     // drifted into rejecting every function would otherwise pass silently.
-    BUSTER_TEST(arguments, recorded_cases * 2u > CASE_COUNT);
-    BUSTER_TEST(arguments, recorded_seeds > CASE_COUNT);
-    BUSTER_TEST(arguments, register_seeds > CASE_COUNT);
-    BUSTER_TEST(arguments, homeless_registers > CASE_COUNT);
+    // Check every corpus separately: a healthy corpus must not hide a
+    // variant whose recorder rejects most of its generated functions.
+    for (u32 corpus = 0; corpus < CORPUS_COUNT; corpus += 1)
+    {
+        BUSTER_TEST(arguments, recorded_cases[corpus] * 2u > CASE_COUNT);
+        BUSTER_TEST(arguments, recorded_seeds[corpus] > CASE_COUNT);
+        BUSTER_TEST(arguments, register_seeds[corpus] > CASE_COUNT);
+        if (corpus == CORPUS_ORIGINAL)
+        {
+            BUSTER_TEST(arguments, homeless_registers[corpus] == 0);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, homeless_registers[corpus] > CASE_COUNT);
+        }
+    }
     return result;
 }
 
@@ -1448,21 +1483,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_homeless_register(
     };
     u32 row_offsets[] = {10, 20, 30, 40};
     DebugLocationSeed seeds[8] = {0};
+    DebugLocationSeed dense_seeds[8] = {0};
     IrFunction ir_function = {.symbol = {.value = 7}};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     CodegenModule module = {.debug_locations = seeds};
+    CodegenModule dense = {.debug_locations = dense_seeds};
     BUSTER_TEST(arguments, codegen_test_record_machine_locations(arguments->arena, &module, BUSTER_ARRAY_LENGTH(seeds), &ir_function, &function,
                                                                  &placement, row_offsets, 100, 150, 80, target));
-    BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_NONE && module.debug_location_count == 3);
-    BUSTER_TEST(arguments, seeds[0].start == 110 && seeds[0].end == 140 && seeds[0].location.kind == DEBUG_LOCATION_UNAVAILABLE);
-    BUSTER_TEST(arguments, seeds[1].start == 140 && seeds[1].end == 150 && seeds[1].location.kind == DEBUG_LOCATION_REGISTER &&
-                           seeds[1].location.reg == DEBUG_REGISTER_X86_RCX);
-    BUSTER_TEST(arguments, seeds[2].start == 110 && seeds[2].end == 150 && seeds[2].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+    BUSTER_TEST(arguments, codegen_test_record_machine_locations_dense(arguments->arena, &dense, BUSTER_ARRAY_LENGTH(dense_seeds), &ir_function,
+                                                                       &function, &placement, row_offsets, 100, 150, 80, target));
+    if (BUSTER_REQUIRE(arguments, module.error == CODEGEN_ERROR_NONE && module.debug_location_count == 3 &&
+                                  dense.error == CODEGEN_ERROR_NONE && dense.debug_location_count == 3))
+    {
+        BUSTER_TEST(arguments, seeds[0].start == 110 && seeds[0].end == 140 && seeds[0].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+        BUSTER_TEST(arguments, seeds[1].start == 140 && seeds[1].end == 150 && seeds[1].location.kind == DEBUG_LOCATION_REGISTER &&
+                               seeds[1].location.reg == DEBUG_REGISTER_X86_RCX);
+        BUSTER_TEST(arguments, seeds[2].start == 110 && seeds[2].end == 150 && seeds[2].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+        BUSTER_TEST(arguments, dense_seeds[0].start == 110 && dense_seeds[0].end == 140 &&
+                               dense_seeds[0].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+        BUSTER_TEST(arguments, dense_seeds[1].start == 140 && dense_seeds[1].end == 150 &&
+                               dense_seeds[1].location.kind == DEBUG_LOCATION_REGISTER && dense_seeds[1].location.reg == DEBUG_REGISTER_X86_RCX);
+        BUSTER_TEST(arguments, dense_seeds[2].start == 110 && dense_seeds[2].end == 150 &&
+                               dense_seeds[2].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+        if (module.debug_location_count == dense.debug_location_count)
+        {
+            bool same = true;
+            for (u32 seed_index = 0; seed_index < module.debug_location_count; seed_index += 1)
+            {
+                same = same && codegen_test_debug_seeds_equal(seeds + seed_index, dense_seeds + seed_index);
+            }
+            BUSTER_TEST(arguments, same);
+        }
+    }
     virtual_offsets[0] = MACHINE_VIRTUAL_REGISTER_NO_HOME - 1u;
     CodegenModule unaddressable = {.debug_locations = seeds};
+    CodegenModule unaddressable_dense = {.debug_locations = dense_seeds};
     BUSTER_TEST(arguments, !codegen_test_record_machine_locations(arguments->arena, &unaddressable, BUSTER_ARRAY_LENGTH(seeds), &ir_function,
                                                                   &function, &placement, row_offsets, 100, 150, 80, target));
+    BUSTER_TEST(arguments, !codegen_test_record_machine_locations_dense(arguments->arena, &unaddressable_dense, BUSTER_ARRAY_LENGTH(dense_seeds),
+                                                                        &ir_function, &function, &placement, row_offsets, 100, 150, 80, target));
     BUSTER_TEST(arguments, unaddressable.error == CODEGEN_ERROR_INVALID_IR);
+    BUSTER_TEST(arguments, unaddressable_dense.error == CODEGEN_ERROR_INVALID_IR);
     return result;
 }
 
