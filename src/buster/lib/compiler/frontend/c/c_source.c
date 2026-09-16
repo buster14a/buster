@@ -5873,18 +5873,6 @@ typedef enum CIncludeGuardState
     C_INCLUDE_GUARD_DISQUALIFIED,
 } CIncludeGuardState;
 
-typedef struct CIncludeFileIdentity CIncludeFileIdentity;
-struct CIncludeFileIdentity
-{
-    // Path fallback for builtins and until the shared file layer publishes a
-    // descriptor identity. Physical identities leave this empty and compare
-    // their device/index pair instead.
-    String8 path;
-    u64 device;
-    u64 index;
-    bool physical;
-};
-
 typedef struct CPreprocessSourceFrame CPreprocessSourceFrame;
 struct CPreprocessSourceFrame
 {
@@ -5921,42 +5909,13 @@ struct CPreprocessSourceFrame
     CIncludeSearchOrigin include_origin;
 };
 
-// One identity record drives all three ways a file can suppress a later
-// inclusion: #import, #pragma once, and a proven whole-file include guard.
-// `spelling` remains the first resolved path for diagnostics/source maps while
-// `identity` is the comparison key. Keeping those roles separate prevents a
-// canonical identity from degrading a useful diagnostic spelling.
-typedef struct CIncludeFileEntry CIncludeFileEntry;
-struct CIncludeFileEntry
-{
-    // With a path key this is both the key and diagnostic spelling. With a
-    // physical key it remains only the spelling users should see.
-    String8 spelling;
-    u64 hash;
-    u64 device;
-    u64 index;
-    u32 guard_symbol;
-    bool physical;
-    bool once;
-};
-
-typedef struct CIncludeFileTable CIncludeFileTable;
-struct CIncludeFileTable
-{
-    Arena* arena;
-    CIncludeFileEntry* entries;
-    u32 count;
-    u32 capacity;
-};
-
-typedef enum CIncludeFileStatus
-{
-    C_INCLUDE_FILE_OK,
-    C_INCLUDE_FILE_INVALID_IDENTITY,
-    C_INCLUDE_FILE_ALLOCATION_FAILED,
-} CIncludeFileStatus;
-
-#define C_INCLUDE_FILE_INITIAL_CAPACITY 64
+// Test instrumentation observes the real probe loops without adding state or
+// work to tests-disabled compiler builds.
+#if BUSTER_INCLUDE_TESTS
+#define C_INCLUDE_FILE_SLOT_HASH(table, entries, slot) ((table)->probe_count += 1, (entries)[slot].hash)
+#else
+#define C_INCLUDE_FILE_SLOT_HASH(table, entries, slot) ((entries)[slot].hash)
+#endif
 
 // The table stays at most half full. Growth first proves both the u32 doubling
 // and this arena's remaining reservation, so neither an overflowing capacity
@@ -5988,7 +5947,7 @@ BUSTER_C_INTERNAL bool c_include_file_table_grow(CIncludeFileTable* table)
             if (entry.hash)
             {
                 u32 slot = (u32)entry.hash & (capacity - 1);
-                while (entries[slot].hash)
+                while (C_INCLUDE_FILE_SLOT_HASH(table, entries, slot))
                 {
                     slot = (slot + 1) & (capacity - 1);
                 }
@@ -6037,8 +5996,9 @@ BUSTER_C_INTERNAL u64 c_include_file_identity_hash(CIncludeFileIdentity identity
     {
         result = buster_hash_64((u8*)identity.path.pointer, identity.path.length);
     }
-    // Zero marks an empty table entry.
-    return result | 1;
+    // Zero marks an empty table entry. Preserve every bit of nonzero hashes
+    // instead of forcing all home buckets odd.
+    return result ? result : 1;
 }
 
 // Find or create the record for `identity`. The output is cleared on failure;
@@ -6057,7 +6017,7 @@ BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* tab
         if (table->capacity)
         {
             slot = (u32)hash & (table->capacity - 1);
-            while (table->entries[slot].hash && !found)
+            while (!found && C_INCLUDE_FILE_SLOT_HASH(table, table->entries, slot))
             {
                 CIncludeFileEntry* entry = table->entries + slot;
                 found = entry->hash == hash && c_include_file_identity_equal(entry, identity);
@@ -6074,7 +6034,7 @@ BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* tab
             if (capacity_ready)
             {
                 slot = (u32)hash & (table->capacity - 1);
-                while (table->entries[slot].hash)
+                while (C_INCLUDE_FILE_SLOT_HASH(table, table->entries, slot))
                 {
                     slot = (slot + 1) & (table->capacity - 1);
                 }
@@ -6103,6 +6063,21 @@ BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* tab
     }
     return result;
 }
+
+#undef C_INCLUDE_FILE_SLOT_HASH
+
+#if BUSTER_INCLUDE_TESTS
+CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling,
+                                            CIncludeFileEntry** entry_out)
+{
+    return c_include_file_entry(table, identity, spelling, entry_out);
+}
+
+bool c_test_include_file_table_grow(CIncludeFileTable* table)
+{
+    return c_include_file_table_grow(table);
+}
+#endif
 
 BUSTER_C_INTERNAL void c_include_file_diagnostic(Arena* arena, CPreprocessResult* preprocess, CSourceLocation location,
                                                   CIncludeFileStatus status, String8 spelling)
