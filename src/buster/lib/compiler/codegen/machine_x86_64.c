@@ -6709,7 +6709,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_compare_exchange(MachineX64Se
                                                               });
             machine_x64_define(selector, success_register, success_row);
             selector->atomic_success_registers[instruction->result.value] = success_register;
-            selector->atomic_success_registers[instruction->result.value] = success_register;
         }
     }
     else
