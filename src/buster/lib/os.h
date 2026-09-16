@@ -121,11 +121,21 @@ typedef enum StandardStream
     STANDARD_STREAM_COUNT,
 } StandardStream;
 
+typedef struct ProcessGroupControlState ProcessGroupControlState;
+
 typedef struct ProcessSpawnResult ProcessSpawnResult;
 struct ProcessSpawnResult
 {
     OsProcessHandle* handle;
     OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
+    // Optional shared flag state. The wait lane remains the sole owner of the
+    // process-group identity and performs every signal, query, and reap.
+    ProcessGroupControlState* process_group_control;
+    // On POSIX, the child is the leader of a fresh process group. Waiting
+    // terminates residual helpers before reaping the leader; deadline cleanup
+    // likewise terminates the complete spawned process tree.
+    u64 process_group : 1;
+    u64 reserved : 63;
 };
 
 typedef struct ProcessSpawnOptions ProcessSpawnOptions;
@@ -133,7 +143,8 @@ struct ProcessSpawnOptions
 {
     u64 capture : (size_t)STANDARD_STREAM_COUNT;
     u64 use_process_environment : 1;
-    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 1;
+    u64 new_process_group : 1;
+    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 2;
 };
 
 typedef struct ProcessWaitResult ProcessWaitResult;
@@ -149,9 +160,14 @@ struct ProcessWaitResult
     // exited on its own. `result` is a plain failure in that case: a killed
     // child's exit status describes the kill, not what it was doing.
     u8 timed_out;
-    u8 reserved[3];
+    // The exact group leader was not reaped. Callers must stop admission and
+    // must not hand its retained numeric identity to another lane.
+    u8 process_group_reservation_retained;
+    // The WNOWAIT observation stopped proving ownership (for example ECHILD).
+    // No later signal, group query, or reap was attempted with the numeric ID.
+    u8 process_group_ownership_lost;
+    u8 reserved[1];
 };
-
 
 typedef enum OsFileReadStatus
 {
@@ -267,6 +283,30 @@ typedef u64 AtomicU64;
 #else
 typedef _Atomic u64 AtomicU64;
 #endif
+
+#if BUSTER_SINGLE_THREADED
+typedef volatile s32 ProcessControlAtomic;
+#else
+typedef AtomicU64 ProcessControlAtomic;
+#endif
+
+// A process-group wait reads these flags directly; there is no callback or
+// alternate dispatcher. The admission mutex makes a cleanup failure and the
+// caller's spawn admission check one serialized policy decision.
+struct ProcessGroupControlState
+{
+    ProcessControlAtomic* cancellation_signal;
+    ProcessControlAtomic* cancellation_escalated;
+    OsMutexHandle* admission_mutex;
+    u64 test_cancel_before_reap : 1;
+    u64 reserved : 63;
+};
+
+// Process-control accesses remain signal-safe in serial builds and lock-free
+// in the threaded POSIX builds that share them with wait lanes.
+BUSTER_F_DECL u64 process_control_atomic_load(ProcessControlAtomic* address);
+BUSTER_F_DECL void process_control_atomic_store(ProcessControlAtomic* address, u64 value);
+BUSTER_F_DECL bool process_control_atomic_set_if_zero(ProcessControlAtomic* address, u64 value);
 
 // All three return the value the address held before the addition. In
 // single-threaded builds they compile to plain arithmetic.
@@ -384,8 +424,34 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 
 BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
+// Outcome of a best-effort prefault request. Prefaulting only populates the
+// page table entries of a range that is already committed. It is advisory on
+// every supported target: it is not residency, not protection from paging or
+// swap, not a lock of any kind, and not a latency guarantee. The operating
+// system may reclaim a populated page immediately afterwards, and nothing
+// here pins anything for any lifetime.
+typedef enum OsPrefaultResult
+{
+    // This build has no prefault facility for its target, so no request was
+    // issued and no page was populated.
+    OS_PREFAULT_UNAVAILABLE,
+    // The platform accepted the request for the whole range.
+    OS_PREFAULT_POPULATED,
+    // The platform rejected it: an older kernel, a privilege or resource
+    // limit, or a mapping it declines to populate. The range stays committed
+    // and usable exactly as it was.
+    OS_PREFAULT_REFUSED,
+} OsPrefaultResult;
+
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
-BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+// Commits `size` bytes at `address`; the result reports that commitment and
+// nothing else. `prefault` additionally requests best-effort prefaulting of
+// the committed range. That request is issued only after the commit itself
+// succeeded and its outcome is not folded into this result, so a refused or
+// unavailable prefault can neither fail a good commit nor stand in for a
+// failed one. Call os_prefault directly when the outcome matters.
+BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
+BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);

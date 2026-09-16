@@ -97,6 +97,8 @@ jobs:
           mkdir -p external
           curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
           curl --fail --location https://www.sqlite.org/2026/sqlite-src-3530400.zip -o external/sqlite-src.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite-amalgamation.zip | sha256sum --check
+          printf '%s  %s\n' d18fa15aec74d8c17e1463f861095adc01b5ad190256acb4f91d22f0368d232b external/sqlite-src.zip | sha256sum --check
           sha256sum external/sqlite-amalgamation.zip external/sqlite-src.zip > evidence/sqlite-archives.sha256
           unzip -q external/sqlite-amalgamation.zip -d external
           unzip -q external/sqlite-src.zip -d external

@@ -3217,6 +3217,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
     S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
     S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
+    S8_INITIALIZER("_Float16"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -5273,9 +5274,79 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
     return result;
 }
 
+// `__has_attribute` answers for the GNU attributes whose semantics this
+// frontend actually implements, by asking the parser's own spelling
+// predicates rather than keeping a second list beside them: `packed` and
+// `aligned` are collected by c_parse_layout_attributes and change the record
+// layout, `vector_size` builds the vector types. An attribute whose spelling
+// is merely accepted and stepped over is not supported and answers 0, so
+// source that selects a layout on this query cannot silently lose it (#639).
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)
 {
-    return string_equal(name, S8("vector_size")) || string_equal(name, S8("__vector_size")) || string_equal(name, S8("__vector_size__"));
+    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name);
+}
+
+// `__has_c_attribute` is a different operator over a different namespace, and
+// is deliberately not the query above. It asks about C's bracketed attributes,
+// answering the standard attribute's version number -- clang 18 answers
+// 202003L for `nodiscard` and 201910L for `fallthrough` -- 1 for a supported
+// vendor attribute written with its namespace (`gnu::packed`), and 0
+// otherwise, including for every GNU attribute named without one: clang
+// answers 0 for a bare `packed`, `aligned` and `vector_size`.
+//
+// This frontend recognizes `[[ ... ]]` in c_parse_c23_attribute_at and steps
+// over it; no bracketed attribute changes layout, diagnostics or code
+// generation here, and c_parse_layout_attributes only ever reads
+// `__attribute__` groups. Nothing is implemented, so the truthful answer is 0
+// for every spelling, and a bare GNU name answers 0 here even though the GNU
+// query above answers 1 for it. Implementing one of these attributes means
+// returning its version number from here, not 1.
+BUSTER_C_INTERNAL bool c_conditional_c_attribute_supported(void)
+{
+    return false;
+}
+
+// `__is_target_os` asks about the selected compilation target, and answers the
+// spellings clang accepts for it rather than this compiler's internal enum
+// names. The alias sets were read back out of clang 18 with `-target` and
+// `-E`, which parses the spelling as a triple's OS component and compares it
+// with the target's own: a Windows target answers `windows` and `win32`; a
+// Darwin target answers `darwin` as well as its own `macos`/`macosx` or `ios`;
+// UEFI answers `uefi`.
+//
+// Android is the case that cannot be answered from the enum name. Its triple
+// carries Linux as the OS and Android as the environment, so clang answers
+// `linux` for an Android target and never answers `android` at all -- the
+// spelling is not an OS. A freestanding target has no triple OS and answers
+// nothing (#640).
+BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, String8 spelling)
+{
+    bool result;
+    switch (os)
+    {
+    case OPERATING_SYSTEM_LINUX:
+    case OPERATING_SYSTEM_ANDROID:
+        result = string_equal(spelling, S8("linux"));
+        break;
+    case OPERATING_SYSTEM_MACOS:
+        result = string_equal(spelling, S8("macos")) || string_equal(spelling, S8("macosx")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_IOS:
+        result = string_equal(spelling, S8("ios")) || string_equal(spelling, S8("darwin"));
+        break;
+    case OPERATING_SYSTEM_WINDOWS:
+        result = string_equal(spelling, S8("windows")) || string_equal(spelling, S8("win32"));
+        break;
+    case OPERATING_SYSTEM_UEFI:
+        result = string_equal(spelling, S8("uefi"));
+        break;
+    case OPERATING_SYSTEM_FREESTANDING:
+    case OPERATING_SYSTEM_COUNT:
+    default:
+        result = false;
+        break;
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
@@ -5316,8 +5387,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool has_include = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include"));
         bool has_include_next = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_include_next"));
         bool has_builtin = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_builtin"));
-        bool has_attribute =
-            token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_attribute")) || c_token_spelling_equal(base, token, S8("__has_c_attribute")));
+        bool has_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_attribute"));
+        bool has_c_attribute = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__has_c_attribute"));
         bool has_feature =
             token.kind == C_TOKEN_IDENTIFIER && (c_token_spelling_equal(base, token, S8("__has_feature")) || c_token_spelling_equal(base, token, S8("__has_extension")) ||
                                                  c_token_spelling_equal(base, token, S8("__building_module")));
@@ -5325,8 +5396,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         bool is_target_environment = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_environment"));
         bool is_target_os = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_os"));
         bool is_target_vendor = token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token, S8("__is_target_vendor"));
-        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_feature && !is_target_arch && !is_target_environment && !is_target_os &&
-            !is_target_vendor)
+        if (!has_include && !has_include_next && !has_builtin && !has_attribute && !has_c_attribute && !has_feature && !is_target_arch &&
+            !is_target_environment && !is_target_os && !is_target_vendor)
         {
             continue;
         }
@@ -5383,6 +5454,15 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]))
                                     : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
         }
+        else if (has_c_attribute && argument_count)
+        {
+            // Any non-empty argument shape the balanced scan above accepted,
+            // so that the namespaced spelling this operator's own contract
+            // admits -- `__has_c_attribute(gnu::packed)` -- answers 0 instead
+            // of failing the directive, however the `::` is tokenized. An
+            // empty argument list is still malformed and still fails below.
+            supported = c_conditional_c_attribute_supported();
+        }
         else if ((is_target_arch || is_target_environment || is_target_os || is_target_vendor) && argument_count == 1 &&
                  arguments[0].kind == C_TOKEN_IDENTIFIER && options)
         {
@@ -5394,13 +5474,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
                                                             string_equal(argument, S8("ebpf"))
                                                       : string_equal(argument, S8("x86_64")))
-                        : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
-                                                       ? string_equal(argument, S8("macos"))
-                                                   : options->target.os == OPERATING_SYSTEM_IOS
-                                                       ? string_equal(argument, S8("ios"))
-                                                   : options->target.os == OPERATING_SYSTEM_LINUX
-                                                       ? string_equal(argument, S8("linux"))
-                                                       : false)
+                        : is_target_os          ? c_conditional_target_os_supported(options->target.os, argument)
                         : is_target_vendor      ? (options->target.os == OPERATING_SYSTEM_MACOS || options->target.os == OPERATING_SYSTEM_IOS) &&
                                                       string_equal(argument, S8("apple"))
                         : is_target_environment ? false
@@ -7964,7 +8038,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
+                      target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
@@ -7976,6 +8051,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__INT_WIDTH__", string_format(arena, S8("{u32}"), layout.integer.bit_width));
     C_DEFINE_TYPE_MACRO("__LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_integer.bit_width));
     C_DEFINE_TYPE_MACRO("__LONG_LONG_WIDTH__", string_format(arena, S8("{u32}"), layout.long_long_integer.bit_width));
+    C_DEFINE_TYPE_MACRO("__SCHAR_MAX__", S8("127"));
+    C_DEFINE_TYPE_MACRO("__SHRT_MAX__", S8("32767"));
+    C_DEFINE_TYPE_MACRO("__INT_MAX__", S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__LONG_MAX__", layout.long_integer.bit_width == 64 ? S8("9223372036854775807L") : S8("2147483647L"));
+    C_DEFINE_TYPE_MACRO("__LONG_LONG_MAX__", S8("9223372036854775807LL"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_SHORT__", string_format(arena, S8("{u32}"), layout.short_integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_INT__", string_format(arena, S8("{u32}"), layout.integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG__", string_format(arena, S8("{u32}"), layout.long_integer.size));
@@ -7992,6 +8072,27 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
     }
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
+    // The `_Float16` half of the <float.h> vocabulary, with clang's own
+    // spellings and values. They describe IEEE-754 binary16, which is what
+    // `_Float16` is on every target here, and they carry the C23 `F16`
+    // suffix exactly as clang's do -- a resource header that reaches for
+    // FLT16_MAX gets a constant of the right type, not a double.
+    C_DEFINE_TYPE_MACRO("__FLT16_MANT_DIG__", S8("11"));
+    C_DEFINE_TYPE_MACRO("__FLT16_DIG__", S8("3"));
+    C_DEFINE_TYPE_MACRO("__FLT16_DECIMAL_DIG__", S8("5"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MAX__", S8("6.5504e+4F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_NORM_MAX__", S8("6.5504e+4F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MIN__", S8("6.103515625e-5F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_DENORM_MIN__", S8("5.9604644775390625e-8F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_EPSILON__", S8("9.765625e-4F16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MAX_EXP__", S8("16"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MIN_EXP__", S8("(-13)"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MAX_10_EXP__", S8("4"));
+    C_DEFINE_TYPE_MACRO("__FLT16_MIN_10_EXP__", S8("(-4)"));
+    C_DEFINE_TYPE_MACRO("__FLT16_HAS_DENORM__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__FLT16_HAS_INFINITY__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__FLT16_HAS_QUIET_NAN__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT16__", string_format(arena, S8("{u32}"), layout.float16_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_DOUBLE__", string_format(arena, S8("{u32}"), layout.double_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_DOUBLE__", string_format(arena, S8("{u32}"), layout.long_double_type.size));
     // The hosted <float.h> supplied by Clang/GCC spells DBL_EPSILON in terms
