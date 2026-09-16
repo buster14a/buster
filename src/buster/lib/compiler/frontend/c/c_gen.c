@@ -6368,7 +6368,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_wide_atomic_runtime_load(CIntegerIrBuilder
     IrTypeId bits_type = IR_TYPE_ID_INVALID;
     IrTypeId pointer_type = IR_TYPE_ID_INVALID;
     IrValueId address = IR_VALUE_ID_INVALID;
-    IrValueId order_value = c_ir_emit_integer_value_typed(builder, order, false, (CToken){0}, builder->s32_type);
+    IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, (CToken){0}, builder->s32_type);
     IrTypeId parameter_types[2] = {IR_TYPE_ID_INVALID, builder->s32_type};
     IrValueId arguments[2] = {IR_VALUE_ID_INVALID, order_value};
     IrValueId loaded = IR_VALUE_ID_INVALID;
@@ -6411,7 +6411,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_wide_atomic_runtime_store(CIntegerIrBuilder* bu
     bool emitted = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source, &bits_type, &pointer_type, &address);
     IrValueId bits_value = aggregate ? c_ir_atomic_aggregate_bits_value(builder, value, value_type, bits_type, true, source)
                                      : c_ir_emit_cast(builder, value, bits_type, source);
-    IrValueId order_value = c_ir_emit_integer_value_typed(builder, order, false, (CToken){0}, builder->s32_type);
+    IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, (CToken){0}, builder->s32_type);
     IrTypeId parameter_types[3] = {pointer_type, bits_type, builder->s32_type};
     IrValueId arguments[3] = {address, bits_value, order_value};
     emitted = emitted && bits_value.value != IR_ID_UNDERLYING_INVALID && order_value.value != IR_ID_UNDERLYING_INVALID &&
@@ -18514,8 +18514,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                                              ? c_ir_emit_cast_instruction(builder, comparison_address, wide_atomic_runtime_pointer_type,
                                                                           IR_CONVERSION_POINTER_REINTERPRET, source)
                                              : IR_VALUE_ID_INVALID;
-                    IrValueId success_order = c_ir_emit_integer_value_typed(builder, order, false, token, builder->s32_type);
-                    IrValueId failed_order = c_ir_emit_integer_value_typed(builder, failure_order, false, token, builder->s32_type);
+                    IrValueId success_order = c_ir_emit_integer_value_typed(builder, (u64)order, false, token, builder->s32_type);
+                    IrValueId failed_order = c_ir_emit_integer_value_typed(builder, (u64)failure_order, false, token, builder->s32_type);
                     IrTypeId parameter_types[5] = {wide_atomic_runtime_pointer_type, wide_atomic_runtime_pointer_type, comparison_type,
                                                    builder->s32_type, builder->s32_type};
                     IrValueId arguments[5] = {comparison_address, expected_address, comparison_desired, success_order, failed_order};
@@ -18786,7 +18786,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         IrValueId address = IR_VALUE_ID_INVALID;
                         bool runtime_arguments = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source,
                                                                                      &runtime_type, &runtime_pointer_type, &address);
-                        IrValueId order_value = c_ir_emit_integer_value_typed(builder, order, false, token, builder->s32_type);
+                        IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, token, builder->s32_type);
                         IrTypeId parameter_types[3] = {runtime_pointer_type, runtime_type, builder->s32_type};
                         IrValueId arguments[3] = {address, operation_value, order_value};
                         if (!runtime_arguments || runtime_type.value != operation_type.value ||
