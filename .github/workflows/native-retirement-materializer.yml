@@ -16,6 +16,11 @@ on:
     types: [checks_requested]
   workflow_dispatch:
 
+# Supersede only the same PR/merge-group; main and manual runs remain distinct.
+concurrency:
+  group: materializer-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+
 permissions:
   contents: read
 
