@@ -62,7 +62,7 @@ See [suite partitioning](ci-suite-partition.md) for ownership and measurement.
 |---|---|---|
 | Combination matrix | all six desktop lanes | `test_all_combinations_ci` |
 | Execution-mode matrix | the four independent Unix native lanes | `test_mode_matrix --config Release` |
-| Native differential matrix | the same four native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle` |
+| Native differential matrix | the same four native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
 | iOS shards | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
 
