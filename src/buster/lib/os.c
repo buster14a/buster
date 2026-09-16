@@ -1,7 +1,8 @@
 // Implementation of the platform boundary declared in os.h. Each facility
 // keeps its POSIX and Windows paths side by side inside one function
 // rather than in per-platform files, so the contract stays in one place:
-// virtual memory (os_reserve/os_commit/os_decommit and protection flags),
+// virtual memory (os_reserve/os_commit/os_decommit, the advisory os_prefault
+// hint, and protection flags),
 // threads, mutexes, and TLS, checked file IO (os_file_write_checked,
 // os_file_close_checked, os_file_flush), process spawn/wait with deadlines,
 // executable lookup, dynamic libraries, and the crash/failure printers.
@@ -389,44 +390,109 @@ BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(OsFileDescriptor* fd)
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool os_fault(void* address, u64 size)
-{
-    bool result = 1;
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_prefault_test_forced;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsPrefaultResult os_prefault_test_forced_result;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsPrefaultTestCounters os_prefault_test_state;
 
-#if defined(__linux__)
-    int os_result = madvise(address, size, MADV_POPULATE_WRITE);
-    result = os_result == 0;
-#elif defined(__APPLE__)
-    int os_result = mlock(address, size);
-    result = os_result == 0;
-    if (result)
+void os_prefault_test_force_next(OsPrefaultResult result)
+{
+    os_prefault_test_forced = true;
+    os_prefault_test_forced_result = result;
+}
+
+OsPrefaultTestCounters os_prefault_test_counters(void)
+{
+    return os_prefault_test_state;
+}
+#endif
+
+// Best-effort prefaulting of an already-committed range: it populates page
+// table entries now so the first touch need not take a fault, and nothing
+// more. No path below keeps a page resident, so no caller may read success
+// as residency, as protection from paging, or as a latency guarantee. The
+// three platforms reach it by different means and refuse it for different
+// ordinary reasons, which is why the outcome is reported instead of hidden:
+//
+// Linux: madvise(MADV_POPULATE_WRITE) states exactly this intent and locks
+// nothing. Kernels before 5.14 do not know the advice and reject it with
+// EINVAL, which is a refusal of the request, never a commit failure.
+//
+// macOS: Darwin has no populate advice, so the range is locked and then
+// immediately unlocked. The lock is only what forces the faults in; it is
+// released before returning, so nothing stays pinned. RLIMIT_MEMLOCK bounds
+// an unprivileged process, so refusing a large range here is ordinary.
+//
+// Windows: VirtualAlloc(MEM_COMMIT) already charges the backing store, and
+// Windows exposes no supported populate call. An MSVC build can force the
+// faults by registering the range as a Winsock Registered I/O buffer, which
+// locks it for the registration and releases it on deregistration. That
+// table is present only once the process obtained the RIO extension
+// functions, and its length is 32 bits, so the ordinary Windows outcome is
+// that no prefault is performed at all.
+OsPrefaultResult os_prefault(void* address, u64 size)
+{
+    OsPrefaultResult result;
+#if BUSTER_INCLUDE_TESTS
+    if (os_prefault_test_forced)
     {
-        os_result = munlock(address, size);
+        os_prefault_test_forced = false;
+        result = os_prefault_test_forced_result;
     }
-    result = os_result == 0;
-#elif defined(_WIN32)
-#if defined(_MSC_VER)
-    if (w32_rio_functions.RIORegisterBuffer)
+    else
+#endif
     {
-        RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer((PCHAR)address, (DWORD)size);
-        result = buffer_id != RIO_INVALID_BUFFERID;
-        if (result)
+#if defined(__linux__)
+        result = madvise(address, size, MADV_POPULATE_WRITE) == 0 ? OS_PREFAULT_POPULATED : OS_PREFAULT_REFUSED;
+#elif defined(__APPLE__)
+        result = OS_PREFAULT_REFUSED;
+        if (mlock(address, size) == 0)
         {
-            if (w32_rio_functions.RIODeregisterBuffer)
+            // Releasing the lock is what makes this prefaulting rather than
+            // pinning. A failed release would leave the process holding
+            // locked memory it never promised to hold, so it is reported as
+            // a refusal rather than as a populated range.
+            result = munlock(address, size) == 0 ? OS_PREFAULT_POPULATED : OS_PREFAULT_REFUSED;
+        }
+#elif defined(_WIN32) && defined(_MSC_VER)
+        result = OS_PREFAULT_UNAVAILABLE;
+        // Both halves are required: a registration that cannot be released
+        // would leave the range locked for the life of the process, which is
+        // the opposite of what this function promises.
+        if (w32_rio_functions.RIORegisterBuffer && w32_rio_functions.RIODeregisterBuffer)
+        {
+            // The registration length is a DWORD. A larger range would be
+            // registered only in part, so refuse it instead of reporting a
+            // range that was never fully populated.
+            if (size > UINT32_MAX)
             {
-                w32_rio_functions.RIODeregisterBuffer(buffer_id);
+                result = OS_PREFAULT_REFUSED;
+            }
+            else
+            {
+                RIO_BUFFERID buffer_id = w32_rio_functions.RIORegisterBuffer((PCHAR)address, (DWORD)size);
+                result = buffer_id == RIO_INVALID_BUFFERID ? OS_PREFAULT_REFUSED : OS_PREFAULT_POPULATED;
+                if (result == OS_PREFAULT_POPULATED)
+                {
+                    w32_rio_functions.RIODeregisterBuffer(buffer_id);
+                }
             }
         }
-    }
 #else
-    BUSTER_UNUSED(address);
-    BUSTER_UNUSED(size);
+        BUSTER_UNUSED(address);
+        BUSTER_UNUSED(size);
+        result = OS_PREFAULT_UNAVAILABLE;
 #endif
+    }
+#if BUSTER_INCLUDE_TESTS
+    os_prefault_test_state.requests += 1;
+    os_prefault_test_state.unpopulated += result != OS_PREFAULT_POPULATED;
+    os_prefault_test_state.last = result;
 #endif
     return result;
 }
 
-bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
+bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
 {
     bool result = 1;
 
@@ -440,9 +506,12 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
     result = os_result != 0;
 #endif
 
-    if (result & lock)
+    // Strictly subordinate and strictly advisory: the request is issued only
+    // once the commit itself succeeded, and its outcome is deliberately kept
+    // out of `result`. A caller that needs the outcome asks os_prefault.
+    if (result & prefault)
     {
-        os_fault(address, size);
+        (void)os_prefault(address, size);
     }
 
 #if BUSTER_BENCH_ALLOCATIONS

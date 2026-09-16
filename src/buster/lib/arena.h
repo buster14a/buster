@@ -5,7 +5,16 @@ typedef struct ArenaFlags ArenaFlags;
 struct ArenaFlags
 {
     u64 execute : 1;
-    u64 lock_pages : 1;
+    // Best-effort prefaulting of the bytes this arena commits, both at
+    // creation and at every later growth. It is a hint and nothing else: it
+    // does not lock pages, does not keep them resident, does not protect
+    // them from paging or swap, and carries no latency guarantee. A platform
+    // that refuses the request -- or has no prefault facility at all --
+    // still yields a fully committed, fully usable arena, so no allocation
+    // can observe the difference. Commitment failure stays a hard failure
+    // and is reported independently of this flag; see os_commit and
+    // os_prefault in os.h for the platform-by-platform behavior.
+    u64 prefault_pages : 1;
     // Opt-in to the destroy-side reuse pool for non-default reservation
     // sizes. A reused arena hands out dirty bytes, so only creation sites
     // whose consumers never assume freshly zeroed pages may set this.
