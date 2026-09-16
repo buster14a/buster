@@ -9713,12 +9713,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                             ? index->physical_rows[unmapped_cursor]
                                             : UINT32_MAX);
             }
-            // A block start clears any held register and republishes the home
-            // preference. The first block changes nothing -- the replay this
+            // A block start clears any held register and changes nothing
+            // else. The first block changes nothing at all -- the replay this
             // stands in for skips it -- and neither does any other while
-            // nothing is held and the preference already matches the home. Skip
-            // those without stopping: the cursor still advances, because the
-            // replay consumes exactly one block per row.
+            // nothing is held. Skip those without stopping: the cursor still
+            // advances, because the replay consumes exactly one block per row.
             u32 block_row = codegen_machine_debug_block_row(function, block_cursor, row);
             if (!block_cursor && block_row < next)
             {
@@ -9726,7 +9725,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                 block_cursor += 1u;
                 block_row = codegen_machine_debug_block_row(function, block_cursor, row);
             }
-            if (block_row < next && state.physical_register < 0 && state.prefer_frame == state.frame_valid)
+            if (block_row < next && state.physical_register < 0)
             {
                 if (index->blocks_ascending)
                 {
@@ -9759,9 +9758,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                             // Physical ownership is edge-specific. A published
                             // home is path-independent: every executing
                             // definition spilled the same vreg there, and reuse
-                            // writes invalidate it explicitly.
+                            // writes invalidate it explicitly. The home
+                            // preference needs no republication beside it: with
+                            // no register held it does not enter the selection,
+                            // and every transition back to holding one rewrites
+                            // it.
                             state.physical_register = -1;
-                            state.prefer_frame = state.frame_valid;
                         }
                         block_cursor += 1u;
                     }
@@ -10241,8 +10243,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
                 // Physical ownership is edge-specific. A published home is
                 // path-independent: every executing definition spilled the
                 // same vreg there, and reuse writes invalidate it explicitly.
+                // The home preference needs no republication beside it: with no
+                // register held it does not enter the selection, and every
+                // transition back to holding one rewrites it.
                 state.physical_register = -1;
-                state.prefer_frame = state.frame_valid;
             }
             block_cursor += 1;
         }
