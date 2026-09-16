@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   validate:
-    name: Verify issue 333 setup repair
+    name: Verify final issue 333 setup repair
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -24,7 +24,7 @@ jobs:
           ref: 9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf
           path: source
           persist-credentials: false
-      - name: Verify and apply setup repair
+      - name: Verify and apply setup repairs
         working-directory: source
         shell: bash
         run: |
@@ -32,14 +32,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/issue-333" build
           python3 - <<'PY'
           import hashlib, os, pathlib, subprocess
-          patch = pathlib.Path('../payload/.github/issue-333-payload/setup-fix.patch').read_bytes()
-          assert hashlib.sha256(patch).hexdigest() == 'ac9e5847e07fd803c601e8e104935448dea1e9fa3bf5c9fdd2381e41787c2594'
           assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == '9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf'
-          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
-          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          for name, digest in [('setup-fix.patch', 'ac9e5847e07fd803c601e8e104935448dea1e9fa3bf5c9fdd2381e41787c2594'), ('windows-shell-fix.patch', '337a51981dffe38f01fc54a732530b73bc7355c7b4f17b615db592044a627c50')]:
+              patch = pathlib.Path('../payload/.github/issue-333-payload', name).read_bytes()
+              assert hashlib.sha256(patch).hexdigest() == digest
+              subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+              subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+              pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', name).write_bytes(patch)
           paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
           assert paths == ['.github/workflows/ci.yml', 'docs/ci-combination-shards.md', 'tools/matrix_shard_test.py'], paths
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'setup-fix.patch').write_bytes(patch)
           PY
           git diff --cached --check
       - name: Native driver and policy tests
@@ -95,7 +96,7 @@ jobs:
                   actual = json.load(response)['sha']
               assert actual == expected, (path, expected, actual)
               entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': actual, 'sha256': hashlib.sha256(data).hexdigest()})
-          result = {'base': '9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf', 'patch_sha256': 'ac9e5847e07fd803c601e8e104935448dea1e9fa3bf5c9fdd2381e41787c2594', 'entries': entries}
+          result = {'base': '9b679ed9bbd0ede670a77238c7fa5a9b5bbf9ebf', 'entries': entries}
           pathlib.Path(os.environ['RUNNER_TEMP'], 'issue-333', 'verified-blobs.json').write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
@@ -103,7 +104,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-333-setup-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          name: issue-333-final-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/issue-333/
           if-no-files-found: error
           retention-days: 7
