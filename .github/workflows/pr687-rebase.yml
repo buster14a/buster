@@ -1,0 +1,34 @@
+name: PR 687 rebase validation
+on:
+  push:
+    branches: [codex/pr687-rebase-20260916]
+    paths: [.github/workflows/pr687-rebase.yml]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Capture exact committed inputs without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git update-ref refs/heads/rebase-main 43a2299211a239c6eeaff5d4b5813e2acdce0c7d
+          git update-ref refs/heads/rebase-pr ff59741884ef4220094cd1fbb2175b86ef8b4a81
+          git bundle create evidence/inputs.bundle refs/heads/rebase-main refs/heads/rebase-pr
+          git bundle verify evidence/inputs.bundle
+          git log --graph --oneline --boundary rebase-main..rebase-pr > evidence/history.txt
+          git diff --stat rebase-main...rebase-pr > evidence/delta.txt
+          sha256sum evidence/inputs.bundle > evidence/inputs.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr687-rebase-inputs
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
