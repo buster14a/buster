@@ -15,11 +15,10 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 3be1d020ca33e9c52bc0afcf198c7ba4904c0c9c
+          ref: 6d5ccfb16df8791b1d454c30e426e206e40e20ee
           path: source
-          fetch-depth: 0
           persist-credentials: false
-      - name: Reproduce reviewed integration tree and preserve candidate
+      - name: Apply exact reviewed infinity builtin repair and preserve candidate
         working-directory: source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -28,17 +27,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pr687-evidence"
           git config user.name 'PR 687 integration review'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git config merge.conflictStyle merge
-          status=0
-          git merge --no-commit --no-ff 939041b3d6b4b5c773318a5b494a28a4d9b829f1 || status=$?
-          test "$status" -eq 1
-          python3 ../transport/.github/pr687-review/resolve.py | tee "$RUNNER_TEMP/pr687-evidence/resolutions.log"
+          python3 ../transport/.github/pr687-review/fix-inf.py | tee "$RUNNER_TEMP/pr687-evidence/repair.log"
           tree=$(git write-tree)
-          commit=$(git commit-tree "$tree" -p 3be1d020ca33e9c52bc0afcf198c7ba4904c0c9c -p 939041b3d6b4b5c773318a5b494a28a4d9b829f1 -m 'Merge main into PR 687 and expand bfloat16 numeric regression coverage')
+          commit=$(git commit-tree "$tree" -p 6d5ccfb16df8791b1d454c30e426e206e40e20ee -m 'c: recognize double infinity builtin in scalar constant folding')
           git -c credential.helper='!gh auth git-credential' push origin "$commit:refs/heads/codex/pr687-reviewed-integration"
           git reset --hard "$commit"
           printf 'commit=%s\ntree=%s\n' "$commit" "$tree" | tee "$RUNNER_TEMP/pr687-evidence/revision.txt"
-          git diff --stat 939041b3d6b4b5c773318a5b494a28a4d9b829f1 HEAD | tee "$RUNNER_TEMP/pr687-evidence/diff-stat.txt"
       - name: Configure hosted compiler
         id: configure
         working-directory: source
