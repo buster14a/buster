@@ -7441,11 +7441,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(debug_parity_sources); source_index += 1)
             {
                 String8 source = debug_parity_sources[source_index];
+                String8 debug_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g.o"), target_index, source_index));
+                String8 stripped_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g0.o"), target_index, source_index));
                 String8 debug_command_line[] = {
-                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], source,
+                    S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], S8("-o"), debug_object_path, source,
                 };
                 String8 stripped_command_line[] = {
-                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], source,
+                    S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], S8("-o"), stripped_object_path, source,
                 };
                 CompilerDriverResult with_debug = compiler_driver_execute_invocation(
                     debug_parity_temporary.arena,
@@ -11210,8 +11216,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // ELF writer then splits that back into the `.init_array.NNNNN` sections
     // `ld` orders across translation units by.  Both halves are checked below.
     {
+        String8 constructor_array_object_path = buster_test_temporary_path(arguments->arena, S8("buster-c-constructor-array-object"), S8(".o"));
         String8 constructor_object_command_line[] = {
-            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_constructor.c"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), constructor_array_object_path, S8("tests/basic_c_constructor.c"),
         };
         CompilerDriverResult constructor_object = compiler_driver_execute_invocation(
             arguments->arena,
@@ -14327,9 +14334,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 allocator_flag =
                     string_format(thread_local_model_arena, S8("-fregister-allocator={S8}"), thread_local_model_allocators[allocator_index]);
                 String8 position_independent_flag = pic_index ? S8("-fPIC") : S8("-fno-pic");
+                String8 thread_local_model_object_path =
+                    buster_test_temporary_path(thread_local_model_arena, S8("buster-c-thread-local-models-object"),
+                                               string_format(thread_local_model_arena, S8("-{u32}-{u32}.o"), allocator_index, pic_index));
                 String8 thread_local_model_object_command_line[] = {
                     allocator_flag, position_independent_flag, S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"),
-                    S8("tests/basic_c_thread_local_models.c"),
+                    S8("-o"), thread_local_model_object_path, S8("tests/basic_c_thread_local_models.c"),
                 };
                 CompilerDriverResult thread_local_model_object = compiler_driver_execute_invocation(
                     thread_local_model_arena, compiler_driver_parse_arguments(thread_local_model_arena,
