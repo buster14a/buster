@@ -111,7 +111,7 @@ capture_lifecycle_output() {
 import sys
 remaining = 65536
 total = 0
-with open(sys.argv[1], "wb") as output:
+with open(sys.argv[1], "wb", buffering=0) as output:
     while True:
         chunk = sys.stdin.buffer.read1(4096)
         if not chunk:
@@ -196,7 +196,9 @@ run_lifecycle_phase() {
     } >"$status_log"; then
         echo "error: could not retain iOS $phase status at $status_log" >&2
         result=1
+        outcome=evidence-failure
     fi
+    last_lifecycle_outcome=$outcome
     cat "$status_log" >&2 || true
     if [[ $result -ne 0 ]]; then
         # Full bounded raw output remains in the artifact, independent of the
@@ -205,6 +207,53 @@ run_lifecycle_phase() {
         collect_lifecycle_context
     fi
     return "$result"
+}
+
+simulator_udid_is_valid() {
+    local value=$1
+    [[ $value =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
+}
+
+# simctl create writes one canonical UUID on stdout. Since lifecycle evidence
+# combines stdout and stderr, reject every other nonempty line instead of
+# treating an arbitrary diagnostic or device name as an owned identity.
+read_simulator_create_identity() {
+    local path=$1
+    local line candidate= valid_count=0 invalid_count=0
+    if [[ ! -f $path ]]; then
+        return 1
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%$'\r'}
+        if [[ -z $line ]]; then
+            continue
+        fi
+        if simulator_udid_is_valid "$line"; then
+            candidate=$line
+            valid_count=$((valid_count + 1))
+        else
+            invalid_count=$((invalid_count + 1))
+        fi
+    done <"$path"
+    if [[ $valid_count -eq 1 && $invalid_count -eq 0 ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+adopt_pending_create_identity() {
+    local candidate=
+    if [[ ${pending_create_owned:-0} -eq 1 && -z ${udid:-} \
+        && -n ${pending_create_log:-} ]]; then
+        if candidate=$(read_simulator_create_identity "$pending_create_log"); then
+            udid=$candidate
+            simulator_owned=1
+            pending_create_owned=0
+            pending_create_log=
+            echo "Recovered pending invocation-owned replacement simulator identity $udid for cleanup" >&2
+        fi
+    fi
 }
 
 print_simulator_diagnostics() {
@@ -382,6 +431,18 @@ launch_stream_is_running() {
 }
 
 udid=${BUSTER_IOS_SIMULATOR_UDID:-}
+explicit_simulator_udid=0
+if [[ -n $udid ]]; then
+    explicit_simulator_udid=1
+fi
+simulator_owned=0
+runtime=
+device_type=
+boot_recovery_eligible=0
+boot_disposition=unresolved
+last_lifecycle_outcome=unavailable
+pending_create_log=
+pending_create_owned=0
 active_launch_stream_pid=
 active_launch_reader_pid=
 active_launch_pipe_dir=
@@ -396,6 +457,10 @@ cleanup() {
         stop_launch_stream "$active_launch_stream_pid"
         active_launch_stream_pid=
     fi
+    # A cancellation can interrupt the bounded create phase after simctl has
+    # emitted the replacement UUID but before the phase function returns.
+    # Adopt only a canonical identity from that invocation-owned evidence.
+    adopt_pending_create_identity
     # Always shut down the selected device. Batch mode reaches this trap once,
     # after both app bundles have had independent install/launch checks.
     if [[ -n ${udid:-} ]]; then
@@ -409,7 +474,7 @@ cleanup() {
                 status=1
             fi
         fi
-        cleanup_summary="BUSTER_IOS_CLEANUP prior_status=$prior_status shutdown_status=$shutdown_status result_status=$status"
+        cleanup_summary="BUSTER_IOS_CLEANUP simulator_udid=$udid prior_status=$prior_status shutdown_status=$shutdown_status result_status=$status"
         printf '%s\n' "$cleanup_summary" >>"${console_log_base}.shutdown.status.log" || true
         printf '%s\n' "$cleanup_summary" >&2
     fi
@@ -509,6 +574,7 @@ if [[ -z $udid ]]; then
         echo "error: failed to create iOS simulator '$device_name'" >&2
         exit 1
     fi
+    simulator_owned=1
 fi
 
 echo "Using simulator $device_name ($udid)"
@@ -518,19 +584,153 @@ echo "Using simulator $device_name ($udid)"
 # trap after the batch, and an already-booted selected device can be reused.
 run_with_timeout "$monitor_command_timeout_seconds" xcrun simctl delete unavailable 2>/dev/null || true
 
-boot_started=$SECONDS
-if run_with_timeout "$boot_timeout_seconds" xcrun simctl boot "$udid" 2>/dev/null; then
-    :
+run_boot_readiness_attempt() {
+    local attempt=$1
+    local evidence_base="${console_log_base}.boot.attempt-${attempt}"
+    local started=$SECONDS
+    local boot_status=0
+    local readiness_status=0
+    local readiness_outcome=unavailable
+
+    # Keep boot and readiness evidence attempt-qualified. Recovery is decided
+    # only from the readiness helper's proven deadline outcome below.
+    if run_lifecycle_phase boot "$attempt" "$evidence_base" "$boot_timeout_seconds" \
+        xcrun simctl boot "$udid"; then
+        boot_status=0
+    else
+        boot_status=$?
+        echo "iOS simulator boot attempt ${attempt} returned status ${boot_status}; continuing to bootstatus (it may already be booted)" >&2
+    fi
+    if run_lifecycle_phase bootstatus "$attempt" "$evidence_base" "$boot_timeout_seconds" \
+        xcrun simctl bootstatus "$udid" -b; then
+        readiness_status=0
+    else
+        readiness_status=$?
+        readiness_outcome=$last_lifecycle_outcome
+    fi
+    if [[ $readiness_status -eq 0 ]]; then
+        readiness_outcome=success
+    fi
+    boot_attempt_boot_status=$boot_status
+    boot_attempt_readiness_status=$readiness_status
+    boot_attempt_readiness_outcome=$readiness_outcome
+    boot_attempt_elapsed=$((SECONDS - started))
+    printf 'BUSTER_IOS_BOOT_ATTEMPT attempt=%s udid=%s boot_status=%s readiness_status=%s readiness_outcome=%s elapsed_seconds=%s evidence_base=%s\n' \
+        "$attempt" "$udid" "$boot_status" "$readiness_status" "$readiness_outcome" \
+        "$boot_attempt_elapsed" "$evidence_base" >&2
+    echo "TIMING_IOS boot_seconds=$boot_attempt_elapsed attempt=$attempt" >&2
+    return "$readiness_status"
+}
+
+recover_boot_readiness() {
+    local old_udid=$udid
+    local recovery_evidence_base="${console_log_base}.boot-recovery"
+    local shutdown_status=0
+    local delete_status=0
+    local create_status=0
+    local replacement_udid=
+    local recovery_status=1
+    local create_log="${recovery_evidence_base}.recovery-create.log"
+
+    # This path is reached only for an invocation-created hosted ARM64 device;
+    # each destructive/device-creation command has its own lifecycle deadline.
+    echo "iOS simulator readiness timed out on owned hosted ARM64 device $old_udid; attempting one bounded replacement" >&2
+    if run_lifecycle_phase recovery-shutdown attempt-1 "$recovery_evidence_base" "$shutdown_timeout_seconds" \
+        xcrun simctl shutdown "$old_udid"; then
+        shutdown_status=0
+    else
+        shutdown_status=$?
+        echo "error: could not shut down the first iOS simulator before recovery" >&2
+    fi
+    if [[ $shutdown_status -eq 0 ]]; then
+        if run_lifecycle_phase recovery-delete attempt-1 "$recovery_evidence_base" "$shutdown_timeout_seconds" \
+            xcrun simctl delete "$old_udid"; then
+            delete_status=0
+            udid=
+        else
+            delete_status=$?
+            echo "error: could not delete the first iOS simulator during recovery" >&2
+        fi
+    fi
+    if [[ $shutdown_status -eq 0 && $delete_status -eq 0 ]]; then
+        pending_create_log=$create_log
+        pending_create_owned=1
+        if run_lifecycle_phase recovery-create attempt-1 "$recovery_evidence_base" "$boot_timeout_seconds" \
+            xcrun simctl create "$device_name" "$device_type" "$runtime"; then
+            create_status=0
+        else
+            create_status=$?
+            echo "error: could not create a replacement iOS simulator during recovery" >&2
+        fi
+    fi
+    # Also run this after a normal phase return; cleanup runs the same strict
+    # parser if cancellation interrupts the phase before reaching this point.
+    adopt_pending_create_identity
+    if [[ -n $udid && $udid != "$old_udid" ]]; then
+        replacement_udid=$udid
+    fi
+    if [[ $shutdown_status -eq 0 && $delete_status -eq 0 && $create_status -eq 0 ]]; then
+        if [[ -z $replacement_udid ]]; then
+            echo "error: replacement simulator creation did not return a valid device identity" >&2
+            create_status=1
+        else
+            echo "Created replacement iOS simulator $udid using runtime=$runtime device_type=$device_type" >&2
+            if run_boot_readiness_attempt 2; then
+                recovery_status=0
+            else
+                echo "error: replacement iOS simulator did not become ready on the one permitted retry" >&2
+            fi
+        fi
+    fi
+    printf 'BUSTER_IOS_BOOT_RECOVERY attempt=1 old_udid=%s shutdown_status=%s delete_status=%s create_status=%s replacement_udid=%s readiness_status=%s result=%s\n' \
+        "$old_udid" "$shutdown_status" "$delete_status" "$create_status" \
+        "${replacement_udid:-unavailable}" "${boot_attempt_readiness_status:-unavailable}" \
+        "$recovery_status" >&2
+    return "$recovery_status"
+}
+
+if [[ $simulator_owned -eq 1 && $explicit_simulator_udid -eq 0 \
+    && ${GITHUB_ACTIONS:-false} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted \
+    && ${RUNNER_OS:-} == macOS \
+    && ${RUNNER_ARCH:-} == ARM64 && ${BUSTER_IOS_ARCH:-arm64} == arm64 ]]; then
+    boot_recovery_eligible=1
+fi
+printf 'BUSTER_IOS_BOOT_RECOVERY eligibility=%s owned=%s explicit_udid=%s github_actions=%s runner_environment=%s runner_os=%s runner_arch=%s ios_arch=%s\n' \
+    "$boot_recovery_eligible" "$simulator_owned" "$explicit_simulator_udid" \
+    "${GITHUB_ACTIONS:-false}" "${RUNNER_ENVIRONMENT:-unavailable}" \
+    "${RUNNER_OS:-unavailable}" "${RUNNER_ARCH:-unavailable}" \
+    "${BUSTER_IOS_ARCH:-default}" >&2
+
+if run_boot_readiness_attempt 1; then
+    boot_disposition=first-attempt-success
 else
-    boot_status=$?
-    echo "iOS simulator boot returned status $boot_status; continuing to bootstatus (it may already be booted)" >&2
+    first_readiness_status=$?
+    if [[ $boot_recovery_eligible -eq 1 && $boot_attempt_readiness_outcome == timeout ]]; then
+        if recover_boot_readiness; then
+            boot_disposition=recovered-infrastructure-pending-tests
+        else
+            boot_disposition=unrecovered-failure
+            echo "error: iOS simulator boot recovery failed; both readiness attempts and recovery statuses are retained" >&2
+            echo "BUSTER_IOS_BOOT_DISPOSITION=$boot_disposition" >&2
+            exit 1
+        fi
+    else
+        if [[ $boot_recovery_eligible -eq 0 ]]; then
+            echo "iOS simulator boot recovery not eligible for this device/invocation; preserving established failure behavior" >&2
+        elif [[ $boot_attempt_readiness_outcome != timeout ]]; then
+            echo "iOS simulator readiness failed with outcome=$boot_attempt_readiness_outcome; no recovery is permitted" >&2
+        fi
+        if [[ $boot_attempt_readiness_outcome == timeout ]]; then
+            echo "error: iOS simulator did not become ready within ${boot_timeout_seconds}s" >&2
+        else
+            echo "error: iOS simulator readiness command failed with outcome=$boot_attempt_readiness_outcome" >&2
+        fi
+        print_simulator_diagnostics
+        boot_disposition=unrecovered-failure
+        echo "BUSTER_IOS_BOOT_DISPOSITION=$boot_disposition" >&2
+        exit "$first_readiness_status"
+    fi
 fi
-if ! run_with_timeout "$boot_timeout_seconds" xcrun simctl bootstatus "$udid" -b; then
-    echo "error: iOS simulator did not become ready within ${boot_timeout_seconds}s" >&2
-    print_simulator_diagnostics
-    exit 1
-fi
-echo "TIMING_IOS boot_seconds=$((SECONDS - boot_started))"
 
 console_log_for_label() {
     local label=$1
@@ -704,5 +904,16 @@ for index in "${!bundle_paths[@]}"; do
         overall_status=1
     fi
 done
+
+if [[ $boot_disposition == recovered-infrastructure-pending-tests ]]; then
+    if [[ $overall_status -eq 0 ]]; then
+        boot_disposition=recovered-infrastructure-failure
+    else
+        boot_disposition=recovered-boot-but-test-failure
+    fi
+elif [[ $boot_disposition == first-attempt-success && $overall_status -ne 0 ]]; then
+    boot_disposition=first-attempt-boot-success-but-test-failure
+fi
+printf 'BUSTER_IOS_BOOT_DISPOSITION=%s\n' "$boot_disposition" >&2
 
 exit "$overall_status"

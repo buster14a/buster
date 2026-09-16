@@ -8627,13 +8627,15 @@ BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8*
 // double format is neither stable across targets nor available to the
 // self-hosted compiler.  The bounded bignum is deliberately local to this
 // narrow literal path; no generic IR wide-float constant is introduced.
-#define C_IR_EXT80_BIG_LIMBS 1024
-typedef struct CIrExt80Big CIrExt80Big;
-struct CIrExt80Big
-{
-    u32 limbs[C_IR_EXT80_BIG_LIMBS];
-    u32 count;
-};
+//
+// CIrExt80Big is declared in c_gen_internal.h so the frontend tests can
+// inspect its limbs.  It holds C_IR_EXT80_BIG_LIMBS limbs, but a literal lives
+// in a handful of them, so only the limbs below `count` are defined.  Every
+// helper here reads a limb at or above an operand's count only after writing
+// it in the same call, and initializes and copies just the live prefix
+// (c_ir_ext80_big_set_u64, c_ir_ext80_big_copy): a whole value is four
+// kilobytes, and the long divisions below shift a copy of the denominator for
+// every quotient bit.
 
 BUSTER_C_INTERNAL void c_ir_ext80_big_normalize(CIrExt80Big* value)
 {
@@ -8645,13 +8647,15 @@ BUSTER_C_INTERNAL void c_ir_ext80_big_normalize(CIrExt80Big* value)
 
 BUSTER_C_INTERNAL void c_ir_ext80_big_set_u64(CIrExt80Big* value, u64 bits)
 {
-    memset(value, 0, sizeof(*value));
-    if (bits)
-    {
-        value->limbs[0] = (u32)bits;
-        value->limbs[1] = (u32)(bits >> 32);
-        value->count = value->limbs[1] ? 2 : 1;
-    }
+    value->limbs[0] = (u32)bits;
+    value->limbs[1] = (u32)(bits >> 32);
+    value->count = value->limbs[1] ? 2 : (value->limbs[0] ? 1 : 0);
+}
+
+BUSTER_C_INTERNAL void c_ir_ext80_big_copy(CIrExt80Big* destination, CIrExt80Big const* source)
+{
+    destination->count = source->count;
+    memcpy(destination->limbs, source->limbs, source->count * sizeof(source->limbs[0]));
 }
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_mul_small(CIrExt80Big* value, u32 multiplier)
@@ -8698,39 +8702,47 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_add_small(CIrExt80Big* value, u32 addend)
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_shift_left(CIrExt80Big* value, u32 shift)
 {
+    bool result = true;
     if (shift && value->count)
     {
         u32 limb_shift = shift / 32;
         u32 bit_shift = shift % 32;
-        if (limb_shift >= C_IR_EXT80_BIG_LIMBS || value->count > C_IR_EXT80_BIG_LIMBS - limb_shift)
+        u32 count = value->count;
+        // The bits the top limb carries into a new limb; shifting through u64
+        // keeps a zero bit_shift defined and carrying nothing.  Once the count
+        // fits, only this carry can land past the last limb.
+        u32 carry = (u32)(((u64)value->limbs[count - 1] << bit_shift) >> 32);
+        if (limb_shift >= C_IR_EXT80_BIG_LIMBS || count > C_IR_EXT80_BIG_LIMBS - limb_shift ||
+            (carry && count + limb_shift == C_IR_EXT80_BIG_LIMBS))
         {
-            return false;
+            result = false;
         }
-        CIrExt80Big shifted = {0};
-        for (u32 index = 0; index < value->count; index += 1)
+        else
         {
-            u64 part = (u64)value->limbs[index] << bit_shift;
-            u32 destination = index + limb_shift;
-            shifted.limbs[destination] |= (u32)part;
-            if (part >> 32)
+            // Shift in place from the top down.  Limb `index` lands at
+            // index + limb_shift, never below itself, so every source limb is
+            // read before anything overwrites it, and every limb below the new
+            // count is assigned rather than combined with what was stored there.
+            u32 shifted_count = count + limb_shift;
+            if (carry)
             {
-                if (destination + 1 >= C_IR_EXT80_BIG_LIMBS)
-                {
-                    return false;
-                }
-                shifted.limbs[destination + 1] |= (u32)(part >> 32);
+                value->limbs[shifted_count] = carry;
+                shifted_count += 1;
             }
+            for (u32 index = count - 1; index; index -= 1)
+            {
+                u64 high = (u64)value->limbs[index] << bit_shift;
+                u64 low = (u64)value->limbs[index - 1] << bit_shift;
+                value->limbs[index + limb_shift] = (u32)(high | (low >> 32));
+            }
+            value->limbs[limb_shift] = (u32)((u64)value->limbs[0] << bit_shift);
+            memset(value->limbs, 0, limb_shift * sizeof(value->limbs[0]));
+            value->count = shifted_count;
+            c_ir_ext80_big_normalize(value);
         }
-        shifted.count = value->count + limb_shift;
-        if (bit_shift && shifted.count < C_IR_EXT80_BIG_LIMBS && shifted.limbs[shifted.count])
-        {
-            shifted.count += 1;
-        }
-        c_ir_ext80_big_normalize(&shifted);
-        *value = shifted;
     }
 
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Big const* right)
@@ -8752,16 +8764,17 @@ BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Bi
 
 BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift)
 {
-    CIrExt80Big shifted = *right;
+    CIrExt80Big shifted;
     if (shift >= 0)
     {
+        c_ir_ext80_big_copy(&shifted, right);
         if (!c_ir_ext80_big_shift_left(&shifted, (u32)shift))
         {
             return -1;
         }
         return c_ir_ext80_big_compare(left, &shifted);
     }
-    shifted = *left;
+    c_ir_ext80_big_copy(&shifted, left);
     s32 result;
     if (shift == INT32_MIN)
     {
@@ -8781,7 +8794,8 @@ BUSTER_C_INTERNAL s32 c_ir_ext80_big_compare_shifted(CIrExt80Big const* left, CI
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift)
 {
-    CIrExt80Big shifted = *right;
+    CIrExt80Big shifted;
+    c_ir_ext80_big_copy(&shifted, right);
     if (!c_ir_ext80_big_shift_left(&shifted, shift) || c_ir_ext80_big_compare(left, &shifted) < 0)
     {
         return false;
@@ -8817,16 +8831,19 @@ BUSTER_C_INTERNAL u32 c_ir_ext80_big_bit_length(CIrExt80Big const* value)
 // Operand-to-operand addition and multiplication.  A single literal only ever
 // scaled its rational by a small constant, so mul_small and add_small were
 // enough for it; folding `a * b` or `a + b` over two literals needs the whole
-// products and sums.  Limbs above `count` are always zero here -- every writer
-// in this bignum either starts from a cleared value or normalizes down through
-// zeros -- so the shorter operand reads as zero without a length test.
+// products and sums.  Limbs at or above `count` are undefined, so the shorter
+// addend contributes zero past its own count rather than whatever is stored
+// there, and the product clears only the limbs it accumulates into.
 BUSTER_C_INTERNAL bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right)
 {
-    u32 count = left->count > right->count ? left->count : right->count;
+    u32 left_count = left->count;
+    u32 count = left_count > right->count ? left_count : right->count;
     u64 carry = 0;
     for (u32 index = 0; index < count; index += 1)
     {
-        u64 sum = (u64)left->limbs[index] + right->limbs[index] + carry;
+        u64 left_limb = index < left_count ? left->limbs[index] : 0;
+        u64 right_limb = index < right->count ? right->limbs[index] : 0;
+        u64 sum = left_limb + right_limb + carry;
         left->limbs[index] = (u32)sum;
         carry = sum >> 32;
     }
@@ -8845,7 +8862,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* 
 
 BUSTER_C_INTERNAL bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out)
 {
-    memset(product_out, 0, sizeof(*product_out));
+    product_out->count = 0;
     if (!left->count || !right->count)
     {
         return true;
@@ -8854,6 +8871,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80
     {
         return false;
     }
+    memset(product_out->limbs, 0, (left->count + right->count) * sizeof(product_out->limbs[0]));
     for (u32 left_index = 0; left_index < left->count; left_index += 1)
     {
         u64 carry = 0;
@@ -8880,7 +8898,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_big_divide_round(CIrExt80Big const* numerator,
     {
         return false;
     }
-    CIrExt80Big remainder = *numerator;
+    CIrExt80Big remainder;
+    c_ir_ext80_big_copy(&remainder, numerator);
     u64 quotient = 0;
     bool overflow = false;
     for (s32 bit = 64; bit >= 0; bit -= 1)
@@ -8929,7 +8948,8 @@ BUSTER_C_INTERNAL bool c_ir_ieee_big_divide_round(CIrExt80Big const* numerator, 
     {
         return false;
     }
-    CIrExt80Big remainder = *numerator;
+    CIrExt80Big remainder;
+    c_ir_ext80_big_copy(&remainder, numerator);
     u64 quotient = 0;
     bool overflow = false;
     for (s32 bit = (s32)fraction_bits + 1; bit >= 0; bit -= 1)
@@ -8958,30 +8978,30 @@ BUSTER_C_INTERNAL bool c_ir_ieee_big_divide_round(CIrExt80Big const* numerator, 
     return true;
 }
 
-BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
-                                             u32 fraction_bits, s32 min_exponent, s32 max_exponent, u32 exponent_bits,
-                                             u64* bits_out)
+BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                             bool negative, u32 fraction_bits, s32 min_exponent, s32 max_exponent,
+                                             u32 exponent_bits, u64* bits_out)
 {
-    if (!denominator.count || !bits_out || !fraction_bits || fraction_bits >= 62 || !exponent_bits || exponent_bits >= 32 ||
+    if (!denominator->count || !bits_out || !fraction_bits || fraction_bits >= 62 || !exponent_bits || exponent_bits >= 32 ||
         exponent_bits > 63 - fraction_bits ||
         min_exponent >= max_exponent)
     {
         return C_IR_ROUND_FAILED;
     }
     u64 sign_bit = (u64)1 << (fraction_bits + exponent_bits);
-    if (!numerator.count)
+    if (!numerator->count)
     {
         *bits_out = negative ? sign_bit : 0;
         return C_IR_ROUND_OK;
     }
 
-    s64 exponent = (s64)c_ir_ext80_big_bit_length(&numerator) - (s64)c_ir_ext80_big_bit_length(&denominator) + binary_exponent;
+    s64 exponent = (s64)c_ir_ext80_big_bit_length(numerator) - (s64)c_ir_ext80_big_bit_length(denominator) + binary_exponent;
     // Correct the one-bit estimate from the operand lengths into floor(log2).
     for (u32 iteration = 0; iteration < 2; iteration += 1)
     {
         s64 shift = exponent - binary_exponent;
         s32 comparison = shift <= INT32_MIN || shift > INT32_MAX ? (shift < 0 ? 1 : -1)
-                                                                : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)shift);
+                                                                : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)shift);
         if (comparison < 0)
         {
             exponent -= 1;
@@ -8990,7 +9010,7 @@ BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big 
         s64 next_shift = shift + 1;
         s32 next_comparison = next_shift <= INT32_MIN || next_shift > INT32_MAX
                                   ? (next_shift < 0 ? 1 : -1)
-                                  : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)next_shift);
+                                  : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)next_shift);
         if (next_comparison >= 0)
         {
             exponent += 1;
@@ -9005,8 +9025,10 @@ BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big 
         return C_IR_ROUND_OVERFLOW;
     }
     s64 scaling = subnormal ? (s64)binary_exponent + fraction_bits - min_exponent : (s64)binary_exponent + fraction_bits - exponent;
-    CIrExt80Big scaled_numerator = numerator;
-    CIrExt80Big scaled_denominator = denominator;
+    CIrExt80Big scaled_numerator;
+    CIrExt80Big scaled_denominator;
+    c_ir_ext80_big_copy(&scaled_numerator, numerator);
+    c_ir_ext80_big_copy(&scaled_denominator, denominator);
     if (scaling >= 0)
     {
         if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9045,8 +9067,8 @@ BUSTER_C_INTERNAL u8 c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big 
             return C_IR_ROUND_OVERFLOW;
         }
         scaling = (s64)binary_exponent + fraction_bits - exponent;
-        scaled_numerator = numerator;
-        scaled_denominator = denominator;
+        c_ir_ext80_big_copy(&scaled_numerator, numerator);
+        c_ir_ext80_big_copy(&scaled_denominator, denominator);
         if (scaling >= 0)
         {
             if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9227,7 +9249,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     bool fraction = false;
     bool saw_digit = false;
     u32 fraction_digits = 0;
-    CIrExt80Big numerator = {0};
+    CIrExt80Big numerator;
+    c_ir_ext80_big_set_u64(&numerator, 0);
     while (index < spelling.length)
     {
         u8 byte = spelling.pointer[index];
@@ -9288,12 +9311,12 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     {
         return false;
     }
-    CIrExt80Big denominator = {0};
+    CIrExt80Big denominator;
     c_ir_ext80_big_set_u64(&denominator, 1);
     if (!numerator.count)
     {
-        *numerator_out = numerator;
-        *denominator_out = denominator;
+        c_ir_ext80_big_copy(numerator_out, &numerator);
+        c_ir_ext80_big_copy(denominator_out, &denominator);
         *binary_exponent_out = 0;
         return true;
     }
@@ -9335,11 +9358,46 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     {
         return false;
     }
-    *numerator_out = numerator;
-    *denominator_out = denominator;
+    c_ir_ext80_big_copy(numerator_out, &numerator);
+    c_ir_ext80_big_copy(denominator_out, &denominator);
     *binary_exponent_out = (s32)binary_exponent;
     return true;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// Seams for the live-limb contract above; c_test_ext80_big_live_limbs drives
+// them with a sentinel in every limb a helper must not read or write.
+bool c_test_ext80_big_shift_left(CIrExt80Big* value, u32 shift)
+{
+    return c_ir_ext80_big_shift_left(value, shift);
+}
+
+s32 c_test_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift)
+{
+    return c_ir_ext80_big_compare_shifted(left, right, shift);
+}
+
+bool c_test_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift)
+{
+    return c_ir_ext80_big_subtract_shifted(left, right, shift);
+}
+
+bool c_test_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right)
+{
+    return c_ir_ext80_big_add(left, right);
+}
+
+bool c_test_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out)
+{
+    return c_ir_ext80_big_multiply(left, right, product_out);
+}
+
+bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
+                                         s32* binary_exponent_out)
+{
+    return c_ir_ext80_parse_rational_literal(spelling, numerator_out, denominator_out, binary_exponent_out);
+}
+#endif
 
 // The value a float literal denotes, for the static-initializer paths that
 // need it as one f64: constant-expression evaluation and the two global
@@ -9365,8 +9423,8 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
     {
         bool single = *suffix_out == 'f' || *suffix_out == 'F';
         bool half = *suffix_out == 'h';
-        CIrExt80Big numerator = {0};
-        CIrExt80Big denominator = {0};
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
         s32 binary_exponent = 0;
         u64 bits = 0;
         if (half)
@@ -9378,7 +9436,7 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
             *value_out = c_ir_float16_round(*value_out);
         }
         else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
-            c_ir_ieee_from_rational(numerator, denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
+            c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
                                     single ? 127 : 1023, single ? 8 : 11, &bits) == C_IR_ROUND_OK)
         {
             if (single)
@@ -9398,26 +9456,26 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
     return result;
 }
 
-BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
-                                              u64* significand_out, u16* exponent_sign_out)
+BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                              bool negative, u64* significand_out, u16* exponent_sign_out)
 {
-    if (!denominator.count)
+    if (!denominator->count)
     {
         return C_IR_ROUND_FAILED;
     }
-    if (!numerator.count)
+    if (!numerator->count)
     {
         *significand_out = 0;
         *exponent_sign_out = negative ? UINT16_C(0x8000) : 0;
         return C_IR_ROUND_OK;
     }
-    s64 exponent = (s64)c_ir_ext80_big_bit_length(&numerator) - (s64)c_ir_ext80_big_bit_length(&denominator) + binary_exponent;
+    s64 exponent = (s64)c_ir_ext80_big_bit_length(numerator) - (s64)c_ir_ext80_big_bit_length(denominator) + binary_exponent;
     // Correct the one-bit estimate from the operand lengths into floor(log2).
     for (u32 iteration = 0; iteration < 2; iteration += 1)
     {
         s64 shift = exponent - binary_exponent;
         s32 comparison = shift <= INT32_MIN || shift > INT32_MAX ? (shift < 0 ? 1 : -1)
-                                                                : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)shift);
+                                                                : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)shift);
         if (comparison < 0)
         {
             exponent -= 1;
@@ -9426,7 +9484,7 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big
         s64 next_shift = shift + 1;
         s32 next_comparison = next_shift <= INT32_MIN || next_shift > INT32_MAX
                                   ? (next_shift < 0 ? 1 : -1)
-                                  : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)next_shift);
+                                  : c_ir_ext80_big_compare_shifted(numerator, denominator, (s32)next_shift);
         if (next_comparison >= 0)
         {
             exponent += 1;
@@ -9440,8 +9498,10 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big
         return C_IR_ROUND_OVERFLOW;
     }
     s64 scaling = subnormal ? (s64)binary_exponent + 16445 : (s64)binary_exponent + 63 - exponent;
-    CIrExt80Big scaled_numerator = numerator;
-    CIrExt80Big scaled_denominator = denominator;
+    CIrExt80Big scaled_numerator;
+    CIrExt80Big scaled_denominator;
+    c_ir_ext80_big_copy(&scaled_numerator, numerator);
+    c_ir_ext80_big_copy(&scaled_denominator, denominator);
     if (scaling >= 0)
     {
         if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9474,8 +9534,8 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big
             return C_IR_ROUND_OVERFLOW;
         }
         scaling = (s64)binary_exponent + 63 - exponent;
-        scaled_numerator = numerator;
-        scaled_denominator = denominator;
+        c_ir_ext80_big_copy(&scaled_numerator, numerator);
+        c_ir_ext80_big_copy(&scaled_denominator, denominator);
         if (scaling >= 0)
         {
             if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
@@ -9562,18 +9622,18 @@ BUSTER_C_INTERNAL bool c_ir_ext80_from_ieee64(u64 bits, bool negative, u64* sign
         *exponent_sign_out = (source_negative ^ negative) ? UINT16_C(0x8000) : 0;
         return true;
     }
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     if (exponent_bits)
     {
         c_ir_ext80_big_set_u64(&numerator, UINT64_C(0x0010000000000000) | fraction);
         c_ir_ext80_big_set_u64(&denominator, 1);
-        return c_ir_ext80_from_rational(numerator, denominator, (s32)exponent_bits - 1023 - 52, source_negative ^ negative,
+        return c_ir_ext80_from_rational(&numerator, &denominator, (s32)exponent_bits - 1023 - 52, source_negative ^ negative,
                                         significand_out, exponent_sign_out) == C_IR_ROUND_OK;
     }
     c_ir_ext80_big_set_u64(&numerator, fraction);
     c_ir_ext80_big_set_u64(&denominator, 1);
-    return c_ir_ext80_from_rational(numerator, denominator, -1074, source_negative ^ negative, significand_out, exponent_sign_out) ==
+    return c_ir_ext80_from_rational(&numerator, &denominator, -1074, source_negative ^ negative, significand_out, exponent_sign_out) ==
            C_IR_ROUND_OK;
 }
 
@@ -9592,18 +9652,18 @@ BUSTER_C_INTERNAL bool c_ir_ext80_from_ieee32(u32 bits, bool negative, u64* sign
         *exponent_sign_out = (source_negative ^ negative) ? UINT16_C(0x8000) : 0;
         return true;
     }
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     if (exponent_bits)
     {
         c_ir_ext80_big_set_u64(&numerator, UINT64_C(0x00800000) | fraction);
         c_ir_ext80_big_set_u64(&denominator, 1);
-        return c_ir_ext80_from_rational(numerator, denominator, (s32)exponent_bits - 127 - 23, source_negative ^ negative,
+        return c_ir_ext80_from_rational(&numerator, &denominator, (s32)exponent_bits - 127 - 23, source_negative ^ negative,
                                         significand_out, exponent_sign_out) == C_IR_ROUND_OK;
     }
     c_ir_ext80_big_set_u64(&numerator, fraction);
     c_ir_ext80_big_set_u64(&denominator, 1);
-    return c_ir_ext80_from_rational(numerator, denominator, -149, source_negative ^ negative, significand_out, exponent_sign_out) ==
+    return c_ir_ext80_from_rational(&numerator, &denominator, -149, source_negative ^ negative, significand_out, exponent_sign_out) ==
            C_IR_ROUND_OK;
 }
 
@@ -9613,8 +9673,8 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negati
     {
         return C_IR_ROUND_FAILED;
     }
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     s32 binary_exponent = 0;
     u8 result;
     if (!c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
@@ -9623,7 +9683,7 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negati
     }
     else
     {
-        result = c_ir_ext80_from_rational(numerator, denominator, binary_exponent, negative, significand_out, exponent_sign_out);
+        result = c_ir_ext80_from_rational(&numerator, &denominator, binary_exponent, negative, significand_out, exponent_sign_out);
     }
 
     return result;
@@ -9752,8 +9812,8 @@ BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_default_nan(u8 rank)
 // holding the float quotient rather than the long double one.  Overflow and
 // underflow are values here, not failures: C says the result becomes the
 // infinity or the signed zero, and Clang folds them that way.
-BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative, u8 rank,
-                                                CIrExt80Value* result_out)
+BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                                bool negative, u8 rank, CIrExt80Value* result_out)
 {
     u64 significand = 0;
     u16 exponent_sign = 0;
@@ -9823,13 +9883,13 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_convert(CIrExt80Value* value, u8 rank)
     bool result = true;
     if (value->rank != rank && rank != C_IR_EXT80_RANK_LONG_DOUBLE && !c_ir_ext80_value_is_special(*value) && value->significand)
     {
-        CIrExt80Big numerator = {0};
-        CIrExt80Big denominator = {0};
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
         s32 binary_exponent = 0;
         bool negative = false;
         c_ir_ext80_big_set_u64(&denominator, 1);
         result = c_ir_ext80_value_rational(*value, &numerator, &binary_exponent, &negative) &&
-                 c_ir_ext80_value_round(numerator, denominator, binary_exponent, negative, rank, value);
+                 c_ir_ext80_value_round(&numerator, &denominator, binary_exponent, negative, rank, value);
     }
     value->rank = rank;
 
@@ -9926,8 +9986,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_special(CPunctuator op, CIrExt80Value le
 
 BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value left, CIrExt80Value right, u8 rank, CIrExt80Value* result_out)
 {
-    CIrExt80Big left_numerator = {0};
-    CIrExt80Big right_numerator = {0};
+    CIrExt80Big left_numerator;
+    CIrExt80Big right_numerator;
     s32 left_exponent = 0;
     s32 right_exponent = 0;
     bool left_negative = false;
@@ -9937,16 +9997,16 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
     {
         return false;
     }
-    CIrExt80Big denominator = {0};
+    CIrExt80Big denominator;
     c_ir_ext80_big_set_u64(&denominator, 1);
     bool negative = false;
     bool valid = false;
     s64 exponent = 0;
     if (op == C_PUNCTUATOR_STAR)
     {
-        CIrExt80Big product = {0};
+        CIrExt80Big product;
         valid = c_ir_ext80_big_multiply(&left_numerator, &right_numerator, &product);
-        left_numerator = product;
+        c_ir_ext80_big_copy(&left_numerator, &product);
         negative = left_negative != right_negative;
         exponent = (s64)left_exponent + right_exponent;
     }
@@ -9958,7 +10018,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
         // numeric core beyond what a single literal already used.  A zero
         // divisor never arrives -- c_ir_ext80_value_special answered it.
         valid = right_numerator.count != 0;
-        denominator = right_numerator;
+        c_ir_ext80_big_copy(&denominator, &right_numerator);
         negative = left_negative != right_negative;
         exponent = (s64)left_exponent - right_exponent;
     }
@@ -9984,7 +10044,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
             }
             else if (!left_numerator.count)
             {
-                left_numerator = right_numerator;
+                c_ir_ext80_big_copy(&left_numerator, &right_numerator);
                 negative = right_negative;
                 exponent = right_exponent;
             }
@@ -10020,9 +10080,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
             }
             else
             {
-                CIrExt80Big difference = right_numerator;
-                valid = c_ir_ext80_big_subtract_shifted(&difference, &left_numerator, 0);
-                left_numerator = difference;
+                valid = c_ir_ext80_big_subtract_shifted(&right_numerator, &left_numerator, 0);
+                c_ir_ext80_big_copy(&left_numerator, &right_numerator);
                 negative = right_negative;
             }
         }
@@ -10031,7 +10090,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
     {
         return false;
     }
-    return c_ir_ext80_value_round(left_numerator, denominator, (s32)exponent, negative, rank, result_out);
+    return c_ir_ext80_value_round(&left_numerator, &denominator, (s32)exponent, negative, rank, result_out);
 }
 
 // The usual arithmetic conversions decide where an operation rounds: both
@@ -10090,14 +10149,14 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
         bool single = suffix == 'f' || suffix == 'F';
         bool half = suffix == 'h';
         rank = half ? C_IR_EXT80_RANK_HALF : single ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
-        CIrExt80Big numerator = {0};
-        CIrExt80Big denominator = {0};
+        CIrExt80Big numerator;
+        CIrExt80Big denominator;
         s32 binary_exponent = 0;
         if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
         {
             u64 ieee_bits = 0;
             bool source_nonzero = c_ir_ext80_spelling_nonzero(spelling);
-            status = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, half ? 10u : single ? 23u : 52u,
+            status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, negative, half ? 10u : single ? 23u : 52u,
                                              half ? -14 : single ? -126 : -1022, half ? 15 : single ? 127 : 1023, half ? 5u : single ? 8u : 11u,
                                              &ieee_bits);
             if (status == C_IR_ROUND_OK)
@@ -10154,13 +10213,13 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
                     negative = false;
                 }
             }
-            CIrExt80Big numerator = {0};
-            CIrExt80Big denominator = {0};
+            CIrExt80Big numerator;
+            CIrExt80Big denominator;
             c_ir_ext80_big_set_u64(&numerator, integer);
             c_ir_ext80_big_set_u64(&denominator, 1);
             // Every u64 is exact in a 64-bit significand, so an integer
             // spelling can only come back as C_IR_ROUND_OK or a failure.
-            status = c_ir_ext80_from_rational(numerator, denominator, 0, negative, &significand, &exponent_sign);
+            status = c_ir_ext80_from_rational(&numerator, &denominator, 0, negative, &significand, &exponent_sign);
         }
     }
     bool result = true;
@@ -10525,8 +10584,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     // which changes the observable `%g` rendering in cJSON's print tests.
     // The bounded integer path is shared with x87 literals and implements
     // round-to-nearest-even for both IEEE widths.
-    CIrExt80Big numerator = {0};
-    CIrExt80Big denominator = {0};
+    CIrExt80Big numerator;
+    CIrExt80Big denominator;
     s32 binary_exponent = 0;
     bool converted = false;
     if (type_value->bit_width == 16)
@@ -10541,7 +10600,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     }
     else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
     {
-        converted = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, false,
+        converted = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
                                              type_value->bit_width == 32 ? 23 : 52,
                                              type_value->bit_width == 32 ? -126 : -1022,
                                              type_value->bit_width == 32 ? 127 : 1023,

@@ -1247,6 +1247,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_process_group_absent(pid_t group, u64 dead
 
 #ifdef BUSTER_BENCH_SERVICE_TEST
 BUSTER_GLOBAL_LOCAL bool bq_worker_test_setpgid_failure;
+BUSTER_GLOBAL_LOCAL bool bq_worker_test_stop_before_exec;
+BUSTER_GLOBAL_LOCAL pid_t bq_worker_test_exec_pid;
 #endif
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_exec_capture(char const* const* arguments, char* output, u32 capacity,
@@ -1257,6 +1259,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_exec_capture(char const* const* arguments,
     int setup[2] = {-1, -1};
     BqError error = capacity && pipe(pipefd) == 0 && pipe(setup) == 0 ? BQ_OK : BQ_IO;
     pid_t pid = error == BQ_OK ? fork() : -1;
+#ifdef BUSTER_BENCH_SERVICE_TEST
+    bq_worker_test_exec_pid = pid;
+#endif
     if (pid < 0) error = BQ_IO;
     if (!pid)
     {
@@ -1275,6 +1280,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_exec_capture(char const* const* arguments,
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
         close(pipefd[1]);
+#ifdef BUSTER_BENCH_SERVICE_TEST
+        if (bq_worker_test_stop_before_exec) raise(SIGSTOP);
+#endif
         execv(arguments[0], (char* const*)arguments);
         _exit(127);
     }

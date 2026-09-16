@@ -76,7 +76,7 @@ jobs:
           GOSUMDB: sum.golang.org
         run: |
           set -euo pipefail
-          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}
         shell: bash
@@ -85,7 +85,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -164,8 +164,20 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
-          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
+
+      # Wrapper integration starts many real shells. It must not consume the
+      # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
+      - name: Bootstrap wrapper regression tests
+        id: bootstrap_wrappers
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
 
       - name: Install mold
         id: mold
@@ -249,6 +261,14 @@ jobs:
           # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          # The result step independently re-probes the exact compiler
+          # executables recorded by the driver. Preserve this step's selected
+          # Visual Studio/LLVM search path and target architecture for it.
+          $PathDelimiter = 'BUSTER_CI_WINDOWS_COMPILER_PATH'
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
           foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
             where.exe $Compiler
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -274,8 +294,12 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools zig combinations_unix' || 'workflow_tools zig combinations_windows' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows' }}
           BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
+          BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
+          BUSTER_CI_COVERAGE_REQUIRED: "1"
+          BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
+          BUSTER_CI_COVERAGE_ARCH: ${{ matrix.arch }}
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
 
       - name: Retain desktop logs
@@ -495,21 +519,31 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/android.log") 2>&1
+          android_phase=start
           cleanup_android_emulator() {
             status=$?
+            payload_status=$status
+            cleanup_status=not-run
             trap - EXIT INT TERM
             if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
+              printf 'Android emulator log follows an already-failed phase=%s status=%s\n' "$android_phase" "$payload_status" >&2
               tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
             fi
             if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
               cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
               if BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$cleanup_timeout_seconds" bash ./android/start_emulator_ci.sh stop; then
-                :
+                cleanup_status=0
               else
                 cleanup_status=$?
                 echo "warning: Android emulator cleanup failed with exit status $cleanup_status" >&2
                 if [[ $status -eq 0 ]]; then status=1; fi
               fi
+            fi
+            printf 'ANDROID_CI_RESULT phase=%s payload_status=%s cleanup_status=%s status=%s\n' "$android_phase" "$payload_status" "$cleanup_status" "$status"
+            if [[ $payload_status -ne 0 ]]; then
+              printf 'error: Android CI failed before final emulator cleanup (phase=%s status=%s)\n' "$android_phase" "$payload_status" >&2
+            elif [[ $status -ne 0 ]]; then
+              printf 'error: Android CI required emulator cleanup failed (status=%s)\n' "$cleanup_status" >&2
             fi
             exit "$status"
           }
@@ -518,6 +552,7 @@ jobs:
           trap 'exit 130' INT
           trap 'exit 143' TERM
           bash ./android/start_emulator_ci.sh start
+          android_phase=tests
           ./android/test_ci.sh --all
 
       - name: Test (iOS simulator)

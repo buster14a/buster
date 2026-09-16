@@ -6,6 +6,11 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-contract.yml
+      # Android status tests reuse frozen mobile support inputs. Keep their
+      # contract validation scheduled even when tests/** itself is unchanged.
+      - .github/workflows/ci.yml
+      - .github/workflows/ios-monitor-tests.yml
+      - android/**
       - .github/workflows/native-retirement-evidence.yml
       - build.c
       - docs/agents/build.md
