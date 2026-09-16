@@ -1,0 +1,43 @@
+name: PR 687 review source snapshots
+on:
+  push:
+    branches: [codex/pr687-review-snapshot]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3be1d020ca33e9c52bc0afcf198c7ba4904c0c9c
+          path: source-head
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 939041b3d6b4b5c773318a5b494a28a4d9b829f1
+          path: source-main
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e68e4f62eb67ec8e432fe46277bfe6f9e0e472cf
+          path: source-base
+          persist-credentials: false
+      - name: Archive tracked source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr687-review"
+          for name in head main base; do
+            git -C "source-$name" archive --format=tar.gz --output="$RUNNER_TEMP/pr687-review/$name.tar.gz" HEAD
+            git -C "source-$name" rev-parse HEAD >> "$RUNNER_TEMP/pr687-review/revisions.txt"
+          done
+          printf '%s\n' 'Source snapshots for conflict resolution and code review only; not compiler validation evidence.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr687-review-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr687-review
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
