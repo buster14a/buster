@@ -39,8 +39,14 @@ class AndroidSummaryTests(unittest.TestCase):
                 (output / "summary.md").read_text())
 
     @staticmethod
-    def configuration(config, status=0, reader=10, producer=143, phase="monitor"):
-        return (f"ANDROID_MONITOR_RESULT config={config} reader_status={reader} producer_status={producer} timeout_seconds=60\n"
+    def configuration(config, status=0, reader=10, producer=143, phase="monitor",
+                      timeout=60, elapsed=None, warning="no"):
+        if elapsed is None:
+            elapsed = timeout if str(producer) in ("124", "137") else 20
+        headroom = max(timeout - elapsed, 0)
+        return (f"ANDROID_MONITOR_RESULT config={config} reader_status={reader} producer_status={producer} "
+                f"timeout_seconds={timeout} elapsed_seconds={elapsed} headroom_seconds={headroom} "
+                f"headroom_warning={warning}\n"
                 f"ANDROID_PAYLOAD_RESULT config={config} phase={phase} status={status}\n"
                 f"ANDROID_CONFIG_RESULT config={config} status={status}\n")
 
@@ -145,6 +151,57 @@ class AndroidSummaryTests(unittest.TestCase):
                 status, _, summary = self.report(log)
                 self.assertEqual(status, 1)
                 self.assertIn(f"| Debug | {code} | {phase} | {code} |", summary)
+
+    def test_payload_deadline_exhaustion_is_named_and_not_blamed_on_cleanup(self):
+        for producer in (124, 137):
+            with self.subTest(producer=producer):
+                log = (self.configuration("Debug", status=1, reader=0, producer=producer) +
+                       self.configuration("Release") +
+                       self.final(payload=1, cleanup="not-run", status=1, config="Debug"))
+                status, report, summary = self.report(log)
+                self.assertEqual(status, 1)
+                self.assertEqual(report["android"]["configurations"]["Debug"]["monitor"]["headroom_seconds"], "0")
+                self.assertIn(f"| Debug | 1 | monitor | 1 | 0 / {producer} | 60 | 60 | 0 |", summary)
+                self.assertIn("Debug exhausted its 60s payload deadline", summary)
+                self.assertIn("emulator cleanup runs afterwards and is not this failure", summary)
+
+    def test_thin_headroom_on_a_passing_payload_is_visible_without_failing_it(self):
+        log = (self.configuration("Debug", elapsed=57, warning="yes") +
+               self.configuration("Release") + self.final())
+        status, report, summary = self.report(log, "success")
+        self.assertEqual(status, 0)
+        self.assertTrue(report["success"])
+        self.assertEqual(report["android"]["configurations"]["Debug"]["monitor"]["headroom_warning"], "yes")
+        self.assertIn("| Debug | 0 | monitor | 0 | 10 / 143 | 60 | 57 | 3 |", summary)
+        self.assertIn("Debug passed 3s inside its 60s payload deadline (57s elapsed)", summary)
+        self.assertNotIn("Release passed", summary)
+
+    def test_comfortable_headroom_adds_no_deadline_note(self):
+        _, _, summary = self.report(self.passing_log(), "success")
+        self.assertIn("| Debug | 0 | monitor | 0 | 10 / 143 | 60 | 20 | 40 |", summary)
+        self.assertNotIn("Payload deadline:", summary)
+
+    def test_monitor_records_without_deadline_fields_are_malformed(self):
+        log = ("ANDROID_MONITOR_RESULT config=Debug reader_status=0 producer_status=124 timeout_seconds=60\n"
+               "ANDROID_PAYLOAD_RESULT config=Debug phase=monitor status=1\n"
+               "ANDROID_CONFIG_RESULT config=Debug status=1\n" +
+               self.configuration("Release") + self.final(payload=1, status=1, config="Debug"))
+        _, report, summary = self.report(log)
+        self.assertNotIn("monitor", report["android"]["configurations"]["Debug"])
+        self.assertIn("Malformed ANDROID_MONITOR_RESULT record ignored.", report["android"]["warnings"])
+        self.assertIn("| Debug | 1 | monitor | 1 | missing / missing | missing | missing | missing |", summary)
+        self.assertNotIn("Payload deadline:", summary)
+
+    def test_untrusted_deadline_values_are_not_copied(self):
+        log = ("ANDROID_MONITOR_RESULT config=Debug reader_status=10 producer_status=143 timeout_seconds=60 "
+               "elapsed_seconds=57 headroom_seconds=3 headroom_warning=<script>secret</script>\n"
+               "ANDROID_MONITOR_RESULT config=Release reader_status=10 producer_status=143 timeout_seconds=60 "
+               "elapsed_seconds=-1 headroom_seconds=61 headroom_warning=yes\n")
+        _, report, summary = self.report(log)
+        self.assertTrue(report["android"]["warnings"])
+        self.assertNotIn("secret", json.dumps(report))
+        self.assertNotIn("<script>", summary)
+        self.assertNotIn("Payload deadline:", summary)
 
     def test_read_failure_leaves_the_existing_step_failure_intact(self):
         self.log.write_text(self.passing_log())

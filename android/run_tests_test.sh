@@ -145,8 +145,11 @@ if [[ ${BUSTER_ANDROID_FAKE_ADB:-0} == 1 ]]; then
 
             printf '%s\n' "$$" >"$state/producer.pid"
             case ${BUSTER_ANDROID_FAKE_SCENARIO:-success} in
-                success)
+                success|slow_success)
                     printf 'unrelated Android log line\n'
+                    # slow_success reports late enough to leave only thin
+                    # headroom inside its deadline, without crossing it.
+                    sleep "${BUSTER_ANDROID_FAKE_MARKER_DELAY_SECONDS:-0}"
                     printf '%s\n' "$(date +%s%N)" >"$state/marker.ns"
                     printf 'BUSTER_ANDROID_TEST_RESULT:0\n'
                     ;;
@@ -163,6 +166,9 @@ if [[ ${BUSTER_ANDROID_FAKE_ADB:-0} == 1 ]]; then
                     ;;
                 missing_marker)
                     printf 'unrelated Android log line\n'
+                    # Oversized payload text must be reported bounded, not in full.
+                    printf 'x%.0s' {1..500}
+                    printf '\n'
                     exit 0
                     ;;
                 timeout)
@@ -219,6 +225,16 @@ assert_log_contains() {
     fi
 }
 
+assert_log_matches() {
+    local expression=$1
+    local state=$2
+    if ! grep -qE "$expression" "$state/run.log"; then
+        echo "assertion failed: '$expression' did not match $state/run.log" >&2
+        cat "$state/run.log" >&2
+        return 1
+    fi
+}
+
 assert_no_owned_producer() {
     local state=$1
     local pid
@@ -248,15 +264,23 @@ run_case() {
     local status
     local marker_ns
     local marker_tail_ms
+    local bounded_tail
     local launch_status=0
     local install_status=0
+    local timeout_seconds=3
+    local headroom_percent=50
+    local marker_delay_seconds=0
     mkdir -p "$state"
 
-    if [[ $scenario == launch_failure ]]; then
-        launch_status=23
-    elif [[ $scenario == install_failure ]]; then
-        install_status=24
-    fi
+    case "$scenario" in
+        launch_failure) launch_status=23 ;;
+        install_failure) install_status=24 ;;
+        slow_success)
+            timeout_seconds=6
+            headroom_percent=75
+            marker_delay_seconds=3
+            ;;
+    esac
 
     start_ns=$(date +%s%N)
     set +e
@@ -265,7 +289,9 @@ run_case() {
         BUSTER_ANDROID_FAKE_SCENARIO="$scenario" \
         BUSTER_ANDROID_FAKE_LAUNCH_STATUS="$launch_status" \
         BUSTER_ANDROID_FAKE_INSTALL_STATUS="$install_status" \
-        BUSTER_ANDROID_TEST_TIMEOUT_SECONDS=3 \
+        BUSTER_ANDROID_FAKE_MARKER_DELAY_SECONDS="$marker_delay_seconds" \
+        BUSTER_ANDROID_TEST_TIMEOUT_SECONDS="$timeout_seconds" \
+        BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT="$headroom_percent" \
         BUSTER_ANDROID_ADB_WAIT_TIMEOUT_SECONDS=2 \
         BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS=2 \
         BUSTER_ANDROID_ADB_INSTALL_TIMEOUT_SECONDS=2 \
@@ -294,7 +320,18 @@ run_case() {
     case "$scenario" in
         success)
             assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=10' "$state"
+            assert_log_matches 'ANDROID_MONITOR_RESULT config=standalone reader_status=10 producer_status=[0-9]+ timeout_seconds=3 elapsed_seconds=[0-9]+ headroom_seconds=[0-9]+ headroom_warning=no$' "$state"
             assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=0' "$state"
+            if grep -qF 'of its 3s deadline' "$state/run.log"; then
+                echo "assertion failed: comfortable headroom reported a deadline warning" >&2
+                return 1
+            fi
+            ;;
+        slow_success)
+            assert_log_matches 'ANDROID_MONITOR_RESULT config=standalone reader_status=10 producer_status=[0-9]+ timeout_seconds=6 elapsed_seconds=[0-9]+ headroom_seconds=[0-9]+ headroom_warning=yes$' "$state"
+            assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=0' "$state"
+            assert_log_contains 'Android compiler tests passed' "$state"
+            assert_log_matches 'warning: Android standalone payload used [0-9]+s of its 6s deadline; [0-9]+s of headroom remain \(warning margin 4s at 75%\)' "$state"
             ;;
         failure)
             assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=11' "$state"
@@ -302,7 +339,9 @@ run_case() {
             ;;
         timeout|malformed)
             assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=0 producer_status=124 timeout_seconds=3' "$state"
+            assert_log_matches 'ANDROID_MONITOR_RESULT config=standalone reader_status=0 producer_status=124 timeout_seconds=3 elapsed_seconds=[0-9]+ headroom_seconds=0 headroom_warning=no$' "$state"
             assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=1' "$state"
+            assert_log_contains 'exhausted its own deadline; emulator cleanup has not run yet' "$state"
             ;;
         missing_marker)
             assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=0 producer_status=0 timeout_seconds=3' "$state"
@@ -317,7 +356,24 @@ run_case() {
             ;;
     esac
 
-    if [[ $scenario == success ]]; then
+    case "$scenario" in
+        timeout)
+            assert_log_contains 'Android payload emitted 1 log line(s) before the monitor ended; last line: test still running' "$state"
+            ;;
+        malformed)
+            assert_log_contains 'Android payload emitted 3 log line(s) before the monitor ended; last line: unrelated Android log line' "$state"
+            ;;
+        missing_marker)
+            bounded_tail=$(printf 'x%.0s' {1..200})
+            assert_log_contains "Android payload emitted 2 log line(s) before the monitor ended; last line: $bounded_tail" "$state"
+            if grep -qF "last line: ${bounded_tail}x" "$state/run.log"; then
+                echo "assertion failed: the reported payload tail was not bounded" >&2
+                return 1
+            fi
+            ;;
+    esac
+
+    if [[ $scenario == success || $scenario == slow_success ]]; then
         marker_ns=$(<"$state/marker.ns")
         marker_tail_ms=$(( (end_ns - marker_ns) / 1000000 ))
         printf 'CASE %s marker_to_wrapper_ms=%s\n' "$scenario" "$marker_tail_ms"
@@ -329,6 +385,7 @@ run_case() {
 }
 
 run_case success 0 2000
+run_case slow_success 0 6000
 run_case failure 1 2000
 run_case timeout 1 6000
 run_case malformed 1 6000
@@ -555,6 +612,8 @@ test_android_batch_status() (
             ;;
         debug-timeout)
             assert_file_contains 'Android compiler tests timed out after 1s' "$state/run.log"
+            assert_file_contains 'the Android Debug payload exhausted its own deadline' "$state/run.log"
+            assert_file_contains 'Android payload emitted 1 log line(s) before the monitor ended; last line: test still running' "$state/run.log"
             assert_file_contains 'ANDROID_PAYLOAD_RESULT config=Debug phase=monitor status=1' "$state/run.log"
             assert_file_contains 'ANDROID_PAYLOAD_RESULT config=Release phase=monitor status=0' "$state/run.log"
             if grep -qF 'ANDROID_PAYLOAD_RESULT config=Debug phase=monitor status=0' "$state/run.log"; then
@@ -660,6 +719,7 @@ test_android_workflow_body() (
             ;;
         debug-timeout)
             assert_file_contains 'Android compiler tests timed out after 4s' "$state/body.log"
+            assert_file_contains 'the Android Debug payload exhausted its own deadline' "$state/body.log"
             ;;
         missing-marker)
             assert_file_contains 'ended without a terminal result' "$state/body.log"

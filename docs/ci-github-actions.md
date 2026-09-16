@@ -280,12 +280,23 @@ native jobs, three mobile jobs and workflow lint.
 The Android summary also exposes the existing wrapper records from
 `RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
 `result.json`'s `android` field. Its two configuration rows show batch status,
-payload phase/status, monitor reader/producer statuses and deadline. Separate
+payload phase/status, monitor reader/producer statuses, the deadline, and the
+payload's elapsed time and remaining headroom. Separate
 batch and final-CI records distinguish a failed Debug payload followed by a
 passing Release from required emulator cleanup failing after successful tests.
 A terminal `BUSTER_ANDROID_TEST_RESULT:0` describes one payload, not the entire
 Debug/Release job. Monitor reader status 10 denotes the success marker; the
 producer can then exit 143 because the wrapper deliberately stops logcat.
+
+A `Payload deadline:` line names either outcome the table alone leaves implicit.
+Reader status 0 with producer status 124/137 is an exhausted payload deadline —
+the wrapper says so at the failure itself, reports how many log lines the payload
+emitted with a truncated last line, and states that emulator cleanup has not run
+yet; that tail is printed by the workflow trap only when the status is already
+nonzero, so it is never the cause. A configuration that passes with less headroom
+than `BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT` (default 25) of its deadline
+is reported as thin on a green run, before a slower runner or new tests cross it.
+Headroom reporting changes no deadline and fails nothing by itself.
 
 These are diagnostics, not a replacement acceptance gate: the existing required
 step outcomes remain authoritative even when logs are missing or contradictory.
@@ -299,6 +310,23 @@ existing Linux/macOS mobile lifecycle workflow runs it independently and retains
 changed. See [#685](https://github.com/buster14a/buster/issues/685) for the original
 Debug-timeout/Release-success diagnosis and [#686](https://github.com/buster14a/buster/pull/686)
 for the already-landed producer and lifecycle repairs.
+
+### Why the runs in #685 failed
+
+The three `Android x86-64` attempts cited in
+[#685](https://github.com/buster14a/buster/issues/685) — runs `35008982632`
+(`fe9569a`) and `35012645467` attempts 1 and 2 (`c6ccdc6`) — were not emulator
+teardown failures. In each, the Debug payload reached its 60-second deadline and
+`error: Android Debug tests failed with status 1` before Release ran and reported
+`BUSTER_ANDROID_TEST_RESULT:0`; the success text quoted in that issue belongs to
+Release alone. The extra Debug time came from an `O(values x rows)` residue in
+the MIR debug-location recorder that put roughly 33 seconds into one
+`codegen_tests` fixture, fixed inside
+[#676](https://github.com/buster14a/buster/pull/676) (`f9f817d`), after which the
+lane passed again on `af4efd6`. The same-day passing runs simply carried no such
+payload regression. No deadline was raised, no cleanup policy relaxed and no test
+skipped; what the diagnostics above add is that the next occurrence is legible
+from the job summary instead of from a complete-log reading.
 
 The iOS launcher retains separate signing logs for each Debug/Release bundle
 and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
