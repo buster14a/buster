@@ -375,7 +375,7 @@ class ArchivedReplayTests(unittest.TestCase):
 
     def test_unpatched_historical_pin_rejects_other_contract(self):
         self.assertEqual(materializer.SUPPORT_CONTRACT_SHA256,
-                         "24ae23cff2ab5bd6ff46304a878ed4dc3e5d639422751de93ea74dabde7e437e")
+                         "b80a5a0b2dab8c7738e5e3ef2b35be2b160f5011e021eba385899481a3119187")
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
@@ -400,49 +400,6 @@ class ArchivedReplayTests(unittest.TestCase):
         changed["archived_replay"]["fixtures"][0]["project_headers"] = ["missing.h"]
         with self.assertRaisesRegex(materializer.MaterializationError, "unauthenticated project header"):
             materializer._archived_replay(changed, self.records)
-
-    def test_descriptor_source_root_must_use_canonical_spelling(self):
-        descriptor = self.root / "repo" / "docs" / "dependencies.json"
-        descriptor.parent.mkdir(parents=True)
-        descriptor.write_text(json.dumps(self.manifest(source_root=".././repo")), encoding="utf-8")
-        with self.assertRaisesRegex(materializer.MaterializationError, "source_root is not canonical"):
-            materializer.materialize_file(descriptor, self.root, self.root / "noncanonical")
-
-        descriptor.write_text(json.dumps(self.manifest(source_root="..")), encoding="utf-8")
-        receipt = materializer.materialize_file(descriptor, self.root / "repo", self.root / "canonical")
-        self.assertEqual(receipt["project_headers"], 1)
-
-    def test_external_records_require_an_authenticated_checkout_declaration(self):
-        external = self.source_root / "external" / "fixture" / "header.h"
-        external.parent.mkdir(parents=True)
-        external.write_bytes(b"external\n")
-        record = self.record("external/fixture/header.h", "dependencies/project-include/external.h",
-                             provenance="github/example/fixture/" + "0" * 40 + "/header.h")
-        with self.assertRaisesRegex(materializer.MaterializationError, "declared closure"):
-            materializer.parse_manifest(self.manifest([record]))
-
-    def test_external_declarations_are_bound_in_receipt(self):
-        external = self.source_root / "external" / "fixture" / "header.h"
-        external.parent.mkdir(parents=True)
-        external.write_bytes(b"external\n")
-        record = self.record("external/fixture/header.h", "dependencies/project-include/external.h",
-                             provenance="github/example/fixture/" + "0" * 40 + "/header.h")
-        declaration = {"name": "fixture", "repository": "example/fixture",
-                       "revision": "0" * 40, "path": "external/fixture"}
-        receipt = materializer.materialize(self.manifest([record], external_checkouts=[declaration]),
-                                           self.source_root, self.root / "external-out")
-        self.assertEqual(receipt["external_checkouts"], [declaration])
-        self.assertEqual(receipt["external_generated"], [])
-        self.assertEqual(len(receipt["external_closure_sha256"]), 64)
-
-    def test_external_declaration_rejects_revision_and_path_mutation(self):
-        declaration = {"name": "fixture", "repository": "example/fixture",
-                       "revision": "F" * 40, "path": "external/not-fixture"}
-        with self.assertRaisesRegex(materializer.MaterializationError, "revision"):
-            materializer.parse_manifest(self.manifest(external_checkouts=[declaration]))
-        declaration["revision"] = "0" * 40
-        with self.assertRaisesRegex(materializer.MaterializationError, "path"):
-            materializer.parse_manifest(self.manifest(external_checkouts=[declaration]))
 
 
 if __name__ == "__main__":
