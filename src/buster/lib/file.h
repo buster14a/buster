@@ -47,6 +47,53 @@ struct CopyFileArguments
     String8 original_path;
     String8 new_path;
 };
+
+typedef enum FileCopyStatus
+{
+    // `error` holds the first failure.
+    FILE_COPY_FAILED,
+    FILE_COPY_PUBLISHED,
+    // One spelling, or new_path names the file opened as the source.
+    FILE_COPY_SAME_FILE,
+    // new_path is a link, directory or special file; it is not followed.
+    FILE_COPY_UNSUPPORTED_DESTINATION,
+} FileCopyStatus;
+
+typedef struct FileCopyResult FileCopyResult;
+struct FileCopyResult
+{
+    FileCopyStatus status;
+    OsError error;
+    // First failure releasing the source or staging file after a failure or
+    // refusal. It never replaces `error`; a failed staging deletion leaves that
+    // file behind.
+    OsError cleanup_error;
+};
+
+// Streams original_path into a staging file created exclusively in new_path's
+// directory, then renames it over new_path. Nothing at new_path changes before
+// that rename: every other result leaves an existing destination byte-identical
+// and a missing one absent. The rename is the last fallible step, so
+// FILE_COPY_PUBLISHED means exactly that new_path names the complete copy.
+//
+// Aliases are judged by identity (device/inode; Windows volume serial and file
+// index) of the opened source and the inspected destination, so "./" and ".."
+// spellings, hard links, a source symlink to the destination and case aliases
+// on case-insensitive filesystems are FILE_COPY_SAME_FILE, with nothing
+// modified. A source symlink is followed. A destination symbolic link (Windows:
+// any reparse point), directory or special file is refused, neither followed
+// nor replaced. An existing destination must still be writable: POSIX opens it
+// write-only without truncation to check; Windows refuses the read-only attribute.
+//
+// Replacement publishes a new file: other hard links to the old destination
+// keep the old bytes. POSIX permission bits (0777) of a replaced destination
+// are kept, and a new destination is created 0644 before umask. Ownership,
+// ACLs, extended attributes, timestamps and Windows attributes or streams are
+// not preserved. The rename is namespace-atomic; nothing is flushed, so crash
+// durability is not promised. The source is streamed to EOF in bounded chunks
+// without a size snapshot; concurrent changes to either path are not isolated.
+BUSTER_F_DECL FileCopyResult file_copy_checked(CopyFileArguments arguments);
+// True only for FILE_COPY_PUBLISHED.
 BUSTER_F_DECL bool file_copy(CopyFileArguments arguments);
 
 

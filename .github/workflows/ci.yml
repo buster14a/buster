@@ -76,7 +76,7 @@ jobs:
           GOSUMDB: sum.golang.org
         run: |
           set -euo pipefail
-          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}
         shell: bash
@@ -85,7 +85,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -164,6 +164,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
+          "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
 
       # Wrapper integration starts many real shells. It must not consume the
@@ -260,6 +261,14 @@ jobs:
           # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          # The result step independently re-probes the exact compiler
+          # executables recorded by the driver. Preserve this step's selected
+          # Visual Studio/LLVM search path and target architecture for it.
+          $PathDelimiter = 'BUSTER_CI_WINDOWS_COMPILER_PATH'
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
           foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
             where.exe $Compiler
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -287,6 +296,10 @@ jobs:
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
           BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows' }}
           BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
+          BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
+          BUSTER_CI_COVERAGE_REQUIRED: "1"
+          BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
+          BUSTER_CI_COVERAGE_ARCH: ${{ matrix.arch }}
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
 
       - name: Retain desktop logs

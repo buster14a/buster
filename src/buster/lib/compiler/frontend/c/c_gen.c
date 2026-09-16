@@ -21831,8 +21831,17 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
     }
     else
     {
-        CTypeKind kind = c_ir_primitive_type_kind(builder->preprocess, start, end, &index);
-        if (kind != C_TYPE_INVALID && kind < C_TYPE_COUNT)
+        u32 invalid_specifier;
+        CTypeKind kind = c_ir_primitive_type_kind(builder->preprocess, start, end, &index, &invalid_specifier);
+        if (invalid_specifier != UINT32_MAX)
+        {
+            builder->failure_message = S8("invalid or unsupported type specifier combination");
+            builder->failure_token_index = invalid_specifier;
+            builder->failure_kind_plus_one = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS + 1;
+            builder->sizeof_operand_constraint = builder->failure_message;
+            builder->sizeof_operand_constraint_token = invalid_specifier;
+        }
+        else if (kind != C_TYPE_INVALID && kind < C_TYPE_COUNT)
         {
             type = c_ir_builder_scalar_type(builder, kind);
         }
@@ -25978,7 +25987,8 @@ c_ir_expression_core_loop:
             {
                 value = is_sizeof ? c_ir_sizeof_operand_size(operand) : c_ir_sizeof_operand_alignment(operand);
             }
-            else if (!is_sizeof && c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
+            else if (!is_sizeof && !builder->sizeof_operand_constraint.length &&
+                     c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
             {
                 // `_Alignof` takes a type name, but GNU's `__alignof__` also
                 // takes an expression -- libc-test's tls_align_dso.c fills its
@@ -25989,7 +25999,8 @@ c_ir_expression_core_loop:
                 // only its second answer is read.
                 value = literal_alignment;
             }
-            else if (is_sizeof && c_ir_sizeof_expression(builder, operand_start, operand_end, &value, 0))
+            else if (is_sizeof && !builder->sizeof_operand_constraint.length &&
+                     c_ir_sizeof_expression(builder, operand_start, operand_end, &value, 0))
             {
             }
             else
