@@ -4364,6 +4364,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     bool local_slot_valid = (place_kind == MACHINE_X64_PLACE_LOCAL) & (slot != UINT32_MAX);
                     bool place_is_addressed = machine_x64_place_is_addressed(selector, value_id, place_kind) & !local_slot_valid;
 
+                    // machine_x64_operand_register writes the address vreg
+                    // exactly when it reports one, so this flag both chooses
+                    // the address-shaped source below and guards reading it;
+                    // a frame-backed aggregate never reads it. The call stays
+                    // unconditional: the helper only reads selector state and
+                    // writes the output, and Clang's conditional-uninitialized
+                    // analysis takes the unconditional out-parameter as the
+                    // definition it cannot otherwise see through the flag.
                     u32 address_register;
                     bool address_register_selected = machine_x64_operand_register(selector, value_id, &address_register) & place_is_addressed;
                     selected = local_slot_valid | address_register_selected;
@@ -4371,10 +4379,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     if (selected)
                     {
                         MachineRef destination = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
-                        u32 source_payload = local_slot_valid ? slot : address_register;
-                        MachineRefKind source_kind = local_slot_valid ? MACHINE_REF_STACK_SLOT : MACHINE_REF_VIRTUAL_REGISTER;
+                        u32 source_payload = address_register_selected ? address_register : slot;
+                        MachineRefKind source_kind = address_register_selected ? MACHINE_REF_VIRTUAL_REGISTER : MACHINE_REF_STACK_SLOT;
                         MachineRef source = machine_ref_make(source_kind, source_payload);
-                        u16 opcode = local_slot_valid ? MACHINE_X64_COPY_FRAME_FROM_FRAME : MACHINE_X64_COPY_FRAME_FROM_PTR;
+                        u16 opcode = address_register_selected ? MACHINE_X64_COPY_FRAME_FROM_PTR : MACHINE_X64_COPY_FRAME_FROM_FRAME;
 
                         machine_x64_select_row(selector, (MachineInstruction){
                                                              .operands = {destination, source},

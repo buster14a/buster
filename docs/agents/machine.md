@@ -73,6 +73,14 @@
   them as values and accept their pointer registers as address bases.
   Only instruction-defined locals take the frame-address path; an absent
   instruction definition is not a missing value.
+- AArch64 aggregate pointer/frame copies and indirect `va_arg` materialize
+  out-of-range or unaligned pointer offsets in reserved X16, matching the
+  existing frame-address policy. X17 (or X9 for `va_arg`) retains the copied
+  data, and the original pointer is preserved across chunks. Direct scaled
+  imm12 words are unchanged. Capacity reserves both expanded memory halves;
+  impossible X16/SP pointer aliases fail before writing a prefix. Registered
+  large-copy tests cross 32 KiB/64 KiB, both C forms and every allocator, with
+  native Unix AArch64 byte/guard verification in addition to encoding checks.
 - Native i128 block parameters expand to two general-register MIR parameters.
   The selector allocates pair mappings only for functions with wide joins and
   snapshots each incoming instruction result at its definition. Entry stores

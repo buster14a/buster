@@ -51,6 +51,16 @@ validator are left unchanged as a unit and increment `validation_skips`.
 Optional transformation must never turn an otherwise accepted legacy source
 shape into a new diagnostic.
 
+When preparation has already run that validator over the module in exactly
+its current state -- the promotion-output scan of a Debug/test/sanitizer/
+explicit transform-check build, or the input scan of an uncertified caller --
+the FAST input guard reuses that result instead of scanning the unchanged
+module a second time. Any mutation between the two points clears the reuse,
+and the guard still scans whenever nothing has proven the current
+representation. In the default tests-enabled Release `ide`, a translation
+unit in which promotion changes any function therefore pays one strict scan
+before FAST, not two.
+
 ## Purity contract
 
 `ir_instruction_is_pure` is the shared canonical DCE authority. Scalar integer

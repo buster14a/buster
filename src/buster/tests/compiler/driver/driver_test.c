@@ -3788,16 +3788,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                 }
                 else
                 {
-#if BUSTER_CPU_ARCH_AARCH64
                     // Read the reference's alias addresses directly from the
-                    // DSO, independently of system COPY-slot allocation.
+                    // DSO, independently of system COPY-slot allocation. GCC's
+                    // x86-64 -fPIE object addresses imported data directly, and
+                    // a -no-pie system link gives each strong alias its own
+                    // COPY slot, so writes through one alias miss the other.
                     command[command_count++] = S8("-fPIC");
                     command[command_count++] = S8("-pie");
                     command[command_count++] = main_source;
-#else
-                    command[command_count++] = S8("-no-pie");
-                    command[command_count++] = object_path;
-#endif
                     command[command_count++] = S8("-L");
                     command[command_count++] = directory;
                     command[command_count++] = S8("-ldataprobe");
@@ -6075,6 +6073,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ByteSlice string_bytes = string_map.bytes;
         BUSTER_TEST(arguments, string_bytes.length != 0);
         file_map_unmap(string_map);
+        String8 wchar_object_path =
+            buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-wchar"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+        String8 wchar_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wchar_object_path, S8("tests/issue36_target_wchar.c"),
+        };
+        CompilerDriverResult wchar_result = compiler_driver_execute_invocation(
+            cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wchar_command_line)));
+        BUSTER_TEST(arguments, wchar_result.error == COMPILER_DRIVER_ERROR_NONE);
+        FileMapRead wchar_map = file_map_read(cross_temp.arena, wchar_object_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, wchar_map.bytes.length != 0);
+        file_map_unmap(wchar_map);
         String8 nullptr_object_path =
             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-nullptr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
         String8 nullptr_command_line[] = {
