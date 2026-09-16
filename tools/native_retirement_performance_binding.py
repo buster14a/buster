@@ -1103,6 +1103,8 @@ def _rules(value):
                                          "outlier_deletion", "retain_all_samples"),
                      "rules.sampling")
     _positive_int(sampling["seed"], "rules.sampling.seed")
+    if sampling["seed"] > (1 << 64) - 1:
+        _fail("rules.sampling.seed must fit the #619 uint64 domain")
     if type(sampling["rounds"]) is not int or sampling["rounds"] != 2:
         _fail("rules.sampling.rounds must be exactly 2")
     _positive_int(sampling["pairs_per_round"], "rules.sampling.pairs_per_round")
@@ -1647,7 +1649,7 @@ def _workflow_phase(root, artifact, schema, name):
                               "result_input_plan_sha256", "pre_sample_plan_sha256",
                               "aa_admission_sha256", "post_aa_binding_sha256",
                               "sealed_result_sha256",
-                              "result_bundle", "seal", "replay_bundle",
+                              "result_bundle", "seal", "replay_bundle", "execution_plan",
                               "publication_receipt"))
     if value["schema"] != schema or value["version"] != 1:
         _fail(f"workflow.{name} schema/version is not approved")
@@ -1758,6 +1760,361 @@ def _result_manifest_descriptors(value, result_plan):
     if total_bytes > RESULT_INPUT_MAX_TOTAL_BYTES * len(validated):
         _fail("sealed result aggregate input bytes exceed the bounded shard policy")
     return validated
+
+
+# Execution evidence is a separate trust boundary from result-file integrity.
+# The caller obtains the receipt digest independently from the admitted control
+# service; neither the result bundle nor the receipt may choose that trust root.
+EXECUTION_PLAN_SCHEMA = "buster-native-retirement-execution-plan-v1"
+EXECUTION_RECEIPT_SCHEMA = "buster-native-retirement-execution-receipt-v1"
+EXECUTION_SCHEDULE = "tp-retirement-block-schedule-v1"
+EXECUTION_LINE_CAP = 8192
+EXECUTION_RECEIPT_BYTE_CAP = 1024 * 1024
+EXECUTION_SHARD_CAP = 4096
+
+
+def _execution_mix64(value):
+    mask = (1 << 64) - 1
+    value = ((value ^ (value >> 30)) * 0xbf58476d1ce4e5b9) & mask
+    value = ((value ^ (value >> 27)) * 0x94d049bb133111eb) & mask
+    return value ^ (value >> 31)
+
+
+def _execution_block_schedule(seed, round_id, block, count):
+    """Exact replay of #619's tp_retirement_block_schedule, not CI tp_run."""
+    value = seed ^ 0x6e61746976652d31
+    value ^= _execution_mix64(1 + 0x100000001b3)
+    value ^= _execution_mix64(round_id + 0x9e3779b97f4a7c15)
+    value ^= _execution_mix64(block + 0xd1b54a32d192ed03)
+    value ^= _execution_mix64(count + 0x94d049bb133111eb)
+    state = _execution_mix64(value)
+
+    def bounded(bound):
+        nonlocal state
+        threshold = (1 << 64) % bound
+        while True:
+            state = (state + 0x9e3779b97f4a7c15) & ((1 << 64) - 1)
+            number = _execution_mix64(state)
+            if number >= threshold:
+                return number % bound
+
+    first = [bounded(2) for _ in range(count)]
+    orders = [list(range(count)), list(range(count))]
+    for order in orders:
+        for remaining in range(count, 1, -1):
+            index = bounded(remaining)
+            order[remaining - 1], order[index] = order[index], order[remaining - 1]
+    return first, orders
+
+
+def _execution_schedule(rows, sampling):
+    """Replay warmups and #619's uint64 seeded blocked/shuffled schedule.
+
+    Compilation and eligible native runtime are separate serial campaigns.
+    Each campaign uses the same frozen schedule seed; neither includes a PMU
+    or allocation diagnostic replay. Memory is O(rows), not O(invocations).
+    """
+    seed = sampling["seed"]
+    if type(seed) is not int or not 1 <= seed <= (1 << 64) - 1:
+        _fail("execution schedule seed must fit the #619 uint64 domain")
+    sequence = 0
+    for kind in ("compiler", "runtime"):
+        selected = sorted(row["row"] for row in rows
+                          if kind == "compiler" or row["metrics"]["generated_runtime"])
+        if len(selected) > 100000:
+            _fail("execution schedule exceeds the #619 cell limit")
+        for row in selected:
+            for repeat in range(sampling["warmups_per_variant"]):
+                for variant in ("baseline", "candidate"):
+                    yield {"sequence": sequence, "kind": kind, "phase": "warmup",
+                           "row": row, "round": None, "pair": None,
+                           "warmup": repeat, "position": None, "variant": variant}
+                    sequence += 1
+        for round_id in range(sampling["rounds"]):
+            for block in range(sampling["pairs_per_round"] // 2):
+                first, orders = _execution_block_schedule(seed, round_id, block, len(selected))
+                for pair_in_block, order in enumerate(orders):
+                    for index in order:
+                        for position in range(2):
+                            variant = ("baseline", "candidate")[first[index] ^ pair_in_block ^ position]
+                            yield {"sequence": sequence, "kind": kind, "phase": "sample",
+                                   "row": selected[index], "round": round_id,
+                                   "pair": block * 2 + pair_in_block, "warmup": None,
+                                   "position": position, "variant": variant}
+                            sequence += 1
+
+
+def _execution_context(binding, raw_measurements_sha256):
+    """Only pre-existing identities: never hash a receipt into itself."""
+    phases = binding["workflow"]["phases"]
+    return {
+        "pre_sample_plan_sha256": phases["pre_sample_plan"]["sha256"],
+        "post_aa_binding_sha256": phases["post_aa_binding"]["sha256"],
+        "support_root_sha256": binding["support"]["root_sha256"],
+        "baseline": binding["subjects"]["baseline"],
+        "candidate": binding["subjects"]["candidate"],
+        "measurement": binding["measurement"],
+        "execution": binding["execution"],
+        "admission_sha256": binding["workflow"]["records"]["admission"]["sha256"],
+        "oracle_sha256": binding["workflow"]["records"]["oracle"]["sha256"],
+        "raw_measurements_sha256": raw_measurements_sha256,
+    }
+
+
+def _check_execution_plan(root, descriptor, binding, parsed, sampling):
+    _artifact(descriptor, "execution_plan")
+    plan = _read_json_evidence(root, descriptor, "execution_plan")
+    plan = _keys(plan, ("schema", "version", "schedule", "seed", "rounds",
+                        "pairs_per_round", "warmups_per_variant", "cpu",
+                        "performance_rows_sha256", "rows"), "execution_plan")
+    if plan["schema"] != EXECUTION_PLAN_SCHEMA or type(plan["version"]) is not int \
+            or plan["version"] != 1 or plan["schedule"] != EXECUTION_SCHEDULE:
+        _fail("execution plan schema/version/schedule is not supported")
+    for key in ("seed", "rounds", "pairs_per_round", "warmups_per_variant"):
+        if type(plan[key]) is not int or plan[key] != sampling[key]:
+            _fail(f"execution plan.{key} differs from the frozen sampling policy")
+    if not 1 <= plan["seed"] <= (1 << 64) - 1:
+        _fail("execution schedule seed must fit the #619 uint64 domain")
+    _nonnegative_int(plan["cpu"], "execution_plan.cpu")
+    performance_rows = _support_file(binding["support"], "performance_rows")
+    if plan["performance_rows_sha256"] != performance_rows["sha256"]:
+        _fail("execution plan does not bind the canonical performance rows")
+    oracle = _read_json_evidence(root, binding["workflow"]["records"]["oracle"],
+                                 "workflow.records.oracle")
+    oracle_records = _list(oracle.get("records"), "execution oracle records")
+    oracle_by_row = {}
+    for item in oracle_records:
+        if type(item) is not dict or type(item.get("row")) is not int \
+                or item["row"] in oracle_by_row:
+            _fail("execution oracle records have missing/duplicate row identities")
+        oracle_by_row[item["row"]] = item
+    contracts = _list(plan["rows"], "execution_plan.rows")
+    rows = sorted(parsed, key=lambda row: row["row"])
+    if len(contracts) != len(rows) or set(oracle_by_row) != {row["row"] for row in rows}:
+        _fail("execution plan/oracles do not cover the complete canonical population")
+    for contract, row in zip(contracts, rows):
+        _keys(contract, ("row", "identity_sha256", "oracle_sha256", "baseline", "candidate"),
+              "execution_plan.row")
+        if type(contract["row"]) is not int or contract["row"] != row["row"] \
+                or contract["identity_sha256"] != _canonical_json_digest(row["identity"]) \
+                or contract["oracle_sha256"] != _canonical_json_digest(oracle_by_row[row["row"]]):
+            _fail("execution plan row is not joined to its frozen identity and oracle")
+        # Eligibility is not a caller-controlled escape hatch. Check the
+        # bound independent oracle before any invocation reaches statistics;
+        # the wider census/source joins remain part of workflow validation.
+        oracle_item = _keys(oracle_by_row[row["row"]], (
+            "row", "code_section_status", "code_section_bytes", "code_section_sha256",
+            "runtime_oracle_status", "runtime_exit_code", "native_runtime"),
+            "execution_plan.oracle")
+        code_eligible = oracle_item["code_section_status"] == "parsed-deterministic"
+        if code_eligible:
+            _positive_int(oracle_item["code_section_bytes"], "execution oracle code-section size")
+            _sha(oracle_item["code_section_sha256"], "execution oracle code-section digest")
+        if type(oracle_item["native_runtime"]) is not bool \
+                or type(oracle_item["runtime_exit_code"]) is not int:
+            _fail("execution oracle native/status fields have invalid types")
+        runtime_eligible = (oracle_item["runtime_oracle_status"] == "passed-native"
+                            and oracle_item["runtime_exit_code"] == 0
+                            and oracle_item["native_runtime"])
+        if row["metrics"]["generated_code_bytes"] is not code_eligible \
+                or row["metrics"]["generated_runtime"] is not runtime_eligible:
+            _fail("execution eligibility is not derived from the independent oracle")
+        for variant in ("baseline", "candidate"):
+            side = _keys(contract[variant], ("compiler_command_sha256", "artifact_sha256",
+                          "code_section_sha256", "code_section_bytes",
+                          "runtime_command_sha256", "runtime_output_sha256"),
+                         f"execution_plan.row.{variant}")
+            for key in ("compiler_command_sha256", "artifact_sha256"):
+                _sha(side[key], f"execution_plan.row.{variant}.{key}")
+            if row["metrics"]["generated_code_bytes"]:
+                _sha(side["code_section_sha256"], "execution plan code-section identity")
+                _positive_int(side["code_section_bytes"], "execution plan code-section size")
+                if side["code_section_bytes"] > (1 << 63) - 1:
+                    _fail("execution plan code-section size exceeds the result domain")
+            elif side["code_section_sha256"] is not None or side["code_section_bytes"] is not None:
+                _fail("ineligible code-section evidence must be explicitly absent")
+            for key in ("runtime_command_sha256", "runtime_output_sha256"):
+                if row["metrics"]["generated_runtime"]:
+                    _sha(side[key], f"execution_plan.row.{variant}.{key}")
+                elif side[key] is not None:
+                    _fail("ineligible runtime evidence must be explicitly absent")
+    return plan
+
+
+def _execution_trace_records(root, shards, expected_count):
+    """Parse bounded canonical JSONL and hash the SAME bytes that are consumed."""
+    seen_paths = set()
+    total = 0
+    if not shards or len(shards) > min(expected_count, EXECUTION_SHARD_CAP):
+        _fail("execution transcript shard population is invalid")
+    for index, shard in enumerate(shards):
+        _keys(shard, ("path", "bytes", "sha256", "records"), "execution trace shard")
+        descriptor = {key: shard[key] for key in ("path", "bytes", "sha256")}
+        _artifact(descriptor, "execution trace shard")
+        _positive_int(shard["records"], "execution trace shard.records")
+        if total + shard["records"] > expected_count \
+                or shard["bytes"] > shard["records"] * EXECUTION_LINE_CAP:
+            _fail("execution transcript exceeds the derived invocation/byte bound")
+        if shard["path"] in seen_paths:
+            _fail("execution transcript contains duplicate shard paths")
+        seen_paths.add(shard["path"])
+        # Common path checks reject escapes/symlinks. The second pass hashes
+        # its own bytes as well, so a replaced shard cannot change observations
+        # while retaining the checked descriptor's digest.
+        _check_evidence(root, descriptor, f"execution trace shard {index}")
+        path = Path(root).joinpath(*PurePosixPath(shard["path"]).parts)
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            for _ in range(shard["records"]):
+                line = stream.readline(EXECUTION_LINE_CAP + 1)
+                if not line.endswith(b"\n") or len(line) > EXECUTION_LINE_CAP:
+                    _fail("execution transcript line is missing, truncated, or oversized")
+                size += len(line)
+                digest.update(line)
+                try:
+                    value = json.loads(line.decode("utf-8"), object_pairs_hook=_json_object)
+                except (ValueError, UnicodeError) as error:
+                    _fail(f"invalid execution transcript JSON: {error}")
+                canonical = (json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False) + "\n").encode("utf-8")
+                if line != canonical:
+                    _fail("execution transcript is not canonical JSONL")
+                yield value
+            if stream.read(1):
+                _fail("execution transcript contains undeclared extra invocations")
+        if size != shard["bytes"] or digest.hexdigest() != shard["sha256"]:
+            _fail("consumed execution transcript differs from its authenticated digest")
+        total += shard["records"]
+    if total != expected_count:
+        _fail("execution transcript omits required invocations")
+
+
+def _check_execution_transcript(root, descriptor, plan_descriptor, binding, parsed,
+                                 sampling, sample_db, raw_measurements_sha256,
+                                 trusted_receipt_sha256):
+    """Join independent supervisor evidence to every warmup and timed sample.
+
+    The receipt digest is an OUT-OF-BAND caller input. Hashes supplied only by
+    the result producer establish integrity, not execution authority. This
+    function executes no code from the evidence bundle.
+    """
+    if trusted_receipt_sha256 is None:
+        _fail("independently obtained trusted execution receipt digest is required")
+    _sha(trusted_receipt_sha256, "trusted execution receipt digest")
+    _artifact(descriptor, "execution_receipt")
+    if descriptor["bytes"] > EXECUTION_RECEIPT_BYTE_CAP:
+        _fail("execution receipt exceeds the bounded metadata size")
+    if descriptor["sha256"] != trusted_receipt_sha256:
+        _fail("execution receipt is not the independently trusted service receipt")
+    receipt = _read_json_evidence(root, descriptor, "execution_receipt")
+    _keys(receipt, ("schema", "version", "context_sha256", "execution_plan_sha256",
+                    "job_id", "attempt", "boot_id", "bound_at_ns", "completed_at_ns",
+                    "invocations", "shards"), "execution_receipt")
+    if receipt["schema"] != EXECUTION_RECEIPT_SCHEMA or type(receipt["version"]) is not int \
+            or receipt["version"] != 1:
+        _fail("execution receipt schema/version is not supported")
+    if receipt["context_sha256"] != _canonical_json_digest(
+            _execution_context(binding, raw_measurements_sha256)) \
+            or receipt["execution_plan_sha256"] != plan_descriptor["sha256"]:
+        _fail("execution receipt is not joined to this job's frozen binding and samples")
+    for key in ("job_id", "boot_id"):
+        _token(receipt[key], f"execution receipt.{key}")
+    for key in ("attempt", "bound_at_ns", "completed_at_ns", "invocations"):
+        _positive_int(receipt[key], f"execution receipt.{key}")
+    if receipt["completed_at_ns"] <= receipt["bound_at_ns"]:
+        _fail("execution receipt completion must follow pre-sample binding")
+    plan = _check_execution_plan(root, plan_descriptor, binding, parsed, sampling)
+    contracts = {item["row"]: item for item in plan["rows"]}
+    row_by_id = {row["row"]: row for row in parsed}
+    campaigns = len(parsed) + sum(row["metrics"]["generated_runtime"] for row in parsed)
+    expected_count = campaigns * 2 * (sampling["warmups_per_variant"]
+                                      + sampling["rounds"] * sampling["pairs_per_round"])
+    if receipt["invocations"] != expected_count:
+        _fail("execution receipt invocation count omits warmups or complete paired sampling")
+    shards = _list(receipt["shards"], "execution receipt.shards")
+    expected_order = iter(_execution_schedule(parsed, sampling))
+    last_end = receipt["bound_at_ns"]
+    count = 0
+    observations = _execution_trace_records(root, shards, expected_count)
+    try:
+        for value in observations:
+            expected = next(expected_order, None)
+            if expected is None:
+                _fail("execution transcript contains an unexpected invocation")
+            _keys(value, tuple(expected) + ("pid", "cpu", "started_ns", "finished_ns",
+                  "exit_code", "signal", "timed_out", "cancelled", "executable_sha256",
+                  "command_sha256", "output_sha256", "code_section_sha256",
+                  "code_section_bytes", "wall_seconds", "peak_rss_bytes"),
+                  "execution invocation")
+            for key, identity in expected.items():
+                if type(value[key]) is not type(identity) or value[key] != identity:
+                    _fail(f"execution invocation.{key} differs from the frozen seeded schedule")
+            for key in ("pid", "started_ns", "finished_ns"):
+                _positive_int(value[key], f"execution invocation.{key}")
+            if value["started_ns"] <= last_end or value["finished_ns"] <= value["started_ns"] \
+                    or value["finished_ns"] >= receipt["completed_at_ns"]:
+                _fail("execution invocations overlap or violate the bound job interval")
+            last_end = value["finished_ns"]
+            if type(value["cpu"]) is not int or value["cpu"] != plan["cpu"]:
+                _fail("execution invocation does not use its admitted CPU")
+            if type(value["exit_code"]) is not int or value["exit_code"] != 0 \
+                    or type(value["signal"]) is not int or value["signal"] != 0 \
+                    or value["timed_out"] is not False or value["cancelled"] is not False:
+                _fail("execution invocation did not complete successfully")
+            side = contracts[value["row"]][value["variant"]]
+            row = row_by_id[value["row"]]
+            compiler = value["kind"] == "compiler"
+            expected_binary = (binding["subjects"][value["variant"]]["binary"]["sha256"]
+                               if compiler else side["artifact_sha256"])
+            expected_output = side["artifact_sha256"] if compiler else side["runtime_output_sha256"]
+            expected_command = side["compiler_command_sha256" if compiler else "runtime_command_sha256"]
+            if value["executable_sha256"] != expected_binary \
+                    or value["output_sha256"] != expected_output \
+                    or value["command_sha256"] != expected_command:
+                _fail("execution invocation binary, command, or oracle output is mismatched")
+            for key in ("code_section_sha256", "code_section_bytes"):
+                expected_value = side[key] if compiler else None
+                if type(value[key]) is not type(expected_value) or value[key] != expected_value:
+                    _fail("execution invocation code-section evidence is mismatched")
+            seconds = value["wall_seconds"]
+            if type(seconds) not in (int, float) or seconds <= 0 \
+                    or (type(seconds) is float and not math.isfinite(seconds)):
+                _fail("execution invocation wall time is not finite and positive")
+            # Both values come from the same monotonic process interval. A
+            # one-nanosecond tolerance permits decimal float serialization,
+            # not substituting a different measured process or interval.
+            elapsed_ns = value["finished_ns"] - value["started_ns"]
+            if abs(Decimal(str(seconds)) * 1_000_000_000 - elapsed_ns) > 1:
+                _fail("execution invocation wall time differs from its process interval")
+            if compiler:
+                _positive_int(value["peak_rss_bytes"], "execution invocation.peak_rss_bytes")
+            elif value["peak_rss_bytes"] is not None:
+                _fail("runtime evidence cannot masquerade as compiler peak RSS")
+            if value["phase"] == "sample":
+                samples = sample_db.execute(
+                    "SELECT metric, baseline, candidate FROM samples "
+                    "WHERE row_id=? AND round_id=? AND pair_id=?",
+                    (value["row"], value["round"], value["pair"])).fetchall()
+                selected_metrics = ({"compiler_wall_time": seconds,
+                                     "compiler_peak_rss": value["peak_rss_bytes"],
+                                     "generated_code_bytes": value["code_section_bytes"]}
+                                    if compiler else {"generated_runtime": seconds})
+                selected_metrics = {key: number for key, number in selected_metrics.items()
+                                    if row["metrics"][key]}
+                actual = {key: baseline if value["variant"] == "baseline" else candidate
+                          for key, baseline, candidate in samples if key in selected_metrics}
+                if set(actual) != set(selected_metrics) or any(
+                        Decimal(actual[key]) != Decimal(str(number))
+                        for key, number in selected_metrics.items()):
+                    _fail("result sample is not the authenticated invocation's measurement")
+            count += 1
+    finally:
+        observations.close()
+    if count != expected_count or next(expected_order, None) is not None:
+        _fail("execution transcript is missing required warmups or timed invocations")
+    return {"receipt_sha256": trusted_receipt_sha256, "invocations": count,
+            "job_id": receipt["job_id"], "attempt": receipt["attempt"]}
 
 
 def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
@@ -2133,7 +2490,10 @@ def _compile_trusted_retirement_adapter(temp_root, repository_root=None,
     compiler_name = shutil.which("clang") or shutil.which("cc")
     if compiler_name is None:
         _fail("no trusted C compiler is available for #619 adapter replay")
-    compiler = Path(compiler_name).resolve()
+    # Preserve argv[0] for command-name-sensitive compiler dispatchers.
+    # Reading bytes follows a symlink, but invoking its target may run a
+    # different command (for example, swiftly instead of clang).
+    compiler = Path(os.path.abspath(compiler_name))
     try:
         compiler_bytes = compiler.read_bytes()
         version_process = subprocess.run([str(compiler), "--version"], check=False,
@@ -2201,6 +2561,13 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
     add("workflow.result_bundle", result_bundle_descriptor)
     add("workflow.adapter_input", result_bundle["adapter_input"])
     add("workflow.adapter_result", adapter_result)
+    pre = _read_json_evidence(root, phases["pre_sample_plan"], "pre_sample_plan")
+    add("workflow.execution_plan", pre["execution_plan"])
+    add("workflow.execution_receipt", result_bundle["execution_receipt"])
+    execution_receipt = _read_json_evidence(
+        root, result_bundle["execution_receipt"], "execution_receipt")
+    for index, shard in enumerate(execution_receipt["shards"]):
+        add(f"execution.shard.{index}", shard)
     for index, item in enumerate(result_bundle["result_manifests"]):
         add(f"result_input.manifest.{item['identity']}",
             {key: item[key] for key in ("path", "bytes", "sha256")})
@@ -2419,7 +2786,8 @@ def _extract_downloaded_bundle_stream(archive, publication_id, expected_files,
 
 
 def _check_workflow_evidence(root, binding, workflow, support_output, row_data,
-                             population, rules, repository_root=None):
+                             population, rules, repository_root=None,
+                             trusted_execution_receipt_sha256=None):
     """Own the streamed sample index for the complete workflow check.
 
     ``TemporaryDirectory`` and ``sqlite3.Connection`` are both explicit
@@ -2436,11 +2804,13 @@ def _check_workflow_evidence(root, binding, workflow, support_output, row_data,
                               "PRIMARY KEY(row_id, round_id, pair_id, metric))")
             return _check_workflow_evidence_open(root, binding, workflow, support_output,
                                                  row_data, population, rules, sample_db,
-                                                 repository_root)
+                                                 repository_root,
+                                                 trusted_execution_receipt_sha256)
 
 
 def _check_workflow_evidence_open(root, binding, workflow, support_output, row_data,
-                                  population, rules, sample_db, repository_root=None):
+                                  population, rules, sample_db, repository_root=None,
+                                  trusted_execution_receipt_sha256=None):
     """Check the four non-circular workflow artifacts and their joins.
 
     The phase records deliberately carry only identities and frozen plan
@@ -2493,7 +2863,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
         "schema", "version", "source_rows_sha256", "result_input_plan_sha256",
         "family_sha256", "result_manifests", "raw_measurements_sha256",
         "member_invocations_sha256", "member_count", "scopes_per_member",
-        "adapter_input", "code_bytes_summary"), "sealed_result_bundle")
+        "adapter_input", "code_bytes_summary", "execution_receipt"), "sealed_result_bundle")
     if result_bundle["schema"] != RESULT_BUNDLE_SCHEMA or result_bundle["version"] != 1:
         _fail("sealed result bundle schema/version is not approved")
     if result_bundle["source_rows_sha256"] != support_output["rows_sha256"] \
@@ -2554,7 +2924,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                       "support_declaration_sha256", "manifest_sha256", "rows_sha256",
                       "family_sha256", "seed", "rounds", "pairs_per_round", "resamples",
                       "bootstrap_members_per_scope", "cell_members_per_scope",
-                      "result_input_plan_sha256"), "workflow.pre_sample_plan")
+                      "result_input_plan_sha256", "execution_plan"), "workflow.pre_sample_plan")
     if pre["status"] != "frozen-before-samples":
         _fail("workflow.pre_sample_plan must be frozen before samples")
     for field, expected in expected_sources.items():
@@ -2568,7 +2938,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                         "family_sha256", "seed", "rounds", "pairs_per_round", "resamples",
                         "bootstrap_members_per_scope", "cell_members_per_scope",
                         "result_input_plan_sha256", "pre_sample_plan_sha256",
-                        "aa_admission_sha256"), "workflow.post_aa_binding")
+                        "aa_admission_sha256", "execution_plan"), "workflow.post_aa_binding")
     if post["status"] != "bound-after-aa-before-samples":
         _fail("workflow.post_aa_binding must be bound after AA and before samples")
     for field, expected in expected_sources.items():
@@ -2595,6 +2965,12 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                                        result_plan["rounds"], result_plan["pairs_per_round"])
     if result_bundle["code_bytes_summary"] != code_summary:
         _fail("sealed result bundle code-byte summary differs from raw observations")
+    if post["execution_plan"] != pre["execution_plan"]:
+        _fail("post-AA execution plan differs from its pre-sample plan")
+    _check_execution_transcript(
+        root, result_bundle["execution_receipt"], pre["execution_plan"], binding,
+        parsed, sampling, sample_db, measurement_digest.hexdigest(),
+        trusted_execution_receipt_sha256)
     _check_adapter_series(root, result_bundle["adapter_input"], family, parsed,
                           rules, sample_db)
     seal = _keys(sealed["seal"], ("schema", "version", "files", "root_sha256"),
@@ -3290,7 +3666,8 @@ def _check_git_identities(repository_root, binding):
         _fail("validator source artifact does not match its bound commit")
 
 
-def validate(binding_path, evidence_root=None, repository_root=None):
+def validate(binding_path, evidence_root=None, repository_root=None,
+             trusted_execution_receipt_sha256=None):
     """Validate one binding record and optionally its referenced evidence files."""
     binding_path = Path(binding_path)
     try:
@@ -3356,7 +3733,7 @@ def validate(binding_path, evidence_root=None, repository_root=None):
         support_output = _check_support_output(evidence_root, binding, rows)
         _check_workflow_evidence(evidence_root, binding, workflow, support_output,
                                  rows, binding["population"], rules,
-                                 repository_root)
+                                 repository_root, trusted_execution_receipt_sha256)
         support_checked = True
         _check_subject_receipts(evidence_root, binding)
         _check_execution_evidence(evidence_root, binding)
@@ -3387,6 +3764,7 @@ def validate(binding_path, evidence_root=None, repository_root=None):
         "provenance_checked": provenance_checked,
         "support_checked": support_checked,
         "execution_checked": execution_checked,
+        "invocations_checked": execution_checked,
         "bundle_checked": bundle_checked,
         "git_checked": git_checked,
         "proof": proof,
@@ -3399,9 +3777,13 @@ def main():
     parser.add_argument("--evidence-root", type=Path)
     parser.add_argument("--repository-root", type=Path,
                         help="immutable checkout used to verify commit/tree/source identities")
+    parser.add_argument("--trusted-execution-receipt-sha256",
+                        help="receipt digest obtained independently from the admitted control service; "
+                             "required with evidence, never copied from an untrusted bundle")
     arguments = parser.parse_args()
     print(json.dumps(validate(arguments.binding, arguments.evidence_root,
-                               arguments.repository_root), sort_keys=True))
+                               arguments.repository_root,
+                               arguments.trusted_execution_receipt_sha256), sort_keys=True))
 
 
 if __name__ == "__main__":

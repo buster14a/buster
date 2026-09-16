@@ -856,8 +856,8 @@ class BindingTests(unittest.TestCase):
                     "record_id": f"row-{row['row']}/round-{round_number}/pair-{pair}",
                     "row": row["row"], "round": round_number, "pair": pair,
                     "measurements": {
-                        metric: {"baseline": (1 if metric == "generated_code_bytes" else 1.0),
-                                  "candidate": (1 if metric == "generated_code_bytes" else 1.0)}
+                        metric: {"baseline": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0),
+                                  "candidate": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0)}
                         for metric in binding.METRICS if row["metrics"].get(metric, False)
                     },
                 }, sort_keys=True, separators=(",", ":")) + "\n")
@@ -1176,8 +1176,8 @@ class BindingTests(unittest.TestCase):
                     "record_id": f"row-0/round-{round_number}/pair-{pair}",
                     "row": 0, "round": round_number, "pair": pair,
                     "measurements": {
-                        metric: {"baseline": (1 if metric == "generated_code_bytes" else 1.0),
-                                 "candidate": (1 if metric == "generated_code_bytes" else 1.0)}
+                        metric: {"baseline": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0),
+                                 "candidate": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0)}
                         for metric in binding.METRICS
                     },
                 }
@@ -1321,6 +1321,39 @@ class BindingTests(unittest.TestCase):
         post_descriptor = phase("workflow/post-aa-binding.json", post_value)
         record["workflow"]["phases"]["post_aa_binding"] = post_descriptor
 
+        # Synthetic service receipt, with its digest supplied independently by
+        # this test caller. This exercises the full invocation gate without
+        # presenting fixture data as deployed-service or performance evidence.
+        from native_retirement_performance_identity_test import InvocationEvidenceTests
+        with tempfile.TemporaryDirectory(prefix="retirement-e2e-execution-") as execution_directory:
+            execution_root = Path(execution_directory)
+            for name, data in contents.items():
+                target = execution_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            sample_map = {}
+            for line in shard_data.splitlines():
+                item = json.loads(line)
+                sample_map[(item["row"], item["round"], item["pair"])] = item["measurements"]
+            execution_plan, execution_receipt, _receipt, events, _digest = (
+                InvocationEvidenceTests.attach_execution(execution_root, record, parsed, sample_map))
+            pre_value["execution_plan"] = execution_plan
+            pre_descriptor = phase("workflow/pre-sample-plan.json", pre_value)
+            record["workflow"]["phases"]["pre_sample_plan"] = pre_descriptor
+            post_value.update({"execution_plan": execution_plan,
+                               "pre_sample_plan_sha256": pre_descriptor["sha256"]})
+            post_descriptor = phase("workflow/post-aa-binding.json", post_value)
+            record["workflow"]["phases"]["post_aa_binding"] = post_descriptor
+            execution_receipt["context_sha256"] = binding._canonical_json_digest(
+                binding._execution_context(record, raw_measurements_digest))
+            execution_descriptor = InvocationEvidenceTests.write_transcript(
+                execution_root, execution_receipt, events)
+            for name in (execution_plan["path"], execution_descriptor["path"],
+                         "execution/invocations.jsonl"):
+                contents[name] = (execution_root / name).read_bytes()
+            result_bundle_value["execution_receipt"] = execution_descriptor
+            result_bundle_descriptor = put("results/sealed-result.bundle", json_data(result_bundle_value))
+
         with tempfile.TemporaryDirectory(prefix="retirement-e2e-seal-") as seal_directory:
             seal_root = Path(seal_directory)
             for path, data in contents.items():
@@ -1440,6 +1473,7 @@ class BindingTests(unittest.TestCase):
 
     def test_bounded_validate_evidence_path_replays_sealed_workflow(self):
         record, contents, support_output = self._build_small_evidence_fixture()
+        trusted_receipt = hashlib.sha256(contents["execution/invocation-receipt.json"]).hexdigest()
         with tempfile.TemporaryDirectory(prefix="retirement-binding-e2e-") as directory:
             root = Path(directory)
             path = self.write_record(root, record)
@@ -1449,10 +1483,11 @@ class BindingTests(unittest.TestCase):
                                    return_value=support_output), \
                     mock.patch.object(binding, "_population",
                                       return_value=record["population"]):
-                result = binding.validate(path, evidence)
+                result = binding.validate(path, evidence, trusted_execution_receipt_sha256=trusted_receipt)
             self.assertEqual(result["proof"],
                              "evidence-and-receipts-checked-without-independent-git")
             self.assertTrue(result["rows_recomputed"])
+            self.assertTrue(result["invocations_checked"])
             # The success path must not be merely a descriptor check: mutate a
             # sealed output byte and retain the original descriptor to prove
             # the sealed result's content/address binding is exercised.
@@ -1463,7 +1498,7 @@ class BindingTests(unittest.TestCase):
                     mock.patch.object(binding, "_population",
                                       return_value=record["population"]):
                 with self.assertRaises(ValueError):
-                    binding.validate(path, evidence)
+                    binding.validate(path, evidence, trusted_execution_receipt_sha256=trusted_receipt)
 
     def test_adapter_series_join_rejects_widened_limit_and_raw_mismatch(self):
         parsed, family, rules = self._series_join_fixture()

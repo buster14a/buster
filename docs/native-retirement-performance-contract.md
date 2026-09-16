@@ -134,7 +134,8 @@ An evidence bundle must be checked before publication:
 ```sh
 python3 tools/native_retirement_performance_binding.py \
   evidence/performance-binding.json --evidence-root evidence \
-  --repository-root /path/to/immutable-checkout
+  --repository-root /path/to/immutable-checkout \
+  --trusted-execution-receipt-sha256 "$TRUSTED_EXECUTION_RECEIPT_SHA256"
 ```
 
 No unbound JSON template is checked in. A record that is not fully populated by
@@ -353,6 +354,93 @@ shared-CI guard success, or a point estimate below a limit is not acceptance.
 A valid point estimate above a limit whose interval still crosses it remains
 inconclusive, not a conveniently declared regression; engineering may still
 choose to repair it before another fully predeclared run.
+
+### Per-invocation execution evidence
+
+Numeric row/round/pair records establish neither actual execution order nor
+successful warmups or runtime oracles. Evidence-mode validation therefore
+requires a separate execution plan, a supervisor-owned invocation transcript,
+and an **independently obtained execution-receipt SHA-256**. The caller supplies
+that digest through `--trusted-execution-receipt-sha256` (or the Python API's
+`trusted_execution_receipt_sha256` argument). Obtain it from the authenticated,
+admitted control service for the exact job/attempt. Never compute the trusted
+value from the downloaded result and feed it back into the validator: that
+would reintroduce self-authentication. SHA-256 provides an integrity link to
+that external trust root, not hardware attestation or proof that a publisher
+is trustworthy.
+
+Both `pre_sample_plan` and `post_aa_binding` carry the same `execution_plan`
+artifact descriptor. Its schema is
+`buster-native-retirement-execution-plan-v1`, integer version `1`. It binds
+`schedule=tp-retirement-block-schedule-v1`, the full uint64 seed, two rounds,
+pairs per round, two warmups per variant, admitted CPU, canonical performance-row
+digest, and exactly one contract per canonical row. Each row contract binds its
+canonical identity and independent oracle record. Baseline and candidate each
+bind compiler-command and deterministic output-artifact SHA-256 values,
+deterministic code-section digest/size, and the native runtime command and
+oracle-output digest where eligible. Inapplicable fields are explicitly null;
+callers cannot remove an applicable metric by changing an eligibility flag.
+Command digests identify the frozen installed recipe's canonical argv, working
+directory and environment contract, not a label chosen after measurements.
+The admitted producer must supply and preserve those exact command identities.
+
+The schedule is the versioned #619
+`tp_retirement_block_schedule(seed, round, block, cell_count, ...)`: SplitMix64,
+domain-separated seed coordinates, unbiased bounded draws, complementary AB/BA
+orientation within each two-pair block, and separate Fisher-Yates cell shuffles
+for its two pairs. It is **not** the ordinary shared-CI runner's 32-bit schedule.
+Compiler invocations form one serial campaign over all canonical rows; eligible
+native-runtime invocations form a second serial campaign. Each campaign first
+performs two warmups per variant in ascending canonical-row order, then the
+frozen two-round blocked schedule. The runtime campaign uses a dense ordering
+of the runtime-eligible canonical rows. PMU/allocation diagnostics are not
+invocations in either timing campaign.
+
+The sealed result bundle carries an `execution_receipt` artifact with schema
+`buster-native-retirement-execution-receipt-v1`, integer version `1`. The receipt
+contains the execution-plan digest, job/attempt/boot identities, the monotonic
+pre-sample binding and completion times, exact invocation count, and ordered
+`{path,bytes,sha256,records}` transcript-shard descriptors. Its `context_sha256`
+is the canonical JSON digest defined by `_execution_context`: pre-sample and
+post-A/A phase digests, support root, both subjects, measurement and execution
+identities, admission/oracle digests, and the streamed numeric-measurement
+digest. It deliberately excludes the receipt itself, result seal and future
+independent replay, so there is no hash cycle.
+
+Every canonical UTF-8 JSONL invocation record includes its global sequence,
+compiler/runtime kind, warmup/sample phase, canonical row, round/pair or warmup
+index, pair position and variant; process ID, CPU, monotonic start/end; exit
+code, signal, timeout and cancellation status; executable, command and output
+digests; deterministic code-section digest/size; wall seconds and compiler
+peak-RSS bytes. Fields not meaningful for that invocation are null. Compiler
+and runtime executable identities are checked separately. Nonzero exits,
+signals, timeouts/cancellation, overlapping or out-of-window invocations,
+missing/duplicate/extra records, schedule deviations, wrong outputs, failed or
+non-native runtime oracles, and mismatched numeric measurements reject before
+statistics replay. Process wall seconds must match the recorded monotonic
+interval within one nanosecond of decimal-serialization error. Warmups cannot
+substitute for samples. A numeric sample must equal its authenticated process
+observation; a positive number alone is insufficient.
+
+Transcript parsing is streamed, bounds each line to 8,192 bytes, limits receipt
+JSON to 1 MiB before loading it, and allows at most 4,096 transcript shards.
+It derives the exact total invocation count from the complete population and sampling policy,
+and hashes the same bytes that it consumes. Extra shards do not increase that
+population or change the existing 39,518,208 numeric-record ceiling. The plan,
+receipt and every transcript shard are members of the durable sealed closure
+and independent archive verification. Missing trusted receipt input fails
+closed; successful invocation verification is reported separately as
+`invocations_checked` and does not itself establish performance acceptance.
+
+This defines the **validator-side receipt contract**, not an assertion that the
+9700X deployment already emits it. The installed trusted producer must collect
+these observations as execution happens, freeze the command/oracle plan before
+sampling, and publish the authoritative receipt through the admitted service.
+A post-hoc converter from numeric sample rows cannot reconstruct missing
+warmups, process outcomes or actual order and is not an acceptable producer.
+Service integration, physical qualification, real A/A–A/B collection and an
+independent replay remain required under #437/#512. Synthetic regression
+receipts test rejection and joining; they are never deployment evidence.
 
 ## Revalidation and durable evidence
 
