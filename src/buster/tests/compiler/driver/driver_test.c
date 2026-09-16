@@ -1362,6 +1362,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
     return result;
 }
 
+// Rejected wide escapes must leave both absent and existing output paths
+// untouched. Exercise the production driver, not only decoder descriptors.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("buster-wide-hex-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-wide-hex-output"), S8(".o"));
+    u64 attempt_position = arena->position;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("x86_64-pc-windows")};
+#define BUSTER_WIDE_HEX_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_WIDE_HEX_ALLOCATOR)};
+#undef BUSTER_WIDE_HEX_ALLOCATOR
+    String8 invalid[] = {
+        S8("__WCHAR_TYPE__ value[] = L\"\\x100000000\";"),
+        S8("unsigned short value[] = u\"\\x100000000\";"),
+        S8("unsigned int value[] = U\"\\x100000000\";"),
+        S8("__WCHAR_TYPE__ value[8] = L\"A\\xffffffffffffffffg\";"),
+        S8("__WCHAR_TYPE__ value[] = L\"A\" L\"\\x100000000g\" L\"B\";"),
+        S8("int value(void) { __WCHAR_TYPE__ local[] = L\"\\x100000000\"; return local[0]; }"),
+        S8("int value(void) { return L'\\x100000000'; }"),
+    };
+    String8 valid = S8("__WCHAR_TYPE__ wide[] = L\"\\x000000041\" L\"B\";"
+                       "unsigned short utf16[] = u\"\\x000000041\"; unsigned int utf32[] = U\"\\x000000041\";"
+                       "int value(void) { return L'\\x000000041'; }");
+    String8 sentinel = S8("existing output must survive a rejected wide escape");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            String8 command[] = {S8("-target"), targets[target], allocators[mode], S8("-nostdinc"), S8("-c"), S8("-o"), output, input};
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(valid))))
+            {
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+            }
+            arena_set_position(arena, attempt_position);
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+            {
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid[index]))))
+                {
+                    for (u32 existing = 0; existing < 2; existing += 1)
+                    {
+                        if (existing)
+                        {
+                            BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                        }
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                        {
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_ANALYSIS, invalid[index]);
+                            BUSTER_TEST_RAW(arguments, compiled.diagnostic_count != 0 && compiled.diagnostic.length != 0, invalid[index]);
+                            if (existing)
+                            {
+                                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                                if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length == sentinel.length))
+                                {
+                                    BUSTER_TEST(arguments, memory_compare(bytes.pointer, sentinel.pointer, bytes.length));
+                                }
+                                BUSTER_TEST(arguments, os_file_delete(output));
+                            }
+                            else
+                            {
+                                OsFileDescriptor* file = os_file_open(output, (OpenFlags){.read = 1}, (OpenPermissions){0});
+                                BUSTER_TEST(arguments, file == 0);
+                                if (file)
+                                {
+                                    BUSTER_TEST(arguments, os_file_close(file));
+                                    BUSTER_TEST(arguments, os_file_delete(output));
+                                }
+                            }
+                        }
+                        arena_set_position(arena, attempt_position);
+                    }
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    arena_set_position(arena, position);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4940,6 +5031,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
