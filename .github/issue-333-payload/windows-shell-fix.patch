@@ -1,0 +1,17 @@
+--- a/tools/matrix_shard_test.py
++++ b/tools/matrix_shard_test.py
+@@ -246,6 +246,14 @@
+         self.addCleanup(self.temporary.cleanup)
+         self.root = Path(self.temporary.name).resolve()
+         self.shell = shutil.which("bash")
++        if os.name == "nt":
++            # Match the existing CI tools harness: System32 bash is WSL,
++            # not the Git Bash used by the workflow's shell: bash steps.
++            git = shutil.which("git")
++            self.assertIsNotNone(git, "Git for Windows is a CI prerequisite")
++            self.shell = next((str(parent / "bin/bash.exe")
++                               for parent in Path(git).resolve().parents
++                               if (parent / "bin/bash.exe").is_file()), None)
+         if not self.shell:
+             self.fail("The desktop workflow requires bash")
+         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
