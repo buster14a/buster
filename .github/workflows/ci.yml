@@ -163,6 +163,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
+          "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
           "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
 
@@ -613,19 +614,49 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Bootstrap candidate and reference build drivers
+      - name: Bootstrap candidate and select reference build driver
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-analyzer"
-          git rev-parse HEAD | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"
-          printf '%s\n' "$BASELINE_REVISION" > "$RUNNER_TEMP/buster-analyzer/baseline-revision.txt"
+          candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
+          printf '%s\n' "$candidate_revision" | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"
+          printf '%s\n' "$reference_revision" > "$RUNNER_TEMP/buster-analyzer/baseline-revision.txt"
+          if [[ "$candidate_revision" == "$reference_revision" && ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) ]]; then
+            selection=skip
+            reason=same-revision
+          else
+            selection=compare
+            if [[ "$candidate_revision" == "$reference_revision" ]]; then
+              reason=event-requires-comparison
+            else
+              reason=distinct-revisions
+            fi
+          fi
+          {
+            printf 'BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n'
+            printf 'event=%s\n' "$EVENT_NAME"
+            printf 'candidate_revision=%s\n' "$candidate_revision"
+            printf 'reference_revision=%s\n' "$reference_revision"
+            printf 'selection=%s\n' "$selection"
+            printf 'reason=%s\n' "$reason"
+          } > "$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
+          printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection" >> "$GITHUB_ENV"
+          {
+            printf '## Clang analyzer comparison selection\n\n'
+            printf '| Event | Candidate | Reference | Selection | Reason |\n| --- | --- | --- | --- | --- |\n'
+            printf '| %s | %s | %s | %s | %s |\n' "$EVENT_NAME" "$candidate_revision" "$reference_revision" "$selection" "$reason"
+          } >> "$GITHUB_STEP_SUMMARY"
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
           clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver
-          git show "$BASELINE_REVISION:build.c" > "$RUNNER_TEMP/buster-analyzer/baseline.c"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char "$RUNNER_TEMP/buster-analyzer/baseline.c" -o build/analyzer-baseline
+          if [[ "$selection" == compare ]]; then
+            git show "$reference_revision:build.c" > "$RUNNER_TEMP/buster-analyzer/baseline.c"
+            clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char "$RUNNER_TEMP/buster-analyzer/baseline.c" -o build/analyzer-baseline
+          fi
       - name: Exercise analyzer failure and coverage controls
         shell: bash
         run: |
@@ -638,9 +669,66 @@ jobs:
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
       - name: Compare reference analysis and aggregate all module shards
         shell: bash
+        env:
+          BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" --baseline-driver build/analyzer-baseline 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
+          candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
+          if [[ "$candidate_revision" == "$reference_revision" && ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) ]]; then
+            expected_selection=skip
+            expected_reason=same-revision
+          else
+            expected_selection=compare
+            if [[ "$candidate_revision" == "$reference_revision" ]]; then
+              expected_reason=event-requires-comparison
+            else
+              expected_reason=distinct-revisions
+            fi
+          fi
+          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
+          if [[ ! -f "$selection_path" || -L "$selection_path" ]]; then
+            echo '::error::Missing analyzer comparison selection evidence.'
+            exit 1
+          fi
+          expected_selection_path="$(mktemp "$RUNNER_TEMP/buster-analyzer/.comparison-selection.expected.XXXXXX")"
+          trap 'rm -f "$expected_selection_path"' EXIT
+          {
+            printf 'BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n'
+            printf 'event=%s\n' "$EVENT_NAME"
+            printf 'candidate_revision=%s\n' "$candidate_revision"
+            printf 'reference_revision=%s\n' "$reference_revision"
+            printf 'selection=%s\n' "$expected_selection"
+            printf 'reason=%s\n' "$expected_reason"
+          } > "$expected_selection_path"
+          if ! cmp -s "$expected_selection_path" "$selection_path" ||
+             [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$expected_selection" ]]; then
+            echo '::error::Missing, malformed, stale or inconsistent analyzer comparison selection evidence.'
+            exit 1
+          fi
+          rm -f "$expected_selection_path"
+          trap - EXIT
+          case "$expected_selection" in
+            compare)
+              if [[ ! -f build/analyzer-baseline || -L build/analyzer-baseline || ! -x build/analyzer-baseline ]]; then
+                echo '::error::Analyzer comparison requires a regular, non-symlink executable baseline driver.'
+                exit 1
+              fi
+              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" --baseline-driver build/analyzer-baseline 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
+              ;;
+            skip)
+              if [[ -e build/analyzer-baseline || -L build/analyzer-baseline ]]; then
+                echo '::error::Analyzer skip requires the baseline driver path to be absent.'
+                exit 1
+              fi
+              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
+              ;;
+            *)
+              echo '::error::Missing or invalid analyzer comparison selection.'
+              exit 1
+              ;;
+          esac
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Retain analyzer inventory, results and measurements
         if: always()

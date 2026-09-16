@@ -1110,6 +1110,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
     u32 recorded_cases = 0;
     u32 recorded_seeds = 0;
     u32 register_seeds = 0;
+    u32 homeless_registers = 0;
     for (u32 case_index = 0; case_index < CASE_COUNT; case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -1165,8 +1166,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
         for (u32 register_index = 0; register_index < REGISTER_COUNT; register_index += 1)
         {
             // Shared homes: several registers spill to the same frame slot, so
-            // one spill invalidates another register's frame copy.
-            virtual_offsets[register_index] = 16u * codegen_test_debug_random(&random_state, REGISTER_COUNT / 2u + 1u);
+            // one spill invalidates another register's frame copy. Some have
+            // no home at all, as the predicate bank leaves a mask no edit
+            // names: those record unavailable where their frame copy would be
+            // selected, and they all carry the same marker as a key, so a
+            // spill of one must not invalidate another.
+            virtual_offsets[register_index] = codegen_test_debug_random(&random_state, 5u)
+                                                  ? 16u * codegen_test_debug_random(&random_state, REGISTER_COUNT / 2u + 1u)
+                                                  : MACHINE_VIRTUAL_REGISTER_NO_HOME;
         }
         u32* stack_offsets = arena_allocate(temporary.arena, u32, SLOT_COUNT);
         for (u32 slot_index = 0; slot_index < SLOT_COUNT; slot_index += 1)
@@ -1287,6 +1294,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
             }
             BUSTER_TEST(arguments, same);
         }
+        for (u32 register_index = 0; register_index < REGISTER_COUNT; register_index += 1)
+        {
+            homeless_registers += virtual_offsets[register_index] == MACHINE_VIRTUAL_REGISTER_NO_HOME;
+        }
         recorded_cases += indexed_ok;
         recorded_seeds += indexed.debug_location_count;
         scratch_end(temporary);
@@ -1296,6 +1307,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
     BUSTER_TEST(arguments, recorded_cases * 2u > CASE_COUNT);
     BUSTER_TEST(arguments, recorded_seeds > CASE_COUNT);
     BUSTER_TEST(arguments, register_seeds > CASE_COUNT);
+    BUSTER_TEST(arguments, homeless_registers > CASE_COUNT);
     return result;
 }
 
@@ -1378,6 +1390,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_seed_sizing(UnitTe
     BUSTER_TEST(arguments, capacity < 4u * VALUE_COUNT);
     BUSTER_TEST(arguments, retained < (u64)8u * VALUE_COUNT * sizeof(DebugLocationSeed));
     scratch_end(temporary);
+    return result;
+}
+
+// The predicate bank leaves a MASK value no predicate edit names without a
+// frame home. Recording reports such a value unavailable wherever its frame
+// copy would be selected, keeps its register rows, and still rejects a home
+// the frame cannot address.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_homeless_register(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineInstruction instructions[4] = {0};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(instructions); row += 1)
+    {
+        instructions[row].opcode = MACHINE_X64_MOV_RI;
+    }
+    instructions[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    instructions[1].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+    instructions[1].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    MachineVirtualRegister virtual_registers[2] = {
+        {.definition_point = machine_point_make(0, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = machine_point_make(1, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_MASK},
+    };
+    MachineDebugValue values[] = {
+        {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}, .piece_sizes = {8}, .local = {.value = 0},
+         .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1},
+        {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1)}, .piece_sizes = {8}, .local = {.value = 1},
+         .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1},
+    };
+    MachineFunction function = {
+        .instructions = instructions,
+        .virtual_registers = virtual_registers,
+        .debug_values = values,
+        .target = machine_target_x86_64(),
+        .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+        .virtual_register_count = BUSTER_ARRAY_LENGTH(virtual_registers),
+        .debug_value_count = BUSTER_ARRAY_LENGTH(values),
+    };
+    u32 virtual_offsets[] = {MACHINE_VIRTUAL_REGISTER_NO_HOME, MACHINE_VIRTUAL_REGISTER_NO_HOME};
+    u8 operand_registers[4 * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
+    operand_registers[0] = MACHINE_X64_RAX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT] = (u8)(MACHINE_PREDICATE_REGISTER_BASE + 1u);
+    // The predicate bank never spills a homeless value; this SPILL is the
+    // defensive case. v0's frame copy is selected for rows 1-2, and the
+    // reload publishes RCX from row 3. v1 is a k register with no debug name.
+    MachineEdit edits[] = {
+        {.point = machine_point_make(0, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = MACHINE_X64_RAX},
+        {.point = machine_point_make(2, MACHINE_POINT_BEFORE), .kind = MACHINE_EDIT_RELOAD, .subject = 0, .location = MACHINE_X64_RCX},
+    };
+    MachineStackPlacement placement = {
+        .edits = edits,
+        .virtual_register_offsets = virtual_offsets,
+        .operand_registers = operand_registers,
+        .edit_count = BUSTER_ARRAY_LENGTH(edits),
+        .valid = true,
+    };
+    u32 row_offsets[] = {10, 20, 30, 40};
+    DebugLocationSeed seeds[8] = {0};
+    IrFunction ir_function = {.symbol = {.value = 7}};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    CodegenModule module = {.debug_locations = seeds};
+    BUSTER_TEST(arguments, codegen_test_record_machine_locations(arguments->arena, &module, BUSTER_ARRAY_LENGTH(seeds), &ir_function, &function,
+                                                                 &placement, row_offsets, 100, 150, 80, target));
+    BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_NONE && module.debug_location_count == 3);
+    BUSTER_TEST(arguments, seeds[0].start == 110 && seeds[0].end == 140 && seeds[0].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+    BUSTER_TEST(arguments, seeds[1].start == 140 && seeds[1].end == 150 && seeds[1].location.kind == DEBUG_LOCATION_REGISTER &&
+                           seeds[1].location.reg == DEBUG_REGISTER_X86_RCX);
+    BUSTER_TEST(arguments, seeds[2].start == 110 && seeds[2].end == 150 && seeds[2].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+    virtual_offsets[0] = MACHINE_VIRTUAL_REGISTER_NO_HOME - 1u;
+    CodegenModule unaddressable = {.debug_locations = seeds};
+    BUSTER_TEST(arguments, !codegen_test_record_machine_locations(arguments->arena, &unaddressable, BUSTER_ARRAY_LENGTH(seeds), &ir_function,
+                                                                  &function, &placement, row_offsets, 100, 150, 80, target));
+    BUSTER_TEST(arguments, unaddressable.error == CODEGEN_ERROR_INVALID_IR);
     return result;
 }
 
@@ -1881,6 +1966,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
+    UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
+    result.succeeded_test_count += homeless_debug.succeeded_test_count;
+    result.test_count += homeless_debug.test_count;
     UnitTestResult machine_debug_differential = codegen_test_machine_debug_differential(arguments);
     result.succeeded_test_count += machine_debug_differential.succeeded_test_count;
     result.test_count += machine_debug_differential.test_count;

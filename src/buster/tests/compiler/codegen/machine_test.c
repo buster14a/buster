@@ -4848,6 +4848,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
                     CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
                         (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
                     BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+                    // The driver records locations by default. The mask-only
+                    // locals a, b and c name homeless predicate registers.
+                    CodegenModule located = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true, .debug_info = true});
+                    BUSTER_TEST(arguments, located.error == CODEGEN_ERROR_NONE && located.statistics.fallback_function_count == 0);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
                     TargetCpuFeatures features = cpu_detect_features_x86_64();
                     bool execute = system == 0 && target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) &&
@@ -5003,7 +5008,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_edges(UnitTestArgument
                 mode == 1 ? machine_fast_placement_build(arguments->arena, &function) : machine_quality_placement_build(arguments->arena, &function);
             MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &function, &placement);
             BUSTER_TEST(arguments, placement.valid && encoded.valid);
-            BUSTER_TEST(arguments, variant == 0 || (placement.rematerialize_count > 0 && placement.virtual_register_offsets[2] == UINT32_MAX));
+            BUSTER_TEST(arguments, variant == 0 || (placement.rematerialize_count > 0 && placement.virtual_register_offsets[2] == MACHINE_VIRTUAL_REGISTER_NO_HOME));
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
             TargetCpuFeatures features = cpu_detect_features_x86_64();
             bool execute = target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) && target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW);
