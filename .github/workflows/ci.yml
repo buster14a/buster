@@ -12,6 +12,12 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      cmake_profile:
+        description: 'Diagnostic CMake profiles (not an uninstrumented timing run)'
+        type: boolean
+        required: false
+        default: false
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -98,6 +104,8 @@ jobs:
   test:
     env:
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
+      # Reuse native matrix profiling; ordinary CI keeps the same configure flags.
+      BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }}
     timeout-minutes: 300
@@ -166,6 +174,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
+          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
@@ -288,13 +297,24 @@ jobs:
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Postprocess only: build.c still owns every configure, probe and build.
+      # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
+      - name: Collect CMake configure evidence
+        id: configure_evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence.py --build-root build --output "$RUNNER_TEMP/buster-ci/configure" --profile-requested "$BUSTER_CMAKE_PROFILE"
+
       - name: Desktop result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix configure_evidence' || 'workflow_tools bootstrap_wrappers zig combinations_windows configure_evidence' }}
           BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
           BUSTER_CI_COVERAGE_REQUIRED: "1"
