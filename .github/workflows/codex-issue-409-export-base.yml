@@ -1,0 +1,31 @@
+name: Export issue 409 base workflow
+
+on:
+  push:
+    branches: [codex/issue-409-upload-artifact-v7-bootstrap]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Export Buster CI workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue-409-base"
+          cp .github/workflows/ci.yml "$RUNNER_TEMP/issue-409-base/ci.yml"
+          git rev-parse HEAD > "$RUNNER_TEMP/issue-409-base/source-commit.txt"
+      - name: Upload base workflow with native Node 24 action
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-409-base-ci-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-409-base/
+          if-no-files-found: error
+          retention-days: 1
