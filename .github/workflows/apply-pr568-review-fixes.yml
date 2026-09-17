@@ -29,7 +29,7 @@ jobs:
           path: target
           fetch-depth: 0
           persist-credentials: true
-      - name: Reconstruct and apply the reviewed patch
+      - name: Reconstruct and commit the reviewed patch locally
         shell: bash
         run: |
           set -euo pipefail
@@ -43,8 +43,8 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("target/docs/agents/benchmarking.md")
-          text = path.read_text()
+          guide = Path("target/docs/agents/benchmarking.md")
+          text = guide.read_text()
           old = """  `python3 tools/native_retirement_performance_binding.py <record.json>
             --evidence-root <bundle> --repository-root <immutable-checkout>`; the
           """
@@ -64,17 +64,54 @@ jobs:
           """
           if text.count(anchor) != 1:
               raise SystemExit("primary benchmarking trust-boundary text changed unexpectedly")
-          path.write_text(text.replace(anchor, addition))
+          guide.write_text(text.replace(anchor, addition))
+
+          tests = Path("target/tools/native_retirement_performance_binding_test.py")
+          text = tests.read_text()
+          old = """        row = copy.deepcopy(rows_record[\"rows\"][0])
+                  row[\"row\"] = 0
+                  row[\"eligibility\"] = {
+          """
+          new = """        row = copy.deepcopy(rows_record[\"rows\"][0])
+                  row[\"row\"] = 0
+                  row[\"identity\"].update({
+                      \"target\": binding.NATIVE_RUNTIME_TARGET,
+                      \"target_abi\": \"systemv-x86_64\",
+                      \"artifact_stage\": \"link\",
+                      \"execution_obligation\": \"semantic-gate-509\",
+                  })
+                  row[\"eligibility\"] = {
+          """
+          if text.count(old) != 1:
+              raise SystemExit("bounded evidence fixture row changed unexpectedly")
+          text = text.replace(old, new)
+          old = """        admission[\"records\"][0].update({\"row\": 0, \"census_row\": 0,
+                                                   \"identity\": parsed[0][\"identity\"],
+                                                   \"artifact_stage\": \"object\"})
+          """
+          new = """        admission[\"records\"][0].update({\"row\": 0, \"census_row\": 0,
+                                                   \"identity\": parsed[0][\"identity\"],
+                                                   \"artifact_stage\": parsed[0][\"identity\"][\"artifact_stage\"]})
+          """
+          if text.count(old) != 1:
+              raise SystemExit("bounded evidence fixture admission changed unexpectedly")
+          tests.write_text(text.replace(old, new))
           PY
           rm -rf target/.github/pr568-patch
           git -C target rm .github/workflows/pr568-apply-review-fixes.yml
           git -C target add -A
           git -C target diff --cached --check
-      - name: Validate the repaired binding
+          git -C target config user.name 'David'
+          git -C target config user.email 'davidgmbb@gmail.com'
+          git -C target commit -m 'bench: resolve native-retirement binding review findings (#568)' \
+            -m 'Authenticate the exact receipt bytes before parsing, require one supervisor-observed process instance per invocation, bind the schedule CPU and native target to admitted receipts, and derive runtime applicability from frozen row obligations. Update both performance-contract entry points and retain adversarial regressions.'
+      - name: Validate the repaired binding from a clean commit
         shell: bash
         working-directory: target
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e844403f0015caf20e275f891b
+          test -z "$(git status --porcelain)"
           python3 -m py_compile \
             tools/native_retirement_performance_binding.py \
             tools/native_retirement_performance_binding_test.py \
@@ -82,15 +119,12 @@ jobs:
           python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
           python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
           python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
-          git diff --cached --check
-      - name: Commit and push the fast-forward repair
+          git diff --check
+          test -z "$(git status --porcelain)"
+      - name: Push the validated fast-forward repair
         shell: bash
         working-directory: target
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = d70fd4b46a3537e844403f0015caf20e275f891b
-          git config user.name 'David'
-          git config user.email 'davidgmbb@gmail.com'
-          git commit -m 'bench: resolve native-retirement binding review findings (#568)' \
-            -m 'Authenticate the exact receipt bytes before parsing, require one supervisor-observed process instance per invocation, bind the schedule CPU and native target to admitted receipts, and derive runtime applicability from frozen row obligations. Update both performance-contract entry points and retain adversarial regressions.'
+          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e844403f0015caf20e275f891b
           git push origin HEAD:refs/heads/docs/511-retirement-performance-contract
