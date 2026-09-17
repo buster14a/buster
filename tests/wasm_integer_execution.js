@@ -47,4 +47,8 @@ for (const bits of [32, 64]) {
         }
     }
 }
-console.log(`${checks} frontend-to-Wasm integer checks passed`);
+// The oracle has no asynchronous work. Publish its receipt synchronously and
+// terminate explicitly so completed checks have a deterministic child-process
+// lifetime on every host.
+fs.writeSync(1, `${checks} frontend-to-Wasm integer checks passed\n`);
+process.exit(0);
