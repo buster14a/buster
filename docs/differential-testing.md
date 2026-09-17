@@ -158,6 +158,17 @@ a signal is not collapsed into an ordinary exit code. A recovering sanitizer
 report is a failure even if its process exits zero. Existing output directories
 are atomically refused, and objects/executables are removed before each compile.
 
+Sanitizer verdicts come from a separate compiler-rt report channel, never from
+searching captured stdout or stderr. Before every child, the runner preserves the
+selected environment and existing `ASAN_OPTIONS`, `UBSAN_OPTIONS`, `LSAN_OPTIONS`,
+`MSAN_OPTIONS`, and `TSAN_OPTIONS`, then appends an authoritative quoted
+`log_path` plus deterministic filename flags. A PID-qualified runtime file is
+read only after that child is reaped, copied byte-for-byte to the observation's
+`.sanitizer` evidence, and removed. Missing or unreadable report evidence fails
+closed. Ordinary program output containing `AddressSanitizer`, `runtime error:`,
+or any other sanitizer spelling remains ordinary byte-exact output and may be a
+valid oracle observation.
+
 Compiler diagnostics are compared across Buster configurations, not against
 Clang's wording. Rejection fixtures require ordinary nonzero compiler exits,
 never a crash or timeout. Successful-warning, syntax-error, and type-error
