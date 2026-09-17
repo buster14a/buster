@@ -26,7 +26,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # declared as supported-native gaps by the frozen support ledger.  The value is
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
-FULL_SUPPORTED_GAP_SHA256 = "a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"
+FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
 FULL_SUPPORT_CONTRACT_SHA256 = "de31038ba09300a7d734dda5a9e3441ae12114ee42d966778912937c2776fd18"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
@@ -43,10 +43,10 @@ FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add270575
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 341
 FULL_APPLICABILITY_LEDGER_SHA256 = "aea04fb09de00349eea368c1cf97af315bfe943a2c6ce73c5951fd44a548dcdd"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379"
-FULL_DEPENDENCY_RECEIPT_SHA256 = "b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30"
-FULL_DEPENDENCY_PROJECT_SHA256 = "37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a"
-FULL_DEPENDENCY_LEDGER_SHA256 = "943194234417ac65971f1ba756613b05e542c33bf19eb2d2d5b10a4f99d2f47d"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "984d2292e8e1a0e8c4666e04cf7228bbb93ad27b283694cc93653f1c2b5bc605"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "328f03733a8f88cac72f2ff23c7fcc3aa925b89603032c0fc64bbc99f7a6c132"
+FULL_DEPENDENCY_PROJECT_SHA256 = "a9a8cc07b545028bd42f56a9235ceed255b5c01ca0b80740082028f76538fb2a"
+FULL_DEPENDENCY_LEDGER_SHA256 = "ac94f7c412ebcd9feed87fc43c542d67f05c1539d3ec4d7359fa8347bb329dd6"
 FULL_EXTERNAL_CHECKOUTS = (
     {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
     {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
@@ -534,7 +534,7 @@ def validate_profile(manifest, inputs, row_count):
         assert row_count == FULL_ROW_COUNT, "full census row count is incomplete"
     elif profile == SELF_TEST_PROFILE:
         # Small fixtures are intentionally accepted only with this explicit
-        # profile; they may not masquerade as the full 403-subject inventory.
+        # profile; they may not masquerade as the full reviewed subject inventory.
         assert subjects and row_count
     return profile, subjects
 

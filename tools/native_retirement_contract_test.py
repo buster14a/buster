@@ -5,6 +5,7 @@ import csv
 import copy
 import hashlib
 import json
+import re
 import shutil
 import struct
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import native_retirement_contract as contract
+import native_retirement_materializer as materializer
 
 
 def write_table(path, fields, rows):
@@ -1211,6 +1213,56 @@ class ContractTests(unittest.TestCase):
         _fields, applicability_rows = read_table(self.root / "applicability.tsv")
         row = next(item for item in applicability_rows if item["row"] == "129")
         self.assertEqual(row["applicability"], "admitted-supported")
+
+class CheckedInDependencyTests(unittest.TestCase):
+    def test_historical_gap_ledger_maps_to_current_row_numbers(self):
+        root = Path(__file__).resolve().parents[1]
+        _fields, inputs = read_table(root / "docs/native-retirement-support-v1.tsv")
+        ledger_path = root / "docs/native-retirement-supported-gaps-v1.tsv"
+        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_SUPPORTED_GAP_LEDGER_SHA256)
+        _fields, gaps = read_table(ledger_path)
+        subjects = [row["path"] for row in inputs if row["role"] == "subject"]
+        identities = [(fixture, target, frontend, pic, allocator)
+                      for fixture in subjects for target in contract.TARGETS
+                      for frontend in ("local-backed-canonical", "direct-ssa")
+                      for pic in ("0", "1") for allocator in contract.ALLOCATORS]
+        row_by_identity = {identity: index for index, identity in enumerate(identities)}
+        fields = ("fixture", "target", "frontend_lowering", "PIC", "allocator")
+        rows = sorted(row_by_identity[tuple(gap[field] for field in fields)] for gap in gaps)
+        self.assertEqual(len(rows), contract.FULL_SUPPORTED_GAP_COUNT)
+        self.assertEqual(contract.canonical_rows_digest(rows), contract.FULL_SUPPORTED_GAP_SHA256)
+
+    def test_full_census_dimensions_match_reviewed_support_inventory(self):
+        root = Path(__file__).resolve().parents[1]
+        _fields, rows = read_table(root / "docs/native-retirement-support-v1.tsv")
+        subjects = sum(row["role"] == "subject" for row in rows)
+        groups = subjects * len(contract.TARGETS) * len(("local-backed-canonical", "direct-ssa")) * len(("0", "1"))
+        counts = {"input": len(rows), "subject": subjects, "group": groups,
+                  "row": groups * len(contract.ALLOCATORS)}
+        self.assertEqual(subjects, contract.FULL_SUBJECT_COUNT)
+        self.assertEqual(counts["row"], contract.FULL_ROW_COUNT)
+        producer = (root / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        for name, count in counts.items():
+            with self.subTest(dimension=name):
+                match = re.search(r'nrc_full_' + name + r'_count = ([0-9]+);', producer)
+                self.assertIsNotNone(match)
+                self.assertEqual(int(match.group(1)), count)
+
+    def test_reviewed_dependency_identities_match_descriptor_and_producer(self):
+        root = Path(__file__).resolve().parents[1]
+        descriptor = (root / "docs/native-retirement-dependencies-v1.json").read_bytes()
+        records, _metadata = materializer.parse_manifest(json.loads(descriptor))
+        self.assertEqual(sha(descriptor), contract.FULL_DEPENDENCY_DESCRIPTOR_SHA256)
+        self.assertEqual(sha(materializer._ledger(records)), contract.FULL_DEPENDENCY_LEDGER_SHA256)
+        producer = (root / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        for name in ("descriptor", "receipt", "project", "ledger"):
+            with self.subTest(identity=name):
+                match = re.search(
+                    r'nrc_dependency_' + name + r'_sha256 = S8_INITIALIZER\("([0-9a-f]{64})"\);',
+                    producer)
+                self.assertIsNotNone(match)
+                self.assertEqual(match.group(1), getattr(contract, "FULL_DEPENDENCY_" + name.upper() + "_SHA256"))
+
 
 if __name__ == "__main__":
     unittest.main()

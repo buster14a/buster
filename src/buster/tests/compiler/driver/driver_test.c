@@ -3621,12 +3621,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         scratch_end(temporary);
     }
     // Keep this valid canonical-only source outside the frozen native support
-    // inventory: it exists to exercise permissive fallback telemetry, not to
-    // claim strict MIR support for inline assembly.
+    // inventory. Seventeen operands exceed the MIR selector's sixteen-operand
+    // limit. The direct System V emitter can allocate nine GPR inputs and
+    // eight SSE inputs for an empty template; Win64 has only seven GPRs.
+    // Scalar CMPXCHG is MIR-supported and cannot serve as a fallback control.
     String8 fallback_source = buster_test_temporary_path(arguments->arena, S8("buster-machine-fallback-inline-asm"), S8(".c"));
-    String8 fallback_source_text = S8("int machine_fallback_inline_asm(volatile long long* pointer)\n{\n    long long expected = *pointer;\n    long long desired = expected;\n    __asm__ __volatile__(\n            \"lock ; cmpxchg %2, %1\"\n            : \"+a\"(expected), \"+m\"(*pointer)\n            : \"r\"(desired)\n            : \"memory\");\n    return (int)expected;\n}\n");
+    String8 fallback_source_text = S8("int machine_fallback_inline_asm(int value, double floating)\n{\n"
+        "    __asm__ __volatile__(\"\" : : "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating), "
+        "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating) : \"memory\");\n"
+        "    return value;\n}\n");
     BUSTER_TEST(arguments, file_write(fallback_source, BUSTER_SLICE_TO_BYTE_SLICE(fallback_source_text)));
-    String8 fallback_targets[] = {S8("x86_64-unknown-windows")};
+    String8 fallback_targets[] = {S8("x86_64-unknown-linux-gnu")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -3690,7 +3698,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     }
     // Multiple input compilation used to discard all fallback and allocator
     // traffic. Compare its census against each input compiled independently.
-    // Include a signature fallback and retained machine functions together.
+    // Include an opcode fallback and retained machine functions together.
     for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -3699,14 +3707,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-census-unit"), S8(".o"));
         for (u32 unit = 0; unit < BUSTER_ARRAY_LENGTH(inputs); unit += 1)
         {
-            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode], S8("-o"), output, inputs[unit]};
+            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), modes[mode], S8("-o"), output, inputs[unit]};
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                 compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
             units[unit] = compiled.codegen_statistics;
         }
         output = buster_test_temporary_path(temporary.arena, S8("buster-mir-census-multiple"), S8(".exe"));
-        String8 command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode], S8("-o"), output,
+        String8 command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), modes[mode], S8("-o"), output,
                              inputs[0], inputs[1], inputs[2], S8("-fcodegen-fallback-census")};
         CompilerDriverResult multiple = compiler_driver_execute_invocation(temporary.arena,
             compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
@@ -3767,7 +3775,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         }
         // A strict failure in a later unit must retain prior-unit statistics
         // and copy its diagnostic out of the destroyed translation-unit arena.
-        String8 strict_command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode], S8("-fno-machine-fallback"),
+        String8 strict_command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), modes[mode], S8("-fno-machine-fallback"),
                                     S8("-o"), output, inputs[1], inputs[0]};
         CompilerDriverResult strict = compiler_driver_execute_invocation(temporary.arena,
             compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(strict_command)));

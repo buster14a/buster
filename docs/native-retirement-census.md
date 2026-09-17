@@ -23,6 +23,14 @@ subjects plus 6 registered non-object controls. The original 192-row
 historical gap ledger and all 341 applicability classifications remain
 explicit and source-bound.
 
+When integrating an admitted inventory update, keep the producer's full-profile
+dimensions and the validator dimensions synchronized. The historical gap ledger
+stays unchanged, but its digest of expanded row numbers must be recomputed from
+the new ordered cross product. Regenerate the dependency receipt from the pinned
+checkouts before updating the descriptor, receipt, project-closure, and ledger
+trust anchors in both consumers. The checked-in contract tests bind these
+dimensions, row identities, and dependency declarations to the reviewed files.
+
 ```sh
 ./build.sh native_retirement_census --self-test
 ./build.sh native_retirement_census --manifest-only --out build/census-inventory
@@ -169,13 +177,13 @@ until their owning gate supplies that setup.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379`, materializer
+`984d2292e8e1a0e8c4666e04cf7228bbb93ad27b283694cc93653f1c2b5bc605`, materializer
 receipt SHA-256
-`b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30`, project
+`328f03733a8f88cac72f2ff23c7fcc3aa925b89603032c0fc64bbc99f7a6c132`, project
 closure SHA-256
-`37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a`, and
+`a9a8cc07b545028bd42f56a9235ceed255b5c01ca0b80740082028f76538fb2a`, and
 materializer ledger SHA-256
-`943194234417ac65971f1ba756613b05e542c33bf19eb2d2d5b10a4f99d2f47d`.
+`ac94f7c412ebcd9feed87fc43c542d67f05c1539d3ec4d7359fa8347bb329dd6`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is

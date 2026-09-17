@@ -31,10 +31,14 @@ BUSTER_GLOBAL_LOCAL NrcTarget const nrc_targets[] = {
 };
 
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_manifest_name = S8_INITIALIZER("docs/native-retirement-dependencies-v1.json");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("943194234417ac65971f1ba756613b05e542c33bf19eb2d2d5b10a4f99d2f47d");
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_input_count = 558;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_subject_count = 410;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_group_count = 19680;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_row_count = 78720;
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("984d2292e8e1a0e8c4666e04cf7228bbb93ad27b283694cc93653f1c2b5bc605");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("328f03733a8f88cac72f2ff23c7fcc3aa925b89603032c0fc64bbc99f7a6c132");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("a9a8cc07b545028bd42f56a9235ceed255b5c01ca0b80740082028f76538fb2a");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("ac94f7c412ebcd9feed87fc43c542d67f05c1539d3ec4d7359fa8347bb329dd6");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
@@ -1526,8 +1530,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             subject_count += string_equal(inputs[index].role, S8("subject"));
         }
         bool full_profile = !settings.fixture_filter.length && !settings.target_filter.length && settings.shard_count == 4 &&
-                            input_count == 549 && subject_count == 403 && groups == 19344 &&
-                            groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == 77376;
+                            input_count == nrc_full_input_count && subject_count == nrc_full_subject_count && groups == nrc_full_group_count &&
+                            groups * BUSTER_ARRAY_LENGTH(nrc_allocators) == nrc_full_row_count;
         bool dependency_required = !settings.manifest_only && (full_profile || settings.project_include.length != 0);
         if (dependency_required && (!settings.project_include.length || !settings.dependency_receipt.length))
         {
@@ -1622,7 +1626,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             settings.dependency_project_sha256, settings.dependency_ledger_sha256, nrc_archived_input_sha256,
             nrc_archived_fixture_map_sha256, nrc_archived_row_sha256, sysroot, system_include, input_count, subject_count,
             groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, 192,
-            S8("a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"),
+            S8("9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"),
             settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds,
             source_dependencies, environment_state, dependency_state, flags);
