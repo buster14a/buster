@@ -1018,7 +1018,28 @@ printf '%s\n' "$checked"
             source = root / "probe.c"
             executable = root / "probe"
             source.write_text("int main(void) { volatile int x = 2147483647; volatile int y = x + 1; (void)y; return 0; }\n")
-            subprocess.run([compiler, "-fsanitize=undefined", "-fsanitize-recover=all", str(source), "-o", str(executable)], check=True, timeout=30, capture_output=True)
+            try:
+                subprocess.run(
+                    [compiler, "-fsanitize=undefined", "-fsanitize-recover=all",
+                     str(source), "-o", str(executable)],
+                    check=True, timeout=30, capture_output=True, text=True)
+            except subprocess.CalledProcessError as error:
+                diagnostics = "\n".join(
+                    output.strip() for output in (error.stdout, error.stderr)
+                    if output and output.strip()) or "(compiler produced no diagnostics)"
+                runtime = re.search(
+                    r"[^\s:'\"]*libclang_rt\.ubsan[^\s:'\"]*", diagnostics)
+                missing = re.search(
+                    r"(?:cannot (?:find|open)|unable to find|no such file|not found)",
+                    diagnostics, re.IGNORECASE)
+                if runtime and missing:
+                    self.fail(
+                        "UBSan fatality gate unavailable: missing Clang compiler-rt "
+                        f"runtime {runtime.group(0)}.\n"
+                        f"Compiler diagnostics:\n{diagnostics}")
+                self.fail(
+                    "UBSan fatality probe compilation failed before policy validation.\n"
+                    f"Compiler diagnostics:\n{diagnostics}")
             recovering = subprocess.run([str(executable)], env=dict(os.environ, UBSAN_OPTIONS="halt_on_error=0"), capture_output=True, text=True, timeout=30)
             self.assertEqual(recovering.returncode, 0)
             self.assertIn("runtime error", recovering.stderr)

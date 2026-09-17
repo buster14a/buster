@@ -2,6 +2,107 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/os.h>
+#include <buster/lib/file.h>
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct UefiAbiTarget UefiAbiTarget;
+    struct UefiAbiTarget
+    {
+        String8 triple;
+        CpuArch architecture;
+        OperatingSystem os;
+    };
+    UefiAbiTarget targets[] = {
+        {S8("aarch64-unknown-linux-gnu"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_LINUX},
+        {S8("aarch64-linux-android"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_ANDROID},
+        {S8("aarch64-apple-macos"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_MACOS},
+        {S8("aarch64-apple-ios"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_IOS},
+        {S8("aarch64-pc-windows-msvc"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_WINDOWS},
+        {S8("aarch64-unknown-uefi"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_UEFI},
+        {S8("x86_64-unknown-uefi"), CPU_ARCH_X86_64, OPERATING_SYSTEM_UEFI},
+    };
+    String8 modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        UefiAbiTarget target = targets[target_index];
+        bool uefi = target.os == OPERATING_SYSTEM_UEFI;
+        u32 mode_count = uefi ? BUSTER_ARRAY_LENGTH(modes) : 1;
+        u32 frontend_count = uefi ? BUSTER_ARRAY_LENGTH(frontends) : 1;
+        for (u32 mode = 0; mode < mode_count; mode += 1)
+        {
+            for (u32 frontend = 0; frontend < frontend_count; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 output = buster_test_temporary_path(arena, S8("buster-uefi-abi"), S8(".o"));
+                String8 command[] = {
+                    S8("-c"), S8("-g0"), string_format(arena, S8("--target={S8}"), target.triple),
+                    string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]), frontends[frontend],
+                    S8("-o"), output, uefi ? S8("tests/basic_c_uefi.c") : S8("tests/basic_c_aarch64_abi_contract.c"),
+                };
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, invocation.target.cpu_arch == target.architecture && invocation.target.os == target.os);
+                BUSTER_TEST(arguments, target_uses_llp64_data_model(invocation.target) ==
+                                      (target.os == OPERATING_SYSTEM_WINDOWS || target.architecture == CPU_ARCH_X86_64));
+                BUSTER_TEST(arguments, target_uses_pe_unwind(invocation.target) == (uefi || target.os == OPERATING_SYSTEM_WINDOWS));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("UEFI ABI control {S8}/{S8}/{S8}: {S8}\n"),
+                                    target.triple, modes[mode], frontends[frontend], compiled.diagnostic);
+                }
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
+                scratch_end(temporary);
+            }
+        }
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        bool rejected = uefi && target.architecture == CPU_ARCH_AARCH64;
+        String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-uefi-bitcode-{u32}"), target_index), S8(".bc"));
+        String8 command[] = {S8("-emit-llvm"), string_format(arena, S8("--target={S8}"), target.triple),
+                             S8("-o"), output, S8("tests/basic_c_llvm_uefi_varargs.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(arena, invocation);
+        if (rejected)
+        {
+            BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_TEST(arguments, !emitted.has_llvm_bitcode && !emitted.llvm_bitcode.bytes.length && !emitted.has_object);
+            FileMapRead absent = file_map_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, !absent.bytes.pointer);
+            file_map_unmap(absent);
+            String8 sentinel = S8("must not overwrite an existing output");
+            String8 inputs[] = {S8("tests/basic_c_llvm_uefi_varargs.c"), S8("tests/basic_c_llvm_uefi_varargs.c")};
+            for (u32 form = 0; form < 3; form += 1)
+            {
+                BUSTER_TEST(arguments, file_write(output, (ByteSlice){.pointer = (u8*)sentinel.pointer, .length = sentinel.length}));
+                CompilerDriverInvocation direct = form == 0 ? invocation : (CompilerDriverInvocation){
+                    .target = invocation.target, .action = COMPILER_DRIVER_ACTION_OBJECT, .emit_llvm_bitcode = true,
+                    .input_paths = inputs, .input_count = form, .output_path = output,
+                };
+                CompilerDriverResult failure = compiler_driver_execute_invocation(arena, direct);
+                BUSTER_TEST(arguments, failure.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                BUSTER_TEST(arguments, !failure.has_llvm_bitcode && !failure.llvm_bitcode.bytes.length && !failure.has_object);
+                BUSTER_TEST(arguments, string_equal(failure.diagnostic,
+                    S8("AArch64 UEFI LLVM bitcode output is unsupported: native UEFI requires LP64/AAPCS64")));
+                FileMapRead retained = file_map_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, retained.bytes.length == sentinel.length &&
+                                      !memcmp(retained.bytes.pointer, sentinel.pointer, sentinel.length));
+                file_map_unmap(retained);
+            }
+        }
+        else
+        {
+            BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments* arguments)
 {
@@ -586,6 +687,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(atomic_padded));
     BUSTER_TEST(arguments, atomic_alias.stats.type_count == without_atomic.stats.type_count);
     BUSTER_TEST(arguments, atomic_padded.stats.type_count == without_atomic.stats.type_count + 2);
+    UnitTestResult uefi_boundary = llvm_bitcode_test_uefi_boundary(arguments);
+    result.test_count += uefi_boundary.test_count;
+    result.succeeded_test_count += uefi_boundary.succeeded_test_count;
     UnitTestResult consumers = llvm_bitcode_test_consumers(arguments);
     result.test_count += consumers.test_count;
     result.succeeded_test_count += consumers.succeeded_test_count;
