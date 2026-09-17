@@ -20,3 +20,5 @@ tests/gpu/* text eol=lf
 
 # Byte-pinned installed bench-service policy input.
 tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf
+# Byte-pinned non-executable retirement admission declaration.
+tools/bench_service/profiles/native-retirement-performance-v1.blocked text eol=lf
