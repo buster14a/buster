@@ -1,0 +1,187 @@
+name: PR 645 dependency identity repair
+
+on:
+  push:
+    branches: [maintenance/pr645-ci-repair-20260916]
+    paths: [.github/workflows/pr645-contract-repair.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/569-canonical-landing-20260914
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refresh every repository-owned project receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pr645-contract-repair"
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/original-head.txt"
+          git rev-parse 'HEAD^{tree}' > "$out/original-tree.txt"
+          python3 - "$out/changed-identities.tsv" <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+          import json
+          import re
+          import sys
+
+          manifest_path = Path('docs/native-retirement-dependencies-v1.json')
+          change_path = Path(sys.argv[1])
+          original = manifest_path.read_text(encoding='utf-8')
+          manifest = json.loads(original)
+          changes = []
+
+          for row in manifest.get('projects', []):
+              source = Path(row['source'])
+              if not source.is_file():
+                  raise SystemExit(f'missing repository-owned project source: {source}')
+              data = source.read_bytes()
+              actual_bytes = len(data)
+              actual_sha = sha256(data).hexdigest()
+              if row.get('bytes') != actual_bytes or row.get('sha256') != actual_sha:
+                  changes.append((str(source), row.get('bytes'), actual_bytes, row.get('sha256'), actual_sha))
+
+          if not changes:
+              raise SystemExit('expected at least one stale repository-owned project receipt')
+
+          lines = original.splitlines(keepends=True)
+          for source, old_bytes, actual_bytes, old_sha, actual_sha in changes:
+              needle = f'"source": {json.dumps(source)}'
+              matches = [index for index, line in enumerate(lines) if needle in line]
+              if len(matches) != 1:
+                  raise SystemExit(f'expected one manifest row for {source}, found {len(matches)}')
+              index = matches[0]
+              line = lines[index]
+              line, byte_count = re.subn(r'"bytes":\s*\d+', f'"bytes": {actual_bytes}', line, count=1)
+              line, sha_count = re.subn(r'"sha256":\s*"[0-9a-f]{64}"', f'"sha256": "{actual_sha}"', line, count=1)
+              if byte_count != 1 or sha_count != 1:
+                  raise SystemExit(f'could not rewrite exact receipt fields for {source}')
+              lines[index] = line
+
+          repaired = ''.join(lines)
+          parsed = json.loads(repaired)
+          if parsed.get('schema') != manifest.get('schema'):
+              raise SystemExit('manifest schema changed while refreshing receipts')
+          manifest_path.write_text(repaired, encoding='utf-8')
+
+          with change_path.open('w', encoding='utf-8') as stream:
+              stream.write('source\told_bytes\tnew_bytes\told_sha256\tnew_sha256\n')
+              for change in changes:
+                  stream.write('\t'.join(str(value) for value in change) + '\n')
+          print(f'refreshed {len(changes)} repository-owned project receipt(s)')
+          for source, old_bytes, actual_bytes, old_sha, actual_sha in changes:
+              print(f'{source}: {old_bytes}/{old_sha} -> {actual_bytes}/{actual_sha}')
+          PY
+          git diff --check
+          git diff -- docs/native-retirement-dependencies-v1.json > "$out/manifest.patch"
+
+      - name: Replay pinned external closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
+          python3 tools/native_retirement_external.py self-test
+          python3 tools/native_retirement_external_test.py -v
+
+      - name: Commit repaired contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pr645-contract-repair"
+          git config user.name 'OpenAI PR 645 maintenance'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/native-retirement-dependencies-v1.json
+          git diff --cached --check
+          git commit -m 'ci: refresh retirement dependency identities'
+          git rev-parse HEAD > "$out/repaired-head.txt"
+          git rev-parse 'HEAD^{tree}' > "$out/repaired-tree.txt"
+          git show --stat --oneline HEAD > "$out/commit.txt"
+          set +e
+          git push --force origin HEAD:refs/heads/maintenance/pr645-contract-fix > "$out/push.log" 2>&1
+          printf '%s\n' "$?" > "$out/push-status.txt"
+          set -e
+
+      - name: Upload repair evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr645-contract-repair-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr645-contract-repair
+          if-no-files-found: error
+          retention-days: 2
