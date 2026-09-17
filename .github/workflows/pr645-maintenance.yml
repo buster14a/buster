@@ -44,34 +44,71 @@ jobs:
           while (( status != 0 )) && { test -d .git/rebase-merge || test -d .git/rebase-apply; }; do
             conflicts="$(git diff --name-only --diff-filter=U)"
             printf '\nCONFLICTS\n%s\n' "$conflicts" >> "$diagnostics/rebase.log"
-            if [[ "$conflicts" == 'docs/native-retirement-support-v1.tsv' ]]; then
-              # This ledger row authenticates the current file bytes. During a
-              # rebase the historical topic-side hash is stale by definition;
-              # retain the integrated file and regenerate its one receipt row.
-              git checkout --ours -- docs/native-retirement-support-v1.tsv
-              python3 - <<'PY'
-          from hashlib import sha256
-          from pathlib import Path
-
-          ledger = Path('docs/native-retirement-support-v1.tsv')
-          subject = Path('tests/ci_tools_test.py')
-          data = subject.read_bytes()
-          replacement = f"tests/ci_tools_test.py\tsupport-file\tdependency-only\t{len(data)}\t{sha256(data).hexdigest()}"
-          lines = ledger.read_text(encoding='utf-8').splitlines()
-          matches = [index for index, line in enumerate(lines) if line.startswith('tests/ci_tools_test.py\t')]
-          if len(matches) != 1:
-              raise SystemExit(f'expected one ci_tools support row, found {len(matches)}')
-          lines[matches[0]] = replacement
-          ledger.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-          PY
-              git add docs/native-retirement-support-v1.tsv
-              set +e
-              GIT_EDITOR=true git rebase --continue >> "$diagnostics/rebase.log" 2>&1
-              status=$?
-              set -e
-            else
+            unknown="$(printf '%s\n' "$conflicts" | grep -Ev '^(docs/native-retirement-support-v1\.tsv|docs/native-retirement-census\.md)$' || true)"
+            if [[ -z "$conflicts" || -n "$unknown" ]]; then
               break
             fi
+
+            # These files are authenticated/generated contracts. Preserve all
+            # non-conflicting changes from both sides, choose the integrated
+            # side only inside stale conflict blocks, then regenerate values
+            # that are functions of the current rebased worktree.
+            CONFLICT_FILES="$conflicts" python3 - <<'PY'
+          from collections import Counter
+          from hashlib import sha256
+          from pathlib import Path
+          import os
+          import re
+
+          conflicts = set(os.environ['CONFLICT_FILES'].splitlines())
+          marker = re.compile(r'<<<<<<< HEAD\n(.*?)=======\n.*?>>>>>>>[^\n]*\n', re.S)
+
+          for name in conflicts:
+              path = Path(name)
+              text = path.read_text(encoding='utf-8')
+              text, count = marker.subn(lambda match: match.group(1), text)
+              if count == 0:
+                  raise SystemExit(f'expected conflict markers in {name}')
+              path.write_text(text, encoding='utf-8')
+
+          ledger = Path('docs/native-retirement-support-v1.tsv')
+          if ledger.exists():
+              subject = Path('tests/ci_tools_test.py')
+              data = subject.read_bytes()
+              replacement = f"tests/ci_tools_test.py\tsupport-file\tdependency-only\t{len(data)}\t{sha256(data).hexdigest()}"
+              lines = ledger.read_text(encoding='utf-8').splitlines()
+              matches = [index for index, line in enumerate(lines) if line.startswith('tests/ci_tools_test.py\t')]
+              if len(matches) != 1:
+                  raise SystemExit(f'expected one ci_tools support row, found {len(matches)}')
+              lines[matches[0]] = replacement
+              ledger.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+              rows = [line.split('\t') for line in lines[1:] if line]
+              roles = Counter(row[1] for row in rows)
+              census = Path('docs/native-retirement-census.md')
+              if census.exists():
+                  prose = census.read_text(encoding='utf-8')
+                  pattern = re.compile(
+                      r'Its \d+\nexplicit SHA-256 rows bind every tracked test byte at the approval point: \d+\n'
+                      r'supported object subjects, \d+ registered rejection controls, \d+ support files\n'
+                      r'and \d+ dormant custom-language files\.'
+                  )
+                  generated = (
+                      f"Its {len(rows)}\nexplicit SHA-256 rows bind every tracked test byte at the approval point: "
+                      f"{roles['subject']}\nsupported object subjects, {roles['negative-diagnostic-fixture']} registered "
+                      f"rejection controls, {roles['support-file']} support files\nand "
+                      f"{roles['dormant-custom-language']} dormant custom-language files."
+                  )
+                  prose, count = pattern.subn(generated, prose)
+                  if count != 1:
+                      raise SystemExit(f'expected one census inventory paragraph, found {count}')
+                  census.write_text(prose, encoding='utf-8')
+          PY
+            git add $conflicts
+            set +e
+            GIT_EDITOR=true git rebase --continue >> "$diagnostics/rebase.log" 2>&1
+            status=$?
+            set -e
           done
 
           printf '%s\n' "$status" > "$diagnostics/rebase-status.txt"
@@ -80,7 +117,7 @@ jobs:
           git diff > "$diagnostics/worktree.diff"
           git diff --cached > "$diagnostics/index.diff"
           git rebase --show-current-patch > "$diagnostics/current.patch" 2>/dev/null || true
-          git log -50 --oneline --decorate > "$diagnostics/log.txt"
+          git log -60 --oneline --decorate > "$diagnostics/log.txt"
 
           if (( status == 0 )); then
             git rev-parse HEAD > "$diagnostics/rebased-head.txt"
