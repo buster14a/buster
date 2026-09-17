@@ -25,7 +25,8 @@ jobs:
 
           path = Path("tools/issue63_apply.py")
           text = path.read_text()
-          old = (
+
+          lane_old = (
               "}\n"
               "#endif''',\n"
               ")\n\n"
@@ -33,16 +34,35 @@ jobs:
               "    \"src/buster/lib/os.c\",\n"
               "    \"void lane_run"
           )
-          new = (
+          lane_new = (
               "}''',\n"
               ")\n\n"
               "replace_function(\n"
               "    \"src/buster/lib/os.c\",\n"
               "    \"void lane_run"
           )
-          if text.count(old) != 1:
-              raise SystemExit(f"expected one lane boundary, found {text.count(old)}")
-          path.write_text(text.replace(old, new, 1))
+          if text.count(lane_old) != 1:
+              raise SystemExit(f"expected one lane boundary, found {text.count(lane_old)}")
+          text = text.replace(lane_old, lane_new, 1)
+
+          pooled_old = (
+              "replace_once(\n"
+              "    \"src/buster/tests/os_test.c\",\n"
+              "    \"BUSTER_CHECK(pooled != 0);\",\n"
+              "    \"BUSTER_ENSURE(pooled != 0);\",\n"
+              ")\n"
+          )
+          pooled_new = (
+              "path = \"src/buster/tests/os_test.c\"\n"
+              "text = read(path)\n"
+              "pooled_check = \"BUSTER_CHECK(pooled != 0);\"\n"
+              "if text.count(pooled_check) != 2:\n"
+              "    raise RuntimeError(f\"{path}: expected two pooled arena checks, found {text.count(pooled_check)}\")\n"
+              "write(path, text.replace(pooled_check, \"BUSTER_ENSURE(pooled != 0);\"))\n"
+          )
+          if text.count(pooled_old) != 1:
+              raise SystemExit(f"expected one pooled-audit block, found {text.count(pooled_old)}")
+          path.write_text(text.replace(pooled_old, pooled_new, 1))
           PY
           python3 -m py_compile tools/issue63_apply.py
           python3 tools/issue63_apply.py
