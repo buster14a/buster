@@ -1,0 +1,126 @@
+name: PR 767 current-main reconciliation
+
+on:
+  push:
+    branches:
+      - claude/clever-cori-qh0b15
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr-767-current-main-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge current main and validate resolution
+        env:
+          EXPECTED_MAIN: a6613ef20125a4c537fc174db705ea43476e95bf
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          actual_main=$(git rev-parse origin/main)
+          if [ "$actual_main" != "$EXPECTED_MAIN" ]; then
+            echo "main moved: expected $EXPECTED_MAIN, found $actual_main" >&2
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          wanted = {
+              'tests/basic_c_pic.c',
+              'tests/x86_64_got_encoding_oracle.s',
+          }
+          rows = {}
+          for line in Path('docs/native-retirement-support-v1.tsv').read_text(encoding='utf-8').splitlines():
+              path = line.split('\t', 1)[0]
+              if path in wanted:
+                  if path in rows:
+                      raise SystemExit(f'duplicate support row before merge: {path}')
+                  rows[path] = line
+          if set(rows) != wanted:
+              raise SystemExit(f'missing PR support rows before merge: {sorted(wanted - set(rows))}')
+          Path('/tmp/pr767-support-rows.json').write_text(json.dumps(rows), encoding='utf-8')
+          PY
+
+          set +e
+          git merge --no-commit --no-ff "$EXPECTED_MAIN"
+          merge_status=$?
+          set -e
+          echo "merge exit status: $merge_status"
+          echo "initial conflicts:"
+          git diff --name-only --diff-filter=U || true
+
+          git show "$EXPECTED_MAIN:docs/native-retirement-support-v1.tsv" > docs/native-retirement-support-v1.tsv
+          git show "$EXPECTED_MAIN:tools/native_retirement_performance_binding.py" > tools/native_retirement_performance_binding.py
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import re
+          from pathlib import Path
+
+          support_path = Path('docs/native-retirement-support-v1.tsv')
+          binding_path = Path('tools/native_retirement_performance_binding.py')
+          workflow_path = Path('.github/workflows/pr767-main-reconcile.yml')
+          replacements = json.loads(Path('/tmp/pr767-support-rows.json').read_text(encoding='utf-8'))
+
+          lines = support_path.read_text(encoding='utf-8').splitlines()
+          seen = set()
+          for index, line in enumerate(lines):
+              path = line.split('\t', 1)[0]
+              if path in replacements:
+                  if path in seen:
+                      raise SystemExit(f'duplicate support row after main merge: {path}')
+                  lines[index] = replacements[path]
+                  seen.add(path)
+          if seen != set(replacements):
+              raise SystemExit(f'missing support rows after main merge: {sorted(set(replacements) - seen)}')
+          support_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+          digest = hashlib.sha256(support_path.read_bytes()).hexdigest()
+          binding = binding_path.read_text(encoding='utf-8')
+          pattern = r'(?m)^SUPPORT_DECLARATION_SHA256 = "[0-9a-f]{64}"$'
+          updated, count = re.subn(pattern, f'SUPPORT_DECLARATION_SHA256 = "{digest}"', binding)
+          if count != 1:
+              raise SystemExit(f'expected one support pin, found {count}')
+          binding_path.write_text(updated, encoding='utf-8')
+          workflow_path.unlink()
+          print(f'merged support declaration SHA-256: {digest}')
+          PY
+
+          git add docs/native-retirement-support-v1.tsv tools/native_retirement_performance_binding.py .github/workflows/pr767-main-reconcile.yml
+          remaining=$(git diff --name-only --diff-filter=U)
+          if [ -n "$remaining" ]; then
+            echo "unexpected merge conflicts remain:" >&2
+            printf '%s\n' "$remaining" >&2
+            exit 1
+          fi
+
+          python3 tools/native_retirement_performance_identity_test.py
+          python3 tools/native_retirement_performance_binding_test.py
+          git diff --check
+          git status --short
+      - name: Commit reconciled merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Merge current main into PR #767 and repin support census'
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
