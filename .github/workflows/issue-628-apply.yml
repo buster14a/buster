@@ -39,7 +39,20 @@ jobs:
       - name: Validate candidate controls
         run: |
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/issue-628/candidate-driver
-          BUSTER_TEST_JOBS=2 build/issue-628/candidate-driver test_differential --self-test
+          set +e
+          BUSTER_TEST_JOBS=2 build/issue-628/candidate-driver test_differential --self-test >build/issue-628/candidate.log 2>&1
+          status=$?
+          set -e
+          cat build/issue-628/candidate.log
+          echo '--- sanitizer-related files ---'
+          find build -type f -name '*sanitizer*' -print0 | while IFS= read -r -d '' file; do
+            printf '%s\n' "$file"
+            case "$file" in
+              *.argv|*.stdout|*.stderr|*.sanitizer) ;;
+              *) sed -n '1,20p' "$file" || true ;;
+            esac
+          done
+          test "$status" -eq 0
           build/issue-628/candidate-driver test_gpu_toolchains --self-test
       - name: Commit source edits
         run: |
