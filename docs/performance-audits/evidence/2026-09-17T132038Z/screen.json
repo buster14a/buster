@@ -1,0 +1,291 @@
+{
+  "artifact_id": 10498099770,
+  "audit_id": "2026-09-17T132038Z",
+  "base_commit": "5e3d839edaa9407f68e3a981fa5cde0ba3beb409",
+  "base_tree": "6d9e5e971188f344a5de462700ae39820f142452",
+  "measurement_commit": "6964324c552d1d2e1b5cf46a1a7749a857573e00",
+  "measurement_tree": "0d063acdf849d7a81d72b99891a4db50e023722f",
+  "output_artifacts": [
+    {
+      "bytes": 40148488,
+      "name": "unity-ordinary",
+      "sha256": "b79cdb6e6f8915a741bd56b07564429be675c696c6bdd884d92b481ed8ab5aa2"
+    },
+    {
+      "bytes": 40148488,
+      "name": "unity-diagnostic",
+      "sha256": "b79cdb6e6f8915a741bd56b07564429be675c696c6bdd884d92b481ed8ab5aa2"
+    },
+    {
+      "bytes": 2400,
+      "name": "small-ordinary.o",
+      "sha256": "804e9f4f1f979742b0f120c1be2e705d88233120e493742b51890b826d3dbbda"
+    },
+    {
+      "bytes": 2400,
+      "name": "small-diagnostic.o",
+      "sha256": "804e9f4f1f979742b0f120c1be2e705d88233120e493742b51890b826d3dbbda"
+    }
+  ],
+  "raw_metric_delta": {
+    "all_other_metric_rows_equal": true,
+    "small_allocation_arena_bytes": {
+      "delta": 144,
+      "diagnostic": 1407881,
+      "ordinary": 1407737
+    },
+    "unity_allocation_arena_bytes": {
+      "delta": 144,
+      "diagnostic": 28621560516,
+      "ordinary": 28621560372
+    }
+  },
+  "small": {
+    "bit_stolen_u32_logical_bytes": 32,
+    "buckets": [
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "0"
+      },
+      {
+        "call_share": 1.0,
+        "calls": 1,
+        "clear_bytes": 16,
+        "instruction_share": 1.0,
+        "instructions": 4,
+        "label": "1-4"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "5-8"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "9-16"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "17-32"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "33-64"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "65-128"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "129-256"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "257-512"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "513-1024"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "1025-2048"
+      },
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "2049+"
+      }
+    ],
+    "clear_bytes": 16,
+    "current_logical_bytes": 48,
+    "current_peak_scratch_bytes": 16,
+    "distinct_sizes": 1,
+    "functions": 1,
+    "instructions": 4,
+    "maximum": 4,
+    "mean": 4.0,
+    "median": 4,
+    "minimum": 4,
+    "p75": 4,
+    "p90": 4,
+    "p95": 4,
+    "p99": 4,
+    "p999": 4,
+    "packed_u64_epoch_logical_bytes": 64,
+    "read_bytes_per_fill_byte": 1.0,
+    "reads": 4,
+    "reads_per_fill_byte": 0.25,
+    "separate_epoch_peak_scratch_bytes": 32,
+    "separate_u32_epoch_logical_bytes": 48,
+    "validation_calls": 1
+  },
+  "unity": {
+    "bit_stolen_u32_logical_bytes": 10698744,
+    "buckets": [
+      {
+        "call_share": 0.0,
+        "calls": 0,
+        "clear_bytes": 0,
+        "instruction_share": 0.0,
+        "instructions": 0,
+        "label": "0"
+      },
+      {
+        "call_share": 0.024101307189542485,
+        "calls": 118,
+        "clear_bytes": 1284,
+        "instruction_share": 0.00024002817526991952,
+        "instructions": 321,
+        "label": "1-4"
+      },
+      {
+        "call_share": 0.026552287581699346,
+        "calls": 130,
+        "clear_bytes": 3360,
+        "instruction_share": 0.0006281111128558642,
+        "instructions": 840,
+        "label": "5-8"
+      },
+      {
+        "call_share": 0.05371732026143791,
+        "calls": 263,
+        "clear_bytes": 13296,
+        "instruction_share": 0.002485525403729634,
+        "instructions": 3324,
+        "label": "9-16"
+      },
+      {
+        "call_share": 0.11723856209150327,
+        "calls": 574,
+        "clear_bytes": 56588,
+        "instruction_share": 0.010578437992347513,
+        "instructions": 14147,
+        "label": "17-32"
+      },
+      {
+        "call_share": 0.1815767973856209,
+        "calls": 889,
+        "clear_bytes": 165940,
+        "instruction_share": 0.03102046371050658,
+        "instructions": 41485,
+        "label": "33-64"
+      },
+      {
+        "call_share": 0.2062908496732026,
+        "calls": 1010,
+        "clear_bytes": 370204,
+        "instruction_share": 0.06920513286419415,
+        "instructions": 92551,
+        "label": "65-128"
+      },
+      {
+        "call_share": 0.1729983660130719,
+        "calls": 847,
+        "clear_bytes": 613580,
+        "instruction_share": 0.11470131447205392,
+        "instructions": 153395,
+        "label": "129-256"
+      },
+      {
+        "call_share": 0.11540032679738563,
+        "calls": 565,
+        "clear_bytes": 811536,
+        "instruction_share": 0.15170677978648708,
+        "instructions": 202884,
+        "label": "257-512"
+      },
+      {
+        "call_share": 0.06004901960784314,
+        "calls": 294,
+        "clear_bytes": 826812,
+        "instruction_share": 0.15456244209600678,
+        "instructions": 206703,
+        "label": "513-1024"
+      },
+      {
+        "call_share": 0.02389705882352941,
+        "calls": 117,
+        "clear_bytes": 654576,
+        "instruction_share": 0.12236501780022029,
+        "instructions": 163644,
+        "label": "1025-2048"
+      },
+      {
+        "call_share": 0.0181781045751634,
+        "calls": 89,
+        "clear_bytes": 1832196,
+        "instruction_share": 0.34250674658632824,
+        "instructions": 458049,
+        "label": "2049+"
+      }
+    ],
+    "clear_bytes": 5349372,
+    "current_logical_bytes": 16048116,
+    "current_peak_scratch_bytes": 276908,
+    "distinct_sizes": 893,
+    "functions": 4896,
+    "instructions": 1337343,
+    "maximum": 69227,
+    "mean": 273.1501225490196,
+    "median": 87.0,
+    "minimum": 2,
+    "p75": 220,
+    "p90": 524,
+    "p95": 891,
+    "p99": 2889,
+    "p999": 11479,
+    "packed_u64_epoch_logical_bytes": 21397488,
+    "read_bytes_per_fill_byte": 1.0,
+    "reads": 1337343,
+    "reads_per_fill_byte": 0.25,
+    "separate_epoch_peak_scratch_bytes": 553816,
+    "separate_u32_epoch_logical_bytes": 16048116,
+    "validation_calls": 1
+  },
+  "workflow_job": 105218243891,
+  "workflow_run": 35226037480
+}
