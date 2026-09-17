@@ -1,0 +1,141 @@
+name: Repair PR 726 Windows wait
+
+on:
+  push:
+    branches:
+      - claude/confident-curie-ymv3ye
+    paths:
+      - .github/workflows/repair-pr726-windows-wait.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: claude/confident-curie-ymv3ye
+          fetch-depth: 0
+
+      - name: Repair Windows captured-process wait
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          os_path = Path("src/buster/lib/os.c")
+          source = os_path.read_text()
+
+          old_declaration = """        HANDLE read_pipes[(u64)STANDARD_STREAM_COUNT];
+                  u64 open_pipe_count = 0;
+                  for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+          """
+          new_declaration = """        HANDLE read_pipes[(u64)STANDARD_STREAM_COUNT];
+                  u64 open_pipe_count = 0;
+                  for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+          """
+          # Insert the state next to the completed pipe census. Keeping the
+          # replacement separate from the loop makes the exact source anchor
+          # fail closed if this implementation changes underneath the repair.
+          declaration_anchor = """        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                  {
+                      read_pipes[stream] = (HANDLE)spawn.pipes[stream][0];
+                      captured[stream] = read_pipes[stream] != 0;
+                      open_pipe_count += captured[stream];
+                  }
+          
+                  while (open_pipe_count)
+          """
+          declaration_replacement = """        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                  {
+                      read_pipes[stream] = (HANDLE)spawn.pipes[stream][0];
+                      captured[stream] = read_pipes[stream] != 0;
+                      open_pipe_count += captured[stream];
+                  }
+          
+                  bool child_exit_observed = false;
+                  while (open_pipe_count)
+          """
+          assert source.count(declaration_anchor) == 1
+          source = source.replace(declaration_anchor, declaration_replacement, 1)
+
+          wait_anchor = """            if (!made_progress)
+                      {
+                          if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+                          {
+                              timed_out = true;
+                              break;
+                          }
+                          // Nothing readable right now: sleep briefly instead of
+                          // spinning. The pipes report ERROR_BROKEN_PIPE once the child
+                          // exits and the buffered data has been drained.
+                          WaitForSingleObject(spawn.handle, 10);
+                      }
+          """
+          wait_replacement = """            if (!made_progress)
+                      {
+                          DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
+                          if (process_wait == WAIT_OBJECT_0)
+                          {
+                              if (child_exit_observed)
+                              {
+                                  // The child was already known to have exited before
+                                  // this complete empty scan. A descendant may retain an
+                                  // inherited writer, but its lifetime must not turn the
+                                  // completed child's wait into a false timeout.
+                                  for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                                  {
+                                      if (read_pipes[stream])
+                                      {
+                                          CloseHandle(read_pipes[stream]);
+                                          read_pipes[stream] = 0;
+                                          open_pipe_count -= 1;
+                                      }
+                                  }
+                                  break;
+                              }
+                              // The child may have written between the scan above and
+                              // this observation. Perform one final complete scan before
+                              // closing any writer kept alive outside the child.
+                              child_exit_observed = true;
+                              continue;
+                          }
+                          if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+                          {
+                              timed_out = true;
+                              break;
+                          }
+                          // Nothing readable right now: sleep briefly instead of
+                          // spinning. The pipes report ERROR_BROKEN_PIPE once the child
+                          // exits and the buffered data has been drained.
+                          WaitForSingleObject(spawn.handle, 10);
+                      }
+          """
+          assert source.count(wait_anchor) == 1
+          source = source.replace(wait_anchor, wait_replacement, 1)
+          os_path.write_text(source)
+
+          # The JS oracle is part of the frozen native-retirement inventory.
+          # Restore it byte-for-byte and fix the process abstraction instead.
+          oracle = Path("tests/wasm_integer_execution.js")
+          original = __import__("subprocess").check_output(
+              ["git", "show", "57185ae0fe0e4112593c4c061d7f29fc31748abc:tests/wasm_integer_execution.js"]
+          )
+          assert len(original) == 2390
+          assert sha256(original).hexdigest() == "07d0294ae7661f5057f583b53488a48b62f70f0cb35013beedc97c5586c5a4d6"
+          oracle.write_bytes(original)
+          PY
+
+          git diff --check
+          test "$(wc -c < tests/wasm_integer_execution.js)" = 2390
+          test "$(sha256sum tests/wasm_integer_execution.js | cut -d' ' -f1)" = 07d0294ae7661f5057f583b53488a48b62f70f0cb35013beedc97c5586c5a4d6
+          git rm .github/workflows/repair-pr726-windows-wait.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/buster/lib/os.c tests/wasm_integer_execution.js
+          git commit -m "os: stop captured pipe wait after child exit"
+          git push origin HEAD:claude/confident-curie-ymv3ye
