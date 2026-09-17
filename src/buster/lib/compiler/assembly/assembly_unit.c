@@ -28,7 +28,7 @@
 // Anything the vocabulary does not cover is refused with a diagnostic naming
 // the directive and its line; nothing is silently dropped.
 
-#include <buster/lib/compiler/assembly/assembly_unit.h>
+#include <buster/lib/compiler/assembly/assembly_unit_internal.h>
 
 #include <buster/lib/string.h>
 
@@ -318,7 +318,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_parse_number(String8 text, u64* value)
         {
             return false;
         }
-        if (digit >= base)
+        if (digit >= base || result > (UINT64_MAX - digit) / base)
         {
             return false;
         }
@@ -328,6 +328,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_parse_number(String8 text, u64* value)
     *value = result;
     return any;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool assembly_unit_test_parse_number(String8 text, u64* value)
+{
+    return assembly_unit_parse_number(text, value);
+}
+#endif
 
 // One operand expression. The vocabulary is deliberately narrow: an absolute
 // constant built from `+`, `-` and `*` over numbers, the location counter `.`,

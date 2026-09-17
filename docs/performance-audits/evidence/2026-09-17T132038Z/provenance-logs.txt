@@ -1,0 +1,130 @@
+# Diagnostic and compiler logs
+===== BEGIN unity-diagnostic.gdb.log =====
+Breakpoint 1 at 0xecf094: file /home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c, line 4469.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/x86_64-linux-gnu/libthread_db.so.1".
+TARGET cpu=znver3 features=adx,aes,avx,avx2,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,invpcid,lzcnt,movbe,pclmul,pku,popcnt,rdrand,rdseed,sha,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,vaes,vpclmulqdq,wbnoinvd,xsave,xsaves
+SOURCE issue566-input/src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                353                      389
+bytes on disk                 31.374.570               31.412.510
+physical lines                   396.834                  398.086
+
+bytes scanned                 31.372.192               31.410.124
+  code                        24.742.362   78.9 %      24.762.304   78.8 %
+  comment                      1.844.322    5.9 %       1.859.758    5.9 %
+  whitespace                   4.785.508   15.3 %       4.788.062   15.2 %
+  literals, within code       13.185.792   42.0 %      13.186.065   42.0 %
+
+lines scanned                    395.645                  396.893
+  code, the sLOC                 354.435   89.6 %         355.297   89.5 %
+  comment                         31.101    7.9 %          31.417    7.9 %
+  blank                           12.018    3.0 %          12.103    3.0 %
+  both, counted twice              1.909    0.5 %           1.924    0.5 %
+
+comments                          25.923                   25.998
+tokens                         3.095.220                3.098.560
+spliced-away lines                 1.189    0.3 %           1.193    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.439.352  111.0 %
+  their spelling bytes        25.117.717  101.4 %
+  bytes retained              34.343.226  109.3 %
+  macro expansions               128.187
+  #define directives               3.827
+
+files lexed more than once
+         lexes re-read bytes  path
+             5        17.136  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+             2            32  /usr/include/x86_64-linux-gnu/asm/ioctls.h
+                      37.932  re-read in total
+IR_FRONTEND_SSA functions=4617 locals=41837 reads=153608 writes=67852 parameters_created=420651 parameters_removed=389727 temporaries=11035 fallback_locals=2106
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1337343 changes=98967
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1337343 changes=9719
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2700879 changes=142056
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=96007 changes=0
+IR_FAST functions=4896 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2084448 retained_bound=15757028 compact_ns=0 instructions_before=1337343 instructions_after=1185363
+IR_LOCAL_PROMOTION candidates=27331 promoted=175 loads_removed=529 stores_removed=322 parameters_inserted=1289 parameters_removed=1158 uninitialized=0 barriers=8 instructions_before=1338369 instructions_after=1337343 values_before=1153584 values_after=1153011
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3488 parameter_visits=2370 incoming_visits=5439
+CODEGEN cpu=znver3 vector_bits=256 functions=4896 instructions=1185363 values=1001031 stack_value_bytes=4959128 stack_frame_bytes=4959128 max_stack_frame_bytes=660328 code_bytes=17837818 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1539127 exact_successes=1539127 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=70464
+CODEGEN_ALLOCATOR reloads=174761 spills=211746 boundary_spills=98149 boundary_reloads=28149 boundary_copies=88 copies=152680 rematerializations=38234 pins=0 splits=0 scheduled=0 schedule_kept=0
+[Inferior 1 (process 2894) exited normally]
+ISSUE566_SAMPLES 4896
+===== END unity-diagnostic.gdb.log =====
+
+===== BEGIN small-diagnostic.gdb.log =====
+Breakpoint 1 at 0xecf094: file /home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c, line 4469.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Inferior 1 (process 2910) exited normally]
+ISSUE566_SAMPLES 1
+===== END small-diagnostic.gdb.log =====
+
+===== BEGIN unity-ordinary.stdout.log =====
+TARGET cpu=znver3 features=adx,aes,avx,avx2,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,invpcid,lzcnt,movbe,pclmul,pku,popcnt,rdrand,rdseed,sha,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,vaes,vpclmulqdq,wbnoinvd,xsave,xsaves
+SOURCE issue566-input/src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                353                      389
+bytes on disk                 31.374.570               31.412.510
+physical lines                   396.834                  398.086
+
+bytes scanned                 31.372.192               31.410.124
+  code                        24.742.362   78.9 %      24.762.304   78.8 %
+  comment                      1.844.322    5.9 %       1.859.758    5.9 %
+  whitespace                   4.785.508   15.3 %       4.788.062   15.2 %
+  literals, within code       13.185.792   42.0 %      13.186.065   42.0 %
+
+lines scanned                    395.645                  396.893
+  code, the sLOC                 354.435   89.6 %         355.297   89.5 %
+  comment                         31.101    7.9 %          31.417    7.9 %
+  blank                           12.018    3.0 %          12.103    3.0 %
+  both, counted twice              1.909    0.5 %           1.924    0.5 %
+
+comments                          25.923                   25.998
+tokens                         3.095.220                3.098.560
+spliced-away lines                 1.189    0.3 %           1.193    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.439.352  111.0 %
+  their spelling bytes        25.117.717  101.4 %
+  bytes retained              34.343.226  109.3 %
+  macro expansions               128.187
+  #define directives               3.827
+
+files lexed more than once
+         lexes re-read bytes  path
+             5        17.136  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+             2            32  /usr/include/x86_64-linux-gnu/asm/ioctls.h
+                      37.932  re-read in total
+IR_FRONTEND_SSA functions=4617 locals=41837 reads=153608 writes=67852 parameters_created=420651 parameters_removed=389727 temporaries=11035 fallback_locals=2106
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1337343 changes=98967
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1337343 changes=9719
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2700879 changes=142056
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=96007 changes=0
+IR_FAST functions=4896 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2084448 retained_bound=15757028 compact_ns=0 instructions_before=1337343 instructions_after=1185363
+IR_LOCAL_PROMOTION candidates=27331 promoted=175 loads_removed=529 stores_removed=322 parameters_inserted=1289 parameters_removed=1158 uninitialized=0 barriers=8 instructions_before=1338369 instructions_after=1337343 values_before=1153584 values_after=1153011
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3488 parameter_visits=2370 incoming_visits=5439
+CODEGEN cpu=znver3 vector_bits=256 functions=4896 instructions=1185363 values=1001031 stack_value_bytes=4959128 stack_frame_bytes=4959128 max_stack_frame_bytes=660328 code_bytes=17837818 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1539127 exact_successes=1539127 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=70464
+CODEGEN_ALLOCATOR reloads=174761 spills=211746 boundary_spills=98149 boundary_reloads=28149 boundary_copies=88 copies=152680 rematerializations=38234 pins=0 splits=0 scheduled=0 schedule_kept=0
+===== END unity-ordinary.stdout.log =====
+
+===== BEGIN small.c =====
+int add(int a, int b) { return a + b; }
+===== END small.c =====
+

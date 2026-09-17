@@ -10,6 +10,19 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE u64 align_forward_un
     return result;
 }
 
+// Returns false for a null output or an overflowing addition; on false,
+// `*result` is untouched.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE bool u64_add_checked(u64 left, u64 right, u64* result)
+{
+    bool valid = result && left <= UINT64_MAX - right;
+    if (valid)
+    {
+        *result = left + right;
+    }
+
+    return valid;
+}
+
 // Returns false for a null output, zero or non-power-of-two alignment, or a
 // rounding addition that would overflow; on false, `*result` is untouched.
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE bool align_forward_checked(u64 n, u64 a, u64* result)
