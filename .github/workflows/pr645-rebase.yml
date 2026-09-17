@@ -1,0 +1,104 @@
+name: PR 645 isolated rebase
+
+on:
+  push:
+    branches: [maintenance/pr645-ci-repair-20260916]
+    paths: [.github/workflows/pr645-rebase.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/569-canonical-landing-20260914
+          fetch-depth: 0
+      - name: Rebase and publish candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/pr645"
+          mkdir -p "$out"
+          git config user.name 'OpenAI PR 645 maintenance'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin main
+          git rev-parse HEAD > "$out/original-head.txt"
+          git rev-parse origin/main > "$out/main-head.txt"
+          set +e
+          git rebase origin/main > "$out/rebase.log" 2>&1
+          status=$?
+          set -e
+          while (( status != 0 )) && { test -d .git/rebase-merge || test -d .git/rebase-apply; }; do
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            printf '\nCONFLICTS\n%s\n' "$conflicts" >> "$out/rebase.log"
+            unknown="$(printf '%s\n' "$conflicts" | grep -Ev '^(docs/native-retirement-support-v1\.tsv|docs/native-retirement-census\.md)$' || true)"
+            if [[ -z "$conflicts" || -n "$unknown" ]]; then break; fi
+            CONFLICT_FILES="$conflicts" python3 - <<'PY'
+          from collections import Counter
+          from hashlib import sha256
+          from pathlib import Path
+          import os, re
+
+          marker = re.compile(r'<<<<<<< HEAD\n(.*?)=======\n.*?>>>>>>>[^\n]*\n', re.S)
+          for name in os.environ['CONFLICT_FILES'].splitlines():
+              path = Path(name)
+              text, count = marker.subn(lambda match: match.group(1), path.read_text(encoding='utf-8'))
+              if count == 0:
+                  raise SystemExit(f'no conflict markers in {name}')
+              path.write_text(text, encoding='utf-8')
+
+          ledger = Path('docs/native-retirement-support-v1.tsv')
+          lines = ledger.read_text(encoding='utf-8').splitlines()
+          data = Path('tests/ci_tools_test.py').read_bytes()
+          row = f"tests/ci_tools_test.py\tsupport-file\tdependency-only\t{len(data)}\t{sha256(data).hexdigest()}"
+          matches = [i for i, line in enumerate(lines) if line.startswith('tests/ci_tools_test.py\t')]
+          if len(matches) != 1: raise SystemExit(f'ci_tools rows: {len(matches)}')
+          lines[matches[0]] = row
+          ledger.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+          rows = [line.split('\t') for line in lines[1:] if line]
+          roles = Counter(row[1] for row in rows)
+          census = Path('docs/native-retirement-census.md')
+          prose = census.read_text(encoding='utf-8')
+          pattern = re.compile(
+              r'Its \d+\nexplicit SHA-256 rows bind every tracked test byte at the approval point: \d+\n'
+              r'supported object subjects, \d+ registered rejection controls, \d+ support files\n'
+              r'and \d+ dormant custom-language files\.'
+          )
+          generated = (
+              f"Its {len(rows)}\nexplicit SHA-256 rows bind every tracked test byte at the approval point: {roles['subject']}\n"
+              f"supported object subjects, {roles['negative-diagnostic-fixture']} registered rejection controls, "
+              f"{roles['support-file']} support files\nand {roles['dormant-custom-language']} dormant custom-language files."
+          )
+          prose, count = pattern.subn(generated, prose)
+          if count != 1: raise SystemExit(f'census paragraphs: {count}')
+          census.write_text(prose, encoding='utf-8')
+          PY
+            git add docs/native-retirement-support-v1.tsv docs/native-retirement-census.md
+            set +e
+            GIT_EDITOR=true git rebase --continue >> "$out/rebase.log" 2>&1
+            status=$?
+            set -e
+          done
+          printf '%s\n' "$status" > "$out/status-code.txt"
+          git status --porcelain=v1 > "$out/status.txt"
+          git diff --name-only --diff-filter=U > "$out/conflicts.txt"
+          git rebase --show-current-patch > "$out/current.patch" 2>/dev/null || true
+          if (( status == 0 )); then
+            git rev-parse HEAD > "$out/rebased-head.txt"
+            git rev-parse 'HEAD^{tree}' > "$out/rebased-tree.txt"
+            git push --force origin HEAD:refs/heads/maintenance/pr645-rebased-candidate > "$out/push.log" 2>&1
+          fi
+          tar -czf "$out/worktree.tar.gz" --exclude=.git --exclude=build --exclude=external .
+          exit "$status"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr645-isolated-rebase-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr645
+          retention-days: 2
