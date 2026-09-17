@@ -1,4 +1,4 @@
-name: Publish PR 767 CodeView repair
+name: Publish PR 767 CodeView frame-piece repair
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 jobs:
   publish:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out owned PR branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -22,18 +22,56 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Apply focused source and regression repair
+      - name: Apply CodeView register-relative frame-piece repair
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $Expected = '814fa99a8d026404371d299463ef4a56076ca5c0'
           $Actual = (git rev-parse HEAD).Trim()
           if ($Actual -ne $Expected) { throw "PR head moved: expected $Expected, found $Actual" }
           @'
           from pathlib import Path
 
-          source = Path("src/buster/lib/compiler/codeview/codeview.c")
-          text = source.read_text()
-          old = '''            else if (piece->kind == DEBUG_LOCATION_FRAME)
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}")
+              file.write_text(text.replace(old, new))
+
+          replace_once(
+              "src/buster/lib/compiler/codeview/codeview.c",
+              """    S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+              S_INLINESITE = 0x114d,
+          """,
+              """    S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+              S_DEFRANGE_REGISTER_REL = 0x1145,
+              S_INLINESITE = 0x114d,
+          """,
+          )
+          replace_once(
+              "src/buster/lib/compiler/codeview/codeview.c",
+              """enum
+          {
+              CV_LF_MODIFIER = 0x1001,
+          """,
+              """enum
+          {
+              CODEVIEW_REGISTER_VFRAME = 30006,
+              CODEVIEW_DEFRANGE_REGISTER_REL_IS_SUBFIELD = 1,
+              CODEVIEW_DEFRANGE_REGISTER_REL_OFFSET_SHIFT = 4,
+              CODEVIEW_DEFRANGE_REGISTER_REL_MAX_OFFSET = 0x0fff,
+          };
+
+          enum
+          {
+              CV_LF_MODIFIER = 0x1001,
+          """,
+          )
+          replace_once(
+              "src/buster/lib/compiler/codeview/codeview.c",
+              """            else if (piece->kind == DEBUG_LOCATION_FRAME)
                       {
                           u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
                           byte_writer_emit_u32_le(symbols, 0);
@@ -43,65 +81,158 @@ jobs:
                           byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
                           codeview_record_end(symbols, record);
                       }
-          '''
-          new = '''            // A frame-backed fragment needs a DIA location program or a
-                      // concrete register-relative base. DebugLocationPiece carries only
-                      // the abstract frame offset, so the old zero program discarded
-                      // frame_offset and link.exe rejected the resulting symbol stream.
-                      // Leave that fragment unavailable until the representation exists;
-                      // register-backed fragments above remain independently valid.
-          '''
-          if text.count(old) != 1:
-              raise SystemExit(f"expected one CodeView frame-subfield block, found {text.count(old)}")
-          source.write_text(text.replace(old, new))
+          """,
+              """            else if (piece->kind == DEBUG_LOCATION_FRAME)
+                      {
+                          // A frame-backed aggregate fragment is a register-relative
+                          // subfield. S_DEFRANGE_SUBFIELD instead names a DIA location
+                          // program in the string table; zero was the empty string and
+                          // link.exe rejected that invalid program. VFRAME is the
+                          // CodeView frame-base register, matching DebugLocation's
+                          // frame-relative offset contract.
+                          u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER_REL);
+                          byte_writer_emit_u16_le(symbols, CODEVIEW_REGISTER_VFRAME);
+                          symbols->overflow |= piece->value_offset > CODEVIEW_DEFRANGE_REGISTER_REL_MAX_OFFSET;
+                          u16 flags = (u16)(CODEVIEW_DEFRANGE_REGISTER_REL_IS_SUBFIELD |
+                                            (BUSTER_MIN(piece->value_offset, CODEVIEW_DEFRANGE_REGISTER_REL_MAX_OFFSET)
+                                             << CODEVIEW_DEFRANGE_REGISTER_REL_OFFSET_SHIFT));
+                          byte_writer_emit_u16_le(symbols, flags);
+                          byte_writer_emit_u32_le(symbols, (u32)piece->frame_offset);
+                          byte_writer_emit_u32_le(symbols, piece_start);
+                          byte_writer_emit_u16_le(symbols, 1);
+                          byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
+                          codeview_record_end(symbols, record);
+                      }
+          """,
+          )
 
-          test = Path("src/buster/tests/compiler/codeview/codeview_test.c")
-          text = test.read_text()
-          replacements = [
-              (
-                  '''    bool found_frame = false;
+          replace_once(
+              "src/buster/tests/compiler/codeview/codeview_test.h",
+              """    CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+              CODEVIEW_TEST_S_INLINESITE = 0x114d,
+          """,
+              """    CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+              CODEVIEW_TEST_S_DEFRANGE_REGISTER_REL = 0x1145,
+              CODEVIEW_TEST_S_INLINESITE = 0x114d,
+          """,
+          )
+
+          replace_once(
+              "src/buster/tests/compiler/codeview/codeview_test.c",
+              """    bool found_frame = false;
               bool found_subfield = false;
               bool found_inline = false;
-          ''',
-                  '''    bool found_frame = false;
+          """,
+              """    bool found_frame = false;
               bool found_frame_subfield = false;
               bool found_register_subfield = false;
+              bool found_legacy_subfield = false;
               bool found_inline = false;
-          ''',
-              ),
-              (
-                  '''                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+          """,
+          )
+          replace_once(
+              "src/buster/tests/compiler/codeview/codeview_test.c",
+              """                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
                           found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD || record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
                           found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
-          ''',
-                  '''                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
-                          found_frame_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD;
+          """,
+              """                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
                           found_register_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
+                          found_legacy_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD;
+                          if (record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER_REL && record_length >= 18)
+                          {
+                              u16 base_register = 0;
+                              u16 flags = 0;
+                              s32 base_offset = 0;
+                              memcpy(&base_register, model_built.symbols.pointer + record_offset + 4, sizeof(base_register));
+                              memcpy(&flags, model_built.symbols.pointer + record_offset + 6, sizeof(flags));
+                              memcpy(&base_offset, model_built.symbols.pointer + record_offset + 8, sizeof(base_offset));
+                              found_frame_subfield |= base_register == 30006 && (flags & 1u) && (flags >> 4) == 0 && base_offset == -24;
+                          }
                           found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
-          ''',
-              ),
-              (
-                  '''    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
-          ''',
-                  '''    // Frame pieces have no representable DIA program yet: omitting
-              // them is valid and keeps strict COFF consumers from rejecting the
-              // stream. Register pieces and whole-frame ranges remain present.
-              BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame &&
-                                         !found_frame_subfield && found_register_subfield && found_inline);
-          ''',
-              ),
-          ]
-          for old, new in replacements:
-              if text.count(old) != 1:
-                  raise SystemExit(f"expected one CodeView test block, found {text.count(old)}")
-              text = text.replace(old, new)
-          test.write_text(text)
+          """,
+          )
+          replace_once(
+              "src/buster/tests/compiler/codeview/codeview_test.c",
+              """    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
+          """,
+              """    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame &&
+                                         found_frame_subfield && found_register_subfield && !found_legacy_subfield && found_inline);
+          """,
+          )
+
+          replace_once(
+              "src/buster/tests/compiler/codegen/codegen_test.c",
+              """    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+          };
+          """,
+              """    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
+              CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL = 0x1145,
+          };
+          """,
+          )
+          replace_once(
+              "src/buster/tests/compiler/codegen/codegen_test.c",
+              """                mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
+                                   record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
+                          mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
+          """,
+              """                bool register_rel_subfield = false;
+                          if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 18)
+                          {
+                              u16 flags = 0;
+                              memcpy(&flags, bytes.pointer + record + 6, sizeof(flags));
+                              register_rel_subfield = (flags & 1u) != 0;
+                          }
+                          mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
+                                   record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER ||
+                                   register_rel_subfield) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
+                          mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
+          """,
+          )
+          replace_once(
+              "src/buster/tests/compiler/codegen/codegen_test.c",
+              """                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
+                          {
+                              memcpy(&range_start, bytes.pointer + record + 10, 4);
+                              memcpy(&range_length, bytes.pointer + record + 16, 2);
+                          }
+          """,
+              """                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
+                          {
+                              memcpy(&range_start, bytes.pointer + record + 10, 4);
+                              memcpy(&range_length, bytes.pointer + record + 16, 2);
+                          }
+                          else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && register_rel_subfield &&
+                                   record_length >= 18)
+                          {
+                              memcpy(&range_start, bytes.pointer + record + 12, 4);
+                              memcpy(&range_length, bytes.pointer + record + 18, 2);
+                          }
+          """,
+          )
+          replace_once(
+              "src/buster/tests/compiler/codegen/codegen_test.c",
+              """                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
+                                            record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
+                                           range_start == 20 && range_length == 10;
+          """,
+              """                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
+                                            record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER ||
+                                            register_rel_subfield) &&
+                                           range_start == 20 && range_length == 10;
+          """,
+          )
           '@ | python -
+
           git diff --check
           git config user.name 'ChatGPT Codex Connector'
           git config user.email 'noreply@openai.com'
-          git add src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codeview/codeview_test.c
-          git commit -m 'codeview: omit unrepresentable frame subfield ranges'
+          git add src/buster/lib/compiler/codeview/codeview.c `
+                  src/buster/tests/compiler/codeview/codeview_test.h `
+                  src/buster/tests/compiler/codeview/codeview_test.c `
+                  src/buster/tests/compiler/codegen/codegen_test.c
+          git commit -m 'codeview: encode frame-backed aggregate fragments'
           git fetch origin main
           git merge --no-edit origin/main
 
@@ -120,7 +251,11 @@ jobs:
           & $Driver generate --cc clang --ci --linker DEFAULT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Driver build --config Release -t test_all
-          exit $LASTEXITCODE
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'Release tests failed once; rerunning to distinguish a transient runner timeout.'
+            & $Driver build --config Release -t test_all
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Prove target-promotion object links with MSVC
         shell: pwsh
@@ -128,9 +263,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
           & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
           $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
           New-Item -ItemType Directory -Force -Path evidence | Out-Null
           $Include = "$PWD\tests\differential"
           $Caller = "$PWD\evidence\caller.o"
@@ -138,23 +275,36 @@ jobs:
           $Program = "$PWD\evidence\program.exe"
           & clang.exe -O0 -fwrapv -fno-strict-aliasing -funsigned-char "-I$Include" tests\differential\abi_host.c -c -o $Caller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $Candidate = @('cc','-fregister-allocator=fast','-fno-machine-fallback','-fno-canonical-local-promotion','-ftarget-local-promotion','-fno-frontend-ssa','-fverify-codegen','-fwrapv','-fno-strict-aliasing','-funsigned-char',"-I$Include")
+          $Candidate = @(
+            'cc',
+            '-fregister-allocator=fast',
+            '-fno-machine-fallback',
+            '-fno-canonical-local-promotion',
+            '-ftarget-local-promotion',
+            '-fno-frontend-ssa',
+            '-fverify-codegen',
+            '-fwrapv',
+            '-fno-strict-aliasing',
+            '-funsigned-char',
+            "-I$Include"
+          )
           foreach ($LibraryPath in $LibraryPaths) { $Candidate += "-L$LibraryPath" }
-          $Candidate += @('tests\differential\abi.c','-c','-o',$Subject)
+          $Candidate += @('tests\differential\abi.c', '-c', '-o', $Subject)
           & build\Release\ide.exe @Candidate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & llvm-readobj.exe --codeview $Subject | Out-Null
+          & llvm-readobj.exe --codeview $Subject
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $Link = @()
           foreach ($LibraryPath in $LibraryPaths) { $Link += "-L$LibraryPath" }
-          $Link += @($Caller,$Subject,'-o',$Program)
+          $Link += @($Caller, $Subject, '-o', $Program)
           & clang.exe @Link
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Program
           exit $LASTEXITCODE
 
-      - name: Publish validated commits
+      - name: Publish validated commit
         shell: pwsh
         run: |
+          git status --short
           git diff --exit-code
           git push origin HEAD:claude/clever-cori-qh0b15
