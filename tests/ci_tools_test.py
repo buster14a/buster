@@ -833,9 +833,21 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
 
     def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
-        expected = ("  pull_request:", "  push:", "    branches: [main]",
-                    "    tags: ['**']", "  merge_group:",
-                    "    types: [checks_requested]", "  workflow_dispatch:")
+        common = ("  pull_request:", "  push:", "    branches: [main]",
+                  "    tags: ['**']", "  merge_group:",
+                  "    types: [checks_requested]")
+        expected = {
+            "ci.yml": common + (
+                "  workflow_dispatch:",
+                "    inputs:",
+                "      cmake_profile:",
+                "        description: Retain native per-tree CMake command profiles",
+                "        required: false",
+                "        default: false",
+                "        type: boolean",
+            ),
+            "self-host-audit.yml": common + ("  workflow_dispatch:",),
+        }
         for name in ("ci.yml", "self-host-audit.yml"):
             with self.subTest(workflow=name):
                 text = (ROOT / ".github/workflows" / name).read_text()
@@ -843,10 +855,13 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIsNotNone(block)
                 lines = tuple(line.rstrip() for line in block.group(1).splitlines()
                               if line.strip() and not line.lstrip().startswith("#"))
-                self.assertEqual(lines, expected)
+                self.assertEqual(lines, expected[name])
                 # Default checkout is the PR/merge-group merge revision, not
                 # an independently selected head or a stale branch ref.
                 self.assertNotRegex(text, r"(?m)^\s+(ref|repository):")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("inputs.cmake_profile", ci)
+        self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
         suffix = ("${{ github.workflow }}-${{ github.event_name }}-"
