@@ -19,6 +19,36 @@
 typedef double _Complex complex_double;
 typedef float _Complex complex_float;
 
+typedef _Float16 _Complex complex_half;
+
+typedef struct ComplexStaticHolder ComplexStaticHolder;
+struct ComplexStaticHolder
+{
+    int tag;
+    complex_double value;
+};
+
+static complex_half static_scalar_half = 1.5f16;
+static complex_half static_scalar_half_brace = {1.5f16, 0.0f16};
+static complex_half static_composed_half = 1.5f16 - 2.0f16i;
+static complex_half static_composed_half_brace = {1.5f16, -2.0f16};
+static complex_float static_scalar_float = 1.25f;
+static complex_float static_scalar_float_brace = {1.25f, 0.0f};
+static complex_float static_composed_float = 1.25f + 2.5fi;
+static complex_float static_composed_float_brace = {1.25f, 2.5f};
+static complex_double static_scalar_double = -3.5;
+static complex_double static_scalar_double_brace = {-3.5, 0.0};
+static complex_double static_composed_double = 3.5 + 4.25i;
+static complex_double static_composed_double_brace = {3.5, 4.25};
+static complex_double static_scaled_imaginary = 3.0 * 2.0i;
+static complex_double static_scaled_imaginary_brace = {0.0, 6.0};
+static complex_double static_signed_zero = 1.0 - 0.0i;
+static complex_double static_signed_zero_brace = {1.0, -0.0};
+static complex_double static_builtin = __builtin_complex(3.5, -6.25);
+static complex_double static_builtin_brace = {3.5, -6.25};
+static ComplexStaticHolder static_nested = {17, 7.5 - 1.25i};
+static ComplexStaticHolder static_nested_brace = {17, {7.5, -1.25}};
+
 static volatile double real_source;
 static volatile double imaginary_source;
 static volatile complex_double complex_source;
@@ -75,6 +105,13 @@ complex_float complex_float_add(complex_float a, complex_float b) { return a + b
 #define FIXTURE_LONG_DOUBLE_IN_SIGNATURE 1
 #else
 #define FIXTURE_LONG_DOUBLE_IN_SIGNATURE 0
+#endif
+
+#if FIXTURE_LONG_DOUBLE_IN_SIGNATURE
+static long double _Complex static_scalar_long = 1.125L;
+static long double _Complex static_scalar_long_brace = {1.125L, 0.0L};
+static long double _Complex static_composed_long = 1.125L + 2.75Li;
+static long double _Complex static_composed_long_brace = {1.125L, 2.75L};
 #endif
 
 #if FIXTURE_LONG_DOUBLE_IN_SIGNATURE
@@ -146,6 +183,39 @@ complex_double complex_compose(double x, double y) { return FIXTURE_CMPLX(x, y, 
 double complex_punned_imaginary(complex_double z) { return FIXTURE_CIMAG(z, double); }
 complex_float complex_float_compose(float x, float y) { return FIXTURE_CMPLX(x, y, float); }
 
+static int same_object_bytes(const void* left_pointer, const void* right_pointer, unsigned long long count)
+{
+    const unsigned char* left = left_pointer;
+    const unsigned char* right = right_pointer;
+    for (unsigned long long index = 0; index < count; index += 1)
+    {
+        if (left[index] != right[index]) return 0;
+    }
+    return 1;
+}
+
+static int check_static_initializers(void)
+{
+    static complex_double local_static = 9.0 + 0.5i;
+    static complex_double local_static_brace = {9.0, 0.5};
+    if (!same_object_bytes(&static_scalar_half, &static_scalar_half_brace, sizeof(static_scalar_half))) return 201;
+    if (!same_object_bytes(&static_composed_half, &static_composed_half_brace, sizeof(static_composed_half))) return 202;
+    if (!same_object_bytes(&static_scalar_float, &static_scalar_float_brace, sizeof(static_scalar_float))) return 203;
+    if (!same_object_bytes(&static_composed_float, &static_composed_float_brace, sizeof(static_composed_float))) return 204;
+    if (!same_object_bytes(&static_scalar_double, &static_scalar_double_brace, sizeof(static_scalar_double))) return 205;
+    if (!same_object_bytes(&static_composed_double, &static_composed_double_brace, sizeof(static_composed_double))) return 206;
+    if (!same_object_bytes(&static_scaled_imaginary, &static_scaled_imaginary_brace, sizeof(static_scaled_imaginary))) return 207;
+    if (!same_object_bytes(&static_signed_zero, &static_signed_zero_brace, sizeof(static_signed_zero))) return 208;
+    if (!same_object_bytes(&static_builtin, &static_builtin_brace, sizeof(static_builtin))) return 209;
+    if (!same_object_bytes(&static_nested, &static_nested_brace, sizeof(static_nested))) return 210;
+    if (!same_object_bytes(&local_static, &local_static_brace, sizeof(local_static))) return 211;
+#if FIXTURE_LONG_DOUBLE_IN_SIGNATURE
+    if (!same_object_bytes(&static_scalar_long, &static_scalar_long_brace, sizeof(static_scalar_long))) return 212;
+    if (!same_object_bytes(&static_composed_long, &static_composed_long_brace, sizeof(static_composed_long))) return 213;
+#endif
+    return 0;
+}
+
 static int check(complex_double value, double real, double imaginary)
 {
     return __real__ value == real && __imag__ value == imaginary;
@@ -201,6 +271,9 @@ static int check_constructors(void)
 
 int main(void)
 {
+    int static_initializer_result = check_static_initializers();
+    if (static_initializer_result) return static_initializer_result;
+
     // Layout first: a complex value is two contiguous elements of its real
     // type, no more strictly aligned than one of them.
     if (sizeof(complex_float) != 2 * sizeof(float)) return 1;
