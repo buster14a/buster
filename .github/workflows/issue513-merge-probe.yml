@@ -1,0 +1,32 @@
+name: Probe issue 513 recovered integration merge
+on:
+  push:
+    branches: [codex/513-reconcile-probe]
+    paths: [.github/workflows/issue513-merge-probe.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Attempt a non-publishing three-way merge
+        shell: bash
+        run: |
+          set -uo pipefail
+          git fetch origin main work/36-recovered-integration-20260915
+          git checkout --detach origin/main
+          set +e
+          git merge --no-commit --no-ff origin/work/36-recovered-integration-20260915 >merge.log 2>&1
+          merge_status=$?
+          set -e
+          cat merge.log
+          printf '\nMERGE_STATUS=%s\n' "$merge_status"
+          printf '\nUNMERGED_PATHS\n'
+          git diff --name-only --diff-filter=U || true
+          printf '\nSTATUS\n'
+          git status --short
+          exit 0
