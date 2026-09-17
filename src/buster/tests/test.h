@@ -2,6 +2,9 @@
 
 #include <buster/lib/base.h>
 #include <buster/lib/arena.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/time.h>
+#endif
 typedef struct BatchTestResult BatchTestResult;
 struct BatchTestResult
 {
@@ -67,7 +70,8 @@ struct UnitTestArguments
     u64 memory_top_retained_bytes;
     u64 memory_top_peak_bytes;
     bool memory_report;
-    u8 reserved[7];
+    bool fixture_timing_report;
+    u8 reserved[6];
 #endif
 };
 
@@ -97,8 +101,10 @@ struct TestArenaScope
     TestArenaMark marks[1 + SCRATCH_ARENA_COUNT];
     String8 name;
     u64 index;
+    TimeDataType start;
     bool module;
-    u8 reserved[7];
+    bool timing;
+    u8 reserved[6];
 };
 
 BUSTER_F_DECL TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module);
