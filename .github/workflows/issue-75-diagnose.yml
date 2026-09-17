@@ -39,10 +39,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
-          ./build/build generate --cc clang
-          ./build/build build --config Release -t ide
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g \
+            build.c -o "$RUNNER_TEMP/buster-build-driver"
+          "$RUNNER_TEMP/buster-build-driver" generate --cc clang
+          "$RUNNER_TEMP/buster-build-driver" build --config Release -t ide
 
       - name: Run QuickJS harness and diagnose failure
         id: harness
@@ -53,7 +53,7 @@ jobs:
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/issue-75"
           set +e
-          ./build/build test_quickjs --config Release "$QUICKJS_SOURCE" 2>&1 | tee "$RUNNER_TEMP/issue-75/harness.log"
+          "$RUNNER_TEMP/buster-build-driver" test_quickjs --config Release "$QUICKJS_SOURCE" 2>&1 | tee "$RUNNER_TEMP/issue-75/harness.log"
           harness_status=${PIPESTATUS[0]}
           set -e
           printf 'status=%s\n' "$harness_status" >> "$GITHUB_OUTPUT"
