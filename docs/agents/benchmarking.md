@@ -25,6 +25,36 @@
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
+- Native-backend retirement has a separate maintainer-approved
+  [performance contract](../native-retirement-performance-contract.md). Its
+  tighter budgets, immutable #508 binding, dedicated-host admission and
+  simultaneous uncertainty rules apply only to the #36/#512 acceptance run;
+  they do not silently replace the native harness's ordinary CI guard. Before
+  any timing verdict, validate the complete immutable binding record with
+  `python3 tools/native_retirement_performance_binding.py <record.json>
+  --evidence-root <bundle> --repository-root <immutable-checkout>
+  --trusted-execution-receipt-sha256 <independently-obtained-sha256>`; the
+  evidence-root form joins the exact #508 declaration, manifest, inputs,
+  dependencies, environment, rows, independent validator report and
+  versioned canonical performance-row artifact. It recomputes unique row
+  identities, eligibility and the round-1/round-2/pooled statistical family,
+  then checks structured #437 service/profile/A-A/lease receipts and #510
+  publication/download/replay receipts. `--repository-root` is an immutable
+  checkout used to verify commit-to-tree and source/build/harness identities;
+  without it the result is explicitly downgraded and cannot prove those
+  relations. The trusted execution-receipt digest must come out of band
+  from the authenticated admitted control service for the exact job and attempt;
+  never derive it from the result bundle being validated. This validation does
+  not itself accept a performance result.
+  A run without the evidence root is reported as `proof=structural-only`.
+  The binding streams schema-2 result inputs through the existing #615 verifier
+  with predeclared 16,777,216-record partitions, then replays #619 through the
+  native `tools/throughput/retirement_stats.h` adapter (`bench_throughput
+  retirement-replay`). One scope-free family member is one C call emitting
+  both rounds and pooled bounds; structural workflow completion is not a
+  verdict.
+  The acceptance service must use the server-authoritative supervisor lease
+  protocol; the existing cooperative throughput lock is not a substitute.
 
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted
