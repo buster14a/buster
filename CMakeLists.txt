@@ -3,7 +3,6 @@ if (POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
 
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/ZigCompilerId.cmake")
 project(buster C)
 
 set (CMAKE_COLOR_DIAGNOSTICS ON)
