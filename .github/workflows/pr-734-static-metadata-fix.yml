@@ -31,49 +31,30 @@ jobs:
           path = Path('src/buster/lib/compiler/frontend/c/c_parse.c')
           text = path.read_text()
 
-          old_scan = '''        bool is_thread_local = false;
-          if (kind == C_DECLARATION_OBJECT &&
-              c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
-          {
-              for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
-              {
-                  CToken token = preprocess.tokens[token_index];
-                  is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
-                                     c_token_in_well_known_set(preprocess.spelling_base, token,
-                                                               C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
-              }
-          }
-          '''
-          new_scan = '''        bool is_static_storage = false;
-          bool is_thread_local = false;
-          if (kind == C_DECLARATION_OBJECT &&
-              c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
-          {
-              for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
-              {
-                  CToken token = preprocess.tokens[token_index];
-                  is_static_storage |= token.kind == C_TOKEN_IDENTIFIER &&
-                                       c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(STATIC));
-                  is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
-                                     c_token_in_well_known_set(preprocess.spelling_base, token,
-                                                               C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
-              }
-          }
-          '''
-          if text.count(old_scan) != 1:
-              raise SystemExit(f'expected one file-scope storage scan, found {text.count(old_scan)}')
-          text = text.replace(old_scan, new_scan)
+          def replace_once(source, old, new, label):
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one {label}, found {count}')
+              return source.replace(old, new)
 
-          old_entity = '''            .is_definition = declaration->is_definition,
-              .is_thread_local = is_thread_local,
-          '''
-          new_entity = '''            .is_definition = declaration->is_definition,
-              .is_static_storage = is_static_storage,
-              .is_thread_local = is_thread_local,
-          '''
-          if text.count(old_entity) != 1:
-              raise SystemExit(f'expected one file-scope entity initializer, found {text.count(old_entity)}')
-          text = text.replace(old_entity, new_entity)
+          text = replace_once(
+              text,
+              "        bool is_thread_local = false;\n        if (kind == C_DECLARATION_OBJECT &&",
+              "        bool is_static_storage = false;\n        bool is_thread_local = false;\n        if (kind == C_DECLARATION_OBJECT &&",
+              'file-scope storage declaration',
+          )
+          text = replace_once(
+              text,
+              "                CToken token = preprocess.tokens[token_index];\n                is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&",
+              "                CToken token = preprocess.tokens[token_index];\n                is_static_storage |= token.kind == C_TOKEN_IDENTIFIER &&\n                                     c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(STATIC));\n                is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&",
+              'file-scope storage scan body',
+          )
+          text = replace_once(
+              text,
+              "            .is_definition = declaration->is_definition,\n            .is_thread_local = is_thread_local,",
+              "            .is_definition = declaration->is_definition,\n            .is_static_storage = is_static_storage,\n            .is_thread_local = is_thread_local,",
+              'file-scope entity initializer',
+          )
           path.write_text(text)
           PY
           git diff --check
