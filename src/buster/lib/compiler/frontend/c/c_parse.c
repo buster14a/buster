@@ -8525,11 +8525,10 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     c_type_parse_frame_complete(machine, type, suffix, true);
 }
 
-// A type qualifier is allowed between a struct/union/enum specifier and the
-// declarator -- `struct S const x;`, `struct { const char *tag; } const
-// defs[]` -- the same way it is allowed after a primitive one. The aggregate
-// paths used to stop at the closing brace or the tag, so the qualifier stood
-// where the declarator was expected and the declaration bound no name at all.
+// Declaration-prefix words may follow a struct/union/enum specifier just as
+// they may follow a primitive specifier. Consume the complete prefix run so a
+// storage or function specifier cannot be mistaken for the declarator name,
+// while only true qualifiers are materialized in the aggregate type.
 BUSTER_C_INTERNAL CTypeId c_parse_apply_trailing_qualifiers(CParseResult* result, CPreprocessResult preprocess, CTypeId type, u32* index, u32 end)
 {
     if (type.value >= result->type_count)
@@ -8538,10 +8537,15 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_trailing_qualifiers(CParseResult* result
     }
     CType qualified = result->types[type.value];
     bool has_qualifier = false;
-    while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER &&
-           c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[*index], &qualified))
+    while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER)
     {
-        has_qualifier = true;
+        CToken token = preprocess.tokens[*index];
+        u16 bits = c_parse_word_bits_token(preprocess, token);
+        if (!c_parse_atomic_declaration_prefix_token(preprocess, token, &qualified))
+        {
+            break;
+        }
+        has_qualifier |= (bits & C_WORD_QUALIFIER_ANY) != 0;
         *index += 1;
     }
     return has_qualifier ? c_parse_add_qualified_type(result, type, qualified) : type;
