@@ -31,7 +31,7 @@ jobs:
           tcc -v
           clang --version
           gcc --version
-          zig version
+          "$RUNNER_TEMP/zig/zig" version
       - name: Full configuration matrix
         run: ./build.sh test_all_combinations_ci
       - name: Release self-host
