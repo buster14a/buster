@@ -1,4 +1,4 @@
-name: PR 767 CODE_4 crash diagnosis
+name: PR 767 CODE_4 sanitizer diagnosis
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-767-code4-diagnosis-v3
+  group: pr-767-code4-sanitizer-v4
   cancel-in-progress: false
 
 jobs:
@@ -35,35 +35,31 @@ jobs:
           test ! -e tools/pr767_repair_followup.py
           test ! -e .github/workflows/pr767-code4-fix.yml
 
-      - name: Build a debuggable compiler
+      - name: Build a sanitized compiler
         env:
           BUSTER_TEST_JOBS: 1
           CMAKE_BUILD_PARALLEL_LEVEL: 2
         run: |
           set -euo pipefail
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --cc clang --linker DEFAULT --no-fuzz
+          "$RUNNER_TEMP/buster-build" generate --sanitize --cc clang --linker DEFAULT --no-fuzz
           "$RUNNER_TEMP/buster-build" build --config Debug -t ide
 
-      - name: Capture the crash backtrace
+      - name: Run strict sanitized tests
         env:
           BUSTER_TEST_JOBS: 1
+          ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=0:symbolize=1
+          UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_stacktrace=1
         run: |
           set -o pipefail
-          command -v gdb
-          gdb -q -batch \
-            -ex 'set pagination off' \
-            -ex 'set print thread-events off' \
-            -ex run \
-            -ex 'thread apply all bt full' \
-            --args ./build/Debug/ide test 2>&1 | tee "$RUNNER_TEMP/pr767-gdb.txt"
+          ./build/Debug/ide test --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/pr767-sanitizer.txt"
           test ${PIPESTATUS[0]} -eq 0
 
-      - name: Retain diagnostic trace
+      - name: Retain sanitizer trace
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pr767-code4-gdb-${{ github.run_id }}
-          path: ${{ runner.temp }}/pr767-gdb.txt
+          name: pr767-code4-sanitizer-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr767-sanitizer.txt
           if-no-files-found: warn
           retention-days: 7
