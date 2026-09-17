@@ -9659,14 +9659,51 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
         dereference_count += 1;
         start += 1;
     }
+    u32 identifier_index = start;
+    u32 postfix_index = start < end ? start + 1 : start;
+    if (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 primary_close =
+            c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (primary_close < end && primary_close + 1 < end)
+        {
+            u32 primary_start = start + 1;
+            u32 primary_end = primary_close;
+            bool primary_stripping = true;
+            while (primary_stripping)
+            {
+                primary_stripping = false;
+                if (primary_end > primary_start + 1 &&
+                    c_token_is_punctuator(&preprocess.tokens[primary_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 nested_close = c_parse_matching_delimiter(preprocess, primary_start, primary_end,
+                                                                  C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                  C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (nested_close == primary_end - 1)
+                    {
+                        primary_start += 1;
+                        primary_end -= 1;
+                        primary_stripping = true;
+                    }
+                }
+            }
+            if (primary_end == primary_start + 1 && preprocess.tokens[primary_start].kind == C_TOKEN_IDENTIFIER)
+            {
+                identifier_index = primary_start;
+                postfix_index = primary_close + 1;
+            }
+        }
+    }
     CTypeId type = C_TYPE_ID_INVALID;
     bool is_enumerator = false;
     u32 declaration_index = UINT32_MAX;
     u32 index = start;
-    if (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    if (identifier_index < end && preprocess.tokens[identifier_index].kind == C_TOKEN_IDENTIFIER)
     {
-        String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]);
-        CEntityId entity = c_parse_lookup_entity_symbol(result, scope, c_parse_symbol_or_intern(result, preprocess.tokens[start].symbol, name), name);
+        String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[identifier_index]);
+        CEntityId entity =
+            c_parse_lookup_entity_symbol(result, scope,
+                                         c_parse_symbol_or_intern(result, preprocess.tokens[identifier_index].symbol, name), name);
         if (entity.value < result->entity_count)
         {
             CEntity* found = &result->entities[entity.value];
@@ -9690,7 +9727,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
                 is_enumerator = string_equal(result->enum_members[member_index].name, name);
             }
         }
-        index = start + 1;
+        index = postfix_index;
     }
     bool valid = type.value != C_ID_UNDERLYING_INVALID;
     while (valid && index < end)
@@ -10243,6 +10280,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                     enum_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[expression_start + expression_index]) + 21;
                 }
                 CSpellingSpace enum_space = c_space_local(temporary.arena, enum_spelling_capacity);
+                bool expression_valid = true;
                 for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
                 {
                     u32 source_index = expression_start + expression_index;
@@ -10338,9 +10376,14 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                                                        &operand_size, &operand_alignment))
                         {
                             // Substituting zero here would silently misfold the
-                            // enumerator, so an unresolved operand fails instead.
-                            scratch_end(temporary);
-                            return C_TYPE_ID_INVALID;
+                            // enumerator. Diagnose the declaration and retain a
+                            // recovery member so later uses do not cascade.
+                            c_parse_diagnostic(
+                                result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                                string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
+                                              c_token_spelling(preprocess.spelling_base, name)));
+                            expression_valid = false;
+                            break;
                         }
                         evaluation_tokens[evaluation_token_count++] =
                             c_space_token(&enum_space, string_format(temporary.arena, S8("{u64}"), enum_word_is_alignof ? operand_alignment : operand_size),
@@ -10368,31 +10411,58 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                             break;
                         }
                     }
+                    if (!folded_member && expression_token.kind == C_TOKEN_IDENTIFIER)
+                    {
+                        String8 spelling = c_token_spelling(preprocess.spelling_base, expression_token);
+                        if (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")))
+                        {
+                            evaluation_tokens[evaluation_token_count++] =
+                                c_space_token(&enum_space, string_equal(spelling, S8("true")) ? S8("1") : S8("0"),
+                                              C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+                            folded_member = true;
+                        }
+                        else
+                        {
+                            c_parse_diagnostic(
+                                result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                                string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
+                                              c_token_spelling(preprocess.spelling_base, name)));
+                            expression_valid = false;
+                            break;
+                        }
+                    }
                     if (!folded_member)
                     {
                         evaluation_tokens[evaluation_token_count++] = c_space_retoken(&enum_space, preprocess.spelling_base, expression_token);
                     }
                 }
-                CPreprocessResult evaluation = {
-                    .diagnostics = arena_allocate(temporary.arena, CDiagnostic, evaluation_token_count + 1),
-                    .target = preprocess.target,
-                    .dialect = preprocess.dialect,
-                };
-                u64 evaluated = 0;
-                bool valid = c_integer_expression_evaluate(temporary.arena, enum_space.base, evaluation_tokens, evaluation_token_count, 65536, &evaluation, &evaluated);
+                if (expression_valid)
+                {
+                    CPreprocessResult evaluation = {
+                        .diagnostics = arena_allocate(temporary.arena, CDiagnostic, evaluation_token_count + 1),
+                        .target = preprocess.target,
+                        .dialect = preprocess.dialect,
+                    };
+                    u64 evaluated = 0;
+                    bool valid = c_integer_expression_evaluate(temporary.arena, enum_space.base, evaluation_tokens,
+                                                               evaluation_token_count, 65536, &evaluation, &evaluated);
+                    if (!valid || evaluation.diagnostic_count)
+                    {
+                        c_parse_diagnostic(
+                            result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                            string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
+                                          c_token_spelling(preprocess.spelling_base, name)));
+                    }
+                    else if (evaluated <= INT64_MAX)
+                    {
+                        value = (s64)evaluated;
+                    }
+                    else
+                    {
+                        value = -1 - (s64)(UINT64_MAX - evaluated);
+                    }
+                }
                 scratch_end(temporary);
-                if (!valid || evaluation.diagnostic_count)
-                {
-                    return C_TYPE_ID_INVALID;
-                }
-                if (evaluated <= INT64_MAX)
-                {
-                    value = (s64)evaluated;
-                }
-                else
-                {
-                    value = -1 - (s64)(UINT64_MAX - evaluated);
-                }
             }
             BUSTER_VALIDATE(result->enum_member_count < result->enum_member_capacity);
             result->enum_members[result->enum_member_count++] = (CEnumMember){
