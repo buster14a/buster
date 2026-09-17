@@ -30,7 +30,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "bcbcec686b2bea0a0e2d8baf6ca227baf8c8dea9790ca648c7d061250d86d706"
+FULL_SUPPORT_CONTRACT_SHA256 = "aa883c302a326143ff5e2f670bdb5e66dd85162e45033246c40df5f5a3411c21"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -44,8 +44,8 @@ MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
-FULL_APPLICABILITY_LEDGER_COUNT = 373
-FULL_APPLICABILITY_LEDGER_SHA256 = "6081b5349761dfb57a1dd054507054fe586c9f3332c562b34280b4af08776b50"
+FULL_APPLICABILITY_LEDGER_COUNT = 374
+FULL_APPLICABILITY_LEDGER_SHA256 = "00cf09f1a58eb0fe8e44fbc1bd9e462a91df4449233c2b0c788442ec7a192a0c"
 FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "7e27cce44651a4adaea2707fe2eaefd0f2a0a29564bb40a5262a18685ff91daa"
 FULL_DEPENDENCY_RECEIPT_SHA256 = "50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad"
 FULL_DEPENDENCY_PROJECT_SHA256 = "9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03"

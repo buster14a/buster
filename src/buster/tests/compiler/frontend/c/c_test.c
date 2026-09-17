@@ -14687,7 +14687,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
             if (lowered.diagnostic_count)
             {
                 BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("unsupported C global initializer for 'l_hex'"));
+                                   S8("C IR lowering: cannot fold '0x1.0000000000001p+0L' in a static initializer"));
             }
             scratch_end(temporary);
             continue;
@@ -15028,7 +15028,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestA
             if (lowered.diagnostic_count)
             {
                 BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("unsupported C global initializer for 'min_normal'"));
+                                   S8("C IR lowering: cannot fold '0x1p-16382L' in a static initializer"));
             }
             scratch_end(temporary);
             continue;
@@ -15210,7 +15210,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
             if (lowered.diagnostic_count)
             {
                 BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                                   S8("unsupported C global initializer for 'folded_quotient'"));
+                                   S8("C IR lowering: cannot fold '1' in a static initializer"));
             }
             scratch_end(temporary);
             continue;

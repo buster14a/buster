@@ -3,7 +3,7 @@
 // No scalar binary128 ABI or arithmetic is required: wide values travel only
 // through pointers. LIBRARY exposes the three operations to external callers;
 // FENV uses an independently compiled AArch64 FPSR/FPCR helper.
-#if __LDBL_MANT_DIG__ == 113 && defined(__aarch64__)
+#if __LDBL_MANT_DIG__ == 113
 
 typedef unsigned long long F128Word;
 typedef union F128Image F128Image;

@@ -396,7 +396,7 @@ reclassify a declared gap. Smaller fixtures must explicitly use
 `profile=self-test` and can never satisfy production profile acceptance.
 The producer also copies the immutable
 `docs/native-retirement-applicability-v1.tsv` projection and binds its SHA-256.
-For the full profile it must contain the exact authenticated 373 fixture/target
+For the full profile it must contain the exact authenticated 374 fixture/target
 entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
 Only this projection can classify a target-specific residual as
 `platform-inapplicable` or `unavailable`; a result disposition, row count,
