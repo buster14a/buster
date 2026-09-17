@@ -2,9 +2,12 @@
 
 #if BUSTER_INCLUDE_TESTS
 
+#include <buster/lib/arena.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/gpu/gpu.h>
+#include <buster/lib/file.h>
 #include <buster/lib/string.h>
+#include <buster/lib/system_headers.h>
 
 BUSTER_GLOBAL_LOCAL bool gpu_test_step_has_argument(GpuPipelinePlan plan, u32 step_index, String8 argument)
 {
@@ -65,11 +68,64 @@ BUSTER_GLOBAL_LOCAL GpuPipelineOptions gpu_test_options(String8* inputs, u32 inp
         .input_paths = inputs,
         .target = target,
         .input_count = input_count,
+        .temporary_directory = S8("owned-gpu-temporaries"),
         .language = GPU_SOURCE_LANGUAGE_AUTOMATIC,
         .action = action,
         .optimization_level = 2,
     };
 }
+
+BUSTER_GLOBAL_LOCAL bool gpu_test_path_is_within(String8 path, String8 directory)
+{
+    bool result = path.length > directory.length && string_starts_with_sequence(path, directory);
+    if (result)
+    {
+        char8 separator = path.pointer[directory.length];
+        result = separator == '/' || separator == '\\';
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool gpu_test_path_has_kind(String8 path, OsFileKind kind)
+{
+    FileStats stats = os_file_replacement_target_stats(path);
+    return stats.valid && stats.kind == kind;
+}
+
+BUSTER_GLOBAL_LOCAL bool gpu_test_file_equals(Arena* arena, String8 path, ByteSlice expected)
+{
+    ByteSlice actual = file_read(arena, path, (FileReadOptions){0});
+    return actual.pointer && actual.length == expected.length && memory_compare(actual.pointer, expected.pointer, expected.length);
+}
+
+typedef struct GpuTestConcurrentExecutions GpuTestConcurrentExecutions;
+struct GpuTestConcurrentExecutions
+{
+    GpuPipelineOptions options;
+    GpuPipelineResult results[2];
+    Arena* arenas[2];
+    u64 worker_count;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType gpu_test_concurrent_execute(void* argument)
+{
+    GpuTestConcurrentExecutions* executions = (GpuTestConcurrentExecutions*)argument;
+    u64 index = lane_index();
+    if (index == 0)
+    {
+        executions->worker_count = lane_count();
+    }
+    if (index < BUSTER_ARRAY_LENGTH(executions->results))
+    {
+        Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+        executions->arenas[index] = arena;
+        if (arena)
+        {
+            executions->results[index] = gpu_pipeline_execute(arena, executions->options);
+        }
+    }
+}
+
 
 UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
 {
@@ -338,6 +394,8 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, plan.output_path.pointer[plan.output_path.length] == 0);
         BUSTER_TEST(arguments, plan.temporary_path_count >= 2 && plan.temporary_paths[0].pointer[plan.temporary_paths[0].length] == 0 &&
                                    plan.temporary_paths[1].pointer[plan.temporary_paths[1].length] == 0);
+        BUSTER_TEST(arguments, gpu_test_path_is_within(plan.temporary_paths[0], options.temporary_directory) &&
+                                   gpu_test_path_is_within(plan.temporary_paths[1], options.temporary_directory));
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("cs_6_9")));
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("compute_main")));
         BUSTER_TEST(arguments, gpu_test_step_has_argument(plan, 0, S8("-Fo")) && gpu_test_step_has_argument(plan, 0, S8("-Fc")));
@@ -426,6 +484,150 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         String8 command_line[] = {S8("-target=nvptx64"), S8("-Ofast"), S8("kernel.cu")};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
         BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.optimization_level == 2);
+    }
+
+
+    {
+        u8 payload_data[] = {'o', 'w', 'n', 'e', 'd'};
+        ByteSlice payload = (ByteSlice)BUSTER_ARRAY_TO_SLICE(payload_data);
+        String8 claimed = buster_test_temporary_path(arena, S8("gpu-exclusive-claim"), S8(""));
+        String8 referent = buster_test_temporary_path(arena, S8("gpu-exclusive-referent"), S8(".bin"));
+        BUSTER_TEST(arguments, os_file_delete(claimed));
+        BUSTER_TEST(arguments, os_file_delete(referent));
+
+        BUSTER_TEST(arguments, file_write(claimed, payload));
+        OsDirectoryCreateResult file_collision = os_make_directory_exclusive(claimed);
+        BUSTER_TEST(arguments, !file_collision.error.v && file_collision.already_exists);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, claimed, payload));
+        BUSTER_TEST(arguments, os_file_delete(claimed));
+
+        BUSTER_TEST(arguments, os_make_directory_attempt(claimed));
+        OsDirectoryCreateResult directory_collision = os_make_directory_exclusive(claimed);
+        BUSTER_TEST(arguments, !directory_collision.error.v && directory_collision.already_exists);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(claimed, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, os_directory_delete(claimed));
+
+#if !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+        BUSTER_TEST(arguments, file_write(referent, payload));
+        BUSTER_TEST(arguments, symlink((const char*)referent.pointer, (const char*)claimed.pointer) == 0);
+        OsDirectoryCreateResult link_collision = os_make_directory_exclusive(claimed);
+        BUSTER_TEST(arguments, !link_collision.error.v && link_collision.already_exists);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(claimed, OS_FILE_KIND_LINK));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, referent, payload));
+        BUSTER_TEST(arguments, os_file_delete(claimed));
+        BUSTER_TEST(arguments, os_file_delete(referent));
+#endif
+
+        OsDirectoryCreateResult created = os_make_directory_exclusive(claimed);
+        BUSTER_TEST(arguments, !created.error.v && !created.already_exists);
+#if !BUSTER_WINDOWS
+        struct stat claimed_stats = {0};
+        BUSTER_TEST(arguments, stat((const char*)claimed.pointer, &claimed_stats) == 0 && (claimed_stats.st_mode & 0777) == 0700);
+#endif
+        BUSTER_TEST(arguments, os_directory_delete(claimed));
+    }
+
+    {
+        u8 valid_spirv_data[] = {0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x00, 0x00};
+        u8 invalid_spirv_data[] = {'n', 'o', 'p', 'e'};
+        u8 sentinel_data[] = {'o', 'l', 'd', '-', 'o', 'u', 't', 'p', 'u', 't'};
+        ByteSlice valid_spirv = (ByteSlice)BUSTER_ARRAY_TO_SLICE(valid_spirv_data);
+        ByteSlice invalid_spirv = (ByteSlice)BUSTER_ARRAY_TO_SLICE(invalid_spirv_data);
+        ByteSlice sentinel = (ByteSlice)BUSTER_ARRAY_TO_SLICE(sentinel_data);
+        String8 input = buster_test_temporary_path(arena, S8("gpu-private-input"), S8(".spv"));
+        String8 output = buster_test_temporary_path(arena, S8("gpu-private-output"), S8(".spv"));
+        String8 referent = buster_test_temporary_path(arena, S8("gpu-private-referent"), S8(".spv"));
+        String8 input_base = string_slice(input, 0, input.length - S8(".spv").length);
+        String8 legacy_temporary = string_format_z(arena, S8("{S8}.buster-gpu-0.spv"), input_base);
+        String8 inputs[] = {input};
+        GpuPipelineOptions options = gpu_test_options(inputs, 1, gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+        options.output_path = output;
+        options.temporary_directory = (String8){0};
+
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_file_delete(referent));
+        BUSTER_TEST(arguments, os_file_delete(legacy_temporary));
+        BUSTER_TEST(arguments, file_write(input, valid_spirv));
+        BUSTER_TEST(arguments, file_write(output, sentinel));
+        BUSTER_TEST(arguments, file_write(legacy_temporary, sentinel));
+
+        GpuPipelineResult published = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, published.error == GPU_PIPELINE_ERROR_NONE && published.artifact.format == GPU_OUTPUT_SPIRV_BINARY);
+        BUSTER_STRING_TEST(arguments, published.artifact.path, output);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, valid_spirv));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, legacy_temporary, sentinel));
+        BUSTER_TEST(arguments, published.temporary_directory.length != 0 &&
+                                   gpu_test_path_has_kind(published.temporary_directory, OS_FILE_KIND_MISSING));
+
+        BUSTER_TEST(arguments, file_write(input, invalid_spirv));
+        BUSTER_TEST(arguments, file_write(output, sentinel));
+        GpuPipelineResult invalid = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, invalid.error == GPU_PIPELINE_ERROR_INVALID_ARTIFACT);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, sentinel));
+        BUSTER_TEST(arguments, invalid.temporary_directory.length != 0 &&
+                                   gpu_test_path_has_kind(invalid.temporary_directory, OS_FILE_KIND_MISSING));
+
+        BUSTER_TEST(arguments, file_write(input, valid_spirv));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_make_directory_attempt(output));
+        GpuPipelineResult directory_target = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, directory_target.error == GPU_PIPELINE_ERROR_FILE_WRITE);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(output, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(directory_target.temporary_directory, OS_FILE_KIND_MISSING));
+        BUSTER_TEST(arguments, os_directory_delete(output));
+
+#if !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+        BUSTER_TEST(arguments, file_write(referent, sentinel));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, symlink((const char*)referent.pointer, (const char*)output.pointer) == 0);
+        GpuPipelineResult link_target = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, link_target.error == GPU_PIPELINE_ERROR_FILE_WRITE);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(output, OS_FILE_KIND_LINK));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, referent, sentinel));
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(link_target.temporary_directory, OS_FILE_KIND_MISSING));
+        BUSTER_TEST(arguments, os_file_delete(output));
+#endif
+
+        options.save_temporaries = true;
+        GpuTestConcurrentExecutions concurrent = {.options = options};
+        lane_run(BUSTER_ARRAY_LENGTH(concurrent.results), &gpu_test_concurrent_execute, &concurrent);
+        if (concurrent.worker_count < BUSTER_ARRAY_LENGTH(concurrent.results))
+        {
+            concurrent.arenas[1] = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+            if (concurrent.arenas[1])
+            {
+                concurrent.results[1] = gpu_pipeline_execute(concurrent.arenas[1], options);
+            }
+        }
+        BUSTER_TEST(arguments, concurrent.arenas[0] != 0 && concurrent.arenas[1] != 0);
+        BUSTER_TEST(arguments, concurrent.results[0].error == GPU_PIPELINE_ERROR_NONE &&
+                                   concurrent.results[1].error == GPU_PIPELINE_ERROR_NONE);
+        BUSTER_TEST(arguments, concurrent.results[0].temporary_directory.length && concurrent.results[1].temporary_directory.length &&
+                                   !string_equal(concurrent.results[0].temporary_directory, concurrent.results[1].temporary_directory));
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(concurrent.results[0].temporary_directory, OS_FILE_KIND_DIRECTORY) &&
+                                   gpu_test_path_has_kind(concurrent.results[1].temporary_directory, OS_FILE_KIND_DIRECTORY));
+#if !BUSTER_WINDOWS
+        struct stat saved_stats = {0};
+        BUSTER_TEST(arguments, stat((const char*)concurrent.results[0].temporary_directory.pointer, &saved_stats) == 0 &&
+                                   (saved_stats.st_mode & 0777) == 0700);
+#endif
+        for (u32 execution = 0; execution < BUSTER_ARRAY_LENGTH(concurrent.results); execution += 1)
+        {
+            if (concurrent.results[execution].temporary_directory.length)
+            {
+                BUSTER_TEST(arguments, os_directory_delete(concurrent.results[execution].temporary_directory));
+            }
+            if (concurrent.arenas[execution])
+            {
+                BUSTER_TEST(arguments, arena_destroy(concurrent.arenas[execution], 1));
+            }
+        }
+
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_file_delete(referent));
+        BUSTER_TEST(arguments, os_file_delete(legacy_temporary));
     }
 
     return result;

@@ -97,6 +97,15 @@ having been made — none of which needs privileges or real memory exhaustion.
 The `commit_prefault` child-process failure mode asserts the fatal commit
 diagnostic with prefaulting requested.
 
+## Exclusive directory ownership
+
+`os_make_directory_exclusive` is the namespace-ownership primitive for private
+workspaces. It succeeds only when the call created the exact requested name,
+uses mode 0700 on POSIX, and distinguishes a pre-existing file, directory, or
+link from other errors. Unlike `os_make_directory_attempt`, an existing entry
+never counts as success and therefore never authorizes cleanup. Callers retain
+the successfully claimed path and delete only that tree.
+
 ## File transfer completion
 
 `os_file_open_checked`, `os_file_write_checked`, `os_file_close_checked` and
