@@ -100,6 +100,9 @@ MOV/LEA family, redundant REX bits, field contents, section bounds, guard
 bytes, failure atomicity, the refusal of a non `-4` addend for an absolute
 conversion, and the one case the spelling exists for: a non-REX site whose
 preceding byte is `48` converts as itself and leaves that byte alone.
+For plain type 9, it separately exhausts all 256 values in each of the three
+byte positions before the field -- including every `40..4f` candidate -- and
+requires `PATCH_NONE` with byte-identical output.
 
 Reproduce external inspection from the repository root:
 
