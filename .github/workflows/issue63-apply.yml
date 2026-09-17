@@ -11,13 +11,27 @@ permissions:
 jobs:
   validate:
     if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
           ref: fix/issue-63-resource-failures
           fetch-depth: 1
+      - name: Install bootstrap tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes tcc mold
+          python3 tools/ci_zig.py \
+            --target x86_64-linux \
+            --cache-directory "$RUNNER_TEMP/zig-archive" \
+            --install-directory "$RUNNER_TEMP/zig"
+          tcc -v
+          clang --version
+          gcc --version
+          zig version
       - name: Full configuration matrix
         run: ./build.sh test_all_combinations_ci
       - name: Release self-host
