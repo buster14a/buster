@@ -328,7 +328,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
 // token census marks the candidates for both in one bitmap instead, and
 // each question becomes an OR of the words its range covers.
 #define C_PARSE_DECLARATION_RANGE_KEYWORDS                                                                                  \
-    (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))
+    (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23) | C_SYMBOL_WELL_KNOWN_BIT(STATIC))
 
 // The words a type-only declaration may open with ahead of its tag keyword.
 #define C_PARSE_TYPE_ONLY_PREFIX_KEYWORDS                                                                        \
