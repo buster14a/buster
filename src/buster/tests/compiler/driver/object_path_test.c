@@ -28,7 +28,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_file_exists(String8 pa
     bool result = file != 0;
     if (file)
     {
-        BUSTER_CHECK(os_file_close(file));
+        BUSTER_ENSURE(os_file_close(file));
     }
     return result;
 }
@@ -47,7 +47,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverError compiler_driver_object_path_test_compile
         arguments->show(arguments, S8("default object path compiler error: {S8}\n"), compiled.diagnostic);
     }
     CompilerDriverError result = compiled.error;
-    BUSTER_CHECK(arena_destroy(arena, 1));
+    BUSTER_ENSURE(arena_destroy(arena, 1));
     return result;
 }
 #endif

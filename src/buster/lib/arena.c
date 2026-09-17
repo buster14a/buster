@@ -9,15 +9,6 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
-#if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL bool arena_fail_next_commit;
-
-void arena_test_fail_next_commit(void)
-{
-    arena_fail_next_commit = true;
-}
-#endif
-
 BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 reserved_size)
 {
     u64 page_size = os_get_page_size();
@@ -47,9 +38,9 @@ void arena_allocation_overflow(void)
 // That subtraction form keeps `aligned_offset + size` within the reservation
 // even for a final partial granule; the commit path below handles granularity
 // rounding without adding any of that state to the hot bump.
-void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
+BUSTER_GLOBAL_LOCAL bool arena_allocate_commit_attempt(Arena* arena, u64 aligned_size_after)
 {
-    BUSTER_VALIDATE(aligned_size_after <= arena->reserved_size);
+    BUSTER_VALIDATE(aligned_size_after > arena->os_position && aligned_size_after <= arena->reserved_size);
     u64 os_position = arena->os_position;
     u64 target_committed_size = aligned_size_after;
     u64 remainder = target_committed_size & (arena->granularity - 1);
@@ -61,26 +52,31 @@ void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
     }
     u64 size_to_commit = target_committed_size - os_position;
     u8* commit_pointer = (u8*)arena + os_position;
+    bool result = os_commit(commit_pointer, size_to_commit,
+                            (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.prefault_pages);
+    if (result)
+    {
+        arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
+    }
+    return result;
+}
 
-    bool commit_succeeded;
-#if BUSTER_INCLUDE_TESTS
-    if (arena_fail_next_commit)
-    {
-        arena_fail_next_commit = false;
-        commit_succeeded = false;
-    }
-    else
-#endif
-    {
-        commit_succeeded = os_commit(commit_pointer, size_to_commit,
-                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.prefault_pages);
-    }
-    if (!commit_succeeded)
+void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
+{
+    if (!arena_allocate_commit_attempt(arena, aligned_size_after))
     {
         os_fail_message(S8("arena commit failed"));
     }
-    arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool arena_test_allocate_commit_attempt(Arena* arena, u64 aligned_size_after)
+{
+    bool result = arena_allocate_commit_attempt(arena, aligned_size_after);
+    return result;
+}
+#endif
+
 
 u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position)
 {
@@ -237,7 +233,7 @@ u64 arena_pool_release_thread(void)
         u64 reserved_size = pooled->reserved_size;
         // This runs after an OS worker has cleared its ThreadContext, so the
         // raw reporter is the only failure path that does not need scratch.
-        BUSTER_CHECK_RAW(arena_destroy_extended(pooled, 1, reserved_size));
+        BUSTER_ENSURE_RAW(arena_destroy_extended(pooled, 1, reserved_size));
         pooled = next;
         result += 1;
     }

@@ -8,6 +8,23 @@
 #include <buster/lib/os.h>
 #if BUSTER_INCLUDE_TESTS
 
+typedef enum OsResourceTestOperation
+{
+    OS_RESOURCE_TEST_RESERVE,
+    OS_RESOURCE_TEST_COMMIT,
+    OS_RESOURCE_TEST_BARRIER_CREATE,
+    OS_RESOURCE_TEST_THREAD_CREATE,
+    OS_RESOURCE_TEST_THREAD_JOIN,
+    OS_RESOURCE_TEST_OPERATION_COUNT,
+} OsResourceTestOperation;
+
+// Fail exactly one selected operation after `successful_operations_before_failure`
+// matching calls on the calling thread. The injected join failure is reported
+// after a successful native join, so no live thread or handle is leaked by the
+// test seam itself.
+BUSTER_F_DECL void os_resource_test_fail_after(OsResourceTestOperation operation, u64 successful_operations_before_failure);
+BUSTER_F_DECL void os_resource_test_clear(void);
+
 typedef enum OsFileTestOperation
 {
     OS_FILE_TEST_OPEN,

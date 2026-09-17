@@ -27,9 +27,13 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_pool_entry(void* argument)
 {
     OsTestThreadPoolState* state = (OsTestThreadPoolState*)argument;
     Arena* pooled = arena_create((ArenaCreation){0});
-    BUSTER_CHECK(pooled != 0);
+    BUSTER_ENSURE(pooled != 0);
     state->pooled_arena = pooled;
-    BUSTER_CHECK(arena_destroy(pooled, 1));
+    BUSTER_ENSURE(arena_destroy(pooled, 1));
+}
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_resource_lane(void* argument)
+{
+    BUSTER_UNUSED(argument);
 }
 #endif
 
@@ -143,9 +147,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_inner_lane_gang(void* argument)
         // arenas. Generic OS-thread teardown must drain all of them before
         // the TLS pool root disappears.
         Arena* pooled = arena_create((ArenaCreation){0});
-        BUSTER_CHECK(pooled != 0);
+        BUSTER_ENSURE(pooled != 0);
         state->inner_pooled_arenas[state->invocation][index] = pooled;
-        BUSTER_CHECK(arena_destroy(pooled, 1));
+        BUSTER_ENSURE(arena_destroy(pooled, 1));
     }
 }
 
@@ -299,6 +303,36 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+#if !BUSTER_SINGLE_THREADED
+    String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
+    if (resource_failure_mode.length)
+    {
+        ThreadContext* resource_context = thread_context_allocate();
+        thread_context_select(resource_context);
+        if (string_equal(resource_failure_mode, S8("barrier_create")))
+        {
+            os_resource_test_fail_after(OS_RESOURCE_TEST_BARRIER_CREATE, 0);
+            lane_run(2, &os_test_resource_lane, 0);
+        }
+        else if (string_equal(resource_failure_mode, S8("thread_create_partial")))
+        {
+            os_resource_test_fail_after(OS_RESOURCE_TEST_THREAD_CREATE, 1);
+            lane_run(3, &os_test_resource_lane, 0);
+        }
+        else if (string_equal(resource_failure_mode, S8("active_barrier")))
+        {
+            os_resource_test_fail_after(OS_RESOURCE_TEST_BARRIER_CREATE, 1);
+            lane_run(2, &os_test_resource_lane, 0);
+        }
+        else if (string_equal(resource_failure_mode, S8("join")))
+        {
+            lane_run(2, &os_test_resource_lane, 0);
+            os_resource_test_fail_after(OS_RESOURCE_TEST_THREAD_JOIN, 0);
+            thread_context_release(resource_context);
+        }
+        os_exit(97);
+    }
+#endif
     String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
     if (fatal_mode.length)
     {
@@ -365,6 +399,62 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
                 String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
                 BUSTER_TEST(arguments, index < 2 ? string_equal(error, S8("fatal-output-37 at os-fail-regression.c:19 in child\n")) : !error.length);
+            }
+        }
+    }
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+    if (!os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE")).length &&
+        !os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE")).length)
+    {
+        String8 modes[] = {
+            S8("barrier_create"),
+            S8("thread_create_partial"),
+            S8("active_barrier"),
+            S8("join"),
+        };
+        String8 diagnostics[] = {
+            S8("lane gang creation failed"),
+            S8("lane gang creation failed"),
+            S8("lane barrier creation failed"),
+            S8("lane worker join failed"),
+        };
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(modes) == BUSTER_ARRAY_LENGTH(diagnostics));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
+        {
+            SliceString8 inherited_keys = program_state->input.environment_keys;
+            SliceString8 inherited_values = program_state->input.environment_values;
+            String8* keys = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            String8* values = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            keys[0] = S8("BUSTER_OS_RESOURCE_FAILURE_MODE");
+            values[0] = modes[index];
+            keys[1] = S8("BUSTER_TEST_JOBS");
+            values[1] = S8("1");
+            u64 count = 2;
+            for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+            {
+                if (!string_equal(inherited_keys.pointer[inherited], keys[0]) &&
+                    !string_equal(inherited_keys.pointer[inherited], keys[1]))
+                {
+                    keys[count] = inherited_keys.pointer[inherited];
+                    values[count] = inherited_values.pointer[inherited];
+                    count += 1;
+                }
+            }
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                (SliceString8){keys, count}, (SliceString8){values, count},
+                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+                String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                 wait.streams[STANDARD_STREAM_ERROR].length};
+                BUSTER_TEST(arguments, string_first_sequence(error, diagnostics[index]) != BUSTER_STRING_NO_MATCH);
             }
         }
     }

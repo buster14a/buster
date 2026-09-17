@@ -1244,7 +1244,7 @@ BUSTER_GLOBAL_LOCAL void d_cancellation_self_test_lane(void* argument)
                      S8("--self-test-index"), index_text, S8("--self-test-count"), count_text};
     work->observations[index] = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
         string_format(settings.arena, S8("{S8}.{u32}.observation"), work->marker, index));
-    BUSTER_CHECK(arena_destroy(settings.arena, 1));
+    BUSTER_ENSURE(arena_destroy(settings.arena, 1));
 }
 
 BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32* jobs);
@@ -1550,7 +1550,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
             os_mutex_unlock(work->settings.spawn_mutex);
         }
     }
-    BUSTER_CHECK(arena_destroy(arena, 1));
+    BUSTER_ENSURE(arena_destroy(arena, 1));
     if (work->self_test)
     {
         os_mutex_lock(work->settings.spawn_mutex);

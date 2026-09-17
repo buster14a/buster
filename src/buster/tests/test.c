@@ -758,7 +758,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
         record->output_length = arena_buffer_size(output_arena);
         record->output_arena = output_arena;
         record->completed = true;
-        BUSTER_CHECK(arena_destroy(arena, 1));
+        BUSTER_ENSURE(arena_destroy(arena, 1));
     }
 }
 
@@ -1209,7 +1209,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
             test_timing_report(arguments, record->timing);
             *timing_record_count += 1;
         }
-        BUSTER_CHECK(arena_destroy(record->output_arena, 1));
+        BUSTER_ENSURE(arena_destroy(record->output_arena, 1));
     }
 
     if (last_eligible + 1 < descriptor_count)

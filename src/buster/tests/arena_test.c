@@ -66,6 +66,45 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 #endif
 
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
+    {
+        ArenaCreation creation = {
+            .reserved_size = BUSTER_MB(1),
+            .initial_size = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        };
+        os_resource_test_fail_after(OS_RESOURCE_TEST_RESERVE, 0);
+        Arena* failed_reservation = arena_create(creation);
+        os_resource_test_clear();
+        BUSTER_TEST(arguments, failed_reservation == 0);
+
+        os_resource_test_fail_after(OS_RESOURCE_TEST_COMMIT, 0);
+        Arena* failed_initial_commit = arena_create(creation);
+        os_resource_test_clear();
+        BUSTER_TEST(arguments, failed_initial_commit == 0);
+
+        Arena* arena = arena_create(creation);
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            u64 position_before = arena->position;
+            u64 os_position_before = arena->os_position;
+            u64 requested_end = os_position_before + 1;
+            os_resource_test_fail_after(OS_RESOURCE_TEST_COMMIT, 0);
+            bool committed = arena_test_allocate_commit_attempt(arena, requested_end);
+            os_resource_test_clear();
+            BUSTER_TEST(arguments, !committed);
+            BUSTER_TEST(arguments, arena->position == position_before);
+            BUSTER_TEST(arguments, arena->os_position == os_position_before);
+
+            u64 allocation_size = requested_end - position_before;
+            void* allocation = arena_allocate_bytes(arena, allocation_size, 1);
+            BUSTER_TEST(arguments, allocation != 0);
+            BUSTER_TEST(arguments, arena->position == requested_end);
+            BUSTER_TEST(arguments, arena->os_position >= requested_end);
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
+        }
+    }
+
     String8 failure_mode = os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE"));
     // Requesting prefaulting changes none of this: the commit is what the
     // arena depends on, so its failure stays fatal and keeps its diagnostic.
@@ -84,7 +123,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         BUSTER_VALIDATE(arena != 0);
         if (string_equal(failure_mode, S8("commit")) || prefaulting_mode)
         {
-            arena_test_fail_next_commit();
+            os_resource_test_fail_after(OS_RESOURCE_TEST_COMMIT, 0);
             arena_allocate_bytes(arena, BUSTER_KB(128), 1);
         }
         else if (string_equal(failure_mode, S8("bound")))

@@ -452,15 +452,24 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
     (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_raw((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
 #define os_fail() os_fail_message(S8("internal error"))
 #define BUSTER_CHECK_RAW(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message_raw(S8("assertion failed")), 0) : 0))
-// Invariants may become optimizer assumptions in Release. Validation may not:
-// anything derived from source text, object bytes, file sizes, system calls or
-// other fallible inputs must retain its branch and failure in every build.
+#define BUSTER_ENSURE_RAW(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message_raw(S8("runtime failure")), 0) : 0))
+#define BUSTER_ENSURE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("runtime failure")), 0) : 0))
+// Validation covers values derived from source text, object bytes, file sizes,
+// system calls, or other fallible inputs. It must retain both its branch and
+// failure in every build.
 #define BUSTER_VALIDATE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("validation failed")), 0) : 0))
+// A debug check is diagnostic only. An assumption is reserved for facts the
+// implementation has already proved; BUSTER_CHECK remains its compatibility
+// spelling so existing invariant sites keep their optimized code shape.
 #if BUSTER_OPTIMIZE
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
+#define BUSTER_DEBUG_CHECK(ok) ((void)0)
+#define BUSTER_ASSUME(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
 #else
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
+#define BUSTER_DEBUG_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
+#define BUSTER_ASSUME(ok) BUSTER_DEBUG_CHECK(ok)
 #endif
+#define BUSTER_CHECK(ok) BUSTER_ASSUME(ok)
+
 // Stated by every global table that is still built on first use. Those builds
 // are unsynchronized on purpose: they run once and every later read is a plain
 // load, which is only sound while no other thread can be reading. A caller
