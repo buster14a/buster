@@ -1,0 +1,43 @@
+name: Fix PR 748 binding
+
+on:
+  push:
+    branches: [fix/issue-747-native-artifact-retry]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-binding:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/issue-747-native-artifact-retry
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Refresh immutable support declaration digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tools/native_retirement_performance_binding.py")
+          old = "4dc9203fca4672a2cb51910f7ab340b8ad3060bc6793af28e6fd25c3ed444ab6"
+          new = "c21794355689113756f00aa2073b7777619889cd7754c9f02563fb406b1799cc"
+          text = path.read_text(encoding="utf-8")
+          if text.count(old) != 1:
+              raise SystemExit(f"expected exactly one stale support digest, found {text.count(old)}")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
+          python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tools/native_retirement_performance_binding.py
+          git commit -m "ci: refresh native retirement support digest"
+          git push origin HEAD:fix/issue-747-native-artifact-retry
