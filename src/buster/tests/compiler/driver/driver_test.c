@@ -3626,6 +3626,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     return result;
 }
 
+typedef struct CompilerDriverWasm64NodeRun CompilerDriverWasm64NodeRun;
+struct CompilerDriverWasm64NodeRun
+{
+    ProcessWaitResult wait;
+    bool spawned;
+};
+
+BUSTER_GLOBAL_LOCAL CompilerDriverWasm64NodeRun compiler_driver_test_wasm64_stack_node_run(UnitTestArguments* arguments, Arena* arena, String8 mode,
+                                                                                            SliceString8 node_arguments)
+{
+    CompilerDriverWasm64NodeRun result = {
+        .wait = {.result = PROCESS_RESULT_NOT_EXISTENT},
+    };
+    u64 start = os_now_microseconds();
+    ProcessSpawnResult spawn = os_process_spawn(node_arguments, (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                               ((u64)1 << STANDARD_STREAM_ERROR),
+                                                    .use_process_environment = 1,
+                                                });
+    result.spawned = spawn.handle != 0;
+    if (spawn.handle)
+    {
+        result.wait = os_process_wait_deadline(arena, spawn, 30000000);
+    }
+    arguments->show(arguments,
+                    S8("WASM64_STACK_PROCESS mode={S8} spawned={u32} result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64}\n"
+                       "stdout:\n{S8}stderr:\n{S8}\n"),
+                    mode, (u32)result.spawned, (u32)result.wait.result, result.wait.platform_status, (u32)result.wait.timed_out,
+                    os_now_microseconds() - start, BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]),
+                    BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm64_stack_provenance(Arena* arena, ByteSlice stdout_bytes, String8 module_hash)
+{
+    String8 text = BYTE_SLICE_TO_STRING(8, stdout_bytes);
+    String8 digest = string_format(arena, S8("\"module_sha256\":\"{S8}\""), module_hash);
+    String8 required[] = {
+        S8("WASM64_STACK_RUNTIME {"),
+        S8("\"process.execPath\":"),
+        S8("\"process.execArgv\":["),
+        S8("\"memory64_flags\":["),
+        S8("\"NODE_OPTIONS\":"),
+        S8("\"node\":\""),
+        S8("\"v8\":\""),
+        digest,
+    };
+    bool result = string_first_sequence(text, S8("memory64_flags=")) == BUSTER_STRING_NO_MATCH;
+    for (u32 required_index = 0; result && required_index < BUSTER_ARRAY_LENGTH(required); required_index += 1)
+    {
+        result = string_first_sequence(text, required[required_index]) != BUSTER_STRING_NO_MATCH;
+    }
+    return result;
+}
+
 // Compile the stack-layout fixture through both C lowering paths, require
 // deterministic module bytes, then validate and execute them in an independent
 // Memory64 engine. The source is generated here so the native-retirement input
@@ -3729,33 +3785,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
         "const fs = require(\"fs\");\n"
         "const crypto = require(\"crypto\");\n"
         "const assert = require(\"assert\").strict;\n"
-        "if (process.argv.length !== 3) throw new Error(\"usage: node wasm64-stack.cjs module.wasm\");\n"
+        "const provenanceOnly = process.argv.length === 4 && process.argv[3] === \"--provenance-only\";\n"
+        "if (process.argv.length !== 3 && !provenanceOnly) throw new Error(\"usage: node wasm64-stack.cjs module.wasm [--provenance-only]\");\n"
         "const bytes = fs.readFileSync(process.argv[2]);\n"
         "const digest = crypto.createHash(\"sha256\").update(bytes).digest(\"hex\");\n"
-        "console.log(`WASM64_STACK_RUNTIME runtime=${process.version} v8=${process.versions.v8} memory64_flags=default module_sha256=${digest}`);\n"
-        "assert.equal(WebAssembly.validate(bytes), true, \"valid Memory64 module\");\n"
-        "const wasmModule = new WebAssembly.Module(bytes);\n"
-        "const instance = new WebAssembly.Instance(wasmModule);\n"
-        "const e = instance.exports;\n"
-        "assert.equal(e.memory.buffer.byteLength, 3 * 65536, \"minimal three-page layout\");\n"
-        "for (let repetition = 0; repetition < 4; ++repetition) {\n"
-        "    assert.equal(e.wasm_stack_frame32(13 + repetition), 0, \"materialized fixed frame\");\n"
-        "    assert.equal(e.wasm_stack_nested(), 0, \"simultaneously live recursive frames\");\n"
-        "    assert.equal(e.wasm_stack_mixed(97), 0, \"mixed fixed and dynamic frames\");\n"
-        "    assert.equal(e.wasm_stack_vla(65, repetition & 1), 0, \"VLA scope and early return restoration\");\n"
-        "    assert.equal(e.wasm_stack_zero_alignment(), 0n, \"zero-size and alignment boundaries\");\n"
+        "const provenance = {\n"
+        "    \"process.execPath\": process.execPath,\n"
+        "    \"process.execArgv\": process.execArgv,\n"
+        "    \"memory64_flags\": process.execArgv.filter(argument => argument.includes(\"wasm-memory64\")),\n"
+        "    \"NODE_OPTIONS\": Object.prototype.hasOwnProperty.call(process.env, \"NODE_OPTIONS\") ? process.env.NODE_OPTIONS : null,\n"
+        "    \"node\": process.version,\n"
+        "    \"v8\": process.versions.v8,\n"
+        "    \"module_sha256\": digest,\n"
+        "};\n"
+        "console.log(\"WASM64_STACK_RUNTIME \" + JSON.stringify(provenance));\n"
+        "function execute() {\n"
+        "    const memory64Probe = Uint8Array.of(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x04, 0x01);\n"
+        "    if (!WebAssembly.validate(memory64Probe)) {\n"
+        "        console.log(\"WASM64_STACK_CAPABILITY \" + JSON.stringify({status: \"unsupported\", reason: \"memory64-probe-rejected\"}));\n"
+        "        process.exitCode = 2;\n"
+        "        return;\n"
+        "    }\n"
+        "    assert.equal(WebAssembly.validate(bytes), true, \"valid Memory64 module\");\n"
+        "    const wasmModule = new WebAssembly.Module(bytes);\n"
+        "    const instance = new WebAssembly.Instance(wasmModule);\n"
+        "    const e = instance.exports;\n"
+        "    assert.equal(e.memory.buffer.byteLength, 3 * 65536, \"minimal three-page layout\");\n"
+        "    for (let repetition = 0; repetition < 4; ++repetition) {\n"
+        "        assert.equal(e.wasm_stack_frame32(13 + repetition), 0, \"materialized fixed frame\");\n"
+        "        assert.equal(e.wasm_stack_nested(), 0, \"simultaneously live recursive frames\");\n"
+        "        assert.equal(e.wasm_stack_mixed(97), 0, \"mixed fixed and dynamic frames\");\n"
+        "        assert.equal(e.wasm_stack_vla(65, repetition & 1), 0, \"VLA scope and early return restoration\");\n"
+        "        assert.equal(e.wasm_stack_zero_alignment(), 0n, \"zero-size and alignment boundaries\");\n"
+        "    }\n"
+        "    assert.equal(e.wasm_stack_exact_limit(), 0, \"complete 64-KiB reserve is usable\");\n"
+        "    assert.equal(e.wasm_stack_dynamic_limit(), 131056n, \"exact-limit dynamic allocation starts at stack base\");\n"
+        "    assert.equal(e.wasm_stack_frame32(91), 0, \"exact-limit call restored stack\");\n"
+        "    function expectStackTrap(size, label) {\n"
+        "        const isolated = new WebAssembly.Instance(wasmModule);\n"
+        "        assert.throws(() => isolated.exports.wasm_stack_dynamic_store(size), error =>\n"
+        "            error instanceof WebAssembly.RuntimeError && /unreachable/.test(error.message), label + \" deliberate overflow trap\");\n"
+        "    }\n"
+        "    expectStackTrap(65537n, \"over-limit allocation\");\n"
+        "    expectStackTrap(0xffffffffffffffffn, \"wrapping allocation\");\n"
+        "    console.log(\"WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0\");\n"
         "}\n"
-        "assert.equal(e.wasm_stack_exact_limit(), 0, \"complete 64-KiB reserve is usable\");\n"
-        "assert.equal(e.wasm_stack_dynamic_limit(), 131056n, \"exact-limit dynamic allocation starts at stack base\");\n"
-        "assert.equal(e.wasm_stack_frame32(91), 0, \"exact-limit call restored stack\");\n"
-        "function expectStackTrap(size, label) {\n"
-        "    const isolated = new WebAssembly.Instance(wasmModule);\n"
-        "    assert.throws(() => isolated.exports.wasm_stack_dynamic_store(size), error =>\n"
-        "        error instanceof WebAssembly.RuntimeError && /unreachable/.test(error.message), label + \" deliberate overflow trap\");\n"
-        "}\n"
-        "expectStackTrap(65537n, \"over-limit allocation\");\n"
-        "expectStackTrap(0xffffffffffffffffn, \"wrapping allocation\");\n"
-        "console.log(\"WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0\");\n");
+        "if (!provenanceOnly) execute();\n");
     bool prepared = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
     BUSTER_TEST(arguments, prepared);
     char8 source_hash_bytes[SHA256_HEX_CAPACITY];
@@ -3791,19 +3866,109 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
             String8 node = executable_resolve_in_path(arena, S8("node"));
             if (node.length)
             {
-                String8 node_arguments[] = {node, script_path, output};
-                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                           (ProcessSpawnOptions){.use_process_environment = 1});
-                BUSTER_TEST(arguments, spawn.handle != 0);
-                if (spawn.handle)
+                String8 module_hash_text = (String8){module_hash_bytes, 64};
+                String8 provenance_flag = string_format(arena, S8("--title=buster-wasm64-provenance-{u64}"), os_get_current_process_id());
+                String8 direct_arguments[] = {node, script_path, output};
+                CompilerDriverWasm64NodeRun direct = compiler_driver_test_wasm64_stack_node_run(
+                    arguments, arena, S8("direct"), (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_arguments));
+                BUSTER_TEST(arguments, direct.spawned);
+                bool execution_succeeded = false;
+                bool capability_unavailable = false;
+                if (direct.spawned)
                 {
-                    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
-                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                    String8 direct_stdout = BYTE_SLICE_TO_STRING(8, direct.wait.streams[STANDARD_STREAM_OUTPUT]);
+                    bool provenance = compiler_driver_test_wasm64_stack_provenance(
+                        arena, direct.wait.streams[STANDARD_STREAM_OUTPUT], module_hash_text);
+                    bool negative_control = string_first_sequence(direct_stdout, provenance_flag) == BUSTER_STRING_NO_MATCH;
+                    bool execution = !direct.wait.timed_out && direct.wait.result == PROCESS_RESULT_SUCCESS &&
+                                     direct.wait.streams[STANDARD_STREAM_ERROR].length == 0 &&
+                                     string_first_sequence(direct_stdout, S8("WASM64_STACK_RESULT validation=pass execution=pass")) !=
+                                         BUSTER_STRING_NO_MATCH &&
+                                     string_first_sequence(direct_stdout, S8("WASM64_STACK_CAPABILITY ")) == BUSTER_STRING_NO_MATCH;
+                    bool unsupported = !direct.wait.timed_out && direct.wait.result == PROCESS_RESULT_FAILED_TRY_AGAIN &&
+                                       direct.wait.streams[STANDARD_STREAM_ERROR].length == 0 &&
+                                       string_first_sequence(direct_stdout,
+                                                             S8("WASM64_STACK_CAPABILITY {\"status\":\"unsupported\","
+                                                                "\"reason\":\"memory64-probe-rejected\"}")) !=
+                                           BUSTER_STRING_NO_MATCH &&
+                                       string_first_sequence(direct_stdout, S8("WASM64_STACK_RESULT ")) == BUSTER_STRING_NO_MATCH;
+                    BUSTER_TEST(arguments, provenance);
+                    BUSTER_TEST(arguments, negative_control);
+                    BUSTER_TEST(arguments, execution || unsupported);
+                    execution_succeeded = execution;
+                    capability_unavailable = unsupported;
+                }
+
+                String8 control_arguments[] = {node, provenance_flag, script_path, output, S8("--provenance-only")};
+                CompilerDriverWasm64NodeRun control = compiler_driver_test_wasm64_stack_node_run(
+                    arguments, arena, S8("flagged-provenance-control"), (SliceString8)BUSTER_ARRAY_TO_SLICE(control_arguments));
+                BUSTER_TEST(arguments, control.spawned);
+                if (control.spawned)
+                {
+                    String8 control_stdout = BYTE_SLICE_TO_STRING(8, control.wait.streams[STANDARD_STREAM_OUTPUT]);
+                    bool control_succeeded = !control.wait.timed_out && control.wait.result == PROCESS_RESULT_SUCCESS &&
+                                             control.wait.streams[STANDARD_STREAM_ERROR].length == 0;
+                    bool provenance = compiler_driver_test_wasm64_stack_provenance(
+                        arena, control.wait.streams[STANDARD_STREAM_OUTPUT], module_hash_text);
+                    bool positive_control = string_first_sequence(control_stdout, provenance_flag) != BUSTER_STRING_NO_MATCH;
+                    bool provenance_only = string_first_sequence(control_stdout, S8("WASM64_STACK_RESULT ")) == BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(control_stdout, S8("WASM64_STACK_CAPABILITY ")) == BUSTER_STRING_NO_MATCH;
+                    BUSTER_TEST(arguments, control_succeeded);
+                    BUSTER_TEST(arguments, provenance);
+                    BUSTER_TEST(arguments, positive_control);
+                    BUSTER_TEST(arguments, provenance_only);
+                }
+
+                if (!execution_succeeded && capability_unavailable)
+                {
+                    String8 memory64_flag = S8("--experimental-wasm-memory64");
+                    String8 feature_arguments[] = {node, memory64_flag, script_path, output};
+                    CompilerDriverWasm64NodeRun feature = compiler_driver_test_wasm64_stack_node_run(
+                        arguments, arena, S8("memory64-feature-flag"), (SliceString8)BUSTER_ARRAY_TO_SLICE(feature_arguments));
+                    BUSTER_TEST(arguments, feature.spawned);
+                    if (feature.spawned)
+                    {
+                        String8 feature_stdout = BYTE_SLICE_TO_STRING(8, feature.wait.streams[STANDARD_STREAM_OUTPUT]);
+                        String8 feature_stderr = BYTE_SLICE_TO_STRING(8, feature.wait.streams[STANDARD_STREAM_ERROR]);
+                        bool provenance = compiler_driver_test_wasm64_stack_provenance(
+                            arena, feature.wait.streams[STANDARD_STREAM_OUTPUT], module_hash_text);
+                        bool flag_reported = string_first_sequence(feature_stdout, memory64_flag) != BUSTER_STRING_NO_MATCH;
+                        bool execution = !feature.wait.timed_out && feature.wait.result == PROCESS_RESULT_SUCCESS &&
+                                         feature.wait.streams[STANDARD_STREAM_ERROR].length == 0 && provenance && flag_reported &&
+                                         string_first_sequence(feature_stdout, S8("WASM64_STACK_RESULT validation=pass execution=pass")) !=
+                                             BUSTER_STRING_NO_MATCH;
+                        bool unsupported = !feature.wait.timed_out && feature.wait.result == PROCESS_RESULT_FAILED_TRY_AGAIN &&
+                                           feature.wait.streams[STANDARD_STREAM_ERROR].length == 0 && provenance && flag_reported &&
+                                           string_first_sequence(feature_stdout, S8("WASM64_STACK_CAPABILITY ")) != BUSTER_STRING_NO_MATCH;
+                        bool flag_rejected = !feature.wait.timed_out && feature.wait.result != PROCESS_RESULT_SUCCESS && !provenance &&
+                                             string_first_sequence(feature_stderr, memory64_flag) != BUSTER_STRING_NO_MATCH &&
+                                             (string_first_sequence(feature_stderr, S8("bad option")) != BUSTER_STRING_NO_MATCH ||
+                                              string_first_sequence(feature_stderr, S8("unknown option")) != BUSTER_STRING_NO_MATCH ||
+                                              string_first_sequence(feature_stderr, S8("unrecognized option")) != BUSTER_STRING_NO_MATCH);
+                        BUSTER_TEST(arguments, execution || unsupported || flag_rejected);
+                        execution_succeeded = execution;
+                        capability_unavailable = unsupported || flag_rejected;
+                        if (flag_rejected)
+                        {
+                            arguments->show(arguments,
+                                            S8("WASM64_STACK_CAPABILITY {\"status\":\"unsupported\","
+                                               "\"reason\":\"memory64-flag-rejected\","
+                                               "\"flag\":\"--experimental-wasm-memory64\"}\n"));
+                        }
+                    }
+                }
+                if (!execution_succeeded && capability_unavailable)
+                {
+                    arguments->show(arguments,
+                                    S8("WASM64_STACK_EXECUTION {\"status\":\"not-executed\","
+                                       "\"reason\":\"runtime-capability-unavailable\"}\n"));
                 }
             }
             else
             {
-                arguments->show(arguments, S8("Wasm64 stack engine execution unavailable: Node is not installed\n"));
+                arguments->show(arguments,
+                                S8("WASM64_STACK_CAPABILITY {\"status\":\"unavailable\","
+                                   "\"reason\":\"node-not-found\"}\n"));
             }
         }
     }
