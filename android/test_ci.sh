@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# shellcheck source=android/payload_deadline_policy.sh
+source "$repo_root/android/payload_deadline_policy.sh"
+
 android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 if [[ -z ${android_sdk} ]]; then
     echo "error: ANDROID_HOME or ANDROID_SDK_ROOT must point at an Android SDK" >&2
@@ -195,10 +198,15 @@ for index in "${!build_configs[@]}"; do
     build_config=${build_configs[$index]}
     android_config=$build_config
     apk_path=${apk_paths[$index]}
+    buster_android_payload_deadline_policy "$build_config"
+    printf 'ANDROID_DEADLINE_POLICY config=%s timeout_seconds=%s headroom_warning_percent=%s\n' \
+        "$build_config" "$android_payload_timeout_seconds" "$android_payload_headroom_warning_percent"
     echo "Running Android ${build_config} tests"
     test_started=$SECONDS
     if BUSTER_ANDROID_EXPECTED_ABI="$android_abi" \
         BUSTER_ANDROID_TEST_CONFIG="$build_config" \
+        BUSTER_ANDROID_TEST_TIMEOUT_SECONDS="$android_payload_timeout_seconds" \
+        BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT="$android_payload_headroom_warning_percent" \
         bash "$android_run_tests_script" \
             "$adb_path" \
             "$apk_path" \
