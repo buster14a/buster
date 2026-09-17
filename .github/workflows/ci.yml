@@ -89,7 +89,7 @@ jobs:
           printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/actionlint.log
@@ -327,7 +327,7 @@ jobs:
 
       - name: Retain desktop logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
@@ -433,7 +433,7 @@ jobs:
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-ci-upload/
@@ -455,7 +455,7 @@ jobs:
       # A packing failure already fails this lane; still retain the original tree.
       - name: Retain unpacked native logs
         if: ${{ !cancelled() && steps.pack.outcome != 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -603,7 +603,7 @@ jobs:
 
       - name: Retain mobile logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
@@ -651,7 +651,7 @@ jobs:
           build/uefi-driver test_uefi build/uefi-compiler/Release/ide build/uefi
       - name: Retain firmware execution evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: uefi-boot-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -790,7 +790,7 @@ jobs:
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Retain analyzer inventory, results and measurements
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: clang-analyzer-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -821,7 +821,7 @@ jobs:
         run: 'python3 tools/github_ci_time.py require-jobs --output "$RUNNER_TEMP/desktop-partitions.json"'
       - name: Retain desktop partition inventory
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/desktop-partitions.json
