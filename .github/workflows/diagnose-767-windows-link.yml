@@ -13,14 +13,14 @@ permissions:
 jobs:
   diagnose:
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Check out exact diagnostic revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      - name: Reproduce and print retained ABI linker evidence
+      - name: Reproduce one target-promotion ABI link
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -49,60 +49,51 @@ jobs:
           if ($RuntimeDlls.Count -ne 1) { throw "Expected one x86-64 ASan runtime; found $($RuntimeDlls.Count)" }
           $env:PATH = "$(Split-Path -Parent $RuntimeDlls[0].FullName);$env:PATH"
 
-          $Arguments = @(
-            'test_differential'
-            '--ide', "$PWD\build\Release\ide.exe"
-            '--cc', 'clang.exe'
-            '--strict-mir'
-            '--sanitize-oracle'
-            '--jobs', '1'
-            '--generated', '0'
-            '--source', "$PWD\tests\differential\abi.c"
-            '--host', "$PWD\tests\differential\abi_host.c"
-            '--out', 'evidence\diagnostic'
-          )
-          foreach ($LibraryPath in $LibraryPaths) {
-            $Arguments += @('--library-path', $LibraryPath)
-          }
-          & $Driver @Arguments
-          $DifferentialExit = $LASTEXITCODE
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          $Include = "$PWD\tests\differential"
+          $Caller = "$PWD\evidence\caller.o"
+          $Subject = "$PWD\evidence\subject.o"
+          $Program = "$PWD\evidence\program.exe"
+          $CommonHost = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', '-fsanitize=address,undefined', '-fno-sanitize-recover=all', "-I$Include")
+          & clang.exe @CommonHost tests\differential\abi_host.c -c -o $Caller
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $FailureFiles = @(
-            Get-ChildItem -Path 'evidence\diagnostic\custom' -Filter 'failure.txt' -File -Recurse |
-              Where-Object { $_.Directory.Name -match '_p2$' } |
-              Sort-Object FullName
+          $Candidate = @(
+            'cc'
+            '-fregister-allocator=fast'
+            '-fno-machine-fallback'
+            '-fno-canonical-local-promotion'
+            '-ftarget-local-promotion'
+            '-fno-frontend-ssa'
+            '-fverify-codegen'
+            '-fwrapv'
+            '-fno-strict-aliasing'
+            '-funsigned-char'
+            "-I$Include"
           )
-          Write-Output "DIAGNOSTIC_FAILURE_COUNT=$($FailureFiles.Count)"
-          foreach ($Failure in ($FailureFiles | Select-Object -First 6)) {
-            $Directory = $Failure.Directory.FullName
-            Write-Output "===== FAILURE $Directory ====="
-            Get-Content -Raw $Failure.FullName
-            $Argv = Join-Path $Directory 'link.argv'
-            if (Test-Path $Argv) {
-              $ArgumentBytes = [System.IO.File]::ReadAllBytes($Argv)
-              $ArgumentText = [System.Text.Encoding]::UTF8.GetString($ArgumentBytes).Replace([char]0, "`n")
-              Write-Output '----- link argv -----'
-              Write-Output $ArgumentText
-            }
-            $Stdout = Join-Path $Directory 'link.stdout'
-            if (Test-Path $Stdout) {
-              Write-Output '----- link stdout -----'
-              Get-Content -Raw $Stdout
-            }
-            $Stderr = Join-Path $Directory 'link.stderr'
-            if (Test-Path $Stderr) {
-              Write-Output '----- link stderr -----'
-              Get-Content -Raw $Stderr
-            }
-            $Object = Join-Path $Directory 'subject.o'
-            if (Test-Path $Object) {
-              Write-Output '----- object headers, symbols, relocations, unwind -----'
-              & llvm-readobj.exe --file-headers --sections --symbols --relocations --unwind $Object
-              Write-Output '----- undefined symbols -----'
-              & llvm-nm.exe --undefined-only $Object
-            }
+          foreach ($LibraryPath in $LibraryPaths) { $Candidate += "-L$LibraryPath" }
+          $Candidate += @('tests\differential\abi.c', '-c', '-o', $Subject)
+          Write-Output '===== candidate command ====='
+          Write-Output ((@('build\Release\ide.exe') + $Candidate) -join "`n")
+          & build\Release\ide.exe @Candidate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Write-Output '===== object headers, symbols, relocations, unwind ====='
+          & llvm-readobj.exe --file-headers --sections --symbols --relocations --unwind $Subject
+          Write-Output '===== undefined symbols ====='
+          & llvm-nm.exe --undefined-only $Subject
+
+          $Link = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          foreach ($LibraryPath in $LibraryPaths) { $Link += "-L$LibraryPath" }
+          $Link += @($Caller, $Subject, '-o', $Program)
+          Write-Output '===== link command ====='
+          Write-Output ((@('clang.exe') + $Link) -join "`n")
+          & clang.exe @Link 2>&1 | Tee-Object -FilePath evidence\link.txt
+          $LinkExit = $LASTEXITCODE
+          Write-Output "LINK_EXIT=$LinkExit"
+          if (Test-Path $Program) {
+            Write-Output '===== program execution ====='
+            & $Program
+            Write-Output "PROGRAM_EXIT=$LASTEXITCODE"
           }
-          if ($DifferentialExit -ne 0 -and $FailureFiles.Count -eq 0) {
-            throw "Differential failed with exit $DifferentialExit but retained no p2 failure records"
-          }
-          exit $DifferentialExit
+          exit $LinkExit
