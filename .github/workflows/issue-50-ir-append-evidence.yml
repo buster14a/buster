@@ -18,10 +18,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  frontend-pmu:
+  frontend-evidence:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -38,7 +38,7 @@ jobs:
           ref: ${{ env.HEAD_SHA }}
           path: candidate
           persist-credentials: false
-      - name: Record exact inputs and enable hardware counters
+      - name: Record exact inputs and probe hardware counters
         shell: bash
         run: |
           set -euo pipefail
@@ -60,8 +60,19 @@ jobs:
           sudo sysctl -w kernel.perf_event_paranoid=0 | tee -a evidence/environment.txt
           printf 'perf_event_paranoid_after=' >> evidence/environment.txt
           cat /proc/sys/kernel/perf_event_paranoid | tee -a evidence/environment.txt
-          perf stat --no-big-num -e instructions:u -- true 2> evidence/perf-probe.txt
-          grep -Eq '^[[:space:]]*[0-9]+[[:space:]]+instructions:u' evidence/perf-probe.txt
+          if perf stat --no-big-num -e instructions:u -- true 2> evidence/perf-probe.txt; then
+            printf 'hardware_instructions=available\n' | tee -a evidence/environment.txt
+          else
+            printf 'hardware_instructions=unavailable\n' | tee -a evidence/environment.txt
+            cat evidence/perf-probe.txt
+          fi
+      - name: Install deterministic instruction counter
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version | tee -a evidence/environment.txt
       - name: Build baseline and candidate with the same host compiler
         shell: bash
         run: |
@@ -76,7 +87,7 @@ jobs:
               sha256sum build/Release/ide > ../evidence/"$tree"-ide.sha256
             )
           done
-      - name: Measure interleaved complete frontend runs
+      - name: Measure interleaved complete frontend wall time
         shell: bash
         run: |
           set -euo pipefail
@@ -86,32 +97,25 @@ jobs:
           PY
           )
           printf 'cpu=%s\n' "$CPU" | tee -a evidence/environment.txt
-          printf 'pair\tside\torder\twall_ns\tinstructions\tbench_min_ns\tbench_median_ns\tsignature\n' > evidence/results.tsv
+          printf 'pair\tside\torder\twall_ns\tbench_min_ns\tbench_median_ns\tsignature\n' > evidence/wall-results.tsv
 
           run_one() {
             side=$1
             pair=$2
             order=$3
-            perf_file="evidence/perf-${pair}-${side}.csv"
-            log_file="evidence/bench-${pair}-${side}.log"
+            log_file="evidence/wall-${pair}-${side}.log"
             start=$(date +%s%N)
-            (
-              cd "$side"
-              taskset -c "$CPU" perf stat --no-big-num -x, -e instructions:u \
-                -o "../$perf_file" -- build/Release/ide bench > "../$log_file" 2>&1
-            )
+            (cd "$side" && taskset -c "$CPU" build/Release/ide bench > "../$log_file" 2>&1)
             end=$(date +%s%N)
-            instructions=$(awk -F, '$3 ~ /^instructions/ {gsub(/[[:space:]]/, "", $1); print $1; exit}' "$perf_file")
             line=$(grep -m1 '^BENCH_C_FRONTEND ' "$log_file")
             bench_min=$(printf '%s\n' "$line" | sed -n 's/.* min_ns=\([0-9][0-9]*\).*/\1/p')
             bench_median=$(printf '%s\n' "$line" | sed -n 's/.* median_ns=\([0-9][0-9]*\).*/\1/p')
             signature=$(printf '%s\n' "$line" | sed -E 's/ min_ns=[0-9]+ median_ns=[0-9]+ throughput_mb_s=[0-9]+$//')
-            test -n "$instructions"
             test -n "$bench_min"
             test -n "$bench_median"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-              "$pair" "$side" "$order" "$((end - start))" "$instructions" \
-              "$bench_min" "$bench_median" "$signature" >> evidence/results.tsv
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$pair" "$side" "$order" "$((end - start))" \
+              "$bench_min" "$bench_median" "$signature" >> evidence/wall-results.tsv
           }
 
           for side in baseline candidate; do
@@ -129,6 +133,42 @@ jobs:
               run_one baseline "$pair" 2
             fi
           done
+      - name: Measure deterministic dynamic instruction executions
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'pair\tside\torder\tcallgrind_ir\tsignature\n' > evidence/callgrind-results.tsv
+
+          run_callgrind() {
+            side=$1
+            pair=$2
+            order=$3
+            output="evidence/callgrind-${pair}-${side}.out"
+            log="evidence/callgrind-${pair}-${side}.log"
+            bench="evidence/callgrind-bench-${pair}-${side}.log"
+            (
+              cd "$side"
+              valgrind --tool=callgrind --cache-sim=no --branch-sim=no --collect-jumps=no \
+                --callgrind-out-file="../$output" --log-file="../$log" \
+                build/Release/ide bench > "../$bench" 2>&1
+            )
+            instructions=$(awk '$1 == "summary:" {print $2; exit}' "$output")
+            line=$(grep -m1 '^BENCH_C_FRONTEND ' "$bench")
+            signature=$(printf '%s\n' "$line" | sed -E 's/ min_ns=[0-9]+ median_ns=[0-9]+ throughput_mb_s=[0-9]+$//')
+            test -n "$instructions"
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$pair" "$side" "$order" "$instructions" "$signature" >> evidence/callgrind-results.tsv
+          }
+
+          for pair in 1 2 3; do
+            if ((pair % 2)); then
+              run_callgrind baseline "$pair" 1
+              run_callgrind candidate "$pair" 2
+            else
+              run_callgrind candidate "$pair" 1
+              run_callgrind baseline "$pair" 2
+            fi
+          done
       - name: Summarize paired evidence
         shell: bash
         run: |
@@ -139,57 +179,79 @@ jobs:
           import statistics
           from pathlib import Path
 
-          rows = list(csv.DictReader(Path('evidence/results.tsv').open(), delimiter='\t'))
-          assert len(rows) == 40, len(rows)
-          for row in rows:
-              for key in ('pair', 'order', 'wall_ns', 'instructions', 'bench_min_ns', 'bench_median_ns'):
+          wall_rows = list(csv.DictReader(Path('evidence/wall-results.tsv').open(), delimiter='\t'))
+          instruction_rows = list(csv.DictReader(Path('evidence/callgrind-results.tsv').open(), delimiter='\t'))
+          assert len(wall_rows) == 40, len(wall_rows)
+          assert len(instruction_rows) == 6, len(instruction_rows)
+          for row in wall_rows:
+              for key in ('pair', 'order', 'wall_ns', 'bench_min_ns', 'bench_median_ns'):
                   row[key] = int(row[key])
-          signatures = {row['signature'] for row in rows}
+          for row in instruction_rows:
+              for key in ('pair', 'order', 'callgrind_ir'):
+                  row[key] = int(row[key])
+          signatures = {row['signature'] for row in wall_rows + instruction_rows}
           assert len(signatures) == 1, signatures
-          by_pair = {}
-          for row in rows:
-              by_pair.setdefault(row['pair'], {})[row['side']] = row
-          assert len(by_pair) == 20
-          assert all(set(pair) == {'baseline', 'candidate'} for pair in by_pair.values())
 
-          fields = ('wall_ns', 'instructions', 'bench_min_ns', 'bench_median_ns')
+          def paired(rows):
+              result = {}
+              for row in rows:
+                  result.setdefault(row['pair'], {})[row['side']] = row
+              assert all(set(pair) == {'baseline', 'candidate'} for pair in result.values())
+              return result
+
+          wall_pairs = paired(wall_rows)
+          instruction_pairs = paired(instruction_rows)
+          environment = Path('evidence/environment.txt').read_text().splitlines()
           summary = {
-              'base_sha': Path('evidence/environment.txt').read_text().splitlines()[0].split('=', 1)[1],
-              'head_sha': Path('evidence/environment.txt').read_text().splitlines()[1].split('=', 1)[1],
-              'pairs': len(by_pair),
+              'base_sha': environment[0].split('=', 1)[1],
+              'head_sha': environment[1].split('=', 1)[1],
+              'wall_pairs': len(wall_pairs),
+              'instruction_pairs': len(instruction_pairs),
+              'hardware_instructions': next(line.split('=', 1)[1] for line in environment if line.startswith('hardware_instructions=')),
               'signature': next(iter(signatures)),
               'metrics': {},
           }
-          for field in fields:
-              baseline = [pair['baseline'][field] for pair in by_pair.values()]
-              candidate = [pair['candidate'][field] for pair in by_pair.values()]
-              paired_change = [100.0 * (pair['candidate'][field] / pair['baseline'][field] - 1.0) for pair in by_pair.values()]
+
+          metric_sets = {
+              'wall_ns': wall_pairs,
+              'bench_min_ns': wall_pairs,
+              'bench_median_ns': wall_pairs,
+              'callgrind_ir': instruction_pairs,
+          }
+          for field, pairs in metric_sets.items():
+              baseline = [pair['baseline'][field] for pair in pairs.values()]
+              candidate = [pair['candidate'][field] for pair in pairs.values()]
+              changes = [100.0 * (pair['candidate'][field] / pair['baseline'][field] - 1.0) for pair in pairs.values()]
               summary['metrics'][field] = {
                   'baseline_median': statistics.median(baseline),
                   'candidate_median': statistics.median(candidate),
-                  'median_paired_change_percent': statistics.median(paired_change),
-                  'min_paired_change_percent': min(paired_change),
-                  'max_paired_change_percent': max(paired_change),
+                  'median_paired_change_percent': statistics.median(changes),
+                  'min_paired_change_percent': min(changes),
+                  'max_paired_change_percent': max(changes),
               }
+
           Path('evidence/summary.json').write_text(json.dumps(summary, indent=2) + '\n')
           labels = {
               'wall_ns': 'Process wall time',
-              'instructions': 'Retired user instructions',
               'bench_min_ns': 'Frontend inner minimum',
               'bench_median_ns': 'Frontend inner median',
+              'callgrind_ir': 'Callgrind Ir',
           }
           lines = [
               '# Issue 50 IR append evidence',
               '',
               f"Baseline `{summary['base_sha']}`; candidate `{summary['head_sha']}`; "
-              f"{summary['pairs']} alternating same-CPU pairs.",
+              f"{summary['wall_pairs']} alternating same-CPU native wall pairs and "
+              f"{summary['instruction_pairs']} alternating Callgrind pairs.",
               '',
               f"Semantic signature: `{summary['signature']}`.",
+              '',
+              f"Hardware PMU instructions event: **{summary['hardware_instructions']}** on this hosted VM.",
               '',
               '| Metric | Baseline median | Candidate median | Median paired change | Pair range |',
               '|---|---:|---:|---:|---:|',
           ]
-          for field in fields:
+          for field in ('wall_ns', 'bench_min_ns', 'bench_median_ns', 'callgrind_ir'):
               metric = summary['metrics'][field]
               lines.append(
                   f"| {labels[field]} | {metric['baseline_median']:.0f} | {metric['candidate_median']:.0f} | "
@@ -198,9 +260,9 @@ jobs:
               )
           lines += [
               '',
-              'The hardware counter is `instructions:u` for the complete `ide bench` process. '
-              'Each process performs the optimized 30-iteration C-frontend benchmark after three untimed warmups; '
-              'baseline and candidate order alternates by pair.',
+              'Each process performs the optimized 30-iteration complete C-frontend benchmark after native warmups. '
+              'Callgrind `Ir` is a deterministic dynamic user-mode instruction-execution proxy; it is not a hardware PMU retired-instruction counter. '
+              'The raw PMU probe is retained to make that limitation explicit.',
           ]
           Path('evidence/summary.md').write_text('\n'.join(lines) + '\n')
           PY
