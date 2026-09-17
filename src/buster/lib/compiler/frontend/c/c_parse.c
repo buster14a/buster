@@ -9944,6 +9944,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                      : string_equal(aggregate_spelling, S8("union")) ? C_TYPE_UNION
                                                                      : C_TYPE_ENUM;
     u32 index = c_parse_skip_attributes(preprocess, aggregate_index + 1, end);
+    u32 tag_index = index;
     String8 tag = {0};
     if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
     {
@@ -10079,6 +10080,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     {
         if (result->types[type.value].tag_scope.value == frame->scope.value)
         {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
+                               string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
             return C_TYPE_ID_INVALID;
         }
         type = C_TYPE_ID_INVALID;
