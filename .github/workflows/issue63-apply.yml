@@ -1,4 +1,4 @@
-name: issue-63-apply
+name: issue-63-validation
 
 on:
   push:
@@ -6,73 +6,19 @@ on:
       - fix/issue-63-resource-failures
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply:
+  validate:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           ref: fix/issue-63-resource-failures
           fetch-depth: 1
-      - name: Apply source transformation
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("tools/issue63_apply.py")
-          text = path.read_text()
-
-          lane_old = (
-              "}\n"
-              "#endif''',\n"
-              ")\n\n"
-              "replace_function(\n"
-              "    \"src/buster/lib/os.c\",\n"
-              "    \"void lane_run"
-          )
-          lane_new = (
-              "}''',\n"
-              ")\n\n"
-              "replace_function(\n"
-              "    \"src/buster/lib/os.c\",\n"
-              "    \"void lane_run"
-          )
-          if text.count(lane_old) != 1:
-              raise SystemExit(f"expected one lane boundary, found {text.count(lane_old)}")
-          text = text.replace(lane_old, lane_new, 1)
-
-          pooled_old = (
-              "replace_once(\n"
-              "    \"src/buster/tests/os_test.c\",\n"
-              "    \"BUSTER_CHECK(pooled != 0);\",\n"
-              "    \"BUSTER_ENSURE(pooled != 0);\",\n"
-              ")\n"
-          )
-          pooled_new = (
-              "path = \"src/buster/tests/os_test.c\"\n"
-              "text = read(path)\n"
-              "pooled_check = \"BUSTER_CHECK(pooled != 0);\"\n"
-              "if text.count(pooled_check) != 2:\n"
-              "    raise RuntimeError(f\"{path}: expected two pooled arena checks, found {text.count(pooled_check)}\")\n"
-              "write(path, text.replace(pooled_check, \"BUSTER_ENSURE(pooled != 0);\"))\n"
-          )
-          if text.count(pooled_old) != 1:
-              raise SystemExit(f"expected one pooled-audit block, found {text.count(pooled_old)}")
-          path.write_text(text.replace(pooled_old, pooled_new, 1))
-          PY
-          python3 -m py_compile tools/issue63_apply.py
-          python3 tools/issue63_apply.py
-      - name: Check patch whitespace
-        run: git diff --check -- src tools/differential.c
-      - name: Commit implementation
-        shell: bash
-        run: |
-          git add src tools/differential.c
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'runtime: make resource failures transactional'
-          git push origin HEAD:fix/issue-63-resource-failures
+      - name: Full configuration matrix
+        run: ./build.sh test_all_combinations_ci
+      - name: Release self-host
+        run: ./build.sh test_self_host --config Release
