@@ -1,0 +1,33 @@
+name: Apply issue 74 implementation
+
+on:
+  push:
+    branches:
+      - fix/issue-74-gnu-atomics
+    paths:
+      - tools/issue_74_apply.py
+      - .github/workflows/issue-74-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply guarded source transformation
+        run: python3 tools/issue_74_apply.py
+      - name: Validate and publish implementation commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm tools/issue_74_apply.py .github/workflows/issue-74-apply.yml
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'frontend/c: implement remaining GNU atomic builtins'
+          git push origin HEAD:${GITHUB_REF_NAME}
