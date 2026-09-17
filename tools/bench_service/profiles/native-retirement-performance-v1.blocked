@@ -1,0 +1,13 @@
+schema=1
+recipe=native-retirement-performance-v1
+repository=buster14a/buster
+status=blocked
+contract=docs/native-retirement-performance-contract.md
+contract-sha256=53096e73ee875db48c69b793ef16603124e499959ac0380ae12928177c72ebbd
+support-declaration=docs/native-retirement-support-v1.tsv
+support-declaration-sha256=aa883c302a326143ff5e2f670bdb5e66dd85162e45033246c40df5f5a3411c21
+binding-validator=tools/native_retirement_performance_binding.py
+binding-validator-sha256=c550b040b8e88f7fc228ee07acd4d7d222db30ddf62e13d00b1e951acec599c5
+statistics=tools/throughput/retirement_stats.h
+statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8
+requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay

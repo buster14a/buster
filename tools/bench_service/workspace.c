@@ -9,12 +9,6 @@
  * is not a process supervisor, build recipe runner, transport, or host lease.
  */
 #include "queue.h"
-BUSTER_GLOBAL_LOCAL char const bq_real_recipe[] =
-    "schema=1\n"
-    "recipe=validate-buster-v1\n"
-    "repository=buster14a/buster\n"
-    "source-manifest=BQ-SOURCE-V1\n"
-    "layout=separate-source-build-v1\n";
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -713,6 +707,7 @@ bool bq_workspace_name(char result[64], u64 id, u64 token)
 
 BUSTER_GLOBAL_LOCAL bool bq_workspace_seal_bytes(BqJob const* job, char bytes[512], u32* size)
 {
+    String8 recipe = bq_field(&job->request, 2);
     String8 base = bq_field(&job->request, 3);
     String8 candidate = bq_field(&job->request, 4);
     char number[32];
@@ -727,8 +722,9 @@ BUSTER_GLOBAL_LOCAL bool bq_workspace_seal_bytes(BqJob const* job, char bytes[51
          bq_workspace_append(bytes, 512, &used, number, (u32)token_length) &&
          bq_workspace_append(bytes, 512, &used, "\nrequest=", sizeof("\nrequest=") - 1) &&
          bq_workspace_append(bytes, 512, &used, job->digest, SHA256_HEX_CAPACITY - 1) &&
-         bq_workspace_append(bytes, 512, &used, "\nrecipe=validate-buster-v1\nbase=",
-                             sizeof("\nrecipe=validate-buster-v1\nbase=") - 1) &&
+         bq_workspace_append(bytes, 512, &used, "\nrecipe=", sizeof("\nrecipe=") - 1) &&
+         bq_workspace_append(bytes, 512, &used, (char const*)recipe.pointer, recipe.length) &&
+         bq_workspace_append(bytes, 512, &used, "\nbase=", sizeof("\nbase=") - 1) &&
          bq_workspace_append(bytes, 512, &used, (char const*)base.pointer, base.length) &&
          bq_workspace_append(bytes, 512, &used, "\ncandidate=", sizeof("\ncandidate=") - 1) &&
          bq_workspace_append(bytes, 512, &used, (char const*)candidate.pointer, candidate.length) &&
@@ -1035,18 +1031,22 @@ BUSTER_GLOBAL_LOCAL BqError bq_real_advance(BqQueue* queue, BqJob const* job, Bq
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_installed_recipe(int installed)
+BUSTER_GLOBAL_LOCAL bool bq_installed_recipe(int installed, BqRecipe selected)
 {
+    BqRecipeFiles files;
+    String8 expected = bq_recipe_profile(selected);
+    bool described = bq_recipe_service(selected) && bq_recipe_files(selected, &files) && expected.length > 0 &&
+                     expected.length <= BQ_RECIPE_PROFILE_CAP;
     int recipes = openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    int recipe = recipes >= 0 ?
-                 openat(recipes, "validate-buster-v1.recipe", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int recipe = described && recipes >= 0 ?
+                 openat(recipes, files.profile, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info;
-    u8 bytes[sizeof(bq_real_recipe)];
+    u8 bytes[BQ_RECIPE_PROFILE_CAP + 1];
     u32 size = 0;
-    bool ok = recipes >= 0 && bq_owned_directory(recipes, false, true) && recipe >= 0 &&
+    bool ok = described && recipes >= 0 && bq_owned_directory(recipes, false, true) && recipe >= 0 &&
               fstat(recipe, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 && (info.st_mode & 0222) == 0 &&
-              bq_read_file(recipe, bytes, sizeof(bytes), &size) && size == sizeof(bq_real_recipe) - 1 &&
-              !memcmp(bytes, bq_real_recipe, sizeof(bq_real_recipe) - 1);
+              bq_read_file(recipe, bytes, sizeof(bytes), &size) && size == expected.length &&
+              !memcmp(bytes, expected.pointer, expected.length);
     if (recipe >= 0)
     {
         close(recipe);
@@ -1132,7 +1132,7 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     {
         error = bq_attempt_write(queue, job, installed_root, workspace_root, &installed_info, &workspaces_info);
     }
-    if (error == BQ_OK && !bq_installed_recipe(installed))
+    if (error == BQ_OK && !bq_installed_recipe(installed, bq_request_recipe(&job->request)))
     {
         error = BQ_RECIPE_MISMATCH;
     }
