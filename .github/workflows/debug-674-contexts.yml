@@ -1,0 +1,83 @@
+name: Debug issue 674 contexts
+
+on:
+  push:
+    branches:
+      - debug/674-generic-contexts
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build candidate compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/build"
+          "$RUNNER_TEMP/build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON
+          "$RUNNER_TEMP/build" build --config Release -t ide -- -j2
+      - name: Compile focused contexts
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/issue674
+          cat > /tmp/issue674/static-assert.c <<'EOF'
+          static int unselected(void) { return 99; }
+          _Static_assert(_Generic((float)0, float: 1, default: unselected()), "generic static assertion");
+          EOF
+          cat > /tmp/issue674/enumerator.c <<'EOF'
+          static int unselected(void) { return 99; }
+          enum { GENERIC_ENUM = _Generic(1, int: 3, default: unselected()) };
+          int value(void) { return GENERIC_ENUM; }
+          EOF
+          cat > /tmp/issue674/array-bound.c <<'EOF'
+          static int unselected(void) { return 99; }
+          static int generic_array[_Generic((double)0, int: unselected(), default: 2)];
+          int value(void) { return (int)(sizeof(generic_array) / sizeof(generic_array[0])); }
+          EOF
+          cat > /tmp/issue674/initializer.c <<'EOF'
+          static int unselected(void) { return 99; }
+          static int generic_value = _Generic((float)0, float: 5, default: unselected());
+          int value(void) { return generic_value; }
+          EOF
+          cat > /tmp/issue674/default.c <<'EOF'
+          static int unselected(void) { return 99; }
+          static int generic_value = _Generic((double)0, int: unselected(), default: 11);
+          int value(void) { return generic_value; }
+          EOF
+          cat > /tmp/issue674/nested.c <<'EOF'
+          static int unselected(void) { return 99; }
+          static int generic_value = _Generic(1, int: _Generic(1.0, double: 13, default: unselected()), default: unselected());
+          int value(void) { return generic_value; }
+          EOF
+          cat > /tmp/issue674/case-label.c <<'EOF'
+          static int unselected(void) { return 99; }
+          int value(int x) { switch (x) { case _Generic(1, int: 7, default: unselected()): return 1; default: return 0; } }
+          EOF
+          cat > /tmp/issue674/invalid-unselected.c <<'EOF'
+          _Static_assert(_Generic(1, int: 1, default: missing_identifier), "must diagnose constraints");
+          EOF
+          status=0
+          for source in /tmp/issue674/*.c; do
+            name="$(basename "$source" .c)"
+            echo "===== $name ====="
+            ./build/Release/ide cc -std=c11 -c "$source" -o "/tmp/issue674/$name.o" >"/tmp/issue674/$name.stdout" 2>"/tmp/issue674/$name.stderr"
+            rc=$?
+            echo "exit=$rc"
+            cat "/tmp/issue674/$name.stdout"
+            cat "/tmp/issue674/$name.stderr"
+            case "$name" in
+              invalid-unselected) test "$rc" -ne 0 || status=1 ;;
+              *) test "$rc" -eq 0 || status=1 ;;
+            esac
+          done
+          exit "$status"
