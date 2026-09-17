@@ -4555,7 +4555,8 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* d
         {
             return operation == (source->bit_width < destination->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
                                  : source->bit_width > destination->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
-                                                                              : IR_CONVERSION_IDENTITY);
+                                                                              : IR_CONVERSION_IDENTITY) &&
+                   !(source->bit_width == destination->bit_width && source->float_format != destination->float_format);
         }
         if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_FLOAT)
         {
@@ -4592,7 +4593,8 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* d
 BUSTER_GLOBAL_LOCAL bool ir_canonical_float_constant_valid(IrType* type, IrInstruction* instruction)
 {
     if (!type || !instruction || type->kind != IR_TYPE_FLOAT || instruction->operand_count != 0 || instruction->target_count != 0 ||
-        instruction->result.value == IR_ID_UNDERLYING_INVALID || !instruction->immediates)
+        instruction->result.value == IR_ID_UNDERLYING_INVALID || !instruction->immediates || type->float_format >= IR_FLOAT_FORMAT_COUNT ||
+        (type->float_format == IR_FLOAT_FORMAT_BFLOAT16 && type->bit_width != 16))
     {
         return false;
     }
@@ -4604,7 +4606,11 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_float_constant_valid(IrType* type, IrInstr
         return type->layout.resolved && type->layout.size == 16 && type->layout.alignment == 16 && instruction->immediate_count == 2 &&
                (instruction->immediates[1] & ~UINT64_C(0xffff)) == 0;
     }
-    return (type->bit_width == 32 || type->bit_width == 64) && instruction->immediate_count == 1;
+    return type->bit_width == 16
+               ? type->layout.resolved && type->layout.size == 2 && type->layout.alignment >= 2 &&
+                     !(type->layout.alignment & (type->layout.alignment - 1)) && instruction->immediate_count == 1 &&
+                     (instruction->immediates[0] & ~UINT64_C(0xffff)) == 0
+               : (type->bit_width == 32 || type->bit_width == 64) && instruction->immediate_count == 1;
 }
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_ok(void)
@@ -4652,7 +4658,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                 // The compact initializer_bits field carries only one u64;
                 // f80 globals must use an explicit 16-byte BYTES initializer
                 // until the frontend/codegen can carry their full payload.
-                initializer_valid = type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64);
+                initializer_valid = type->kind == IR_TYPE_FLOAT && type->float_format < IR_FLOAT_FORMAT_COUNT &&
+                                    (type->float_format != IR_FLOAT_FORMAT_BFLOAT16 || type->bit_width == 16) &&
+                                    (type->bit_width == 32 || type->bit_width == 64 ||
+                                     (type->bit_width == 16 && (global->initializer_bits & ~UINT64_C(0xffff)) == 0 && type->layout.size == 2 &&
+                                      type->layout.alignment >= 2 && !(type->layout.alignment & (type->layout.alignment - 1))));
             }
             break;
             case IR_GLOBAL_INITIALIZER_BYTES:
