@@ -1,0 +1,116 @@
+name: Repair PR 749 frozen-support validation
+
+on:
+  push:
+    branches: [fix/707-zig-configure]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Relocate focused test outside frozen support inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_head="$GITHUB_SHA"
+          original_head="$(git rev-parse "$GITHUB_SHA^")"
+          git fetch --no-tags origin main
+          git reset --hard "$original_head"
+          git checkout FETCH_HEAD -- tests/ci_tools_test.py
+
+          cat > tools/zig_compiler_id_test.py <<'PY'
+          #!/usr/bin/env python3
+          """Regression coverage for the Zig-only CMake compiler-ID adjustment."""
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
+          import textwrap
+          import unittest
+
+          ROOT = Path(__file__).resolve().parents[1]
+
+
+          @unittest.skipUnless(shutil.which("cmake"), "CMake is required")
+          class ZigCompilerIdTests(unittest.TestCase):
+              def test_compile_only_identification_is_scoped_to_zig_cc(self):
+                  cmake_lists = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+                  include = 'include("${CMAKE_CURRENT_LIST_DIR}/cmake/ZigCompilerId.cmake")'
+                  self.assertEqual(cmake_lists.count(include), 1)
+                  self.assertLess(cmake_lists.index(include), cmake_lists.index("project(buster C)"))
+
+                  helper = (ROOT / "cmake/ZigCompilerId.cmake").as_posix()
+                  with tempfile.TemporaryDirectory() as temporary:
+                      script = Path(temporary) / "verify-zig-compiler-id.cmake"
+                      script.write_text(textwrap.dedent(f'''\
+                          set(CMAKE_C_COMPILER "zig;cc")
+                          include("{helper}")
+                          if (NOT CMAKE_C_COMPILER_ID_FLAGS_ALWAYS STREQUAL "-c")
+                              message(FATAL_ERROR "zig cc did not select compile-only compiler identification")
+                          endif()
+
+                          unset(CMAKE_C_COMPILER_ID_FLAGS_ALWAYS)
+                          set(CMAKE_C_COMPILER "C:/tools/zig.exe")
+                          set(CMAKE_C_COMPILER_ARG1 "cc")
+                          include("{helper}")
+                          if (NOT CMAKE_C_COMPILER_ID_FLAGS_ALWAYS STREQUAL "-c")
+                              message(FATAL_ERROR "zig.exe plus CMAKE_C_COMPILER_ARG1 did not select -c")
+                          endif()
+
+                          set(CMAKE_C_COMPILER_ID_FLAGS_ALWAYS "sentinel")
+                          unset(CMAKE_C_COMPILER_ARG1)
+                          set(CMAKE_C_COMPILER "clang")
+                          include("{helper}")
+                          if (NOT CMAKE_C_COMPILER_ID_FLAGS_ALWAYS STREQUAL "sentinel")
+                              message(FATAL_ERROR "non-Zig compiler state was mutated")
+                          endif()
+
+                          unset(CMAKE_C_COMPILER_ID_FLAGS_ALWAYS)
+                          set(CMAKE_C_COMPILER "zig")
+                          include("{helper}")
+                          if (DEFINED CMAKE_C_COMPILER_ID_FLAGS_ALWAYS)
+                              message(FATAL_ERROR "plain zig without the cc subcommand inherited C flags")
+                          endif()
+                      '''), encoding="utf-8", newline="\n")
+                      subprocess.run([shutil.which("cmake"), "-P", str(script)], check=True)
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(".github/workflows/ci.yml")
+          source = path.read_text(encoding="utf-8")
+          needle = '          "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"\n'
+          replacement = needle + '          "$BUSTER_CI_PYTHON" tools/zig_compiler_id_test.py -v 2>&1 | tee -a "$RUNNER_TEMP/buster-ci/workflow-tools.log"\n'
+          if source.count(needle) != 1:
+              raise SystemExit(f"expected one workflow-tools insertion point, found {source.count(needle)}")
+          path.write_text(source.replace(needle, replacement, 1), encoding="utf-8", newline="\n")
+          PY
+
+          python3 tools/zig_compiler_id_test.py -v
+          python3 tests/action_pins_test.py -v
+          python3 tests/bootstrap_wrapper_test.py -v
+          python3 tests/ci_tools_test.py -v
+          python3 tools/native_retirement_contract_test.py \
+            ContractTests.test_checked_in_support_contract_replays_every_tree_path -v
+          git diff --check
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/ci.yml tests/ci_tools_test.py tools/zig_compiler_id_test.py
+          git commit -m "test: isolate Zig compiler-id regression coverage"
+          git push --force-with-lease=refs/heads/fix/707-zig-configure:"$expected_head" \
+            origin HEAD:refs/heads/fix/707-zig-configure
