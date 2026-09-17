@@ -46,5 +46,17 @@ struct BusterX86CompletionLedger
     u64 digest;
 };
 
-BUSTER_F_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);
+#if !BUSTER_UNITY_BUILD && BUSTER_COMPILER_CLANG
+/*
+    The unity test aggregate receives optnone in apps/ide/ide.c. Mirror that
+    policy for this suite's standalone non-unity object: optimizing its large
+    test body otherwise requires several GiB of compiler memory.
+*/
+#define BUSTER_X86_64_METADATA_TEST_DECL __attribute__((optnone))
+#else
+#define BUSTER_X86_64_METADATA_TEST_DECL
+#endif
+
+BUSTER_F_DECL BUSTER_X86_64_METADATA_TEST_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);
+#undef BUSTER_X86_64_METADATA_TEST_DECL
 #endif
