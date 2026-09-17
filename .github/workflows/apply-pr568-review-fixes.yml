@@ -1,4 +1,4 @@
-name: Apply PR 568 review fixes
+name: Reconcile PR 568 with current main
 
 on:
   push:
@@ -9,19 +9,14 @@ permissions:
   contents: write
 
 concurrency:
-  group: apply-pr568-review-fixes
+  group: reconcile-pr568-current-main
   cancel-in-progress: false
 
 jobs:
-  apply:
+  reconcile:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - name: Check out immutable helper payload
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: helper
-          persist-credentials: false
       - name: Check out the exact PR branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -29,33 +24,47 @@ jobs:
           path: target
           fetch-depth: 0
           persist-credentials: true
-      - name: Reconstruct and commit the reviewed patch locally
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git -C target rev-parse HEAD)" = d70fd4b46a3537e844403f0015caf20e275f891b
-          cp helper/.github/pr568-review-fix/patch-v2.gz "$RUNNER_TEMP/pr568-review.patch.gz"
-          echo '0bca71190ea22116956d476454e947ab2ca82ed66b46538b43ba3040207049c4  '"$RUNNER_TEMP/pr568-review.patch.gz" | sha256sum --check
-          gzip -dc "$RUNNER_TEMP/pr568-review.patch.gz" > "$RUNNER_TEMP/pr568-review.patch"
-          echo 'b9c421338b75ba825bdac88a8f9b9cdf0b8f467636e9c71e53713cb810a7d82e  '"$RUNNER_TEMP/pr568-review.patch" | sha256sum --check
-          git -C target apply --check "$RUNNER_TEMP/pr568-review.patch"
-          git -C target apply --index "$RUNNER_TEMP/pr568-review.patch"
-          python3 helper/.github/pr568-review-fix/post_apply.py target
-          rm -rf target/.github/pr568-patch
-          git -C target rm .github/workflows/pr568-apply-review-fixes.yml
-          git -C target add -A
-          git -C target diff --cached --check
-          git -C target config user.name 'David'
-          git -C target config user.email 'davidgmbb@gmail.com'
-          git -C target commit -m 'bench: resolve native-retirement binding review findings (#568)' \
-            -m 'Authenticate the exact receipt bytes before parsing, require one supervisor-observed process instance per invocation, bind the schedule CPU and native target to admitted receipts, and derive runtime applicability from frozen row obligations. Update both performance-contract entry points and retain adversarial regressions.'
-      - name: Validate the repaired binding from a clean commit
+      - name: Merge the reviewed main checkpoint and update the immutable support pin
         shell: bash
         working-directory: target
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e844403f0015caf20e275f891b
+          test "$(git rev-parse HEAD)" = e91a92ee5d14b03160342413e97902ab25eeab59
+          git fetch --no-tags origin f5ed0ec53b06b62ea457d4cc77173c77f96c064c
+          git merge --no-commit --no-ff f5ed0ec53b06b62ea457d4cc77173c77f96c064c
+
+          test "$(git hash-object docs/native-retirement-support-v1.tsv)" = 81cb632afade253c5d841d6bd55f6149cc30ea08
+          printf '%s  %s\n' \
+            '4dc9203fca4672a2cb51910f7ab340b8ad3060bc6793af28e6fd25c3ed444ab6' \
+            docs/native-retirement-support-v1.tsv | sha256sum --check
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tools/native_retirement_performance_binding.py")
+          text = path.read_text()
+          old = 'SUPPORT_DECLARATION_SHA256 = "7a035eb922b9b26c8c5fdfb50008240612aa1ad69ac2bc3dbcb11eca514e18f4"'
+          new = 'SUPPORT_DECLARATION_SHA256 = "4dc9203fca4672a2cb51910f7ab340b8ad3060bc6793af28e6fd25c3ed444ab6"'
+          if text.count(old) != 1:
+              raise SystemExit("reviewed support pin changed unexpectedly")
+          path.write_text(text.replace(old, new))
+          PY
+
+          git add tools/native_retirement_performance_binding.py docs/native-retirement-support-v1.tsv
+          git diff --cached --check
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'Merge current main into PR #568 and repin support census' \
+            -m 'Integrate main f5ed0ec53b06b62ea457d4cc77173c77f96c064c, retain every additive support row, and bind the validator to the exact merged declaration SHA-256. Do not change thresholds, eligibility policy, dispatch, service qualification, or performance claims.'
+      - name: Validate the reconciled clean merge commit
+        shell: bash
+        working-directory: target
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^1)" = e91a92ee5d14b03160342413e97902ab25eeab59
+          test "$(git rev-parse HEAD^2)" = f5ed0ec53b06b62ea457d4cc77173c77f96c064c
           test -z "$(git status --porcelain)"
+
           python3 -m py_compile \
             tools/native_retirement_performance_binding.py \
             tools/native_retirement_performance_binding_test.py \
@@ -63,12 +72,27 @@ jobs:
           python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
           python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
           python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_evidence_upload_test.py -v
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out "$RUNNER_TEMP/contract"
+
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv \
+            -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 \
+            tools/throughput/throughput.c tools/throughput/shared.c -lm \
+            -o "$RUNNER_TEMP/bench-throughput-retirement"
+          "$RUNNER_TEMP/bench-throughput-retirement" self-test
+
           git diff --check
           test -z "$(git status --porcelain)"
-      - name: Push the validated fast-forward repair
+      - name: Push the validated merge commit
         shell: bash
         working-directory: target
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e844403f0015caf20e275f891b
+          test "$(git rev-parse HEAD^1)" = e91a92ee5d14b03160342413e97902ab25eeab59
+          test "$(git rev-parse HEAD^2)" = f5ed0ec53b06b62ea457d4cc77173c77f96c064c
           git push origin HEAD:refs/heads/docs/511-retirement-performance-contract
