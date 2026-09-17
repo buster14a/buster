@@ -1236,6 +1236,100 @@ class ContractTests(unittest.TestCase):
         row = next(item for item in applicability_rows if item["row"] == "129")
         self.assertEqual(row["applicability"], "admitted-supported")
 
+    def make_reference_supplements(self):
+        import native_retirement_reference as reference
+        for directory in self.shards:
+            candidate = (directory / "candidate-ide.exe").read_bytes()
+            (directory / "baseline-ide.exe").write_bytes(candidate)
+            manifest_path = directory / "manifest.txt"
+            text = manifest_path.read_text().replace("baseline_revision_claim=" + "b" * 40,
+                                                    "baseline_revision_claim=" + "a" * 40)
+            text = re.sub(r"baseline_bytes=.*", "baseline_bytes=" + str(len(candidate)), text)
+            text = re.sub(r"baseline_sha256=.*", "baseline_sha256=" + sha(candidate), text)
+            manifest_path.write_text(text)
+            fields, results = read_table(directory / "results.tsv")
+            baseline = next(row for row in results if row["row"] == str(int(row["group"]) * 4))
+            baseline["status"] = "1"
+            write_table(directory / "results.tsv", fields, results)
+            report = contract.validate(directory)
+            output = directory / "reference-supplement"
+            output.mkdir()
+            (output / "clang.exe").write_bytes(b"test compiler identity")
+            (output / "version.txt").write_bytes(b"clang version test\n")
+            records = []
+            for outcome in report["outcomes"].values():
+                if outcome["side"] != "baseline" or not outcome["reference_failure"]:
+                    continue
+                row = report["selected_row_records"][str(outcome["row"]) ]
+                prefix = output / row["group"]
+                # The first selected groups are x86-64 ELF object controls.
+                data = bytearray(64)
+                data[:6] = b"\x7fELF\x02\x01"
+                struct.pack_into("<HH", data, 16, 1, 62)
+                prefix.with_suffix(".o").write_bytes(data)
+                for stream in ("stdout", "stderr"):
+                    prefix.with_suffix("." + stream).write_bytes(b"")
+                argv = reference.command(contract.read_argv(directory / row["argv_evidence"]), row,
+                                         output / "clang.exe", prefix.with_suffix(".o"))
+                prefix.with_suffix(".argv.json").write_text(json.dumps(argv))
+                records.append({"row": row["row"], "group": row["group"], "status": 0,
+                                "object_bytes": len(data), "object_sha256": sha(data),
+                                "stdout_sha256": sha(b""), "stderr_sha256": sha(b""), "oracle": "clang-object"})
+            (output / "manifest.json").write_text(json.dumps({
+                "schema": 1, "directory": str(directory),
+                "compiler_sha256": reference.digest(output / "clang.exe"),
+                "version_sha256": reference.digest(output / "version.txt"),
+                "census_manifest_sha256": reference.digest(directory / "manifest.txt"),
+                "rows_identity_sha256": report["rows_identity_sha256"],
+                "input_ledger_sha256": report["input_ledger_sha256"],
+                "environment": {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}, "results": records}))
+
+    def test_reference_supplement_preserves_direct_failures_and_candidate_gate(self):
+        self.make_reference_supplements()
+        report = contract.validate_shards(self.shards, self.root / "supplement.json", reference_supplements=True)
+        self.assertEqual(len(report["direct_reference_failure_rows"]), 8)
+        self.assertEqual(report["reference_failure_rows"], [])
+        fields, results = read_table(self.shards[0] / "results.tsv")
+        candidate = next(row for row in results if int(row["row"]) % 4 == 1)
+        candidate["status"] = "1"
+        write_table(self.shards[0] / "results.tsv", fields, results)
+        with self.assertRaisesRegex(AssertionError, "candidate has unresolved rows"):
+            contract.validate_shards(self.shards, self.root / "candidate-failed.json", True, reference_supplements=True)
+
+    def test_reference_supplement_rejects_missing_rows_and_tampered_argv(self):
+        self.make_reference_supplements()
+        output = self.shards[0] / "reference-supplement"
+        manifest_path = output / "manifest.json"
+        original = manifest_path.read_text()
+        manifest = json.loads(original)
+        manifest["results"] = []
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(AssertionError, "incomplete reference supplement"):
+            contract.validate_shards(self.shards, self.root / "missing.json", reference_supplements=True)
+        manifest_path.write_text(original)
+        argv = next(output.glob("*.argv.json"))
+        command = json.loads(argv.read_text())
+        command.append("-DREPLACE_SOURCE")
+        argv.write_text(json.dumps(command))
+        with self.assertRaisesRegex(AssertionError, "reference argv mismatch"):
+            contract.validate_shards(self.shards, self.root / "argv.json", reference_supplements=True)
+
+    def test_reference_supplement_checks_target_object_header(self):
+        self.make_reference_supplements()
+        output = self.shards[0] / "reference-supplement"
+        artifact = next(output.glob("*.o"))
+        data = bytearray(artifact.read_bytes())
+        struct.pack_into("<H", data, 18, 183)  # AArch64 bytes in an x86-64 row.
+        artifact.write_bytes(data)
+        manifest_path = output / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["results"][0]["object_sha256"] = sha(data)
+        manifest_path.write_text(json.dumps(manifest))
+        report = contract.validate_shards(self.shards, self.root / "wrong-target.json", reference_supplements=True)
+        self.assertEqual(len(report["reference_failure_rows"]), 4)
+
+
+
 class CheckedInDependencyTests(unittest.TestCase):
     def test_historical_gap_ledger_maps_to_current_row_numbers(self):
         root = Path(__file__).resolve().parents[1]
@@ -1284,6 +1378,7 @@ class CheckedInDependencyTests(unittest.TestCase):
                     producer)
                 self.assertIsNotNone(match)
                 self.assertEqual(match.group(1), getattr(contract, "FULL_DEPENDENCY_" + name.upper() + "_SHA256"))
+
 
 
 if __name__ == "__main__":

@@ -30,6 +30,11 @@ on:
       - tools/native_retirement_materializer.py
       - tools/native_retirement_materializer_test.py
       - tools/native_retirement_external.py
+      - tools/native_retirement_sdks.py
+      - tools/native_retirement_sdks_test.py
+      - tools/native_retirement_reference.py
+      - tools/native-retirement-mingw/**
+      - docs/native-retirement-sdks-v1.json
       - tools/native_retirement_external_test.py
       - tools/native_retirement_result_input.py
       - tools/native_retirement_result_input_test.py
@@ -131,6 +136,8 @@ jobs:
           path: external/musl
           fetch-depth: 1
           persist-credentials: false
+      - name: Materialize pinned target SDK headers
+        run: python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
       - name: Prepare the pinned external closure
         run: >-
           python3 tools/native_retirement_external.py prepare
@@ -148,6 +155,7 @@ jobs:
           python3 tools/native_retirement_materializer_test.py -v
           python3 tools/native_retirement_external.py self-test
           python3 tools/native_retirement_external_test.py -v
+          python3 tools/native_retirement_sdks_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v

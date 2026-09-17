@@ -14677,6 +14677,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTes
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        // Android x86-64 uses binary128. Keep this row as an explicit
+        // unsupported-initializer control until that format is implemented;
+        // it must never silently inherit these x87 payload expectations.
+        if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
+        {
+            BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+            if (lowered.diagnostic_count)
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
+                                   S8("unsupported C global initializer for 'l_hex'"));
+            }
+            scratch_end(temporary);
+            continue;
+        }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         BUSTER_TEST(arguments, lowered.program != 0);
         if (lowered.program)
@@ -15003,6 +15018,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestA
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        // Android x86-64 uses binary128. Keep this row as an explicit
+        // unsupported-initializer control until that format is implemented;
+        // it must never silently inherit these x87 payload expectations.
+        if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
+        {
+            BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+            if (lowered.diagnostic_count)
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
+                                   S8("unsupported C global initializer for 'min_normal'"));
+            }
+            scratch_end(temporary);
+            continue;
+        }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         if (lowered.program)
         {
@@ -15046,6 +15076,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArgum
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        // Android x86-64 uses binary128. Keep this row as an explicit
+        // unsupported-initializer control until that format is implemented;
+        // it must never silently inherit these x87 payload expectations.
+        if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
+        {
+            BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+            if (lowered.diagnostic_count)
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
+                                   S8("unsupported C global initializer for 'brace'"));
+            }
+            scratch_end(temporary);
+            continue;
+        }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         if (lowered.program)
         {
@@ -15155,6 +15200,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        // Android x86-64 uses binary128. Keep this row as an explicit
+        // unsupported-initializer control until that format is implemented;
+        // it must never silently inherit these x87 payload expectations.
+        if (parsed_target.target.os == OPERATING_SYSTEM_ANDROID)
+        {
+            BUSTER_TEST(arguments, target_data_layout(parsed_target.target).long_double_type.bit_width == 128);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+            if (lowered.diagnostic_count)
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
+                                   S8("unsupported C global initializer for 'folded_quotient'"));
+            }
+            scratch_end(temporary);
+            continue;
+        }
         BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
         if (lowered.program)
         {

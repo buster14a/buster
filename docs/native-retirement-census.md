@@ -22,7 +22,7 @@ current support ledger. The integrated profile has 558 inputs,
 subjects plus 6 registered non-object controls. The original 192-row
 historical gap ledger and the original 341 applicability classifications remain
 explicit and source-bound. Eighteen additional source-bound target exclusions
-bring the applicability ledger to 359 entries:
+brought the applicability ledger to 359 entries in the earlier repair:
 
 | Fixture | Object targets retained | Why the other targets are inapplicable |
 | --- | --- | --- |
@@ -32,9 +32,7 @@ bring the applicability ledger to 359 entries:
 
 These additions preserve every fixture byte and census row. Their 288
 non-executed rows carry authenticated skip provenance; the 288 rows for the
-three fixtures' applicable targets still execute. They do not waive missing
-libc headers, host-observer assembly failures, function-count disagreements,
-or unresolved archived references. Both clean-candidate and clean-acceptance
+three fixtures' applicable targets still execute. They do not waive candidate compiler or evidence failures. Both clean-candidate and clean-acceptance
 requirements remain active. The validator prints every failing fixture and its
 row count before rejecting an incomplete census, with full detail in the JSON
 and TSV evidence. The producer also counts failed MIR children when their
@@ -188,19 +186,19 @@ SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
 the 558 input rows, 410 subject inputs (404 supported-object subjects and six
 non-object controls), 78,720 support-contract identities,
-or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
-generated data, or any other non-repo dependency remain visible diagnostic rows
-until their owning gate supplies that setup.
+or the support ledger bytes and digests. These are historical replay dispositions. The current full census supplies
+the authenticated 692-record project closure, including the target SDK headers
+and the project-owned MinGW varargs adapter described below.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`6639387fe418cea3a31e51ca4683809920168b624ea3f270bc0a520b96d2003d`, materializer
+`7e27cce44651a4adaea2707fe2eaefd0f2a0a29564bb40a5262a18685ff91daa`, materializer
 receipt SHA-256
-`28feba705367c1998e13cb306f30d9e8e5bf89f0dd3b373433960c39dcb711f7`, project
+`50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad`, project
 closure SHA-256
-`b341e623f5475088fb5abd46b29628fba9accb135c41662e5cedf615635fcb76`, and
+`9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03`, and
 materializer ledger SHA-256
-`e6736f30321aa4a993067bec42997bf7fa5369c282ddb194b3bb414d43d2c5a3`.
+`eb69112f4c38a2298dddfa6d132c594c0349b5b31ee5cf309bf42820c3475944`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
@@ -398,7 +396,7 @@ reclassify a declared gap. Smaller fixtures must explicitly use
 `profile=self-test` and can never satisfy production profile acceptance.
 The producer also copies the immutable
 `docs/native-retirement-applicability-v1.tsv` projection and binds its SHA-256.
-For the full profile it must contain the exact authenticated 359 fixture/target
+For the full profile it must contain the exact authenticated 373 fixture/target
 entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
 Only this projection can classify a target-specific residual as
 `platform-inapplicable` or `unavailable`; a result disposition, row count,
@@ -513,8 +511,9 @@ checks all remain. Other native hosts retain inline maintenance, and the
 independent Linux AArch64 byte oracle continues to check its complete sequence.
 No case or matrix row is pruned for either host-toolchain limitation. The stable
 `Native retirement acceptance complete` check rejects a missing, skipped,
-cancelled or failed census or native matrix. The archived direct reference
-remains separately pinned.
+cancelled or failed census or native matrix. Historical direct-reference
+results remain preserved in the durable archives; current acceptance uses the
+same-source direct backend and independently bound Clang controls.
 
 The census upload is scoped to the generated `candidate/evidence/` tree and
 explicit build recipes, with hidden-file inclusion enabled for that evidence
@@ -536,3 +535,67 @@ revision/path fields and complete, disjoint shard selection without needing a
 compiler. Real smoke runs must additionally exercise successful objects, known
 strict failures and refusal to reuse an evidence directory. The deadline and
 child-evidence implementation is shared with `test_differential --self-test`.
+
+## Current frontend reference and target SDK closure
+
+The acceptance workflow now builds the exact integrated candidate once and
+uses its `none` backend as the direct reference. The separately frozen
+`3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e` compiler remains historical evidence,
+including its unresolved rows; it predates attribute queries, assembly forms
+and ABI repairs in the current fixtures. Comparing different frontend behavior
+as a function-count oracle rejected valid MIR objects. This change does not
+rewrite any archived run or the historical 192-row supported-gap ledger.
+
+Some operations were added only to MIR and remain unsupported by the frozen
+direct emitter. `native_retirement_reference.py` compiles those exact source
+snapshots with Clang, using the same resource/project closure, CPU, PIC and C
+dialect. Buster-specific mode/verification switches are removed, CPU spellings
+are translated, and Clang selects its own supported GNU SDK branch. The
+supplement retains the Clang binary, version, explicit environment, argv,
+status, object and raw streams. The independent validator checks their hashes,
+exact census/input binding, complete unresolved-group inventory, and target
+object headers. A successful control resolves only the reference obligation;
+no candidate, fallback, telemetry or object failure is cleared. The report
+retains `direct_reference_failure_rows` and every supplement digest. Both clean
+acceptance gates remain required. Missing, failed or altered supplements fail
+acceptance.
+
+Clang's UEFI controls use the corresponding freestanding C ABI: x64 MSVC/LLP64
+and ARM64 AAPCS64/LP64, with short wchar. The ARM64 control is an ELF object; it
+is not claimed to validate a PE loader. `basic_c_asm_goto_range.c` deliberately
+requires a far TBZ relaxation that Clang's inline assembler lacks. Its Clang
+control selects the explicit portable bit-test oracle, while every Buster row
+still compiles the full 9,216-NOP assembly body. Registered native driver tests
+execute both branch outcomes in every strict allocator and frontend mode.
+The ordinary assembly fixture omits ELF-only `.type` metadata on Darwin.
+
+`native_retirement_sdks.py` is a network setup step, before the offline
+materializer. `native-retirement-sdks-v1.json` pins complete archive SHA-256 and
+size plus every extracted header's identity; each record must also match the
+dependency descriptor. It selects 311 unmodified headers from the existing
+Zig 0.16.0 distribution (MinGW and Darwin) and Android NDK r27c. It never copies
+upstream source into the repository. Linux continues to use the pinned musl
+closure. The seven hosted-library fixtures receive their target-specific include
+paths. MinGW's non-GNU ARM64 varargs gap uses a small project-owned adapter to
+Buster's existing va_list builtins, and Buster selects the SDK's non-GNU path
+to avoid GCC-only inline intrinsics. Clang retains its own GNU SDK path.
+Darwin does not ship uchar.h, so the header smoke tests the supplied headers
+there and retains uchar.h coverage on the other hosted targets.
+
+The hosted-library fixtures require a hosted libc and are explicitly
+platform-inapplicable on the two freestanding UEFI targets. The unchanged
+`host_sysv_unnamed_bitfields.c` source is a host-compiler-only ABI observer,
+as its source and driver registration state; its census rows retain that
+platform ownership, and the native driver continues to build and execute it
+with the host compiler. The ARM64 floating-state observer uses `unsigned long
+long` for its 64-bit system-register operands, including LLP64 Windows.
+Every original fixture and all 78,720 row identities remain present.
+
+Main's Android x86-64 ABI repair selects binary128 long double. Format-specific
+fixtures now test `__LDBL_MANT_DIG__`, retaining the complete x87 bodies on x87
+targets and the existing float/double cases elsewhere. AArch64 binary128
+widening stays scoped to AArch64. The signbit driver explicitly enables the
+unsupported x86 binary128 operation and checks its exact load rejection in
+every allocator/frontend/PIC/CPU combination, then compiles the float/double
+positive control with zero fallback. Frontend initializer tests retain Android
+as an explicit rejection control instead of expecting x87 byte images there.

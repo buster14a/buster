@@ -1,4 +1,7 @@
-#if defined(__aarch64__) || defined(_M_ARM64)
+// Clang does not relax out-of-range TBZ instructions inside inline asm.
+// Its independent oracle uses the same bit-test contract; Buster always
+// compiles the complete far-branch input below.
+#if (defined(__aarch64__) || defined(_M_ARM64)) && !defined(BUSTER_CLANG_RANGE_ORACLE)
 #define ASM_NOP_1 "nop\n"
 #define ASM_NOP_2 ASM_NOP_1 ASM_NOP_1
 #define ASM_NOP_4 ASM_NOP_2 ASM_NOP_2
@@ -37,7 +40,7 @@ done:
 #else
 int asm_goto_test_range(int value)
 {
-    return value ? 3 : 7;
+    return (value & 1) ? 3 : 7;
 }
 #endif
 

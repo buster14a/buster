@@ -8086,6 +8086,24 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_move(MachineA64Encoder* encoder, u32 d
     machine_a64_emit_generated_opcode(encoder, MACHINE_A64_MOV_RR, destination, source, 0, 0);
 }
 
+// The same bounded address recipe as LEA_FRAME, for copy-loop cursors.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_copy_cursor(MachineA64Encoder* encoder, u32 destination, u32 offset)
+{
+    if (offset <= A64_IMM12_MAX)
+    {
+        u32 fields[] = {destination, MACHINE_A64_X28, offset};
+        machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+    }
+    else
+    {
+        machine_a64_emit_immediate(encoder, destination, offset);
+        u32 fields[] = {destination, MACHINE_A64_X28, 0, destination};
+        machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+    }
+}
+
+#define MACHINE_A64_INLINE_COPY_LIMIT 256u
+
 // Frame-slot placement offsets grow downward from the frame base; the
 // X28-relative byte offset is their distance from the top of the frame
 // area. The area's first 8 * push_count bytes — the offsets the shared
@@ -8741,7 +8759,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         case MACHINE_A64_COPY_PTR_FROM_FRAME:
             // Both pointer and frame halves can require materialize/add
             // prefixes; reserve each half, including all three sized tails.
-            capacity64 += ((u64)capacity_row->payload / 8) * (large_save_offset ? 32u : 8u) + (large_save_offset ? 96u : 48u);
+            capacity64 += capacity_row->payload >= MACHINE_A64_INLINE_COPY_LIMIT
+                              ? 128u
+                              : ((u64)capacity_row->payload / 8) * (large_save_offset ? 32u : 8u) + (large_save_offset ? 96u : 48u);
             break;
         case MACHINE_A64_VA_SAVE:
             // Eight X and eight Q stores, each possibly using a large offset.
@@ -9176,6 +9196,51 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 }
                 u32 copied = 0;
                 u32 remaining = instruction->payload;
+                if (remaining >= MACHINE_A64_INLINE_COPY_LIMIT)
+                {
+                    // Read the allocated pointer before overwriting either
+                    // cursor. Metadata reserves both cursors across this row.
+                    if (instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_PTR)
+                    {
+                        machine_a64_emit_move(&encoder, MACHINE_A64_X10, pointer_register);
+                        machine_a64_emit_copy_cursor(&encoder, MACHINE_A64_X9,
+                            machine_a64_frame_offset(frame_area, destination_slot_offset));
+                    }
+                    else
+                    {
+                        if (instruction->opcode == MACHINE_A64_COPY_PTR_FROM_FRAME)
+                        {
+                            machine_a64_emit_move(&encoder, MACHINE_A64_X9, pointer_register);
+                        }
+                        else
+                        {
+                            machine_a64_emit_copy_cursor(&encoder, MACHINE_A64_X9,
+                                machine_a64_frame_offset(frame_area, destination_slot_offset));
+                        }
+                        machine_a64_emit_copy_cursor(&encoder, MACHINE_A64_X10,
+                            machine_a64_frame_offset(frame_area, source_slot_offset));
+                    }
+                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X16, remaining / 8);
+                    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X17, MACHINE_A64_X10, 0, 8, false);
+                    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X17, MACHINE_A64_X9, 0, 8, true);
+                    u32 source_step[] = {MACHINE_A64_X10, MACHINE_A64_X10, 8};
+                    u32 destination_step[] = {MACHINE_A64_X9, MACHINE_A64_X9, 8};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, source_step, BUSTER_ARRAY_LENGTH(source_step));
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, destination_step, BUSTER_ARRAY_LENGTH(destination_step));
+                    // SUB x16,x16,#1; CBNZ x16, the load five words back.
+                    // CBNZ preserves the flags carried through a memory copy.
+                    machine_a64_emit(&encoder, UINT32_C(0xd1000610));
+                    machine_a64_emit(&encoder, UINT32_C(0xb5ffff70));
+                    remaining %= 8;
+                    while (remaining && !encoder.overflow && !encoder.error)
+                    {
+                        u32 chunk = remaining >= 4 ? 4u : remaining >= 2 ? 2u : 1u;
+                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X17, MACHINE_A64_X10, copied, chunk, false);
+                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X17, MACHINE_A64_X9, copied, chunk, true);
+                        copied += chunk;
+                        remaining -= chunk;
+                    }
+                }
                 while (remaining && !encoder.overflow && !encoder.error)
                 {
                     u32 chunk = remaining >= 8 ? 8u : remaining >= 4 ? 4u : remaining >= 2 ? 2u : 1u;

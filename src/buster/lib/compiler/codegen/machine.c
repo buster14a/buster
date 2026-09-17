@@ -901,22 +901,28 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_FRAME},
     },
     [MACHINE_A64_LEA_OFFSET] = MACHINE_INFO_MOVE(),
-    // The copies run through the reserved X17 data scratch, so unlike their
-    // x86-64 counterparts they clobber no allocatable register.
+    // Large copies use X9/X10 cursors and reserved X16/X17 count/data
+    // scratches. Declare cursor clobbers even for the short inline form.
     [MACHINE_A64_COPY_FRAME_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X10),
     },
     [MACHINE_A64_COPY_FRAME_FROM_PTR] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X10),
     },
     [MACHINE_A64_COPY_PTR_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X10),
     },
     [MACHINE_A64_B] = {
         .operand_count = 1,

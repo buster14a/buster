@@ -35,15 +35,15 @@ BUSTER_GLOBAL_LOCAL u64 const nrc_full_input_count = 558;
 BUSTER_GLOBAL_LOCAL u64 const nrc_full_subject_count = 410;
 BUSTER_GLOBAL_LOCAL u64 const nrc_full_group_count = 19680;
 BUSTER_GLOBAL_LOCAL u64 const nrc_full_row_count = 78720;
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("6639387fe418cea3a31e51ca4683809920168b624ea3f270bc0a520b96d2003d");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("28feba705367c1998e13cb306f30d9e8e5bf89f0dd3b373433960c39dcb711f7");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("b341e623f5475088fb5abd46b29628fba9accb135c41662e5cedf615635fcb76");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("e6736f30321aa4a993067bec42997bf7fa5369c282ddb194b3bb414d43d2c5a3");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("7e27cce44651a4adaea2707fe2eaefd0f2a0a29564bb40a5262a18685ff91daa");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("eb69112f4c38a2298dddfa6d132c594c0349b5b31ee5cf309bf42820c3475944");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
-BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("a4496cc2d236b1c705c147a89ba1decb80a42c1abbd63a4f65db72d73c67d040");
-BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 359;
+BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("6081b5349761dfb57a1dd054507054fe586c9f3332c562b34280b4af08776b50");
+BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 373;
 
 typedef struct NrcInput NrcInput;
 struct NrcInput { String8 path; String8 role; String8 compile_obligation; String8 sha256; u64 hash; u64 bytes; };
@@ -404,6 +404,23 @@ BUSTER_GLOBAL_LOCAL NrcFixtureRecipe nrc_fixture_recipe(String8 path)
         recipe.x86_cpu = S8("haswell");
     }
     return recipe;
+}
+
+// Hosted library probes need the target SDK, not the Linux runner's libc.
+BUSTER_GLOBAL_LOCAL bool nrc_hosted_fixture(String8 path)
+{
+    String8 fixtures[] = {
+        S8("tests/basic_c_target_headers.c"), S8("tests/basic_cjson_roundtrip.c"),
+        S8("tests/basic_doom_headless.c"), S8("tests/basic_lz4_roundtrip.c"),
+        S8("tests/basic_stb_compat.c"), S8("tests/basic_yyjson_roundtrip.c"),
+        S8("tests/basic_zlib_compat.c"),
+    };
+    bool result = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixtures); index += 1)
+    {
+        result |= string_equal(path, fixtures[index]);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 nrc_recipe_cpu(NrcFixtureRecipe recipe, NrcTarget target, String8 fallback)
@@ -1107,7 +1124,7 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         NrcFixtureRecipe recipe = nrc_fixture_recipe(input.path);
         String8 recipe_cpu = nrc_recipe_cpu(recipe, nrc_targets[target], settings->cpu);
         String8 cpu = string_format(temporary.arena, S8("-mcpu={S8}"), recipe_cpu);
-        String8 command[36] = {0};
+        String8 command[48] = {0};
         u64 command_count = 0;
         command[command_count++] = mode ? settings->child.ide : settings->baseline;
         command[command_count++] = S8("cc");
@@ -1136,6 +1153,27 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
                                                      settings->project_snapshot, musl_arch);
             command[command_count++] = S8("-isystem");
             command[command_count++] = string_format(temporary.arena, S8("{S8}/musl/include"), settings->project_snapshot);
+        }
+        if (nrc_hosted_fixture(input.path) && settings->project_snapshot.length && target >= 2 && target < 10)
+        {
+            String8 sdk = S8("darwin");
+            if (target == 2 || target == 3)
+            {
+                sdk = S8("windows");
+                command[command_count++] = S8("-U__GNUC__");
+                if (target == 2) { command[command_count++] = S8("-D__x86_64=1"); }
+                command[command_count++] = S8("-isystem");
+                command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/mingw-adapter"), settings->project_snapshot);
+            }
+            else if (target == 6 || target == 7)
+            {
+                sdk = S8("android");
+                command[command_count++] = S8("-isystem");
+                command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/android/{S8}-linux-android"),
+                    settings->project_snapshot, target == 6 ? S8("x86_64") : S8("aarch64"));
+            }
+            command[command_count++] = S8("-isystem");
+            command[command_count++] = string_format(temporary.arena, S8("{S8}/sdk/{S8}"), settings->project_snapshot, sdk);
         }
         command[command_count++] = include;
         if (settings->project_snapshot.length)
@@ -1596,8 +1634,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         String8 source_dependencies = settings.project_include.length
                                           ? S8("tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include-plus-pinned-github-closure")
                                           : S8("tracked-tests-plus-snapshotted-resource-include");
-        String8 sysroot = settings.project_include.length ? S8("target-correct-musl-linux-gnu-only") : S8("none");
-        String8 system_include = settings.project_include.length ? S8("target-correct-musl-project-include") : S8("none");
+        String8 sysroot = settings.project_include.length ? S8("target-correct-hosted-sdks") : S8("none");
+        String8 system_include = settings.project_include.length ? S8("target-correct-libc-project-include") : S8("none");
         String8 flags = settings.project_include.length
                             ? S8("-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem RESOURCE_SNAPSHOT -isystem TARGET_MUSL_INCLUDE -isystem MUSL_INCLUDE")
                             : S8("-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem RESOURCE_SNAPSHOT");

@@ -23254,6 +23254,91 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_initializer_capture(CIntegerIrBuilder* bui
     return result;
 }
 
+#define C_IR_BOUNDED_ZERO_STORAGE_MIN_BYTES 4096u
+
+BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, IrTypeId root)
+{
+    IrType* root_type = ir_type_from_id(&builder->program->types, root);
+    bool compatible = root_type && root_type->layout.resolved && root_type->layout.size >= C_IR_BOUNDED_ZERO_STORAGE_MIN_BYTES &&
+                      (root_type->kind == IR_TYPE_ARRAY || root_type->kind == IR_TYPE_STRUCT || root_type->kind == IR_TYPE_UNION);
+    if (compatible)
+    {
+        u32 capacity = builder->program->types.count;
+        IrTypeId* pending = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+        u8* seen = arena_allocate(builder->temporary_arena, u8, capacity);
+        memset(seen, 0, capacity);
+        u32 count = 1;
+        pending[0] = root;
+        seen[root.value] = 1;
+        for (u32 index = 0; compatible && index < count; index += 1)
+        {
+            IrType* type = ir_type_from_id(&builder->program->types, pending[index]);
+            compatible = type && type->layout.resolved && !type->is_atomic && !type->is_volatile;
+            if (compatible)
+            {
+                bool array = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR;
+                bool record = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+                compatible = array || record || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN ||
+                             type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FLOAT;
+                u32 children = array ? 1 : record ? type->field_count : 0;
+                for (u32 child = 0; compatible && child < children; child += 1)
+                {
+                    IrTypeId id = array ? type->element_type : type->fields[child].type;
+                    compatible = id.value < capacity;
+                    if (compatible && !seen[id.value])
+                    {
+                        seen[id.value] = 1;
+                        pending[count++] = id;
+                    }
+                }
+            }
+        }
+    }
+    return compatible;
+}
+
+// Large aggregate zero initialization must not expand into one canonical
+// value and spill slot per byte. Windows ARM64 unwind records cannot describe
+// the multi-megabyte functions that expansion produces. Check representations
+// and qualifiers before using a byte loop; this introduces no libc dependency.
+BUSTER_C_INTERNAL bool c_ir_emit_zero_storage(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type_id,
+                                             u64 count, CToken token)
+{
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId element_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR);
+    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, element_type);
+    IrValueId address = c_ir_emit_address_of_place(builder, place, type_id, source);
+    IrValueId array = c_ir_emit_cast(builder, address, pointer_type, source);
+    IrValueId cursor = c_ir_emit_temporary(builder, builder->size_type, source);
+    IrValueId initial = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->size_type);
+    IrValueId limit = c_ir_emit_integer_value_typed(builder, count, false, token, builder->size_type);
+    IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, builder->size_type);
+    IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, element_type);
+    IrBlockId body = c_ir_block_create(builder);
+    IrBlockId done = c_ir_block_create(builder);
+    bool valid = array.value != IR_ID_UNDERLYING_INVALID && cursor.value != IR_ID_UNDERLYING_INVALID &&
+                 initial.value != IR_ID_UNDERLYING_INVALID && limit.value != IR_ID_UNDERLYING_INVALID &&
+                 one.value != IR_ID_UNDERLYING_INVALID && zero.value != IR_ID_UNDERLYING_INVALID &&
+                 body.value != IR_ID_UNDERLYING_INVALID && done.value != IR_ID_UNDERLYING_INVALID;
+    valid = valid && c_ir_emit_store_place(builder, cursor, builder->size_type, initial, source) &&
+            c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &body, 1, source) && c_ir_switch_block(builder, body);
+    if (valid)
+    {
+        IrValueId index = c_ir_emit_load_place(builder, cursor, builder->size_type, source);
+        IrValueId element = c_ir_emit_index_place(builder, array, index, source);
+        IrValueId next = c_ir_emit_binary_value(builder, index, one, builder->size_type, IR_BINARY_INTEGER_ADD, source);
+        IrValueId finished = c_ir_emit_binary_value(builder, next, limit, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+        IrBlockId targets[2] = {done, body};
+        valid = index.value != IR_ID_UNDERLYING_INVALID && element.value != IR_ID_UNDERLYING_INVALID &&
+                next.value != IR_ID_UNDERLYING_INVALID && finished.value != IR_ID_UNDERLYING_INVALID &&
+                c_ir_emit_store_place(builder, element, element_type, zero, source) &&
+                c_ir_emit_store_place(builder, cursor, builder->size_type, next, source) &&
+                c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &finished, 1, targets, 2, source) &&
+                c_ir_switch_block(builder, done);
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CToken token)
 {
     typedef enum CIrZeroTaskKind
@@ -23485,10 +23570,21 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         IrTypeId root_type = frame->as.nested_compound_literal.state->root_type;
         CToken root_token = builder->preprocess.tokens[root_open];
         IrSourceRange root_source = c_ir_token_source_range(builder, root_token);
-        IrValueId initial = c_ir_emit_zero_value(builder, root_type, root_token);
         IrValueId root_place = c_ir_emit_temporary(builder, root_type, root_source);
-        if (initial.value == IR_ID_UNDERLYING_INVALID || root_place.value == IR_ID_UNDERLYING_INVALID ||
-            !c_ir_emit_store_place(builder, root_place, root_type, initial, root_source))
+        IrValueId initial = IR_VALUE_ID_INVALID;
+        bool zeroed;
+        if (root_place.value != IR_ID_UNDERLYING_INVALID && c_ir_zero_storage_compatible(builder, root_type))
+        {
+            IrType* root = ir_type_from_id(&builder->program->types, root_type);
+            zeroed = c_ir_emit_zero_storage(builder, root_place, root_type, root->layout.size, root_token);
+        }
+        else
+        {
+            initial = c_ir_emit_zero_value(builder, root_type, root_token);
+            zeroed = initial.value != IR_ID_UNDERLYING_INVALID && root_place.value != IR_ID_UNDERLYING_INVALID &&
+                     c_ir_emit_store_place(builder, root_place, root_type, initial, root_source);
+        }
+        if (!zeroed)
         {
             if (!builder->failure_message.length)
             {
@@ -24033,8 +24129,8 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             }
             return;
         }
-        bool nested = false;
-        for (u32 token_index = open + 1; token_index < close; token_index += 1)
+        bool nested = c_ir_zero_storage_compatible(builder, type_id);
+        for (u32 token_index = open + 1; !nested && token_index < close; token_index += 1)
         {
             if (c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_LEFT_BRACE) &&
                 (token_index == open + 1 || !c_token_is_punctuator(&builder->preprocess.tokens[token_index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
@@ -38161,6 +38257,9 @@ BUSTER_C_INTERNAL void c_ir_initializer_narrow_compound_literal_value(CIntegerIr
     }
 }
 
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId target_type,
+                                                                      u8* bytes, u64 byte_count, bool* handled);
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end,
                                                                      IrTypeId root_type, u8* bytes, u64 byte_count, u64 relocation_base,
                                                                      IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
@@ -38207,6 +38306,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
             return false;
         }
         bool aggregate = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+        if (type->is_complex)
+        {
+            bool complex_handled = false;
+            if (!c_ir_constant_complex_initializer_bytes(builder, task.start, task.end, task.type, bytes + task.offset,
+                                                          type->layout.size, &complex_handled))
+            {
+                return false;
+            }
+            if (complex_handled)
+            {
+                continue;
+            }
+        }
         if (aggregate)
         {
             bool string_handled = false;
@@ -41341,6 +41453,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             frame->has_last_union = false;
         }
         bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
+        if (aggregate && child->is_complex &&
+            !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 compound_open = 0;
+            u32 compound_close = 0;
+            aggregate = c_ir_initializer_compound_literal_info(builder, value_start, value_end, &compound_open, &compound_close, 0, 0);
+        }
         if (aggregate)
         {
             bool child_string_handled = false;
@@ -44081,6 +44200,558 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     return true;
 }
 
+typedef struct CIrConstantComplexInitializerValue CIrConstantComplexInitializerValue;
+struct CIrConstantComplexInitializerValue
+{
+    CIrConstantValue real;
+    CIrConstantValue imaginary;
+    IrTypeId type;
+    IrTypeId element_type;
+    bool is_complex;
+};
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_cast(CIntegerIrBuilder* builder,
+                                                               const CIrConstantComplexInitializerValue* source, IrTypeId target_type,
+                                                               CIrConstantComplexInitializerValue* result)
+{
+    IrType* target = ir_type_from_id(&builder->program->types, target_type);
+    if (!target)
+    {
+        return false;
+    }
+    if (target->is_complex)
+    {
+        IrType* element = ir_type_from_id(&builder->program->types, target->element_type);
+        CIrConstantValue real = {0};
+        CIrConstantValue imaginary = {.type = target->element_type, .kind = C_IR_CONSTANT_FLOAT};
+        if (!element || element->kind != IR_TYPE_FLOAT ||
+            !c_ir_constant_cast(builder, &source->real, target->element_type, &real) ||
+            (source->is_complex && !c_ir_constant_cast(builder, &source->imaginary, target->element_type, &imaginary)))
+        {
+            return false;
+        }
+        *result = (CIrConstantComplexInitializerValue){
+            .real = real,
+            .imaginary = imaginary,
+            .type = target_type,
+            .element_type = target->element_type,
+            .is_complex = true,
+        };
+        return true;
+    }
+    if (target->kind != IR_TYPE_FLOAT && !c_ir_constant_type_is_integer(target))
+    {
+        return false;
+    }
+    CIrConstantValue real = {0};
+    if (!c_ir_constant_cast(builder, &source->real, target_type, &real))
+    {
+        return false;
+    }
+    *result = (CIrConstantComplexInitializerValue){.real = real, .type = target_type};
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_unary(CIntegerIrBuilder* builder, CConditionalOperator operation,
+                                                                const CIrConstantComplexInitializerValue* source,
+                                                                CIrConstantComplexInitializerValue* result)
+{
+    if (operation != C_CONDITIONAL_UNARY_PLUS && operation != C_CONDITIONAL_UNARY_MINUS)
+    {
+        return false;
+    }
+    *result = *source;
+    if (!c_ir_constant_apply_unary(builder, operation, IR_TYPE_ID_INVALID, &result->real))
+    {
+        return false;
+    }
+    return !source->is_complex || c_ir_constant_apply_unary(builder, operation, IR_TYPE_ID_INVALID, &result->imaginary);
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_binary(CIntegerIrBuilder* builder, CConditionalOperator operation,
+                                                                 const CIrConstantComplexInitializerValue* left,
+                                                                 const CIrConstantComplexInitializerValue* right,
+                                                                 CIrConstantComplexInitializerValue* result)
+{
+    if (!left->is_complex && !right->is_complex)
+    {
+        CIrConstantValue scalar = {0};
+        if (!c_ir_constant_apply_binary(builder, operation, &left->real, &right->real, &scalar))
+        {
+            return false;
+        }
+        *result = (CIrConstantComplexInitializerValue){.real = scalar, .type = scalar.type};
+        return true;
+    }
+    if (operation != C_CONDITIONAL_ADD && operation != C_CONDITIONAL_SUBTRACT &&
+        operation != C_CONDITIONAL_MULTIPLY && operation != C_CONDITIONAL_DIVIDE)
+    {
+        return false;
+    }
+    IrTypeId left_element = left->is_complex ? left->element_type : left->type;
+    IrTypeId right_element = right->is_complex ? right->element_type : right->type;
+    IrTypeId element = c_ir_usual_arithmetic_type(builder, left_element, right_element);
+    IrType* element_type = ir_type_from_id(&builder->program->types, element);
+    if (!element_type || element_type->kind != IR_TYPE_FLOAT)
+    {
+        return false;
+    }
+    IrTypeId result_type = c_ir_complex_type_for_element(builder, element);
+    CIrConstantValue left_real = {0};
+    CIrConstantValue right_real = {0};
+    CIrConstantValue left_imaginary = {.type = element, .kind = C_IR_CONSTANT_FLOAT};
+    CIrConstantValue right_imaginary = {.type = element, .kind = C_IR_CONSTANT_FLOAT};
+    if (!c_ir_constant_cast(builder, &left->real, element, &left_real) ||
+        !c_ir_constant_cast(builder, &right->real, element, &right_real) ||
+        (left->is_complex && !c_ir_constant_cast(builder, &left->imaginary, element, &left_imaginary)) ||
+        (right->is_complex && !c_ir_constant_cast(builder, &right->imaginary, element, &right_imaginary)))
+    {
+        return false;
+    }
+    CIrConstantValue real = {0};
+    CIrConstantValue imaginary = {0};
+    if (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT)
+    {
+        if (!c_ir_constant_apply_binary(builder, operation, &left_real, &right_real, &real))
+        {
+            return false;
+        }
+        if (left->is_complex && right->is_complex)
+        {
+            if (!c_ir_constant_apply_binary(builder, operation, &left_imaginary, &right_imaginary, &imaginary))
+            {
+                return false;
+            }
+        }
+        else if (left->is_complex)
+        {
+            imaginary = left_imaginary;
+        }
+        else
+        {
+            imaginary = right_imaginary;
+            if (operation == C_CONDITIONAL_SUBTRACT &&
+                !c_ir_constant_apply_unary(builder, C_CONDITIONAL_UNARY_MINUS, IR_TYPE_ID_INVALID, &imaginary))
+            {
+                return false;
+            }
+        }
+    }
+    else if (operation == C_CONDITIONAL_MULTIPLY && left->is_complex && right->is_complex)
+    {
+        CIrConstantValue ac = {0};
+        CIrConstantValue bd = {0};
+        CIrConstantValue ad = {0};
+        CIrConstantValue bc = {0};
+        if (!c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_real, &right_real, &ac) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_imaginary, &right_imaginary, &bd) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_real, &right_imaginary, &ad) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_imaginary, &right_real, &bc) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &ac, &bd, &real) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &ad, &bc, &imaginary))
+        {
+            return false;
+        }
+    }
+    else if (operation == C_CONDITIONAL_MULTIPLY)
+    {
+        const CIrConstantValue* scalar = left->is_complex ? &right_real : &left_real;
+        const CIrConstantValue* complex_real = left->is_complex ? &left_real : &right_real;
+        const CIrConstantValue* complex_imaginary = left->is_complex ? &left_imaginary : &right_imaginary;
+        if (!c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, complex_real, scalar, &real) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, complex_imaginary, scalar, &imaginary))
+        {
+            return false;
+        }
+    }
+    else if (!right->is_complex)
+    {
+        if (!c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &left_real, &right_real, &real) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &left_imaginary, &right_real, &imaginary))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        CIrConstantValue cc = {0};
+        CIrConstantValue dd = {0};
+        CIrConstantValue denominator = {0};
+        CIrConstantValue ac = {0};
+        CIrConstantValue bd = {0};
+        CIrConstantValue bc = {0};
+        CIrConstantValue ad = {0};
+        CIrConstantValue real_numerator = {0};
+        CIrConstantValue imaginary_numerator = {0};
+        if (!c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &right_real, &right_real, &cc) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &right_imaginary, &right_imaginary, &dd) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &cc, &dd, &denominator) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_real, &right_real, &ac) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_imaginary, &right_imaginary, &bd) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_imaginary, &right_real, &bc) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_MULTIPLY, &left_real, &right_imaginary, &ad) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_ADD, &ac, &bd, &real_numerator) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_SUBTRACT, &bc, &ad, &imaginary_numerator) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &real_numerator, &denominator, &real) ||
+            !c_ir_constant_apply_binary(builder, C_CONDITIONAL_DIVIDE, &imaginary_numerator, &denominator, &imaginary))
+        {
+            return false;
+        }
+    }
+    *result = (CIrConstantComplexInitializerValue){
+        .real = real,
+        .imaginary = imaginary,
+        .type = result_type,
+        .element_type = element,
+        .is_complex = true,
+    };
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_builtin(CIntegerIrBuilder* builder, u32 start, u32 end,
+                                                                  CIrConstantComplexInitializerValue* result)
+{
+    if (end < start + 5 || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER ||
+        !string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("__builtin_complex")) ||
+        !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+        c_ir_matching_delimiter(builder->preprocess, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                C_PUNCTUATOR_RIGHT_PARENTHESIS) != end - 1)
+    {
+        return false;
+    }
+    u32 comma = UINT32_MAX;
+    u32 depth = 0;
+    for (u32 index = start + 2; index + 1 < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            if (!depth)
+            {
+                return false;
+            }
+            depth -= 1;
+        }
+        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            if (comma != UINT32_MAX)
+            {
+                return false;
+            }
+            comma = index;
+        }
+    }
+    if (comma == UINT32_MAX || comma == start + 2 || comma + 1 == end - 1)
+    {
+        return false;
+    }
+    CIrConstantValue real = {0};
+    CIrConstantValue imaginary = {0};
+    if (!c_ir_constant_evaluate(builder, start + 2, comma, &real) ||
+        !c_ir_constant_evaluate(builder, comma + 1, end - 1, &imaginary))
+    {
+        return false;
+    }
+    IrTypeId element = c_ir_constant_common_type(builder, real.type, imaginary.type);
+    IrType* element_type = ir_type_from_id(&builder->program->types, element);
+    IrTypeId complex_type = element_type && element_type->kind == IR_TYPE_FLOAT
+                                ? c_ir_complex_type_for_element(builder, element)
+                                : IR_TYPE_ID_INVALID;
+    CIrConstantValue converted_real = {0};
+    CIrConstantValue converted_imaginary = {0};
+    if (!element_type || element_type->kind != IR_TYPE_FLOAT ||
+        !c_ir_constant_cast(builder, &real, element, &converted_real) ||
+        !c_ir_constant_cast(builder, &imaginary, element, &converted_imaginary))
+    {
+        return false;
+    }
+    *result = (CIrConstantComplexInitializerValue){
+        .real = converted_real,
+        .imaginary = converted_imaginary,
+        .type = complex_type,
+        .element_type = element,
+        .is_complex = true,
+    };
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end,
+                                                                   CIrConstantComplexInitializerValue* result)
+{
+    if (start >= end)
+    {
+        return false;
+    }
+    while (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                   C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    CIrConstantValue scalar = {0};
+    if (c_ir_constant_evaluate(builder, start, end, &scalar))
+    {
+        *result = (CIrConstantComplexInitializerValue){.real = scalar, .type = scalar.type};
+        return true;
+    }
+    u32 additive = UINT32_MAX;
+    u32 multiplicative = UINT32_MAX;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    bool previous_is_operand = false;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+            previous_is_operand = false;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            if (!parentheses)
+            {
+                return false;
+            }
+            parentheses -= 1;
+            previous_is_operand = true;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+            previous_is_operand = false;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            if (!brackets)
+            {
+                return false;
+            }
+            brackets -= 1;
+            previous_is_operand = true;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+            previous_is_operand = false;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            if (!braces)
+            {
+                return false;
+            }
+            braces -= 1;
+            previous_is_operand = true;
+            continue;
+        }
+        if (parentheses || brackets || braces || token.kind == C_TOKEN_INVALID)
+        {
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS))
+        {
+            if (previous_is_operand)
+            {
+                additive = index;
+            }
+            previous_is_operand = false;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_SLASH))
+        {
+            if (previous_is_operand)
+            {
+                multiplicative = index;
+            }
+            previous_is_operand = false;
+            continue;
+        }
+        previous_is_operand = token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_IDENTIFIER ||
+                              token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL;
+    }
+    u32 binary = additive != UINT32_MAX ? additive : multiplicative;
+    if (binary != UINT32_MAX)
+    {
+        CIrConstantComplexInitializerValue left = {0};
+        CIrConstantComplexInitializerValue right = {0};
+        CToken token = builder->preprocess.tokens[binary];
+        CConditionalOperator operation = c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS)       ? C_CONDITIONAL_ADD
+                                         : c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS)    ? C_CONDITIONAL_SUBTRACT
+                                         : c_token_is_punctuator(&token, C_PUNCTUATOR_STAR)     ? C_CONDITIONAL_MULTIPLY
+                                                                                                  : C_CONDITIONAL_DIVIDE;
+        return c_ir_constant_complex_initializer_evaluate(builder, start, binary, &left) &&
+               c_ir_constant_complex_initializer_evaluate(builder, binary + 1, end, &right) &&
+               c_ir_constant_complex_initializer_binary(builder, operation, &left, &right, result);
+    }
+    CToken first = builder->preprocess.tokens[start];
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS))
+    {
+        CIrConstantComplexInitializerValue operand = {0};
+        CConditionalOperator operation = c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ? C_CONDITIONAL_UNARY_MINUS
+                                                                                             : C_CONDITIONAL_UNARY_PLUS;
+        return c_ir_constant_complex_initializer_evaluate(builder, start + 1, end, &operand) &&
+               c_ir_constant_complex_initializer_unary(builder, operation, &operand, result);
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                            C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close > start + 1 && close + 1 < end)
+        {
+            IrTypeId cast_type = c_ir_type_name(builder, start + 1, close);
+            if (cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                CIrConstantComplexInitializerValue operand = {0};
+                return c_ir_constant_complex_initializer_evaluate(builder, close + 1, end, &operand) &&
+                       c_ir_constant_complex_initializer_cast(builder, &operand, cast_type, result);
+            }
+        }
+    }
+    if (c_ir_constant_complex_initializer_builtin(builder, start, end, result))
+    {
+        return true;
+    }
+    if (start + 1 == end && first.kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        String8 real_spelling = {0};
+        if (c_ir_number_imaginary_spelling(builder->arena, c_token_spelling(builder->preprocess.spelling_base, first), &real_spelling))
+        {
+            CIrConstantValue imaginary = {0};
+            if (!c_ir_constant_float_literal(builder, real_spelling, &imaginary))
+            {
+                return false;
+            }
+            IrTypeId complex_type = c_ir_complex_type_for_element(builder, imaginary.type);
+            if (complex_type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                complex_type = imaginary.type;
+            }
+            if (complex_type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            *result = (CIrConstantComplexInitializerValue){
+                .real = {.type = imaginary.type, .kind = C_IR_CONSTANT_FLOAT},
+                .imaginary = imaginary,
+                .type = complex_type,
+                .element_type = imaginary.type,
+                .is_complex = true,
+            };
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_store_float(CIntegerIrBuilder* builder, IrType* type,
+                                                                      CIrConstantValue value, u8* bytes)
+{
+    if (!type || type->kind != IR_TYPE_FLOAT || value.kind != C_IR_CONSTANT_FLOAT || !type->layout.resolved)
+    {
+        return false;
+    }
+    memset(bytes, 0, type->layout.size);
+    if (type->bit_width == 16)
+    {
+        u64 bits = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(value.floating)
+                                                                  : c_ir_float16_bits_from_f64(value.floating);
+        c_ir_constant_store_bits(builder->program, type, bytes, 0, bits, false);
+        return true;
+    }
+    if (type->bit_width == 32)
+    {
+        f32 narrowed = (f32)value.floating;
+        u32 bits = 0;
+        memcpy(&bits, &narrowed, sizeof(bits));
+        c_ir_constant_store_bits(builder->program, type, bytes, 0, bits, false);
+        return true;
+    }
+    if (type->bit_width == 64)
+    {
+        u64 bits = 0;
+        memcpy(&bits, &value.floating, sizeof(bits));
+        c_ir_constant_store_bits(builder->program, type, bytes, 0, bits, false);
+        return true;
+    }
+    if (type->bit_width == 80 && type->layout.size == 16 && builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE)
+    {
+        c_ir_ext80_store_bytes(bytes, value.integer, (u16)value.integer_high);
+        return true;
+    }
+    if (type->bit_width == 128 && type->layout.size == 16)
+    {
+        bool little = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE;
+        c_ir_constant_store_unit_bits(builder->program, 8, bytes, little ? 0 : 8, value.integer, false);
+        c_ir_constant_store_unit_bits(builder->program, 8, bytes, little ? 8 : 0, value.integer_high, false);
+        return true;
+    }
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId target_type,
+                                                                u8* bytes, u64 byte_count, bool* handled)
+{
+    if (!handled)
+    {
+        return false;
+    }
+    *handled = false;
+    IrType* target = ir_type_from_id(&builder->program->types, target_type);
+    if (!target || !target->is_complex || !target->layout.resolved || byte_count < target->layout.size || start >= end)
+    {
+        return false;
+    }
+    bool braced = c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+                  c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+                  c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE,
+                                          C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+    u32 compound_open = 0;
+    u32 compound_close = 0;
+    bool compound = c_ir_initializer_compound_literal_info(builder, start, end, &compound_open, &compound_close, 0, 0);
+    if (braced || compound)
+    {
+        return true;
+    }
+    *handled = true;
+    CIrConstantComplexInitializerValue value = {0};
+    CIrConstantComplexInitializerValue converted = {0};
+    if (!c_ir_constant_complex_initializer_evaluate(builder, start, end, &value) ||
+        !c_ir_constant_complex_initializer_cast(builder, &value, target_type, &converted))
+    {
+        if (!builder->failure_message.length)
+        {
+            builder->failure_message = S8("cannot fold complex expression in a static initializer");
+            builder->failure_token_index = start;
+        }
+        return false;
+    }
+    IrType* element = ir_type_from_id(&builder->program->types, target->element_type);
+    if (!element || target->field_count != 2 || target->fields[0].offset > byte_count || target->fields[1].offset > byte_count ||
+        element->layout.size > byte_count - target->fields[0].offset || element->layout.size > byte_count - target->fields[1].offset)
+    {
+        return false;
+    }
+    memset(bytes, 0, target->layout.size);
+    return c_ir_constant_complex_initializer_store_float(builder, element, converted.real, bytes + target->fields[0].offset) &&
+           c_ir_constant_complex_initializer_store_float(builder, element, converted.imaginary, bytes + target->fields[1].offset);
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
 {
     if (start >= end)
@@ -45294,6 +45965,25 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
                 builder->failure_message = S8("a label address in static storage must belong to the defining function");
                 return false;
             }
+        }
+    }
+    if (type->is_complex)
+    {
+        u8* complex_bytes = arena_allocate_zeroed(arena, u8, type->layout.size);
+        bool complex_handled = false;
+        if (!c_ir_constant_complex_initializer_bytes(builder, start, end, global->type, complex_bytes, type->layout.size, &complex_handled))
+        {
+            return false;
+        }
+        if (complex_handled)
+        {
+            if (c_ir_global_canonicalize_zero_bytes(global, complex_bytes, type->layout.size, 0))
+            {
+                return true;
+            }
+            global->bytes = (ByteSlice){.pointer = complex_bytes, .length = type->layout.size};
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+            return true;
         }
     }
     bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;

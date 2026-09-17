@@ -22,8 +22,6 @@ UPLOAD_PATHS = (
     "candidate/evidence-candidate.txt",
     "candidate/build/CMakeCache.txt",
     "candidate/build/compile_commands.json",
-    "reference/build/CMakeCache.txt",
-    "reference/build/compile_commands.json",
 )
 
 

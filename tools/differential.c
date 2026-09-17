@@ -18,7 +18,7 @@ BUSTER_GLOBAL_LOCAL String8 const d_optimizations[] = {{0}, BUSTER_CODEGEN_OPTIM
 typedef struct DConfig DConfig;
 struct DConfig { String8 name; u32 allocator; u32 optimization; u32 promotion; };
 typedef struct DCase DCase;
-struct DCase { String8 name; String8 source; String8 host; bool reject; String8 include; bool require_zero; bool strict_mir; };
+struct DCase { String8 name; String8 source; String8 host; bool reject; String8 include; bool require_zero; bool strict_mir; bool expect_sanitizer; };
 BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
     {S8("warning"), S8("tests/differential/warning.c"), {0}, false},
     {S8("observables"), S8("tests/differential/observables.c"), {0}, false},
@@ -46,6 +46,7 @@ struct DObservation
     u32 status;
     u32 raw_status;
     bool sanitizer;
+    String8 sanitizer_report;
     String8 output;
     String8 error;
 };
@@ -255,13 +256,149 @@ BUSTER_GLOBAL_LOCAL String8 d_reference_compiler(Arena* arena, String8 file)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool d_sanitizer(String8 text)
+BUSTER_GLOBAL_LOCAL String8 const d_sanitizer_environment_names[] = {
+    S8_INITIALIZER("ASAN_OPTIONS"), S8_INITIALIZER("UBSAN_OPTIONS"), S8_INITIALIZER("LSAN_OPTIONS"),
+    S8_INITIALIZER("MSAN_OPTIONS"), S8_INITIALIZER("TSAN_OPTIONS")};
+
+BUSTER_GLOBAL_LOCAL String8 d_sanitizer_name_text(void)
 {
-    String8 names[] = {S8("AddressSanitizer"), S8("UndefinedBehaviorSanitizer"), S8("MemorySanitizer"),
-                       S8("ThreadSanitizer"), S8("LeakSanitizer"), S8("runtime error:")};
-    bool found = false;
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1) { found |= d_contains(text, names[index]); }
-    return found;
+    return S8("AddressSanitizer UndefinedBehaviorSanitizer MemorySanitizer ThreadSanitizer LeakSanitizer runtime error:\n");
+}
+
+BUSTER_GLOBAL_LOCAL bool d_environment_key_equal(String8 left, String8 right)
+{
+    bool equal = left.length == right.length;
+    for (u64 index = 0; equal && index < left.length; index += 1)
+    {
+        char8 left_character = left.pointer[index];
+        char8 right_character = right.pointer[index];
+#if BUSTER_WINDOWS
+        if (left_character >= 'A' && left_character <= 'Z') { left_character += 'a' - 'A'; }
+        if (right_character >= 'A' && right_character <= 'Z') { right_character += 'a' - 'A'; }
+#endif
+        equal = left_character == right_character;
+    }
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_sanitizer_environment_index(String8 key)
+{
+    u32 result = BUSTER_ARRAY_LENGTH(d_sanitizer_environment_names);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(d_sanitizer_environment_names); index += 1)
+    {
+        if (d_environment_key_equal(key, d_sanitizer_environment_names[index]))
+        {
+            result = index;
+            break;
+        }
+    }
+    return result;
+}
+
+// compiler-rt's common flag parser accepts quoted values. Quote every
+// absolute path so spaces and drive colons remain one flag value; percent
+// characters are literal in log_path and must remain byte-for-byte unchanged.
+BUSTER_GLOBAL_LOCAL String8 d_sanitizer_log_path(DSettings* settings, String8 path, String8* absolute, bool* valid)
+{
+    String8 terminated = string_duplicate_arena(settings->arena, path, true);
+    *absolute = os_path_absolute_lexical(settings->arena, terminated, true);
+    bool single_quote = false, double_quote = false;
+    for (u64 index = 0; index < absolute->length; index += 1)
+    {
+        single_quote |= absolute->pointer[index] == '\'';
+        double_quote |= absolute->pointer[index] == '"';
+    }
+    *valid = absolute->length && !(single_quote && double_quote) && absolute->length <= UINT64_MAX - 2;
+    String8 result = {0};
+    if (*valid)
+    {
+        char8 quote = single_quote ? '"' : '\'';
+        char8* quoted = arena_allocate(settings->arena, char8, absolute->length + 2);
+        u64 length = 0;
+        quoted[length++] = quote;
+        for (u64 index = 0; index < absolute->length; index += 1)
+        {
+            char8 character = absolute->pointer[index];
+            quoted[length++] = character;
+        }
+        quoted[length++] = quote;
+        result = (String8){.pointer = quoted, .length = length};
+    }
+    return result;
+}
+
+// Preserve the caller's complete environment and sanitizer policy, replacing
+// only duplicate sanitizer option keys and appending a final, authoritative
+// report destination. stdout and stderr remain ordinary observed streams.
+BUSTER_GLOBAL_LOCAL bool d_sanitizer_environment(DSettings* settings, String8 requested_report_base,
+                                                  String8* report_base, SliceString8* keys, SliceString8* values)
+{
+    SliceString8 source_keys = settings->explicit_environment ? settings->environment_keys : program_state->input.environment_keys;
+    SliceString8 source_values = settings->explicit_environment ? settings->environment_values : program_state->input.environment_values;
+    bool valid = source_keys.length == source_values.length;
+    String8 quoted_path = valid ? d_sanitizer_log_path(settings, requested_report_base, report_base, &valid) : (String8){0};
+    String8 directive = valid ? string_format(settings->arena,
+        S8("log_path={S8}:log_exe_name=0:log_suffix='':log_to_syslog=0:log_fallback_to_stderr=0"), quoted_path) : (String8){0};
+    u64 capacity = source_keys.length + BUSTER_ARRAY_LENGTH(d_sanitizer_environment_names);
+    String8* output_keys = valid ? arena_allocate(settings->arena, String8, capacity) : 0;
+    String8* output_values = valid ? arena_allocate(settings->arena, String8, capacity) : 0;
+    bool seen[BUSTER_ARRAY_LENGTH(d_sanitizer_environment_names)] = {0};
+    u64 count = 0;
+    for (u64 index = 0; valid && index < source_keys.length; index += 1)
+    {
+        String8 key = source_keys.pointer[index];
+        String8 value = source_values.pointer[index];
+        u32 sanitizer = d_sanitizer_environment_index(key);
+        if (sanitizer < BUSTER_ARRAY_LENGTH(d_sanitizer_environment_names))
+        {
+            if (!seen[sanitizer])
+            {
+                String8 separator = value.length ? S8(":") : (String8){0};
+                output_keys[count] = d_sanitizer_environment_names[sanitizer];
+                output_values[count] = string_format(settings->arena, S8("{S8}{S8}{S8}"), value, separator, directive);
+                seen[sanitizer] = true;
+                count += 1;
+            }
+        }
+        else
+        {
+            output_keys[count] = key;
+            output_values[count] = value;
+            count += 1;
+        }
+    }
+    for (u32 index = 0; valid && index < BUSTER_ARRAY_LENGTH(d_sanitizer_environment_names); index += 1)
+    {
+        if (!seen[index])
+        {
+            output_keys[count] = d_sanitizer_environment_names[index];
+            output_values[count] = directive;
+            count += 1;
+        }
+    }
+    if (valid)
+    {
+        *keys = (SliceString8){.pointer = output_keys, .length = count};
+        *values = (SliceString8){.pointer = output_values, .length = count};
+    }
+    else
+    {
+        *keys = (SliceString8){0};
+        *values = (SliceString8){0};
+        *report_base = (String8){0};
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_process_identifier(ProcessSpawnResult spawn)
+{
+    u64 result = 0;
+#if BUSTER_WINDOWS
+    if (spawn.handle) { result = (u64)GetProcessId((HANDLE)spawn.handle); }
+#else
+    result = (u64)(size_t)spawn.handle;
+#endif
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL FILE* d_file_open(char const* path, bool write, bool update)
@@ -353,6 +490,29 @@ BUSTER_GLOBAL_LOCAL void d_write_evidence(DSettings* settings, String8 path, Str
     }
 }
 
+BUSTER_GLOBAL_LOCAL void d_collect_sanitizer_report(DSettings* settings, String8 prefix, String8 report_base,
+                                                              u64 process_identifier, DObservation* observation)
+{
+    if (process_identifier)
+    {
+        String8 runtime_path = string_format_z(settings->arena, S8("{S8}.{u64}"), report_base, process_identifier);
+        if (path_exists(settings->arena, runtime_path))
+        {
+            FileReadResult read = file_read_checked(settings->arena, runtime_path, (FileReadOptions){0});
+            bool valid = read.status == OS_FILE_READ_OK && read.bytes.pointer && read.bytes.length;
+            if (valid)
+            {
+                observation->sanitizer = true;
+                observation->sanitizer_report = (String8){.pointer = (char8*)read.bytes.pointer, .length = read.bytes.length};
+                d_write_evidence(settings, string_format(settings->arena, S8("{S8}.sanitizer"), prefix),
+                    observation->sanitizer_report);
+            }
+            else { settings->io_failed = true; }
+            settings->io_failed |= !os_file_delete(runtime_path);
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void d_log(DSettings* settings, String8 text)
 {
     if (settings->log)
@@ -402,7 +562,6 @@ BUSTER_GLOBAL_LOCAL DObservation d_wait_observation(ProcessWaitResult wait)
         else if (WIFSIGNALED(status)) { observation.kind = D_SIGNAL; observation.status = (u32)WTERMSIG(status); }
 #endif
     }
-    observation.sanitizer = d_sanitizer(observation.output) || d_sanitizer(observation.error);
     return observation;
 }
 
@@ -422,6 +581,12 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
         bytes[at++] = 0;
     }
     d_write_evidence(settings, string_format(arena, S8("{S8}.argv"), prefix), (String8){.pointer = bytes, .length = size});
+    String8 sanitizer_report_base = {0};
+    SliceString8 environment_keys = {0}, environment_values = {0};
+    bool environment_valid = d_sanitizer_environment(settings,
+        string_format(arena, S8("{S8}.sanitizer-runtime"), prefix), &sanitizer_report_base,
+        &environment_keys, &environment_values);
+    settings->io_failed |= !environment_valid;
     u64 start = os_now_microseconds();
     // Serialize pipe creation through closing each child's pipe ends. Otherwise
     // a concurrent child can inherit another child's writer and delay its EOF.
@@ -436,11 +601,12 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
         .test_cancel_before_reap = settings->self_test_cancel_before_reap,
     };
 #endif
-    if (d_spawn_admission_begin())
+    bool admitted = d_spawn_admission_begin();
+    if (admitted && environment_valid)
     {
-        spawn = os_process_spawn(command, settings->environment_keys, settings->environment_values,
+        spawn = os_process_spawn(command, environment_keys, environment_values,
             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                  .use_process_environment = !settings->explicit_environment,
+                                  .use_process_environment = false,
                                   .new_process_group = !BUSTER_WINDOWS});
 #if BUSTER_LINUX || BUSTER_MACOS
         if (spawn.handle)
@@ -450,6 +616,8 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
 #endif
     }
     d_spawn_admission_end();
+    u64 process_identifier = d_process_identifier(spawn);
+    if (spawn.handle && !process_identifier) { settings->io_failed = true; }
     if (settings->spawn_mutex) { os_mutex_unlock(settings->spawn_mutex); }
     DObservation observation = {.kind = D_SPAWN};
     if (spawn.handle)
@@ -469,6 +637,7 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
             }
         }
 #endif
+        d_collect_sanitizer_report(settings, prefix, sanitizer_report_base, process_identifier, &observation);
     }
     d_write_evidence(settings, string_format(arena, S8("{S8}.stdout"), prefix), observation.output);
     d_write_evidence(settings, string_format(arena, S8("{S8}.stderr"), prefix), observation.error);
@@ -943,9 +1112,11 @@ BUSTER_GLOBAL_LOCAL void d_self_test_child(Arena* arena, String8 mode, String8 p
         os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), (ByteSlice){.pointer = (u8*)"child stderr\n", .length = 13});
         exit(7);
     }
-    else if (string_equal(mode, S8("sanitizer")))
+    else if (string_equal(mode, S8("sanitizer-name-stdout")) || string_equal(mode, S8("sanitizer-name-stderr")))
     {
-        fputs("runtime error: simulated recovering sanitizer\n", stderr);
+        String8 text = d_sanitizer_name_text();
+        StandardStream stream = string_equal(mode, S8("sanitizer-name-stdout")) ? STANDARD_STREAM_OUTPUT : STANDARD_STREAM_ERROR;
+        os_file_write(os_get_standard_stream(stream), (ByteSlice){.pointer = (u8*)text.pointer, .length = text.length});
         exit(0);
     }
     else if (string_equal(mode, S8("timeout")))
@@ -964,19 +1135,9 @@ BUSTER_GLOBAL_LOCAL void d_self_test_child(Arena* arena, String8 mode, String8 p
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
         RaiseException(0xC0000409U, 0, 0, 0);
 #else
-        // The application entry point installs a diagnostic SIGABRT handler.
-        // A self-test crash must exercise the observer's real signal path, not
-        // inherit a handler whose re-raise can remain pending while SIGABRT is
-        // masked. Restore the platform default before raising so the child
-        // terminates as a signal and the observer can still classify a genuine
-        // deadline as D_TIMEOUT.
-        struct sigaction default_action = {0};
-        sigemptyset(&default_action.sa_mask);
-        default_action.sa_handler = SIG_DFL;
-        sigaction(SIGABRT, &default_action, 0);
-        struct rlimit limit = {0};
-        setrlimit(RLIMIT_CORE, &limit);
-        raise(SIGABRT);
+        // Core-dumping signals can block behind user-space core handlers on
+        // hosted Linux; SIGTERM still exercises the signal observation path.
+        raise(SIGTERM);
 #endif
         exit(2);
     }
@@ -1343,8 +1504,14 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
                     String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"), S8("--self-test-child"), test.source};
                     if (test.host.length) { argv[0] = test.host; }
                     DObservation observed = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), path_join(arena, directory, S8("child")));
-                    record->failures += observed.kind != D_EXIT || observed.status != 7 ||
-                        !string_equal(observed.output, S8("a\0b")) || !string_equal(observed.error, S8("child stderr\n"));
+                    bool normal = observed.kind == D_EXIT && observed.status == 7 &&
+                        string_equal(observed.output, S8("a\0b")) && string_equal(observed.error, S8("child stderr\n"));
+                    record->failures += !normal;
+                    if (test.expect_sanitizer)
+                    {
+                        record->failures += observed.kind != D_EXIT || observed.status != 0 || !observed.sanitizer ||
+                            !d_contains(observed.sanitizer_report, S8("runtime error:"));
+                    }
                     settings.rows = 1;
                     d_log(&settings, string_format(arena, S8("case={S8}\n"), test.name));
                 }
@@ -1537,7 +1704,71 @@ BUSTER_GLOBAL_LOCAL u32 d_cases_run(DSettings* settings, DCase* tests, u32 count
     return failures;
 }
 
-BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
+BUSTER_GLOBAL_LOCAL u32 d_sanitizer_runtime_self_test(Arena* arena, DSettings* parent, String8 root,
+                                                               String8* recovering_program)
+{
+    *recovering_program = (String8){0};
+    String8 configured = os_get_environment_variable(S8("CC"));
+    String8 compiler = configured.length ? d_reference_compiler(arena, configured) : (String8){0};
+    if (!compiler.length) { compiler = d_reference_compiler(arena, S8("clang")); }
+    if (!compiler.length) { compiler = d_reference_compiler(arena, S8("cc")); }
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64
+    // The hosted Windows Arm64 LLVM toolchain currently has no linkable
+    // compiler-rt UBSan runtime. Report the real runtime control as
+    // unavailable; never replace it with sanitizer-looking program text.
+    bool available = false;
+#else
+    bool available = compiler.length > 0;
+#endif
+    bool recover_built = false, fatal_built = false, recover_ok = false, fatal_ok = false;
+    u32 errors = 0;
+    DSettings settings = *parent;
+    settings.timeout_seconds = 30;
+    if (available)
+    {
+        String8 source = path_join(arena, root, S8("sanitizer-control.c"));
+#if BUSTER_WINDOWS
+        String8 recover_path = path_join(arena, root, S8("sanitizer-recover.exe"));
+        String8 fatal_path = path_join(arena, root, S8("sanitizer-fatal.exe"));
+#else
+        String8 recover_path = path_join(arena, root, S8("sanitizer-recover"));
+        String8 fatal_path = path_join(arena, root, S8("sanitizer-fatal"));
+#endif
+        d_write(&settings, source, S8("#include <limits.h>\nint main(void)\n{\n    volatile int value = INT_MAX;\n    value += 1;\n    (void)value;\n    return 0;\n}\n"));
+        String8 recover_argv[] = {compiler, S8("-O0"), S8("-fsanitize=undefined"), S8("-fsanitize-recover=all"),
+                                  source, S8("-o"), recover_path};
+        String8 fatal_argv[] = {compiler, S8("-O0"), S8("-fsanitize=undefined"), S8("-fno-sanitize-recover=all"),
+                                source, S8("-o"), fatal_path};
+        DObservation recover_compile = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(recover_argv),
+            path_join(arena, root, S8("sanitizer-compile-recover")));
+        DObservation fatal_compile = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(fatal_argv),
+            path_join(arena, root, S8("sanitizer-compile-fatal")));
+        recover_built = d_success(recover_compile) && path_exists(arena, recover_path);
+        fatal_built = d_success(fatal_compile) && path_exists(arena, fatal_path);
+        if (recover_built && fatal_built && !settings.io_failed)
+        {
+            String8 recover_run_argv[] = {recover_path};
+            String8 fatal_run_argv[] = {fatal_path};
+            DObservation recover = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(recover_run_argv),
+                path_join(arena, root, S8("sanitizer-run-recover")));
+            DObservation fatal = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(fatal_run_argv),
+                path_join(arena, root, S8("sanitizer-run-fatal")));
+            recover_ok = recover.kind == D_EXIT && recover.status == 0 && recover.sanitizer &&
+                d_contains(recover.sanitizer_report, S8("runtime error:"));
+            fatal_ok = fatal.sanitizer && d_contains(fatal.sanitizer_report, S8("runtime error:")) &&
+                (fatal.kind == D_SIGNAL || (fatal.kind == D_EXIT && fatal.status != 0));
+            if (recover_ok) { *recovering_program = recover_path; }
+        }
+        errors += !recover_built || !fatal_built;
+        if (recover_built && fatal_built) { errors += !recover_ok; errors += !fatal_ok; }
+        errors += settings.io_failed;
+    }
+    string_print(S8("DIFFERENTIAL_SANITIZER_CONTROL version=1 available={u32} recover_built={u32} fatal_built={u32} recover_ok={u32} fatal_ok={u32} errors={u32}\n"),
+        (u32)available, (u32)recover_built, (u32)fatal_built, (u32)recover_ok, (u32)fatal_ok, errors);
+    return errors;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root, String8 sanitizer_program)
 {
     u32 errors = 0, jobs = 0;
     errors += !d_jobs(4, 2, S8("3"), &jobs) || jobs != (BUSTER_SINGLE_THREADED ? 1 : 2);
@@ -1575,7 +1806,12 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
             {
                 tests[0].source = S8("timeout");
                 tests[1].source = S8("crash");
-                tests[2].source = S8("sanitizer");
+                if (sanitizer_program.length)
+                {
+                    tests[2].host = sanitizer_program;
+                    tests[2].expect_sanitizer = true;
+                }
+                else { tests[2].source = S8("crash"); }
                 tests[3].host = path_join(arena, work.settings.out, S8("missing-program"));
                 // Both duplicate directory claims must not count as success.
                 tests[5].name = tests[4].name;
@@ -1584,6 +1820,11 @@ BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
             work.test_jobs = worker_jobs;
             lane_run(worker_jobs, &d_case_lane, &work);
             u32 failures = d_cases_collect(&work);
+            if (failure_control && sanitizer_program.length)
+            {
+                errors += records[2].failures != 1;
+                errors += records[2].evidence_count != 4;
+            }
             errors += failure_control ? failures < 5 : failures != 0;
             errors += work.test_lanes != worker_jobs || work.test_peak != worker_jobs;
             errors += work.test_active != 0 || work.test_arenas != 0;
@@ -1676,8 +1917,6 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     other = normal; other.kind = D_TIMEOUT; errors += d_difference(normal, other) != 1;
     other.kind = D_SIGNAL; other.status = 11; errors += d_normal(other);
     other = normal; other.sanitizer = true; errors += d_normal(other);
-    errors += !d_sanitizer(S8("x.c:42: runtime error: bad value"));
-    errors += d_sanitizer(S8("ordinary warning"));
     normal.output = S8("a\0b"); other = normal; other.output = S8("a\0c");
     errors += d_difference(normal, other) != 4;
     u32 number = 1;
@@ -1775,11 +2014,14 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += d_caller_ready(caller_compile, true, false);
     }
     if (errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL pure_controls={u32}\n"), errors); }
-    String8 directory = string_format_z(arena, S8("build/differential-self-test-{u64}"), os_now_microseconds());
+    String8 directory = string_format_z(arena, S8("build/differential self-test%-{u64}"), os_now_microseconds());
     if (!d_create_output(arena, directory)) { errors += 1; }
     else
     {
-        String8 modes[] = {S8("exit"), S8("sanitizer"), S8("timeout"), S8("crash")};
+        String8 recovering_sanitizer = {0};
+        String8 modes[] = {S8("exit"), S8("sanitizer-name-stdout"), S8("sanitizer-name-stderr"),
+                           S8("timeout"), S8("crash")};
+        String8 sanitizer_names = d_sanitizer_name_text();
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
         {
             u32 before_child = errors;
@@ -1792,14 +2034,18 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
             DObservation child = d_observe(&observation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
                                            path_join(arena, directory, modes[index]));
             if (index == 0) { errors += child.kind != D_EXIT || child.status != 7 || !string_equal(child.output, S8("a\0b")) || !string_equal(child.error, S8("child stderr\n")); }
-            if (index == 1) { errors += child.kind != D_EXIT || child.status != 0 || !child.sanitizer || d_success(child); }
-            if (index == 2) { errors += child.kind != D_TIMEOUT; }
-            if (index == 3) { errors += child.kind != D_SIGNAL; }
+            if (index == 1) { errors += child.kind != D_EXIT || child.status != 0 || child.sanitizer || !d_success(child) ||
+                !string_equal(child.output, sanitizer_names) || child.error.length; }
+            if (index == 2) { errors += child.kind != D_EXIT || child.status != 0 || child.sanitizer || !d_success(child) ||
+                child.output.length || !string_equal(child.error, sanitizer_names); }
+            if (index == 3) { errors += child.kind != D_TIMEOUT; }
+            if (index == 4) { errors += child.kind != D_SIGNAL; }
             if (errors != before_child)
             {
                 string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL child={S8} kind={u32} status={u32} raw={u32}\n"), modes[index], (u32)child.kind, child.status, child.raw_status);
             }
         }
+        errors += d_sanitizer_runtime_self_test(arena, &settings, directory, &recovering_sanitizer);
 #if BUSTER_LINUX || BUSTER_MACOS
         {
             u32 before_child = errors;
@@ -1862,7 +2108,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += path_exists(arena, stale_object) || missing_caller.io_failed;
         errors += d_create_output(arena, directory); // Never reuse existing output.
         if (errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL before_workers={u32}\n"), errors); }
-        errors += d_workers_self_test(arena, directory);
+        errors += d_workers_self_test(arena, directory, recovering_sanitizer);
     }
     errors += settings.io_failed;
     string_print(S8("DIFFERENTIAL_SELF_TEST failures={u32} configurations={u32}\n"), errors, count);

@@ -2144,21 +2144,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                             String8 object = buster_test_temporary_path(temporary.arena, S8("buster-frame-vector"), S8(".o"));
                             String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], cpus[cpu], modes[mode],
-                                frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), sources[fixture], S8("-o"), object};
+                                frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), sources[fixture], S8("-o"), object,
+                                S8("-DBUSTER_SIGNBIT_BINARY128_REJECTION=1")};
                             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                             invocation.reject_machine_fallback = mode != 0;
                             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                             String8 description = string_format(temporary.arena, S8("frame vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
                                 sources[fixture], targets[target], modes[mode], frontends[frontend], cpus[cpu], pic, compiled.diagnostic);
+                            TargetDataLayout layout = target_data_layout(invocation.target);
+                            // No x86-64 allocator implements binary128 loads.
+                            // Require the structured refusal so selecting the
+                            // Android ABI can never silently reuse x87.
+                            bool x86_quad_control = fixture == 6 &&
+                                invocation.target.cpu_arch == CPU_ARCH_X86_64 &&
+                                layout.long_double_type.bit_width == 128;
                             // The archived direct implementation cannot load a
                             // binary128 value through a pointer. Retain that
                             // failed control; it is not the semantic oracle.
-                            bool direct_quad_control = fixture == 6 && mode == 0 && (target == 6 || target == 9 || target == 11);
-                            BUSTER_TEST_RAW(arguments, direct_quad_control
+                            bool direct_quad_control = fixture == 6 && mode == 0 &&
+                                invocation.target.cpu_arch == CPU_ARCH_AARCH64 &&
+                                layout.long_double_type.bit_width == 128;
+                            bool explicit_x86_unsupported = compiled.error == COMPILER_DRIVER_ERROR_CODEGEN &&
+                                compiled.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !compiled.has_object &&
+                                string_first_sequence(compiled.diagnostic, S8("kind=codegen.unsupported-instruction")) < compiled.diagnostic.length &&
+                                string_first_sequence(compiled.diagnostic, S8("opcode=load")) < compiled.diagnostic.length &&
+                                string_first_sequence(compiled.diagnostic, targets[target]) < compiled.diagnostic.length;
+                            BUSTER_TEST_RAW(arguments, x86_quad_control
+                                ? explicit_x86_unsupported
+                                : direct_quad_control
                                 ? compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object
                                 : compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
-                            BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == function_counts[fixture] &&
-                                compiled.codegen_statistics.fallback_function_count == 0, description);
+                            if (x86_quad_control)
+                            {
+                                command[BUSTER_ARRAY_LENGTH(command) - 1] = S8("-UBUSTER_SIGNBIT_BINARY128_REJECTION");
+                                CompilerDriverInvocation positive = compiler_driver_parse_arguments(temporary.arena,
+                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                                positive.reject_machine_fallback = mode != 0;
+                                CompilerDriverResult supported = compiler_driver_execute_invocation(temporary.arena, positive);
+                                BUSTER_TEST_RAW(arguments, supported.error == COMPILER_DRIVER_ERROR_NONE && supported.has_object &&
+                                    supported.codegen_statistics.function_count == 2 &&
+                                    supported.codegen_statistics.fallback_function_count == 0, description);
+                            }
+                            else
+                            {
+                                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == function_counts[fixture] &&
+                                    compiled.codegen_statistics.fallback_function_count == 0, description);
+                            }
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
                             u32 native_base = BUSTER_CPU_ARCH_AARCH64 ? 6u : 0u;
                             bool native_target = (target == native_base && BUSTER_LINUX) || (target == native_base + 1 && BUSTER_MACOS) ||

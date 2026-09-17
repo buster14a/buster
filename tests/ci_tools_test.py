@@ -1055,6 +1055,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--out evidence/census-validation-v2.json", census_validation)
         self.assertIn("--require-clean-candidate", census_validation)
         self.assertIn("--require-clean-acceptance", census_validation)
+        self.assertIn("--reference-supplements", census_validation)
+        self.assertEqual(text.count('--baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"'), 5)
+        self.assertIn("../validation/tools/native_retirement_reference.py", text)
+        self.assertNotIn("--baseline-ide ../reference/", text)
         self.assertNotIn("join-census.py", census_validation)
         self.assertNotIn("validate-census-v2.py", census_validation)
         upload = text.split("      - name: Retain raw evidence and build recipes", 1)[1].split(

@@ -1,4 +1,5 @@
 /build/
+/build-clang/
 /build-android*/
 /*.data
 /perf.data*
@@ -20,3 +21,6 @@ imgui.ini
 .codex
 /VDSO/
 __pycache__/
+
+/sdk-headers/
+/external/

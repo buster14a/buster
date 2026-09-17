@@ -1,3 +1,5 @@
+// This fixture observes the x87 format, including its 64-bit significand.
+#if __LDBL_MANT_DIG__ == 64
 #ifndef F80_U64_CLIENT
 long double f80_u64_from(unsigned long long value) { return (long double)value; }
 unsigned long long f80_u64_to(long double value) { return (unsigned long long)value; }
@@ -60,4 +62,8 @@ int main(void)
 #else
 int main(void) { return f80_u64_check(); }
 #endif
+#endif
+
+#else
+int main(void) { return 0; }
 #endif

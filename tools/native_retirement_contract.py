@@ -16,6 +16,9 @@ from pathlib import Path
 
 
 ALLOCATORS = ("none", "mir-stack", "fast", "quality")
+HOSTED_FIXTURES = frozenset("tests/" + name + ".c" for name in (
+    "basic_c_target_headers", "basic_cjson_roundtrip", "basic_doom_headless",
+    "basic_lz4_roundtrip", "basic_stb_compat", "basic_yyjson_roundtrip", "basic_zlib_compat"))
 FULL_CENSUS_PROFILE = "full-census"
 SELF_TEST_PROFILE = "self-test"
 FULL_SUBJECT_COUNT = 410
@@ -27,7 +30,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "de31038ba09300a7d734dda5a9e3441ae12114ee42d966778912937c2776fd18"
+FULL_SUPPORT_CONTRACT_SHA256 = "bcbcec686b2bea0a0e2d8baf6ca227baf8c8dea9790ca648c7d061250d86d706"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -41,12 +44,12 @@ MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
-FULL_APPLICABILITY_LEDGER_COUNT = 359
-FULL_APPLICABILITY_LEDGER_SHA256 = "a4496cc2d236b1c705c147a89ba1decb80a42c1abbd63a4f65db72d73c67d040"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "6639387fe418cea3a31e51ca4683809920168b624ea3f270bc0a520b96d2003d"
-FULL_DEPENDENCY_RECEIPT_SHA256 = "28feba705367c1998e13cb306f30d9e8e5bf89f0dd3b373433960c39dcb711f7"
-FULL_DEPENDENCY_PROJECT_SHA256 = "b341e623f5475088fb5abd46b29628fba9accb135c41662e5cedf615635fcb76"
-FULL_DEPENDENCY_LEDGER_SHA256 = "e6736f30321aa4a993067bec42997bf7fa5369c282ddb194b3bb414d43d2c5a3"
+FULL_APPLICABILITY_LEDGER_COUNT = 373
+FULL_APPLICABILITY_LEDGER_SHA256 = "6081b5349761dfb57a1dd054507054fe586c9f3332c562b34280b4af08776b50"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "7e27cce44651a4adaea2707fe2eaefd0f2a0a29564bb40a5262a18685ff91daa"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad"
+FULL_DEPENDENCY_PROJECT_SHA256 = "9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03"
+FULL_DEPENDENCY_LEDGER_SHA256 = "eb69112f4c38a2298dddfa6d132c594c0349b5b31ee5cf309bf42820c3475944"
 FULL_EXTERNAL_CHECKOUTS = (
     {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
     {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
@@ -565,6 +568,21 @@ def validate_argv(directory, manifest, row, recipes):
             arch = "x86_64" if row["target"].startswith("x86_64-") else "aarch64"
             expected.extend(["-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / arch / "include"),
                              "-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / "include")])
+        if row["fixture"] in HOSTED_FIXTURES:
+            sdk_root = recorded_root / "dependencies" / "project-include" / "sdk"
+            target = row["target"]
+            if "windows" in target:
+                expected.append("-U__GNUC__")
+                if target.startswith("x86_64-"):
+                    expected.append("-D__x86_64=1")
+                expected.extend(["-isystem", str(sdk_root / "mingw-adapter"),
+                                 "-isystem", str(sdk_root / "windows")])
+            elif "apple" in target:
+                expected.extend(["-isystem", str(sdk_root / "darwin")])
+            elif "android" in target:
+                arch = target.split("-", 1)[0]
+                expected.extend(["-isystem", str(sdk_root / "android" / (arch + "-linux-android")),
+                                 "-isystem", str(sdk_root / "android")])
         expected.append("-I" + str(recorded_root / "inputs" / "tests"))
         expected.append("-I" + str(recorded_root / "dependencies" / "project-include"))
     else:
@@ -994,8 +1012,8 @@ def validate(directory):
     assert manifest["environment"] == "explicit-replacement-in-environment.tsv"
     assert manifest["unfrozen_dependencies"] == "none-for-object-census"
     if manifest.get("project_include_sha256", ""):
-        assert manifest["sysroot"] == "target-correct-musl-linux-gnu-only"
-        assert manifest["system_include"] == "target-correct-musl-project-include"
+        assert manifest["sysroot"] == "target-correct-hosted-sdks"
+        assert manifest["system_include"] == "target-correct-libc-project-include"
         assert manifest["source_dependencies"] == (
             "tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include-plus-pinned-github-closure")
     else:
@@ -1253,7 +1271,7 @@ def partition_shards(reports, require_clean_candidate=False, require_clean_accep
     return first, selected_rows, {key: outcomes[key] for key in sorted(outcomes, key=int)}
 
 
-def validate_shards(directories, output, require_clean_candidate=False, require_clean_acceptance=False):
+def validate_shards(directories, output, require_clean_candidate=False, require_clean_acceptance=False, reference_supplements=False):
     """Validate every v2 shard and prove that their selected rows partition it.
 
     A per-shard result can be internally consistent while the overall census
@@ -1270,6 +1288,24 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
     # Always write the aggregate, including failed dispositions, before
     # applying the optional gate.  Failed evidence must remain inspectable.
     first, selected_rows, outcomes = partition_shards(reports)
+    direct_reference_failure_rows = sorted(item["row"] for item in outcomes.values() if item["reference_failure"])
+    supplement_identities = []
+    if reference_supplements:
+        import native_retirement_reference as reference
+        assert first["baseline_revision_claim"] == first["compiler_revision_claim"], "supplement requires same-source direct reference"
+        assert first["baseline_sha256"] == first["compiler_sha256"], "supplement requires same binary for direct and MIR"
+        resolved = set()
+        for report in reports:
+            groups, identity = reference.validate(report)
+            resolved.update(groups)
+            supplement_identities.append(identity)
+        for outcome in outcomes.values():
+            if outcome["reference_failure"] and str(outcome["group"]) in resolved:
+                outcome["reference_failure"] = False
+                outcome["acceptance_failure"] = outcome["candidate_failure"]
+                outcome["reference_resolution"] = "independent-clang-control"
+                outcome["reason"] = "direct-reference-unresolved-clang-control-passed"
+                outcome["ownership"] = "clang-reference"
     count = len(reports)
     row_records = {}
     residuals = []
@@ -1395,6 +1431,8 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "residual_limit": MAX_RESIDUAL_ROWS,
         "residual_truncated": residual_truncated,
         "candidate_failure_rows": candidate_failures,
+        "direct_reference_failure_rows": direct_reference_failure_rows,
+        "reference_supplement_sha256": supplement_identities,
         "reference_failure_rows": reference_failures,
         "acceptance_failure_rows": acceptance_failures,
         "inapplicable_rows": inapplicable_rows,
@@ -1537,6 +1575,7 @@ def main():
     shards_parser.add_argument("--out", required=True, type=Path)
     shards_parser.add_argument("--require-clean-candidate", action="store_true")
     shards_parser.add_argument("--require-clean-acceptance", action="store_true")
+    shards_parser.add_argument("--reference-supplements", action="store_true")
     compare_parser = subparsers.add_parser("compare")
     compare_parser.add_argument("reference", type=Path)
     compare_parser.add_argument("candidate", type=Path)
@@ -1557,7 +1596,8 @@ def main():
     elif arguments.command == "validate-shards":
         print(json.dumps(validate_shards(arguments.directories, arguments.out,
                                          arguments.require_clean_candidate,
-                                         arguments.require_clean_acceptance), sort_keys=True))
+                                         arguments.require_clean_acceptance,
+                                         arguments.reference_supplements), sort_keys=True))
     else:
         print(json.dumps(reconcile(validate(arguments.reference), validate(arguments.candidate),
                                    arguments.out, arguments.require_clean_candidate,

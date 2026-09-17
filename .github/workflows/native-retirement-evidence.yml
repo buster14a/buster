@@ -15,6 +15,11 @@ on:
       - tools/native_retirement_materializer.py
       - tools/native_retirement_materializer_test.py
       - tools/native_retirement_external.py
+      - tools/native_retirement_sdks.py
+      - tools/native_retirement_sdks_test.py
+      - tools/native_retirement_reference.py
+      - tools/native-retirement-mingw/**
+      - docs/native-retirement-sdks-v1.json
       - tools/native_retirement_external_test.py
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
@@ -108,16 +113,11 @@ jobs:
           path: candidate/external/musl
           fetch-depth: 1
           persist-credentials: false
-      - name: Check out archived direct source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
-          path: reference
-          persist-credentials: false
       - name: Bootstrap candidate build driver
         working-directory: candidate
         run: |
           test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
+          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
           python3 tools/native_retirement_external.py prepare \
             --manifest docs/native-retirement-dependencies-v1.json \
             --source-root "$(pwd)"
@@ -137,14 +137,6 @@ jobs:
         run: |
           "$RUNNER_TEMP/candidate-build" generate --cc clang --ci --linker DEFAULT
           "$RUNNER_TEMP/candidate-build" build --config Release -t ide
-      - name: Bootstrap archived build driver
-        working-directory: reference
-        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/reference-build"
-      - name: Rebuild archived direct reference
-        working-directory: reference
-        run: |
-          "$RUNNER_TEMP/reference-build" generate --cc clang --ci --linker DEFAULT
-          "$RUNNER_TEMP/reference-build" build --config Release -t ide
       - name: Validate census harness
         working-directory: candidate
         run: '"$RUNNER_TEMP/candidate-build" native_retirement_census --self-test'
@@ -155,8 +147,8 @@ jobs:
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
           --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
-          --baseline-ide ../reference/build/Release/ide
-          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
           --manifest-only --out evidence/manifest
       - name: Execute complete assigned shard 0
         continue-on-error: true
@@ -166,8 +158,8 @@ jobs:
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
           --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
-          --baseline-ide ../reference/build/Release/ide
-          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
           --shard-index 0 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
           --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
@@ -182,8 +174,8 @@ jobs:
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
           --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
-          --baseline-ide ../reference/build/Release/ide
-          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
           --shard-index 1 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
           --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
@@ -198,8 +190,8 @@ jobs:
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
           --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
-          --baseline-ide ../reference/build/Release/ide
-          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
           --shard-index 2 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
           --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
@@ -214,14 +206,22 @@ jobs:
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
           --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
-          --baseline-ide ../reference/build/Release/ide
-          --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
           --shard-index 3 --shard-count 4
           --resource-include "$(clang -print-resource-dir)/include"
           --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
           --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
           --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
           --out evidence/census-integrated-3
+      - name: Compile independent controls for unsupported direct-reference operations
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          python3 ../validation/tools/native_retirement_reference.py
+          evidence/census-integrated-0 evidence/census-integrated-1
+          evidence/census-integrated-2 evidence/census-integrated-3 --clang clang
       - name: Independently validate every census shard and row
         if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
         working-directory: candidate
@@ -232,6 +232,7 @@ jobs:
             evidence/census-integrated-2 \
             evidence/census-integrated-3 \
             --out evidence/census-validation-v2.json \
+            --reference-supplements \
             --require-clean-candidate \
             --require-clean-acceptance
       - name: Retain raw evidence and build recipes
@@ -244,8 +245,6 @@ jobs:
             candidate/evidence-candidate.txt
             candidate/build/CMakeCache.txt
             candidate/build/compile_commands.json
-            reference/build/CMakeCache.txt
-            reference/build/compile_commands.json
           retention-days: 7
           if-no-files-found: error
           compression-level: 6

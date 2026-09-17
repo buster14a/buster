@@ -20,7 +20,7 @@
 // flags of the status word, so a `fprem1` that ran against the wrong stack
 // position produces a plausible remainder and a wrong quotient.
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && __LDBL_MANT_DIG__ != 113
 
 static int failures;
 

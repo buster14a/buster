@@ -12,7 +12,7 @@
 // The result comes back through a memory output rather than a register,
 // because that is the only place `fistpll` can put it.
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && __LDBL_MANT_DIG__ != 113
 
 static int failures;
 
