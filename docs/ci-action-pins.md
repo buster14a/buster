@@ -8,15 +8,23 @@ policy decision before use.
 
 The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
 actionlint. The checker now lives under `tools/` because the Forgejo workflows
-and their script directory were removed. Its allowlist preserves the existing
-GitHub workflow revisions; this migration does not update any action source.
+and their script directory were removed. Its allowlist preserves existing revisions and records staged migrations; an
+older pin remains approved only while at least one reviewed workflow still uses it.
 
 | Action path | Approved commit | Existing release annotation |
 |---|---|---|
 | `actions/checkout` | `11bd71901bbe5b1630ceea73d27597364c9af683` | v4.2.2 |
-| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | v4.6.2 |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | v4.6.2 (legacy workflows; Node 20) |
+| `actions/upload-artifact` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | v7.0.1 (Buster CI; Node 24) |
 | `actions/cache/restore` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4.3.0 |
 | `actions/cache/save` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4.3.0 |
+
+The Buster CI workflow moved to the immutable v7.0.1 commit after run
+35167957822 completed its required Windows x86-64 Release work but the final
+v4.6.2 artifact step, which GitHub forced from Node 20 onto Node 24, failed
+while creating the artifact. The v7 action declares Node 24 natively and keeps
+the existing artifact names, paths, retention, compression and failure policy.
+Other workflows remain on v4.6.2 until their independent validation.
 
 Checkout necessarily precedes repository-local checks; its literal pin must
 itself be reviewed in the PR. This policy cannot prevent a PR author from
