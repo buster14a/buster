@@ -1,4 +1,4 @@
-name: Publish PR 767 CodeView frame-piece repair
+name: Diagnose PR 767 CodeView short range
 
 on:
   push:
@@ -8,235 +8,161 @@ on:
       - .github/workflows/diagnose-767-windows-link.yml
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
 
 jobs:
-  publish:
+  diagnose:
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
-      - name: Check out owned PR branch
+      - name: Check out diagnostic revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: claude/clever-cori-qh0b15
-          fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Apply CodeView register-relative frame-piece repair
+      - name: Download retained failing object
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 35282867175 --repo buster14a/buster --name issue-786-windows-abi-link-35282867175 --dir diag
+
+      - name: Build exact range-preserving variants
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $Expected = '814fa99a8d026404371d299463ef4a56076ca5c0'
-          $Actual = (git rev-parse HEAD).Trim()
-          if ($Actual -ne $Expected) { throw "PR head moved: expected $Expected, found $Actual" }
           @'
-          from pathlib import Path
+          import pathlib
+          import struct
 
-          def replace_once(path: str, old: str, new: str) -> None:
-              file = Path(path)
-              text = file.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one replacement, found {count}")
-              file.write_text(text.replace(old, new))
+          source = pathlib.Path("diag/subject-fast-p2.o")
+          original = source.read_bytes()
 
-          replace_once(
-              "src/buster/lib/compiler/codeview/codeview.c",
-              """    S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
-              S_INLINESITE = 0x114d,
-          """,
-              """    S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
-              S_DEFRANGE_REGISTER_REL = 0x1145,
-              S_INLINESITE = 0x114d,
-          """,
-          )
-          replace_once(
-              "src/buster/lib/compiler/codeview/codeview.c",
-              """enum
-          {
-              CV_LF_MODIFIER = 0x1001,
-          """,
-              """enum
-          {
-              CODEVIEW_REGISTER_VFRAME = 30006,
-              CODEVIEW_DEFRANGE_REGISTER_REL_IS_SUBFIELD = 1,
-              CODEVIEW_DEFRANGE_REGISTER_REL_OFFSET_SHIFT = 4,
-              CODEVIEW_DEFRANGE_REGISTER_REL_MAX_OFFSET = 0x0fff,
-          };
+          def parse(data):
+              machine, count, timestamp, symbols, symbol_count, optional_size, characteristics = struct.unpack_from("<HHLLLHH", data, 0)
+              strings = b""
+              if symbols and symbol_count:
+                  string_offset = symbols + symbol_count * 18
+                  string_size = struct.unpack_from("<L", data, string_offset)[0]
+                  strings = data[string_offset:string_offset + string_size]
+              sections = []
+              table = 20 + optional_size
+              for index in range(count):
+                  header = table + index * 40
+                  raw_name = data[header:header + 8]
+                  if raw_name.startswith(b"/"):
+                      name_offset = int(raw_name[1:].split(b"\0", 1)[0])
+                      name = strings[name_offset:].split(b"\0", 1)[0].decode("ascii")
+                  else:
+                      name = raw_name.split(b"\0", 1)[0].decode("ascii")
+                  values = struct.unpack_from("<LLLLLLHHL", data, header + 8)
+                  sections.append({
+                      "header": header,
+                      "name": name,
+                      "size": values[2],
+                      "raw": values[3],
+                      "reloc": values[4],
+                      "line": values[5],
+                      "nreloc": values[6],
+                  })
+              return symbols, symbol_count, sections
 
-          enum
-          {
-              CV_LF_MODIFIER = 0x1001,
-          """,
-          )
-          replace_once(
-              "src/buster/lib/compiler/codeview/codeview.c",
-              """            else if (piece->kind == DEBUG_LOCATION_FRAME)
-                      {
-                          u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
-                          byte_writer_emit_u32_le(symbols, 0);
-                          byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece->value_offset, UINT16_MAX));
-                          byte_writer_emit_u32_le(symbols, piece_start);
-                          byte_writer_emit_u16_le(symbols, 1);
-                          byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
-                          codeview_record_end(symbols, record);
-                      }
-          """,
-              """            else if (piece->kind == DEBUG_LOCATION_FRAME)
-                      {
-                          // A frame-backed aggregate fragment is a register-relative
-                          // subfield. S_DEFRANGE_SUBFIELD instead names a DIA location
-                          // program in the string table; zero was the empty string and
-                          // link.exe rejected that invalid program. VFRAME is the
-                          // CodeView frame-base register, matching DebugLocation's
-                          // frame-relative offset contract.
-                          u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER_REL);
-                          byte_writer_emit_u16_le(symbols, CODEVIEW_REGISTER_VFRAME);
-                          symbols->overflow |= piece->value_offset > CODEVIEW_DEFRANGE_REGISTER_REL_MAX_OFFSET;
-                          u16 flags = (u16)(CODEVIEW_DEFRANGE_REGISTER_REL_IS_SUBFIELD |
-                                            (BUSTER_MIN(piece->value_offset, CODEVIEW_DEFRANGE_REGISTER_REL_MAX_OFFSET)
-                                             << CODEVIEW_DEFRANGE_REGISTER_REL_OFFSET_SHIFT));
-                          byte_writer_emit_u16_le(symbols, flags);
-                          byte_writer_emit_u32_le(symbols, (u32)piece->frame_offset);
-                          byte_writer_emit_u32_le(symbols, piece_start);
-                          byte_writer_emit_u16_le(symbols, 1);
-                          byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
-                          codeview_record_end(symbols, record);
-                      }
-          """,
-          )
+          def symbol_name(data, symbols, index, strings):
+              offset = symbols + index * 18
+              raw = data[offset:offset + 8]
+              zeroes, string_offset = struct.unpack_from("<LL", raw)
+              if zeroes == 0:
+                  return strings[string_offset:].split(b"\0", 1)[0].decode("ascii", "replace")
+              return raw.split(b"\0", 1)[0].decode("ascii", "replace")
 
-          replace_once(
-              "src/buster/tests/compiler/codeview/codeview_test.h",
-              """    CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
-              CODEVIEW_TEST_S_INLINESITE = 0x114d,
-          """,
-              """    CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
-              CODEVIEW_TEST_S_DEFRANGE_REGISTER_REL = 0x1145,
-              CODEVIEW_TEST_S_INLINESITE = 0x114d,
-          """,
-          )
+          def insert_into_section(data, section_name, insertion, payload, subsection_length):
+              old = bytes(data)
+              symbols, symbol_count, sections = parse(old)
+              section = next(item for item in sections if item["name"] == section_name)
+              delta = len(payload)
+              result = bytearray(old[:insertion] + payload + old[insertion:])
 
-          replace_once(
-              "src/buster/tests/compiler/codeview/codeview_test.c",
-              """    bool found_frame = false;
-              bool found_subfield = false;
-              bool found_inline = false;
-          """,
-              """    bool found_frame = false;
-              bool found_frame_subfield = false;
-              bool found_register_subfield = false;
-              bool found_legacy_subfield = false;
-              bool found_inline = false;
-          """,
-          )
-          replace_once(
-              "src/buster/tests/compiler/codeview/codeview_test.c",
-              """                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
-                          found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD || record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
-                          found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
-          """,
-              """                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
-                          found_register_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
-                          found_legacy_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD;
-                          if (record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER_REL && record_length >= 18)
-                          {
-                              u16 base_register = 0;
-                              u16 flags = 0;
-                              s32 base_offset = 0;
-                              memcpy(&base_register, model_built.symbols.pointer + record_offset + 4, sizeof(base_register));
-                              memcpy(&flags, model_built.symbols.pointer + record_offset + 6, sizeof(flags));
-                              memcpy(&base_offset, model_built.symbols.pointer + record_offset + 8, sizeof(base_offset));
-                              found_frame_subfield |= base_register == 30006 && (flags & 1u) && (flags >> 4) == 0 && base_offset == -24;
-                          }
-                          found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
-          """,
-          )
-          replace_once(
-              "src/buster/tests/compiler/codeview/codeview_test.c",
-              """    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
-          """,
-              """    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame &&
-                                         found_frame_subfield && found_register_subfield && !found_legacy_subfield && found_inline);
-          """,
-          )
+              if symbols >= insertion:
+                  struct.pack_into("<L", result, 8, symbols + delta)
 
-          replace_once(
-              "src/buster/tests/compiler/codegen/codegen_test.c",
-              """    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
-          };
-          """,
-              """    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
-              CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL = 0x1145,
-          };
-          """,
-          )
-          replace_once(
-              "src/buster/tests/compiler/codegen/codegen_test.c",
-              """                mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                   record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
-                          mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
-          """,
-              """                bool register_rel_subfield = false;
-                          if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 18)
-                          {
-                              u16 flags = 0;
-                              memcpy(&flags, bytes.pointer + record + 6, sizeof(flags));
-                              register_rel_subfield = (flags & 1u) != 0;
-                          }
-                          mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                   record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER ||
-                                   register_rel_subfield) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
-                          mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
-          """,
-          )
-          replace_once(
-              "src/buster/tests/compiler/codegen/codegen_test.c",
-              """                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
-                          {
-                              memcpy(&range_start, bytes.pointer + record + 10, 4);
-                              memcpy(&range_length, bytes.pointer + record + 16, 2);
-                          }
-          """,
-              """                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
-                          {
-                              memcpy(&range_start, bytes.pointer + record + 10, 4);
-                              memcpy(&range_length, bytes.pointer + record + 16, 2);
-                          }
-                          else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && register_rel_subfield &&
-                                   record_length >= 18)
-                          {
-                              memcpy(&range_start, bytes.pointer + record + 12, 4);
-                              memcpy(&range_length, bytes.pointer + record + 18, 2);
-                          }
-          """,
-          )
-          replace_once(
-              "src/buster/tests/compiler/codegen/codegen_test.c",
-              """                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                            record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
-                                           range_start == 20 && range_length == 10;
-          """,
-              """                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                            record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER ||
-                                            register_rel_subfield) &&
-                                           range_start == 20 && range_length == 10;
-          """,
-          )
+              for item in sections:
+                  header = item["header"]
+                  if item["name"] == section_name:
+                      struct.pack_into("<L", result, header + 16, item["size"] + delta)
+                  for field, key in ((20, "raw"), (24, "reloc"), (28, "line")):
+                      pointer = item[key]
+                      if pointer and pointer >= insertion:
+                          struct.pack_into("<L", result, header + field, pointer + delta)
+
+              old_length = struct.unpack_from("<L", old, subsection_length)[0]
+              struct.pack_into("<L", result, subsection_length, old_length + delta)
+
+              _, _, new_sections = parse(result)
+              new_section = next(item for item in new_sections if item["name"] == section_name)
+              relative_insertion = insertion - section["raw"]
+              for index in range(section["nreloc"]):
+                  relocation = new_section["reloc"] + index * 10
+                  address = struct.unpack_from("<L", result, relocation)[0]
+                  if address >= relative_insertion:
+                      struct.pack_into("<L", result, relocation, address + delta)
+
+              new_symbols, new_symbol_count, _ = parse(result)
+              string_table = new_symbols + new_symbol_count * 18
+              string_size = struct.unpack_from("<L", result, string_table)[0]
+              strings = result[string_table:string_table + string_size]
+              index = 0
+              while index < new_symbol_count:
+                  symbol = new_symbols + index * 18
+                  auxiliary_count = result[symbol + 17]
+                  if symbol_name(result, new_symbols, index, strings) == section_name and auxiliary_count:
+                      auxiliary = symbol + 18
+                      length = struct.unpack_from("<L", result, auxiliary)[0]
+                      struct.pack_into("<L", result, auxiliary, length + delta)
+                  index += 1 + auxiliary_count
+              return result
+
+          symbols, symbol_count, sections = parse(original)
+          debug = next(item for item in sections if item["name"] == ".debug$S")
+          target = 4032
+          record_length, record_kind = struct.unpack_from("<HH", original, target)
+          frame_offset, range_start, section_index, range_length = struct.unpack_from("<lLHH", original, target + 4)
+          if (record_length, record_kind, frame_offset, range_start, section_index, range_length) != (14, 0x1142, -16, 203, 1, 4):
+              raise SystemExit("retained object no longer has the measured four-byte frame range")
+
+          cursor = debug["raw"] + 4
+          debug_end = debug["raw"] + debug["size"]
+          subsection_length = None
+          while cursor + 8 <= debug_end:
+              cursor = (cursor + 3) & ~3
+              kind, length = struct.unpack_from("<LL", original, cursor)
+              payload = cursor + 8
+              if payload <= target < payload + length:
+                  subsection_length = cursor + 4
+                  break
+              cursor = (payload + length + 3) & ~3
+          if subsection_length is None:
+              raise SystemExit("target symbol subsection was not found")
+
+          pathlib.Path("diag/original.o").write_bytes(original)
+
+          floor = bytearray(original)
+          struct.pack_into("<H", floor, target + 14, 5)
+          pathlib.Path("diag/floor-five.o").write_bytes(floor)
+
+          for name, new_start, gap_start in (
+              ("trailing-gap", 203, 4),
+              ("leading-gap", 202, 0),
+          ):
+              candidate = bytearray(original)
+              struct.pack_into("<H", candidate, target, 18)
+              struct.pack_into("<L", candidate, target + 8, new_start)
+              struct.pack_into("<H", candidate, target + 14, 5)
+              candidate = insert_into_section(candidate, ".debug$S", target + 16, struct.pack("<HH", gap_start, 1), subsection_length)
+              pathlib.Path(f"diag/{name}.o").write_bytes(candidate)
           '@ | python -
 
-          git diff --check
-          git config user.name 'ChatGPT Codex Connector'
-          git config user.email 'noreply@openai.com'
-          git add src/buster/lib/compiler/codeview/codeview.c `
-                  src/buster/tests/compiler/codeview/codeview_test.h `
-                  src/buster/tests/compiler/codeview/codeview_test.c `
-                  src/buster/tests/compiler/codegen/codegen_test.c
-          git commit -m 'codeview: encode frame-backed aggregate fragments'
-          git fetch origin main
-          git merge --no-edit origin/main
-
-      - name: Build and run Release tests
+      - name: Link every candidate with MSVC
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -245,66 +171,34 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
           & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          $Driver = Join-Path $env:RUNNER_TEMP 'publish-build.exe'
-          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $Driver generate --cc clang --ci --linker DEFAULT
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $Driver build --config Release -t test_all
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning 'Release tests failed once; rerunning to distinguish a transient runner timeout.'
-            & $Driver build --config Release -t test_all
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Sanitizer = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          $LibraryArgs = @()
+          foreach ($LibraryPath in @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })) { $LibraryArgs += "-L$LibraryPath" }
+          $Results = @{}
+          foreach ($Name in @('original', 'floor-five', 'trailing-gap', 'leading-gap')) {
+            & clang.exe @Sanitizer @LibraryArgs diag\caller.o "diag\$Name.o" -o "diag\$Name.exe" *> "diag\link-$Name.log"
+            $Results[$Name] = $LASTEXITCODE
+            Write-Host "LINK_RESULT candidate=$Name code=$LASTEXITCODE"
           }
+          @(
+            "original=$($Results['original'])",
+            "floor-five=$($Results['floor-five'])",
+            "trailing-gap=$($Results['trailing-gap'])",
+            "leading-gap=$($Results['leading-gap'])"
+          ) | Set-Content -Encoding ascii diag\candidate-summary.txt
+          Get-Content diag\candidate-summary.txt
+          if ($Results['original'] -eq 0) { throw 'Original corrupt object unexpectedly linked' }
+          if ($Results['floor-five'] -ne 0) { throw 'Measured five-byte control did not link' }
+          if ($Results['trailing-gap'] -ne 0) { Get-Content diag\link-trailing-gap.log; throw 'Exact trailing-gap candidate did not link' }
+          if ($Results['leading-gap'] -ne 0) { Get-Content diag\link-leading-gap.log; throw 'Exact leading-gap candidate did not link' }
 
-      - name: Prove target-promotion object links with MSVC
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
-          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
-          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
-          New-Item -ItemType Directory -Force -Path evidence | Out-Null
-          $Include = "$PWD\tests\differential"
-          $Caller = "$PWD\evidence\caller.o"
-          $Subject = "$PWD\evidence\subject.o"
-          $Program = "$PWD\evidence\program.exe"
-          & clang.exe -O0 -fwrapv -fno-strict-aliasing -funsigned-char "-I$Include" tests\differential\abi_host.c -c -o $Caller
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $Candidate = @(
-            'cc',
-            '-fregister-allocator=fast',
-            '-fno-machine-fallback',
-            '-fno-canonical-local-promotion',
-            '-ftarget-local-promotion',
-            '-fno-frontend-ssa',
-            '-fverify-codegen',
-            '-fwrapv',
-            '-fno-strict-aliasing',
-            '-funsigned-char',
-            "-I$Include"
-          )
-          foreach ($LibraryPath in $LibraryPaths) { $Candidate += "-L$LibraryPath" }
-          $Candidate += @('tests\differential\abi.c', '-c', '-o', $Subject)
-          & build\Release\ide.exe @Candidate
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & llvm-readobj.exe --codeview $Subject
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $Link = @()
-          foreach ($LibraryPath in $LibraryPaths) { $Link += "-L$LibraryPath" }
-          $Link += @($Caller, $Subject, '-o', $Program)
-          & clang.exe @Link
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $Program
-          exit $LASTEXITCODE
-
-      - name: Publish validated commit
-        shell: pwsh
-        run: |
-          git status --short
-          git diff --exit-code
-          git push origin HEAD:claude/clever-cori-qh0b15
+      - name: Retain candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-767-codeview-short-range-${{ github.run_id }}
+          path: |
+            diag/candidate-summary.txt
+            diag/link-*.log
+          retention-days: 3
+          if-no-files-found: warn
