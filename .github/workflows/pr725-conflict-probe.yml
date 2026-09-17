@@ -8,39 +8,125 @@ on:
       - .github/workflows/pr725-conflict-probe.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inspect:
+  integrate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out topic branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Show merge conflicts against current main
+      - name: Merge current main and resolve reviewed conflicts
         shell: bash
         run: |
-          set -uo pipefail
-          git config user.name 'PR 725 conflict probe'
-          git config user.email 'pr725-conflict-probe@users.noreply.github.com'
+          set -euo pipefail
+          branch=fix/665-builtin-capabilities
+          source_path=src/buster/lib/compiler/frontend/c/c_source.c
+          driver_path=src/buster/tests/compiler/driver/driver_test.c
+          ours_driver=$(mktemp)
+          trap 'rm -f "$ours_driver"' EXIT
+
+          git config user.name 'PR 725 integration'
+          git config user.email 'pr725-integration@users.noreply.github.com'
+          git show HEAD:"$driver_path" >"$ours_driver"
           git fetch --no-tags origin main
+          printf 'PR725_TOPIC_SHA=%s\n' "$(git rev-parse HEAD)"
+          printf 'PR725_MAIN_SHA=%s\n' "$(git rev-parse origin/main)"
+
           set +e
           git merge --no-commit --no-ff origin/main
           merge_status=$?
           set -e
-          printf 'PR725_MERGE_STATUS=%s\n' "$merge_status"
-          git status --short
-          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-          printf 'PR725_CONFLICT_COUNT=%s\n' "${#conflicts[@]}"
-          for path in "${conflicts[@]}"; do
-              printf 'PR725_CONFLICT_FILE=%s\n' "$path"
-              git checkout --conflict=merge -- "$path" || true
-              echo "----- conflict markers: $path -----"
-              grep -n -B 35 -A 35 -E '^(<<<<<<<|=======|>>>>>>>)' "$path" || true
-              echo "----- combined diff: $path -----"
-              git diff --cc -- "$path" || true
+          if [[ $merge_status -ne 1 || ! -f .git/MERGE_HEAD ]]; then
+              echo "error: expected a content-conflict merge, got status $merge_status" >&2
+              exit 1
+          fi
+
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U | sort)
+          expected=("$source_path" "$driver_path")
+          if [[ ${#conflicts[@]} -ne ${#expected[@]} ]]; then
+              printf 'error: expected %s conflicts, got %s\n' "${#expected[@]}" "${#conflicts[@]}" >&2
+              printf 'conflict: %s\n' "${conflicts[@]}" >&2
+              exit 1
+          fi
+          for index in "${!expected[@]}"; do
+              if [[ ${conflicts[$index]} != "${expected[$index]}" ]]; then
+                  printf 'error: conflict %s is %s, expected %s\n' "$index" "${conflicts[$index]}" "${expected[$index]}" >&2
+                  exit 1
+              fi
           done
-          git merge --abort || true
+
+          git checkout --conflict=merge -- "$source_path"
+          python3 - "$source_path" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          assert text.count("<<<<<<< ours\n") == 1
+          assert text.count("=======\n") == 1
+          assert text.count(">>>>>>> theirs\n") == 1
+          start = text.index("<<<<<<< ours\n")
+          middle = text.index("=======\n", start)
+          end = text.index(">>>>>>> theirs\n", middle) + len(">>>>>>> theirs\n")
+          ours = text[start + len("<<<<<<< ours\n"):middle]
+          theirs = text[middle + len("=======\n"):end - len(">>>>>>> theirs\n")]
+          assert "c_conditional_builtin_supported" in ours
+          assert "options ? options->target.cpu_arch : CPU_ARCH_COUNT" in ours
+          assert "c_conditional_attribute_supported(base, arguments[0]," in theirs
+          replacement = (
+              "            supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),\n"
+              "                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT)\n"
+              "                                    : c_conditional_attribute_supported(base, arguments[0],\n"
+              "                                                                        options ? options->target : target_native);\n"
+          )
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
+          git add "$source_path"
+
+          git checkout --theirs -- "$driver_path"
+          python3 - "$ours_driver" "$driver_path" <<'PY'
+          from pathlib import Path
+          import sys
+
+          ours = Path(sys.argv[1]).read_text()
+          path = Path(sys.argv[2])
+          merged = path.read_text()
+          start = ours.index("// #665: a positive query must reach the selected non-native backend too.")
+          end = ours.index("\nUnitTestResult compiler_driver_tests(", start)
+          builtin_fixture = ours[start:end].rstrip() + "\n\n"
+          function_anchor = "// #666: inspect the bytes the selected object writer actually emitted, not\n"
+          assert function_anchor in merged
+          assert "compiler_driver_test_has_builtin_targets" not in merged
+          merged = merged.replace(function_anchor, builtin_fixture + function_anchor, 1)
+          registry_anchor = "    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);\n"
+          assert merged.count(registry_anchor) == 1
+          merged = merged.replace(
+              registry_anchor,
+              registry_anchor + "    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);\n",
+              1,
+          )
+          assert merged.count("UnitTestResult compiler_driver_test_has_builtin_targets") == 1
+          assert merged.count("BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);") == 1
+          assert merged.count("UnitTestResult compiler_driver_test_attribute_queries") == 1
+          path.write_text(merged)
+          PY
+          git add "$driver_path"
+
+          if [[ -n $(git diff --name-only --diff-filter=U) ]]; then
+              echo 'error: unresolved merge conflicts remain' >&2
+              git diff --name-only --diff-filter=U >&2
+              exit 1
+          fi
+          if grep -n -E '^(<<<<<<<|=======|>>>>>>>)' "$source_path" "$driver_path"; then
+              echo 'error: conflict markers remain' >&2
+              exit 1
+          fi
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m 'Merge current main into fix/665-builtin-capabilities'
+          git push origin HEAD:"$branch"
