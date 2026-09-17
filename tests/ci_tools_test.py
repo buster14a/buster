@@ -588,8 +588,12 @@ class EvidencePackTests(unittest.TestCase):
 
     def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
         steps = self.native_steps()
-        self.assertEqual(list(steps)[-5:], ["Native result and reproduction", "Pack native logs",
-                                            "Retain native logs", "Record native packaging failure", "Retain unpacked native logs"])
+        self.assertEqual(list(steps)[-8:], [
+            "Native result and reproduction", "Pack native logs", "Retain native logs",
+            "Back off before retrying native log upload", "Retain native logs (retry)",
+            "Record recovered native log upload", "Record native packaging failure",
+            "Retain unpacked native logs",
+        ])
         pack, packed, unpacked = (steps[name] for name in (
             "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
         self.assertIn("id: pack\n", pack)
@@ -760,7 +764,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("test_mode_matrix --config Release", text)
         self.assertIn("./android/test_ci.sh --all", text)
         self.assertIn("./ios/test_ci.sh --all", text)
-        self.assertNotRegex(text, r"(?m)^\s*continue-on-error:")
+        steps = re.findall(
+            r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", text)
+        tolerated = [name for name, block in steps
+                     if re.search(r"(?m)^        continue-on-error: true$", block)]
+        self.assertEqual(tolerated, ["Retain native logs"])
         self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text.split("\n  uefi:", 1)[0])
 
     def test_integrity_and_security_policy(self):
@@ -831,6 +839,19 @@ class WorkflowPolicyTests(unittest.TestCase):
                       '--out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle', native)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program", native)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
+        primary_upload = native.split("      - name: Retain native logs\n", 1)[1].split(
+            "      - name:", 1)[0]
+        retry_upload = native.split("      - name: Retain native logs (retry)\n", 1)[1].split(
+            "      - name:", 1)[0]
+        self.assertIn("id: native_upload", primary_upload)
+        self.assertIn("continue-on-error: true", primary_upload)
+        self.assertNotIn("overwrite: true", primary_upload)
+        self.assertIn("id: native_upload_retry", retry_upload)
+        self.assertNotIn("continue-on-error", retry_upload)
+        self.assertIn("steps.native_upload.outcome == 'failure'", retry_upload)
+        self.assertIn("overwrite: true", retry_upload)
+        self.assertIn("sleep 15", native)
+        self.assertIn("steps.native_upload_retry.outcome == 'success'", native)
 
     def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
         common = ("  pull_request:", "  push:", "    branches: [main]",
