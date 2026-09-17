@@ -68,33 +68,42 @@ jobs:
 
           tests = Path("target/tools/native_retirement_performance_binding_test.py")
           text = tests.read_text()
-          old = """        row = copy.deepcopy(rows_record[\"rows\"][0])
-                  row[\"row\"] = 0
-                  row[\"eligibility\"] = {
+          old = """        row[\"eligibility\"] = {
+                      \"compiler_wall_time\": True, \"compiler_peak_rss\": True,
+                      \"generated_code_bytes\": True, \"generated_runtime\": True,
+                      \"runtime_oracle\": \"independent-native-executable-oracle\",
+                      \"code_section\": \"deterministic-code-section\",
+                  }
           """
-          new = """        row = copy.deepcopy(rows_record[\"rows\"][0])
-                  row[\"row\"] = 0
-                  row[\"identity\"].update({
-                      \"target\": \"x86_64-unknown-linux-gnu\",
-                      \"target_abi\": \"systemv-x86_64\",
-                      \"artifact_stage\": \"link\",
-                      \"execution_obligation\": \"semantic-gate-509\",
-                  })
-                  row[\"eligibility\"] = {
+          new = """        row[\"eligibility\"] = {
+                      \"compiler_wall_time\": True, \"compiler_peak_rss\": True,
+                      \"generated_code_bytes\": True, \"generated_runtime\": False,
+                      \"runtime_oracle\": \"not-applicable\",
+                      \"code_section\": \"deterministic-code-section\",
+                  }
           """
           if text.count(old) != 1:
-              raise SystemExit("bounded evidence fixture row changed unexpectedly")
+              raise SystemExit("bounded evidence fixture eligibility changed unexpectedly")
           text = text.replace(old, new)
-          old = """        admission[\"records\"][0].update({\"row\": 0, \"census_row\": 0,
-                                                   \"identity\": parsed[0][\"identity\"],
-                                                   \"artifact_stage\": \"object\"})
+          old = """        oracle[\"records\"][0].update({
+                      \"row\": 0, \"runtime_oracle_status\": \"passed-native\",
+                      \"runtime_exit_code\": 0, \"native_runtime\": True,
+                  })
           """
-          new = """        admission[\"records\"][0].update({\"row\": 0, \"census_row\": 0,
-                                                   \"identity\": parsed[0][\"identity\"],
-                                                   \"artifact_stage\": parsed[0][\"identity\"][\"artifact_stage\"]})
+          new = """        oracle[\"records\"][0].update({
+                      \"row\": 0, \"runtime_oracle_status\": \"not-applicable\",
+                      \"runtime_exit_code\": -1, \"native_runtime\": False,
+                  })
           """
           if text.count(old) != 1:
-              raise SystemExit("bounded evidence fixture admission changed unexpectedly")
+              raise SystemExit("bounded evidence fixture oracle changed unexpectedly")
+          text = text.replace(old, new)
+          old = """                        for metric in binding.METRICS
+          """
+          new = """                        for metric in binding.METRICS if row[\"eligibility\"][metric]
+          """
+          if text.count(old) != 1:
+              raise SystemExit("bounded evidence fixture measurement loop changed unexpectedly")
           tests.write_text(text.replace(old, new))
           PY
           rm -rf target/.github/pr568-patch
