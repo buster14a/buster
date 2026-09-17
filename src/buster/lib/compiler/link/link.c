@@ -2105,15 +2105,20 @@ BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* resul
 }
 
 // The object writer binds GOT references to this image's definitions. The
-// metadata authority validates and rewrites the bounded instruction shape;
-// this adapter owns section bounds only. Both ELF image writers consume it.
-// This remains the MOV-r64 family, not broader GOTPCRELX conversion (#78).
-BUSTER_GLOBAL_LOCAL bool link_x86_relax_got_load(u8* bytes, u64 field_offset, u64 section_start, u64 section_end)
+// metadata authority validates and rewrites the bounded instruction shape and
+// answers with the patch its replacement now takes; this adapter owns section
+// bounds and the psABI spelling only, never opcode bits. Both ELF image
+// writers consume it.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataGotPatch link_x86_relax_got_reference(ObjectRelocationKind kind, s64 addend, u8* bytes, u64 field_offset,
+                                                                          u64 section_start, u64 section_end)
 {
-    bool result = false;
+    BusterX86MetadataGotPatch result = BUSTER_X86_METADATA_GOT_PATCH_NONE;
     if (bytes && section_start <= field_offset && field_offset <= section_end)
     {
-        result = buster_x86_metadata_relax_got_load(bytes + section_start, field_offset - section_start, section_end - section_start);
+        BusterX86MetadataGotSite site = kind == OBJECT_RELOCATION_X86_64_GOTPCRELX       ? BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX
+                                        : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX ? BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX
+                                                                                         : BUSTER_X86_METADATA_GOT_SITE_GOTPCREL;
+        result = buster_x86_metadata_relax_got_reference(site, bytes + section_start, field_offset - section_start, section_end - section_start, addend);
     }
     return result;
 }
@@ -3793,18 +3798,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, section_offsets[relocation->section],
-                                      section_offsets[relocation->section] + section->data.length))
+        BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
+        if (object_relocation_kind_is_x86_got(relocation->kind))
         {
-            result.error = LINK_ERROR_RELOCATION;
-            result.symbol = symbol->name;
-            return result;
+            got_patch = link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
+                                                     section_offsets[relocation->section] + section->data.length);
+            if (got_patch == BUSTER_X86_METADATA_GOT_PATCH_NONE)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
         }
         // A relaxed GOT load and a PLT call both patch the same rel32 the
         // direct form does, against the same address: this image has one
-        // definition of every name in it.
+        // definition of every name in it. A conversion that answers with the
+        // address as an immediate patches the same field with the address
+        // itself, and the GOT load's -4 has no part in that value.
         if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-            relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL)
+            got_patch == BUSTER_X86_METADATA_GOT_PATCH_PC32)
         {
             s64 value = 0;
             if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
@@ -3813,6 +3825,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 return result;
             }
             link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (got_patch == BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32)
+        {
+            s32 value = 0;
+            if (!link_absolute32s_value(symbol_address, 0, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
         {
@@ -4249,7 +4272,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // zero, and re-deriving that per relocation would rescan every
         // library's exports for every reference to an absent weak name.
         if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA &&
-            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_GOTPCREL &&
+            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && !object_relocation_kind_is_x86_got(relocation->kind) &&
             relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -4855,7 +4878,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             // data imports cannot be mistaken for callable symbols.
             if (import_index == UINT32_MAX ||
                 (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32 &&
-                 relocation->kind != OBJECT_RELOCATION_X86_64_GOTPCREL && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
+                 !object_relocation_kind_is_x86_got(relocation->kind) && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -4888,18 +4911,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, section_offsets[relocation->section],
-                                      section_offsets[relocation->section] + section->data.length))
+        BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
+        if (object_relocation_kind_is_x86_got(relocation->kind))
         {
-            result.error = LINK_ERROR_RELOCATION;
-            result.symbol = symbol->name;
-            return result;
+            got_patch = link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
+                                                     section_offsets[relocation->section] + section->data.length);
+            if (got_patch == BUSTER_X86_METADATA_GOT_PATCH_NONE)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
         }
         // A relaxed GOT load and a PLT call both patch the same rel32 the
         // direct form does, against the same address: this image has one
-        // definition of every name in it.
+        // definition of every name in it. A conversion that answers with the
+        // address as an immediate patches the same field with the address
+        // itself, and the GOT load's -4 has no part in that value.
         if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-            relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL)
+            got_patch == BUSTER_X86_METADATA_GOT_PATCH_PC32)
         {
             s64 value = 0;
             if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
@@ -4908,6 +4938,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 return result;
             }
             link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (got_patch == BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32)
+        {
+            s32 value = 0;
+            if (!link_absolute32s_value(symbol_address, 0, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
         {

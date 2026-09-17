@@ -1139,11 +1139,37 @@ enum
 BUSTER_F_DECL bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity, BusterX86MetadataForwardingKind kind,
                                                      BusterX86MetadataRelocation* branch);
 
-// Rewrite the existing MOV-r64 RIP-relative GOT load to its metadata-derived
-// LEA shape. The relocation field is section-relative, remains PC32, and is
-// not patched here. Reject truncated/unrecognized shapes without any write.
-// First preparation is serial; prewarm_all_forms prepares worker-lane use.
-BUSTER_F_DECL bool buster_x86_metadata_relax_got_load(u8* section, u64 field_offset, u64 section_size);
+// Rewrite a RIP-relative GOT reference into the direct instruction the psABI
+// conversion table (B.2) names for its shape. The site's psABI spelling says
+// how many bytes of the instruction precede the field, which is what makes
+// the shape decidable at all: plain GOTPCREL promises nothing and keeps the
+// closed MOV-r64 -> LEA family, while the two relaxable spellings open the
+// ALU, TEST, PUSH and indirect-branch conversions as well.
+//
+// The relocation field is section-relative and is never patched here, but the
+// answer says what the rewritten site now expects there: PC32 keeps the
+// rip-relative displacement the caller already computes, ABSOLUTE32 asks for
+// the symbol's own address, sign-extended, with no addend. NONE means nothing
+// was recognized and, as for a truncated shape, nothing was written. An
+// absolute answer is only ever given for the -4 addend that aims a GOT load
+// at its slot. First preparation is serial; prewarm_all_forms prepares
+// worker-lane use.
+typedef enum BusterX86MetadataGotSite
+{
+    BUSTER_X86_METADATA_GOT_SITE_GOTPCREL,
+    BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX,
+    BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX,
+    BUSTER_X86_METADATA_GOT_SITE_COUNT,
+} BusterX86MetadataGotSite;
+typedef enum BusterX86MetadataGotPatch
+{
+    BUSTER_X86_METADATA_GOT_PATCH_NONE,
+    BUSTER_X86_METADATA_GOT_PATCH_PC32,
+    BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32,
+    BUSTER_X86_METADATA_GOT_PATCH_COUNT,
+} BusterX86MetadataGotPatch;
+BUSTER_F_DECL BusterX86MetadataGotPatch buster_x86_metadata_relax_got_reference(BusterX86MetadataGotSite site, u8* section, u64 field_offset,
+                                                                               u64 section_size, s64 addend);
 
 // Bulk-fill using the checked metadata-derived one-byte NOP. A zero-length
 // fill succeeds without output or initialization; failure writes nothing.

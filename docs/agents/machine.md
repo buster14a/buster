@@ -713,15 +713,18 @@
   already produce. `-fno-pic` clears the model; `-fno-pie` clears nothing
   because nothing was set.
 - The built-in linker resolves both forms for the image it writes, which binds
-  every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT load
-  is relaxed back into the `lea` it would have been (`link_x86_relax_got_load`),
-  the same relaxation `ld` performs for a `GOTPCRELX` it can resolve. The ELF
-  reader takes `R_X86_64_GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` as one
-  kind for that reason, so a `-fPIC` object -- this compiler's or clang's --
-  links here. An instruction shape the relaxation does not recognize fails the
-  link by name rather than being rewritten. It relaxes the two indirect
-  thread-local models back to local-exec for the same reason
-  (`link_elf_relax_thread_local`).
+  every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT
+  reference is relaxed into the direct instruction the psABI table names for
+  its shape (`link_x86_relax_got_reference`), the same relaxation `ld`
+  performs for a `GOTPCRELX` it can resolve -- an address computation, an
+  absolute immediate, or a direct branch. The ELF reader keeps
+  `R_X86_64_GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` as three kinds, because
+  the relaxable spellings also say how many bytes of the instruction precede
+  the field and rewriting the wrong ones is silent; see the
+  [GOT-reference encoding authority](../x86-64-got-authority.md). An
+  instruction shape the relaxation does not recognize fails the link by name
+  rather than being rewritten. It relaxes the two indirect thread-local models
+  back to local-exec for the same reason (`link_elf_relax_thread_local`).
 
 ## Wide integer conversion rounding
 
