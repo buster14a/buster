@@ -1,0 +1,97 @@
+name: Production PGO/LTO profile
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - CMakeLists.txt
+      - build.c
+      - tools/production_profile.c
+      - docs/production-profile.md
+      - .github/workflows/production-profile.yml
+  workflow_dispatch:
+
+concurrency:
+  group: production-profile-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  production-profile:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED != 'false' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@de0fac2e4500dabe0009e5f753f9ec38b83c67ce # v6.0.2
+
+      - name: Ensure one complete LLVM toolchain is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for tool in clang ld.lld llvm-profdata llvm-readobj; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes clang lld llvm
+          fi
+          clang --version
+          ld.lld --version
+          llvm-profdata --version
+          llvm-readobj --version
+
+      - name: Bootstrap the native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh
+
+      - name: Run the focused production-profile contract test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/build production_profile_self_test
+
+      - name: Build, train, verify, test, and benchmark the production profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/build production_profile \
+            --output build/production-profile \
+            --clean \
+            --benchmark-profile smoke \
+            --pairs 1 \
+            --warmups 1 \
+            --jobs 2 \
+            --timeout 3600
+
+      - name: Verify compact acceptance evidence
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s build/production-profile/summary.txt
+          test -s build/production-profile/profile/training-contract.txt
+          test -s build/production-profile/profile/manifest.txt
+          test -d build/production-profile/evidence
+          cat build/production-profile/summary.txt
+
+      - name: Retain production-profile evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/production-profile/summary.txt
+            build/production-profile/profile/training-contract.txt
+            build/production-profile/profile/manifest.txt
+            build/production-profile/evidence
+          if-no-files-found: error
+          retention-days: 7
