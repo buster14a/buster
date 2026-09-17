@@ -545,6 +545,22 @@ static int indirect_variadic_struct_argument(void)
     return holder.callback(4, slice, 5ULL, 6ULL) == 18;
 }
 
+#if defined(__x86_64__) && defined(__linux__)
+__asm__(".text\n.p2align 8\n.globl indirect_variadic_xmm_count\n.type indirect_variadic_xmm_count,@function\nindirect_variadic_xmm_count:\nmovzbl %al, %eax\nret\n.size indirect_variadic_xmm_count, .-indirect_variadic_xmm_count\n");
+extern int indirect_variadic_xmm_count(int marker, ...);
+static int (*indirect_variadic_xmm_count_callback)(int, ...) = indirect_variadic_xmm_count;
+
+static int indirect_variadic_float_register_count(void)
+{
+    return indirect_variadic_xmm_count_callback(7, 1.0) == 1;
+}
+#else
+static int indirect_variadic_float_register_count(void)
+{
+    return 1;
+}
+#endif
+
 static char sizeof_fold_char_source(void)
 {
     return 1;
@@ -627,5 +643,6 @@ int main(void)
            8 * (0ULL - (unsigned long long)(-9223372036854775807LL - 1) == 9223372036854775808ULL) + 16 * ((-10LL - 1) == -11LL) +
            32 * (9223372036854775807LL == 0x7fffffffffffffffLL) + 64 * (-9223372036854775807LL == (long long)0x8000000000000001ULL) +
            2 * initialized_integer_arrays() + unicode_exception_paths() + unicode_index_conditions() + narrow_unsigned_conversions() +
-           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + sizeof_expression_folds() + zero_storage_round_trip() - 473;
+           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + indirect_variadic_float_register_count() +
+           sizeof_expression_folds() + zero_storage_round_trip() - 474;
 }
