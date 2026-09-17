@@ -7266,6 +7266,25 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     return result;
 }
 
+// Does the identifier at `index` name a type on its own?  The answer comes
+// from c_ir_primitive_type_kind run over that one token: a word the scan
+// collects names a type, and a qualifier, storage class or function
+// specifier it steps over does not -- so the question is asked of the same
+// ladder the specifier sets are built from and no second list of spellings
+// can drift from it.  A tag keyword names a type through the aggregate
+// branch rather than the scan, and is read from the well-known set that
+// branch already tests.  Callers ask it of a word standing beside a type
+// that is spelled some other way, where a second type specifier is the
+// constraint violation C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS reports.
+BUSTER_C_INTERNAL bool c_parse_type_specifier_token(CPreprocessResult preprocess, u32 index)
+{
+    u32 declarator_start = index;
+    u32 invalid_specifier = UINT32_MAX;
+    CTypeKind kind = c_ir_primitive_type_kind(preprocess, index, index + 1, &declarator_start, &invalid_specifier);
+    return kind != C_TYPE_INVALID || invalid_specifier != UINT32_MAX ||
+           c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS);
+}
+
 BUSTER_C_SHARED bool c_parse_attribute_unsigned(String8 spelling, u32* value_out)
 {
     u32 base = 10;
@@ -8554,6 +8573,21 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
     {
         u32 declarator_start = frame->start;
         CTypeId type = c_parse_scalar_type_core_begin(machine, frame, &declarator_start);
+        // The base type is read; a type word still standing where the
+        // declarator belongs names a second one. `struct S int v` and `T int
+        // v` both ended here, with the trailing specifier left for a
+        // declarator that never matched it, so the declaration vanished
+        // without a word. The word-bits test keeps an ordinary declarator
+        // name -- every declaration there is -- at one load.
+        if (type.value != C_ID_UNDERLYING_INVALID && !machine->failed && declarator_start < frame->end &&
+            frame->preprocess.tokens[declarator_start].kind == C_TOKEN_IDENTIFIER &&
+            c_parse_type_word_for_dialect_token(frame->preprocess, frame->preprocess.tokens[declarator_start]) &&
+            c_parse_type_specifier_token(frame->preprocess, declarator_start))
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&frame->preprocess, frame->preprocess.tokens[declarator_start]),
+                C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
+            type = C_TYPE_ID_INVALID;
+        }
         if (type.value == C_ID_UNDERLYING_INVALID || machine->failed)
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, declarator_start, false);
@@ -9938,6 +9972,36 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             }
         }
         return c_parse_primitive_type(result, preprocess, start, end, declarator_start);
+    }
+    // The words the scan above stepped over to reach the tag keyword. A
+    // qualifier, a storage class or an alignment specifier stands beside a
+    // tag; a word that names a type of its own is a second type specifier,
+    // and reading the tag through it gave `int struct S v` the aggregate's
+    // layout under a spelling it never had. Walking the run again costs only
+    // the declarations that reach a tag, where the scan above already walked
+    // every declaration there is.
+    u32 specifier_index = start;
+    u32 invalid_specifier = UINT32_MAX;
+    while (specifier_index < aggregate_index && invalid_specifier == UINT32_MAX)
+    {
+        u32 decorated = c_parse_skip_alignment_specifiers(preprocess, specifier_index, aggregate_index);
+        decorated = c_parse_skip_attributes(preprocess, decorated, aggregate_index);
+        if (decorated != specifier_index)
+        {
+            specifier_index = decorated;
+        }
+        else
+        {
+            invalid_specifier = c_parse_type_specifier_token(preprocess, specifier_index) ? specifier_index : UINT32_MAX;
+            specifier_index += 1;
+        }
+    }
+    if (invalid_specifier != UINT32_MAX)
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[invalid_specifier]),
+            C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
+        *declarator_start = aggregate_index;
+        return C_TYPE_ID_INVALID;
     }
     String8 aggregate_spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]);
     CTypeKind kind = string_equal(aggregate_spelling, S8("struct"))  ? C_TYPE_STRUCT
@@ -15182,20 +15246,51 @@ BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParser
     if (index >= *validated_end && preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER &&
         c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[index]))
     {
-        u32 end = index + 1;
+        u32 end = index;
+        u32 aggregate_count = 0;
         while (end < preprocess->token_count && preprocess->tokens[end].kind == C_TOKEN_IDENTIFIER &&
                c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[end]))
         {
+            bool aggregate = c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[end], C_PARSE_AGGREGATE_KEYWORDS);
+            aggregate_count += (u32)aggregate;
             end += 1;
+            // A tag keyword names its type together with the word after it,
+            // and that word is no declarator: `struct S int v` has to be one
+            // run and not a `struct S` run the `int` one never meets. A body
+            // ends the run instead of joining it, so the declarations inside
+            // the braces keep being walked on their own.
+            if (aggregate && end < preprocess->token_count && preprocess->tokens[end].kind == C_TOKEN_IDENTIFIER &&
+                !c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[end]))
+            {
+                end += 1;
+            }
         }
         u32 declarator_start;
         u32 invalid_specifier;
         c_ir_primitive_type_kind(*preprocess, index, end, &declarator_start, &invalid_specifier);
         *validated_end = end;
-        if (invalid_specifier != UINT32_MAX)
+        // A tag in the run makes every other type-naming word in it a second
+        // type specifier. Which words those are is asked only of the runs
+        // that carry a tag, so an ordinary `static const int` keeps paying
+        // one bit test per word.
+        bool mixed = aggregate_count > 1;
+        u32 first_specifier = UINT32_MAX;
+        u32 specifier_index = aggregate_count ? index : end;
+        while (specifier_index < end)
+        {
+            bool names_type = preprocess->tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
+                              c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[specifier_index]) &&
+                              c_parse_type_specifier_token(*preprocess, specifier_index);
+            mixed |= names_type &&
+                     !c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[specifier_index], C_PARSE_AGGREGATE_KEYWORDS);
+            first_specifier = names_type && first_specifier == UINT32_MAX ? specifier_index : first_specifier;
+            specifier_index += 1;
+        }
+        u32 blamed = invalid_specifier != UINT32_MAX ? invalid_specifier : first_specifier;
+        if (blamed != UINT32_MAX && (invalid_specifier != UINT32_MAX || mixed))
         {
             c_parser_diagnostic(arena, result,
-                c_preprocess_token_location(preprocess, preprocess->tokens[invalid_specifier]),
+                c_preprocess_token_location(preprocess, preprocess->tokens[blamed]),
                 C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
         }
     }

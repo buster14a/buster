@@ -5207,6 +5207,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
             scratch_end(temporary);
         }
     }
+    // A tag specifier names a type the way a primitive word does, so a set
+    // that spells both, or two tags, is refused the same way. `int struct S
+    // v` reached the object with the aggregate's layout under a spelling it
+    // never had, and `struct S int v` reached it with no `v` at all. The
+    // prelude occupies three lines, so each specifier is spelled on line 4.
+    // Data, not a format: string_format copies an argument through without
+    // rescanning it, so the braces are spelled once.
+    String8 tag_prelude = S8("struct S { int a; int b; };\nunion U { int a; };\nenum E { A };\n");
+    String8 tag_specifiers[] = {S8("int struct S"), S8("struct S int"), S8("unsigned struct S"), S8("struct S unsigned"),
+        S8("int union U"), S8("union U int"), S8("int enum E"), S8("enum E int"), S8("struct S enum E"),
+        S8("double struct S"), S8("_Complex struct S")};
+    for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(tag_specifiers); specifier += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-type-specifiers-tag-{u32}-{u32}"), specifier, frontend);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            String8 source = string_format(arena, S8("{S8}{S8} v;\nint take(void) {{ return 1; }}\n"), tag_prelude,
+                tag_specifiers[specifier]);
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))) &&
+                BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+            {
+                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"),
+                    frontends[frontend], S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, source);
+                bool coded = false;
+                for (u32 diagnostic = 0; diagnostic < refused.diagnostic_count; diagnostic += 1)
+                {
+                    coded |= string_equal(refused.diagnostics[diagnostic].code, S8("c.invalid-type-specifiers")) &&
+                             refused.diagnostics[diagnostic].primary.position.line == 4;
+                }
+                BUSTER_TEST_RAW(arguments, coded, source);
+                ByteSlice retained = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), sentinel);
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 tag_control_specifiers[] = {S8("struct S"), S8("const struct S"), S8("struct S const"), S8("union U"), S8("enum E")};
+    u64 tag_control_sizes[] = {8, 8, 8, 4, 4};
+    for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(tag_control_specifiers); control += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 name = string_format(arena, S8("buster-type-specifiers-tag-control-{u32}"), control);
+        String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+        String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+        String8 source = string_format(arena, S8("{S8}{S8} v;\nint take(void) {{ return 1; }}\n"), tag_prelude,
+            tag_control_specifiers[control]);
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"), S8("-o"), output, input};
+            CompilerDriverResult built = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, built.diagnostic);
+            if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
+            {
+                ObjectSymbol* v = compiler_driver_test_symbol_by_name(&built.object, S8("v"));
+                BUSTER_TEST_RAW(arguments, v && v->section != OBJECT_SECTION_UNDEFINED && v->kind == OBJECT_SYMBOL_DATA &&
+                    v->size == tag_control_sizes[control], source);
+                ObjectSymbol* take = compiler_driver_test_symbol_by_name(&built.object, S8("take"));
+                BUSTER_TEST_RAW(arguments, take && take->section != OBJECT_SECTION_UNDEFINED &&
+                    take->kind == OBJECT_SYMBOL_FUNCTION, source);
+            }
+        }
+        scratch_end(temporary);
+    }
     String8 control_targets[] = {S8("x86_64-linux"), S8("aarch64-linux"), S8("x86_64-windows"), S8("aarch64-macos")};
     String8 control_specifiers[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(control_targets); target += 1)
@@ -5293,9 +5365,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 }
                 scratch_end(temporary);
             }
+            // Each row is spelled after the tag prelude, so the tag sets name
+            // the same complete types buster is held to and the primitive
+            // rows are unchanged by the definitions standing ahead of them.
             String8 oracle_refused[] = {S8("long float"), S8("short double"), S8("unsigned float"), S8("signed double"),
                 S8("long long double"), S8("float double"), S8("_Imaginary double"), S8("long _Float16"),
-                S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 int"), S8("_Float16 _Float16")};
+                S8("_Float16 long"), S8("unsigned _Float16"), S8("_Float16 int"), S8("_Float16 _Float16"),
+                S8("int struct S"), S8("struct S int"), S8("unsigned struct S"), S8("struct S unsigned"),
+                S8("int union U"), S8("union U int"), S8("int enum E"), S8("enum E int"), S8("struct S enum E")};
             String8 oracle_extension[] = {S8("_Complex int"), S8("_Complex char")};
             String8 oracle_valid[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
             for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
@@ -5309,7 +5386,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                         String8 name = string_format(arena, S8("buster-type-specifiers-oracle-{u32}-{u32}-{u32}"), compiler, dialect, specifier);
                         String8 input = buster_test_temporary_path(arena, name, S8(".c"));
                         String8 output = buster_test_temporary_path(arena, name, S8(".o"));
-                        String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), oracle_refused[specifier]);
+                        String8 source = string_format(arena, S8("{S8}{S8} v;\nint take(void) {{ return 1; }}\n"), tag_prelude,
+                            oracle_refused[specifier]);
                         if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
                         {
                             String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};

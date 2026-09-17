@@ -3567,6 +3567,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             open_pipe_count += captured[stream];
         }
 
+        bool child_exit_observed = false;
         while (open_pipe_count)
         {
             bool made_progress = false;
@@ -3609,6 +3610,32 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
             if (!made_progress)
             {
+                DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
+                if (process_wait == WAIT_OBJECT_0)
+                {
+                    if (child_exit_observed)
+                    {
+                        // The child was already known to have exited before
+                        // this complete empty scan. A descendant may retain an
+                        // inherited writer, but its lifetime must not turn the
+                        // completed child's wait into a false timeout.
+                        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                        {
+                            if (read_pipes[stream])
+                            {
+                                CloseHandle(read_pipes[stream]);
+                                read_pipes[stream] = 0;
+                                open_pipe_count -= 1;
+                            }
+                        }
+                        break;
+                    }
+                    // The child may have written between the scan above and
+                    // this observation. Perform one final complete scan before
+                    // closing any writer kept alive outside the child.
+                    child_exit_observed = true;
+                    continue;
+                }
                 if (deadline && !os_process_deadline_milliseconds(deadline, 1))
                 {
                     timed_out = true;
