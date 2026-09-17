@@ -2773,6 +2773,8 @@ static u32 llvm_bc_atomic_operation(IrAtomicOperation operation)
         return 5;
     case IR_ATOMIC_BITWISE_XOR:
         return 6;
+    case IR_ATOMIC_BITWISE_NAND:
+        return 4;
     case IR_ATOMIC_OPERATION_COUNT:
         break;
     }

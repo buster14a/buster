@@ -164,5 +164,94 @@ int main(void)
             return 26;
         }
     }
+    {
+        unsigned char one = 1;
+        unsigned char desired = 7;
+        unsigned char observed = 0;
+        __atomic_store(&one, &desired, __ATOMIC_RELEASE);
+        __atomic_load(&one, &observed, __ATOMIC_ACQUIRE);
+        if (observed != 7)
+        {
+            return 27;
+        }
+        desired = 9;
+        __atomic_exchange(&one, &desired, &observed, __ATOMIC_SEQ_CST);
+        if (observed != 7 || one != 9)
+        {
+            return 28;
+        }
+        desired = 11;
+        observed = 9;
+        if (!__atomic_compare_exchange(&one, &observed, &desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED) || one != 11)
+        {
+            return 29;
+        }
+    }
+    {
+        unsigned short two = 0;
+        unsigned short input = 0x1234;
+        unsigned short output = 0;
+        __atomic_store(&two, &input, __ATOMIC_SEQ_CST);
+        __atomic_load(&two, &output, __ATOMIC_SEQ_CST);
+        if (output != input)
+        {
+            return 30;
+        }
+    }
+    {
+        struct four_bytes
+        {
+            unsigned char bytes[4];
+        } object = {{1, 2, 3, 4}}, desired = {{5, 6, 7, 8}}, observed = {{0, 0, 0, 0}};
+        __atomic_exchange(&object, &desired, &observed, __ATOMIC_SEQ_CST);
+        if (observed.bytes[0] != 1 || observed.bytes[3] != 4 ||
+            object.bytes[0] != 5 || object.bytes[3] != 8)
+        {
+            return 31;
+        }
+        struct four_bytes expected = {{5, 6, 7, 8}};
+        struct four_bytes replacement = {{9, 10, 11, 12}};
+        if (!__atomic_compare_exchange(&object, &expected, &replacement, 0,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_RELAXED) ||
+            object.bytes[0] != 9 || object.bytes[3] != 12)
+        {
+            return 32;
+        }
+    }
+    {
+        unsigned long long eight = 0;
+        unsigned long long input = 0x1122334455667788ull;
+        unsigned long long output = 0;
+        __atomic_store(&eight, &input, __ATOMIC_SEQ_CST);
+        __atomic_load(&eight, &output, __ATOMIC_SEQ_CST);
+        if (output != input)
+        {
+            return 33;
+        }
+    }
+    {
+        unsigned int bits = 0xf0u;
+        if (__atomic_fetch_nand(&bits, 0x3cu, __ATOMIC_SEQ_CST) != 0xf0u ||
+            bits != ~(0xf0u & 0x3cu))
+        {
+            return 34;
+        }
+        bits = 0xf0u;
+        if (__atomic_nand_fetch(&bits, 0x3cu, __ATOMIC_SEQ_CST) != ~(0xf0u & 0x3cu))
+        {
+            return 35;
+        }
+        bits = 0xf0u;
+        if (__sync_fetch_and_nand(&bits, 0x3cu) != 0xf0u ||
+            bits != ~(0xf0u & 0x3cu))
+        {
+            return 36;
+        }
+        bits = 0xf0u;
+        if (__sync_nand_and_fetch(&bits, 0x3cu) != ~(0xf0u & 0x3cu))
+        {
+            return 37;
+        }
+    }
     return 0;
 }
