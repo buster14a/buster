@@ -24,11 +24,11 @@ jobs:
           from pathlib import Path
           path = Path("tools/issue_74_apply.py")
           text = path.read_text()
-          old = "the C11 name spells in\\n"
-          new = "the C11 name spells;\\n"
-          if text.count(old) != 1:
-              raise SystemExit(f"expected one stale comment anchor, found {text.count(old)}")
-          path.write_text(text.replace(old, new, 1))
+          old = "the C11 name spells in\n"
+          new = "the C11 name spells;\n"
+          if text.count(old) != 2:
+              raise SystemExit(f"expected two stale comment anchors, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
           PY
       - name: Apply guarded source transformation
         run: python3 tools/issue_74_apply.py
