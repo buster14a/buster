@@ -11,7 +11,10 @@ apk=$2
 package=$3
 activity=$4
 test_args=$5
-timeout_seconds=${BUSTER_ANDROID_TEST_TIMEOUT_SECONDS:-60}
+# This watchdog bounds the complete suite, not each adb operation. Debug
+# compiler-driver fixtures can exceed one minute while still making progress.
+# A terminal result still ends monitoring immediately; missing results fail.
+timeout_seconds=${BUSTER_ANDROID_TEST_TIMEOUT_SECONDS:-180}
 # A payload that merely fits its deadline today crosses it on a slower runner or
 # after new tests are added. Report the remaining margin as a percentage of the
 # deadline so thinning headroom is visible before it becomes a red lane.

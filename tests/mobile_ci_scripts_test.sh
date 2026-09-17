@@ -56,6 +56,77 @@ assert_count() {
     fi
 }
 
+assert_android_owned_process_stopped() {
+    local pid=$1
+    local process_state
+
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Keep the assertion aligned with emulator_pid_is_running: kill -0 also
+    # succeeds for a terminated child awaiting reaping, but an unavailable or
+    # inconclusive ps result must stay fail-closed and count as still live.
+    if process_state=$(ps -o stat= -p "$pid" 2>/dev/null); then
+        process_state=${process_state//[[:space:]]/}
+        if [[ $process_state == Z* || $process_state == X* ]]; then
+            return 0
+        fi
+    fi
+
+    echo "assertion failed: lifecycle stop left the owned emulator PID $pid alive" >&2
+    return 1
+}
+
+test_android_owned_process_stop_assertion() (
+    set -euo pipefail
+    local state="$test_root/android-owned-process-stop-assertion"
+    local live_pid
+    mkdir -p "$state/bin"
+
+    python3 -c 'import signal; signal.pause()' &
+    live_pid=$!
+    cleanup_live_process() {
+        kill "$live_pid" >/dev/null 2>&1 || true
+        wait "$live_pid" 2>/dev/null || true
+    }
+    trap cleanup_live_process EXIT
+
+    if assert_android_owned_process_stopped "$live_pid" 2>"$state/live.err"; then
+        echo "assertion failed: a genuinely live owned process was accepted as stopped" >&2
+        exit 1
+    fi
+    assert_file_contains "owned emulator PID $live_pid alive" "$state/live.err"
+
+    cat >"$state/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case ${FAKE_PROCESS_STATE:?FAKE_PROCESS_STATE is required} in
+    zombie) printf 'Z\n' ;;
+    exited) printf 'X\n' ;;
+    unavailable) exit 1 ;;
+    *) exit 2 ;;
+esac
+EOF
+    chmod +x "$state/bin/ps"
+
+    (
+        export PATH="$state/bin:$PATH" FAKE_PROCESS_STATE=zombie
+        assert_android_owned_process_stopped "$live_pid"
+    )
+    (
+        export PATH="$state/bin:$PATH" FAKE_PROCESS_STATE=exited
+        assert_android_owned_process_stopped "$live_pid"
+    )
+    if (
+        export PATH="$state/bin:$PATH" FAKE_PROCESS_STATE=unavailable
+        assert_android_owned_process_stopped "$live_pid"
+    ) 2>"$state/unavailable.err"; then
+        echo "assertion failed: an unavailable ps result was accepted as stopped" >&2
+        exit 1
+    fi
+    assert_file_contains "owned emulator PID $live_pid alive" "$state/unavailable.err"
+)
+
 test_mobile_workflow_uses_batch_invocations() (
     set -euo pipefail
     local workflow="$repo_root/.github/workflows/ci.yml"
@@ -191,10 +262,7 @@ test_android_timeout_and_cleanup_fallback() (
     set -e
     [[ $cleanup_status -ne 0 ]]
     [[ ! -f $marker ]]
-    if kill -0 "$owned_pid" >/dev/null 2>&1; then
-        echo "assertion failed: lifecycle stop left the owned emulator PID alive" >&2
-        exit 1
-    fi
+    assert_android_owned_process_stopped "$owned_pid"
 
     # A pre-existing job failure must survive a cleanup failure unchanged.
     rm -f "$state/kill"
@@ -207,10 +275,7 @@ test_android_timeout_and_cleanup_fallback() (
     set -e
     [[ $cleanup_status -eq 23 ]]
     [[ ! -f $marker ]]
-    if kill -0 "$owned_pid" >/dev/null 2>&1; then
-        echo "assertion failed: lifecycle stop left the owned emulator PID alive" >&2
-        exit 1
-    fi
+    assert_android_owned_process_stopped "$owned_pid"
 )
 
 test_ios_batch_and_cleanup() (
@@ -834,6 +899,7 @@ test_ios_lifecycle_evidence() (
 )
 
 result_marker_success='BUSTER_IOS_RESULT: SUCCESS'
+test_android_owned_process_stop_assertion
 test_mobile_workflow_uses_batch_invocations
 test_android_success_and_snapshots
 test_android_timeout_and_cleanup_fallback

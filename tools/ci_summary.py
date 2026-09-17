@@ -161,9 +161,20 @@ def _coverage_row_id(identity, row):
     def state(name):
         return "on" if row.get(name) else "off"
 
-    return "/".join((identity.get("suite", ""), identity.get("shard", ""), identity.get("platform", ""), identity.get("architecture", ""),
+    return "/".join((identity.get("suite", ""), "combinations", identity.get("platform", ""), identity.get("architecture", ""),
                      f"compiler={row.get('compiler', '')}", f"configuration={row.get('configuration', '')}", f"sanitize={state('sanitize')}",
                      f"fuzz={state('fuzz')}", f"unity={state('unity')}", f"execution={row.get('execution', '')}"))
+
+
+def _coverage_row_owner(row):
+    # Independently check the native driver's semantic partition. Never let
+    # an evidence file choose its own ownership or shrink the full policy.
+    return "release" if row.get("compiler") == "clang" and not row.get("sanitize") and row.get("optimize") else "checks"
+
+
+def _coverage_selected_ids(rows, shard):
+    return {row_id for row_id, row in rows.items() if row.get("state") == "required" and
+            (shard == "combinations" or _coverage_row_owner(row) == shard)}
 
 
 def _coverage_runner_identity(environment):
@@ -316,6 +327,10 @@ def _coverage_expected_obligations(identity, mode, environment, has_unity):
         reason = "coverage-manifest-self-test-only"
         return {name: ("not-applicable", reason) for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
 
+    if identity.get("shard") == "checks":
+        return {name: ("not-applicable", "owned-by-release-shard")
+                for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
+
     platform = identity.get("platform")
     architecture = identity.get("architecture")
     direct = _coverage_flag_is_on(environment, "BUSTER_MATRIX_DIRECT") or (platform == "macos" and architecture == "x86_64")
@@ -386,8 +401,15 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
                                f"source={identity.get('source_revision', '')}", f"run={identity.get('run_id', '')}", f"attempt={identity.get('run_attempt', '')}"))
     if identity.get("lane_id") != expected_lane:
         errors.append("coverage lane identity is malformed")
-    if identity.get("suite") != "desktop" or identity.get("shard") != "combinations":
-        errors.append("coverage lane is not the desktop combinations lane")
+    expected_shard = environment.get("BUSTER_MATRIX_SHARD") or "all"
+    if expected_shard == "all":
+        expected_shard = "combinations"
+    if expected_shard not in ("combinations", "release", "checks"):
+        errors.append("coverage consumer shard is unsupported")
+    if identity.get("suite") != "desktop" or identity.get("shard") != expected_shard:
+        errors.append("coverage lane does not match the requested desktop shard")
+    if expected_shard != "combinations" and manifest.get("partition_version") != 1:
+        errors.append("coverage partition version is unsupported")
     for name in ("source_hash", "driver_hash"):
         if not _coverage_strict_hash(identity.get(name), 64):
             errors.append(f"coverage {name} is not a strict SHA-256 digest")
@@ -483,10 +505,10 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
         if obligation_states["fixed_point"] == "scheduled" and obligation_reasons["fixed_point"] != "canonical-release-fanout":
             errors.append("coverage fixed-point reason is not the canonical fan-out policy")
         if obligation_states["self_host"] == "not-applicable" and obligation_reasons["self_host"] not in (
-                "direct-matrix-does-not-consume-fanout", "superbuild-does-not-consume-fanout", "coverage-manifest-self-test-only"):
+                "direct-matrix-does-not-consume-fanout", "superbuild-does-not-consume-fanout", "coverage-manifest-self-test-only", "owned-by-release-shard"):
             errors.append("coverage self-host exclusion reason is not explicit")
         if obligation_states["fixed_point"] == "not-applicable" and obligation_reasons["fixed_point"] not in (
-                "direct-matrix-does-not-run-self-host", "superbuild-does-not-run-self-host", "coverage-manifest-self-test-only"):
+                "direct-matrix-does-not-run-self-host", "superbuild-does-not-run-self-host", "coverage-manifest-self-test-only", "owned-by-release-shard"):
             errors.append("coverage fixed-point exclusion reason is not explicit")
         if obligation_states["table_audit"] == "scheduled" and obligation_states["unity_analysis"] != "scheduled":
             errors.append("coverage table audit is scheduled without unity analysis")
@@ -496,10 +518,10 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
                 "canonical-superbuild-tree", "direct-matrix-default-audit"):
             errors.append("coverage table-audit reason is not a lane-owned policy")
         if obligation_states["unity_analysis"] == "not-applicable" and obligation_reasons["unity_analysis"] not in (
-                "no-canonical-clang-release", "coverage-manifest-self-test-only"):
+                "no-canonical-clang-release", "coverage-manifest-self-test-only", "owned-by-release-shard"):
             errors.append("coverage unity-analysis exclusion reason is not explicit")
         if obligation_states["table_audit"] == "not-applicable" and obligation_reasons["table_audit"] not in (
-                "no-canonical-clang-release", "coverage-manifest-self-test-only"):
+                "no-canonical-clang-release", "coverage-manifest-self-test-only", "owned-by-release-shard"):
             errors.append("coverage table-audit exclusion reason is not explicit")
     expected_by_id = {}
     for row in expected:
@@ -513,6 +535,8 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
         expected_by_id[row_id] = row
         if row_id != _coverage_row_id(identity, row):
             errors.append(f"coverage expected row identity is not semantic: {row_id}")
+        if (expected_shard != "combinations" or "owner_shard" in row) and row.get("owner_shard") != _coverage_row_owner(row):
+            errors.append(f"coverage row owner does not match the semantic partition: {row_id}")
         if row.get("compiler") not in ("cl", "clang", "gcc", "zig") or row.get("configuration") not in ("Debug", "Release"):
             errors.append(f"coverage expected row has unsupported compiler/configuration: {row_id}")
         if not all(isinstance(row.get(name), bool) for name in ("optimize", "sanitize", "fuzz", "unity")):
@@ -630,7 +654,10 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
     if _coverage_strict_hash(policy.get("fingerprint"), 16) and \
             policy.get("fingerprint") != _coverage_policy_fingerprint(identity, expected):
         errors.append("coverage policy fingerprint does not match expected rows")
-    has_unity = any(row.get("state") == "required" and row.get("unity") for row in expected_by_id.values())
+    required_ids = _coverage_selected_ids(expected_by_id, expected_shard)
+    if not required_ids:
+        errors.append("coverage shard has no required configurations")
+    has_unity = any(row_id in required_ids and row.get("unity") for row_id, row in expected_by_id.items())
     expected_obligations = _coverage_expected_obligations(identity, mode, environment, has_unity)
     for name, (expected_state, expected_reason) in expected_obligations.items():
         if obligation_states.get(name) != expected_state or obligation_reasons.get(name) != expected_reason:
@@ -644,7 +671,6 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
     if mode == "ci" and environment.get("BUSTER_TEST_TABLE_AUDITS") not in (None, ""):
         errors.append("BUSTER_TEST_TABLE_AUDITS cannot override CI coverage policy")
 
-    required_ids = {row_id for row_id, row in expected_by_id.items() if row.get("state") == "required"}
     executed_ids = []
     if len(executed) != 1:
         errors.append("coverage execution must contain exactly one lane completion record")
@@ -677,7 +703,13 @@ def _coverage_summary(manifest, errors):
     available_count = sum(row.get("state") == "available" for row in detected if isinstance(row, dict))
     executed_count = sum(len(record.get("rows", [])) for record in executed
                          if isinstance(record, dict) and isinstance(record.get("rows"), list))
-    lines += ["", f"Expected rows: {len(expected)} (required {required_count}, excluded {excluded_count}); "
+    identity = manifest_data.get("identity", {})
+    shard = identity.get("shard", "missing") if isinstance(identity, dict) else "missing"
+    selected_count = sum(row.get("state") == "required" and (shard == "combinations" or _coverage_row_owner(row) == shard)
+                         for row in expected if isinstance(row, dict))
+    lines += ["", f"Selected shard: {html.escape(str(shard))}; required here: {selected_count}. "
+              "Other shards' configurations remain visible below, not counted as executed.",
+              "", f"Expected rows: {len(expected)} (required {required_count}, excluded {excluded_count}); "
               f"detected available: {available_count}; executed: {executed_count}; "
               f"probes: {manifest_data.get('capability_probe_count', 'missing')}",
               f"Policy counts: {html.escape(str(policy.get('row_count', 'missing')))} expected / "
@@ -702,15 +734,15 @@ def _coverage_summary(manifest, errors):
             lines.append("Lane obligation reasons: " + html.escape(obligation_text))
     evidence = ", ".join(str(record.get("evidence", "missing")) for record in executed if isinstance(record, dict))
     lines.append("Completion evidence: " + html.escape(evidence or "missing"))
-    lines += ["", "| Row identity | State | Detected compiler | Identity | Target | Version | Execution | Exclusion |",
-              "|---|---|---|---|---|---|---|---|"]
+    lines += ["", "| Row identity | Owner shard | State | Detected compiler | Identity | Target | Version | Execution | Exclusion |",
+              "|---|---|---|---|---|---|---|---|---|"]
     detected_by_id = {row.get("id"): row for row in detected if isinstance(row, dict)}
     rows = expected
     for row in rows if isinstance(rows, list) else []:
         row_id = html.escape(str(row.get("id", ""))).replace("|", "&#124;")
         detected_row = detected_by_id.get(row.get("id"), {})
         display = lambda value: html.escape(str(value)).replace("\n", "<br>").replace("|", "&#124;")
-        lines.append(f"| {row_id} | {display(row.get('state', 'malformed'))} | "
+        lines.append(f"| {row_id} | {display(_coverage_row_owner(row))} | {display(row.get('state', 'malformed'))} | "
                      f"{display(detected_row.get('compiler', 'missing'))} | {display(detected_row.get('identity', 'missing'))} | "
                      f"{display(detected_row.get('target', 'missing'))} | "
                      f"{display(detected_row.get('version', 'missing'))} | {display(row.get('execution', 'missing'))} | "
@@ -740,7 +772,8 @@ def write_report(environment, *, expected_coverage_mode="ci"):
         failures = sorted(set(failures + ["coverage"] if coverage_errors else failures))
     metadata = {key: environment.get(key, "unknown") for key in (
         "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_REF", "GITHUB_RUN_ID",
-        "GITHUB_RUN_ATTEMPT", "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "BUSTER_CI_RUNNER")}
+        "GITHUB_RUN_ATTEMPT", "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "BUSTER_CI_RUNNER",
+        "BUSTER_MATRIX_SHARD", "BUSTER_CI_ZIG_CACHE_HIT")}
     report = {"schema": 1, "metadata": metadata, "required_steps": required,
               "steps": steps, "coverage": coverage, "coverage_errors": coverage_errors,
               "unsatisfied_steps": failures, "success": not failures}

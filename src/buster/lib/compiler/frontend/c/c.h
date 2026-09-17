@@ -673,6 +673,7 @@ typedef enum CTypeKind
     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
     // `__m512h` out of it, which is what brought it in.
     C_TYPE_FLOAT16,
+    C_TYPE_BFLOAT16,
     C_TYPE_FLOAT,
     C_TYPE_DOUBLE,
     C_TYPE_LONG_DOUBLE,
@@ -1211,6 +1212,9 @@ struct CParseResult
     // Lazily computed per-token spelling-predicate bits, indexed like
     // identifier_use_by_token_plus_one; see C_TOKEN_CLASS_* in c.c.
     u8* token_classes;
+    // Lazy worklist of typed BF16 target-builtin calls, checked before unused
+    // definitions can disappear. Other translation units allocate no storage.
+    u32* bfloat16_builtin_calls;
     // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.
     // c_parse_scope_for_token descends this index instead of scanning every
@@ -1276,6 +1280,8 @@ struct CParseResult
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;
     u32 type_alignment_capacity;
+    u32 bfloat16_builtin_call_count;
+    u32 bfloat16_builtin_call_capacity;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase
