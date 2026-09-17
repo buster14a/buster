@@ -257,6 +257,7 @@ jobs:
           from pathlib import Path
           import re
           import sys
+          import textwrap
 
           evidence = Path(sys.argv[1])
           audit = Path(sys.argv[2])
@@ -302,7 +303,10 @@ jobs:
           census_assertions = split["x86_64_completion_census_tests"]["assertions"]
           environment = (evidence / "environment.txt").read_text().strip()
 
-          audit.write_text(f"""# X86 metadata test compile-memory audit — {audit.stem}
+          audit.write_text(textwrap.dedent(f"""\
+          `{audit.stem}` (Ubuntu 24.04 x86_64, GitHub-hosted runner; **bounded x86 metadata test compile memory without reducing coverage**).
+
+          # X86 metadata test compile-memory audit
 
           ## Scope
 
@@ -351,7 +355,7 @@ jobs:
 
           Compact command, timing, environment, and module-summary evidence is stored in
           `docs/performance-audits/evidence/{audit.stem}/`.
-          """)
+          """))
           PY_AUDIT
 
           python3 tools/new_audit.py --check
