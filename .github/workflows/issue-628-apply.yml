@@ -1,0 +1,33 @@
+name: issue-628-apply
+
+on:
+  push:
+    branches: [fix/628-sanitizer-provenance]
+    paths:
+      - tools/issue_628_patch.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/628-sanitizer-provenance
+          fetch-depth: 0
+      - name: Apply exact source edits
+        run: python3 tools/issue_628_patch.py
+      - name: Verify patch shape
+        run: |
+          git diff --check
+          git diff --exit-code -- tools/issue_628_patch.py
+          test -n "$(git status --short -- tools/differential.c tools/gpu_toolchains.c docs/differential-testing.md)"
+      - name: Commit source edits
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tools/differential.c tools/gpu_toolchains.c docs/differential-testing.md
+          git commit -m 'test: authenticate sanitizer diagnostics'
+          git push origin HEAD:fix/628-sanitizer-provenance
