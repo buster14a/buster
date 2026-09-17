@@ -161,6 +161,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_unit_number_boundary_tests(UnitTestA
         BUSTER_TEST(arguments, overflow.section_count == 0);
         BUSTER_TEST(arguments, overflow.symbol_count == 0);
         BUSTER_TEST(arguments, overflow.relocation_count == 0);
+
+        // Before the overflow guard, this reference wrapped to zero and bound
+        // to the real `0:` label instead of reporting an invalid expression.
+        String8 alias_source = string_format(arguments->arena, S8("0:\n\tjmp {S8}b\n"), boundary.overflow);
+        AssemblyUnitResult alias = assembly_unit_encode(arguments->arena, alias_source, options);
+        BUSTER_TEST(arguments, alias.diagnostic_count == 1);
+        BUSTER_TEST(arguments, alias.relocation_count == 0);
+        if (BUSTER_REQUIRE(arguments, alias.section_count == 1))
+        {
+            BUSTER_TEST(arguments, !alias.sections[0].data.pointer && alias.sections[0].data.length == 0 && alias.sections[0].zero_size == 0);
+        }
     }
 
     AssemblyUnitResult ordinary_label = assembly_unit_encode(arguments->arena, S8("1:\n\tjmp 1b\n"), options);
