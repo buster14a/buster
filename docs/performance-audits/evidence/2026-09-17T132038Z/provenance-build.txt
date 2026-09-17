@@ -1,0 +1,132 @@
+# Build, input and output provenance
+===== BEGIN environment.txt =====
+head=6964324c552d1d2e1b5cf46a1a7749a857573e00
+tree=0d063acdf849d7a81d72b99891a4db50e023722f
+Ubuntu clang version 21.1.8 (6ubuntu1)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/lib/llvm-21/bin
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+1.13.2
+GNU gdb (Ubuntu 17.1-2ubuntu1) 17.1
+Linux runnervmfjyae 7.0.0-1012-azure #12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026 x86_64 GNU/Linux
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           48 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 9V74 80-Core Processor
+CPU family:                              25
+Model:                                   17
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                1
+BogoMIPS:                                5192.27
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm
+Virtualization:                          AMD-V
+Hypervisor vendor:                       Microsoft
+Virtualization type:                     full
+L1d cache:                               64 KiB (2 instances)
+L1i cache:                               64 KiB (2 instances)
+L2 cache:                                2 MiB (2 instances)
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Vulnerable: No microcode
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+               total        used        free      shared  buff/cache   available
+Mem:     16759504896  1142272000 12618383360    86327296  3431612416 15617232896
+Swap:     3221221376           0  3221221376
+===== END environment.txt =====
+
+===== BEGIN commands.txt =====
+# Producer build
+clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+"$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci \
+  -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF \
+  -DBUSTER_BENCH_ALLOCATIONS=ON -DBUSTER_DEBUG_INFO=ON
+"$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+
+# Unity input, used for both ordinary and diagnostic producers
+ide-screen cc -Iissue566-input/src -Ibuild/generated \
+  -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+  -march=znver3 -g -v -fsource-metrics=issue566-evidence/unity.metrics \
+  issue566-input/src/buster/apps/ide/ide.c -lm \
+  -o issue566-evidence/unity-output
+
+# Small input, used for both ordinary and diagnostic producers
+ide-screen cc -march=znver3 -g0 -O0 -c \
+  -fsource-metrics=issue566-evidence/small.metrics \
+  issue566-evidence/small.c -o issue566-evidence/small-output.o
+
+# The diagnostic producer was run under GDB with a silent breakpoint at
+# ir_function_instruction_owners. Each stop wrote function->instruction_count.
+===== END commands.txt =====
+
+===== BEGIN compiler.sha256 =====
+7f0db446de788458d5062d373078889d757bffd6dc197d3ca1d7505d5750921d  /home/runner/work/_temp/ide-ordinary
+bb55a435e575367a6b4055c4805b9b1c18f73d0127574cc8fd785c866ba560a9  /home/runner/work/_temp/ide-diagnostic
+===== END compiler.sha256 =====
+
+===== BEGIN inputs.sha256 =====
+e9484a39f63671f68d559bd4d7007fa43a507e321383c87177ebe216f72d6970  issue566-input/src/buster/apps/ide/ide.c
+5d5858116870d5857da6924cf1c89469496198b057fdd101eb09327656b240eb  build/generated/buster/lib/shaders/paths.h
+===== END inputs.sha256 =====
+
+===== BEGIN outputs.sha256 =====
+b79cdb6e6f8915a741bd56b07564429be675c696c6bdd884d92b481ed8ab5aa2  unity-ordinary
+b79cdb6e6f8915a741bd56b07564429be675c696c6bdd884d92b481ed8ab5aa2  unity-diagnostic
+804e9f4f1f979742b0f120c1be2e705d88233120e493742b51890b826d3dbbda  small-ordinary.o
+804e9f4f1f979742b0f120c1be2e705d88233120e493742b51890b826d3dbbda  small-diagnostic.o
+===== END outputs.sha256 =====
+
+===== BEGIN outputs.tsv =====
+name	bytes	sha256
+unity-ordinary	40148488	b79cdb6e6f8915a741bd56b07564429be675c696c6bdd884d92b481ed8ab5aa2
+unity-diagnostic	40148488	b79cdb6e6f8915a741bd56b07564429be675c696c6bdd884d92b481ed8ab5aa2
+small-ordinary.o	2400	804e9f4f1f979742b0f120c1be2e705d88233120e493742b51890b826d3dbbda
+small-diagnostic.o	2400	804e9f4f1f979742b0f120c1be2e705d88233120e493742b51890b826d3dbbda
+===== END outputs.tsv =====
+
+===== BEGIN owner-symbol.txt =====
+0000000000ecf080 t ir_function_instruction_owners
+===== END owner-symbol.txt =====
+
+===== BEGIN diagnostic-noinline.patch =====
+diff --git a/src/buster/lib/compiler/ir/ir.c b/src/buster/lib/compiler/ir/ir.c
+index 93629e3..5703052 100644
+--- a/src/buster/lib/compiler/ir/ir.c
++++ b/src/buster/lib/compiler/ir/ir.c
+@@ -4392,7 +4392,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError err
+     };
+ }
+ 
+-IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
++__attribute__((noinline)) IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
+ {
+     IrInstructionOwnership result = {
+         .error = IR_VALIDATION_NONE,
+===== END diagnostic-noinline.patch =====
+
