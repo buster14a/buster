@@ -1,0 +1,55 @@
+name: PR 645 latest-main rebase
+
+on:
+  push:
+    branches: [maintenance/pr645-ci-repair-20260916]
+    paths: [.github/workflows/pr645-rebase-latest.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/569-canonical-landing-20260914
+          fetch-depth: 0
+      - name: Rebase onto current main
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/pr645-latest"
+          mkdir -p "$out"
+          git config user.name 'OpenAI PR 645 maintenance'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin main
+          git rev-parse HEAD > "$out/original-head.txt"
+          git rev-parse origin/main > "$out/main-head.txt"
+          set +e
+          GIT_EDITOR=true git rebase origin/main > "$out/rebase.log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$out/status-code.txt"
+          git status --porcelain=v1 > "$out/status.txt"
+          git diff --name-only --diff-filter=U > "$out/conflicts.txt"
+          git diff > "$out/worktree.diff"
+          git diff --cached > "$out/index.diff"
+          git rebase --show-current-patch > "$out/current.patch" 2>/dev/null || true
+          git log -80 --oneline --decorate > "$out/log.txt"
+          if (( status == 0 )); then
+            git rev-parse HEAD > "$out/rebased-head.txt"
+            git rev-parse 'HEAD^{tree}' > "$out/rebased-tree.txt"
+            git push --force origin HEAD:refs/heads/maintenance/pr645-rebased-latest > "$out/push.log" 2>&1
+          fi
+          tar -czf "$out/worktree.tar.gz" --exclude=.git --exclude=build --exclude=external .
+          exit "$status"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr645-latest-rebase-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr645-latest
+          retention-days: 2
