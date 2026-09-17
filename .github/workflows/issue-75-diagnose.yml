@@ -44,6 +44,7 @@ jobs:
           set -euo pipefail
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g \
             build.c -o "$RUNNER_TEMP/buster-build-driver"
+          export CFLAGS=-Wno-invalid-feature-combination
           "$RUNNER_TEMP/buster-build-driver" generate --cc clang
           "$RUNNER_TEMP/buster-build-driver" build --config Release -t ide
 
