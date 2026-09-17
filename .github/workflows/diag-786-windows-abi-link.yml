@@ -1,4 +1,4 @@
-name: Inspect issue 786 CodeView artifact
+name: Bisect issue 786 CodeView records
 
 on:
   push:
@@ -11,52 +11,194 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  bisect:
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Download retained failing and control objects
+      - name: Download retained failing object
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          gh run download 35282867175 \
-            --repo buster14a/buster \
-            --name issue-786-windows-abi-link-35282867175 \
-            --dir diag
+          gh run download 35282867175 --repo buster14a/buster --name issue-786-windows-abi-link-35282867175 --dir diag
           Get-ChildItem -Recurse diag | Select-Object FullName,Length
 
-      - name: Parse CodeView objects and partial PDBs
+      - name: Build CodeView record variants
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          foreach ($Object in @('subject-fast-p2.o', 'subject-fast-p0.o', 'subject-none-p2.o')) {
-            Write-Host "===== LLVM-READOBJ CODEVIEW $Object ====="
-            & llvm-readobj.exe --codeview --sections --relocations (Join-Path 'diag' $Object) 2>&1 |
-              Tee-Object -FilePath (Join-Path 'diag' "$Object.codeview.txt") |
-              ForEach-Object { Write-Host $_ }
-            Write-Host "LLVM_READOBJ_EXIT[$Object]=$LASTEXITCODE"
-          }
-          if (Get-Command llvm-pdbutil.exe -ErrorAction SilentlyContinue) {
-            foreach ($Pdb in @('fast-p2.pdb', 'fast-p0.pdb', 'none-p2.pdb')) {
-              Write-Host "===== LLVM-PDBUTIL $Pdb ====="
-              & llvm-pdbutil.exe dump -modules -section-contribs -symbols -types (Join-Path 'diag' $Pdb) 2>&1 |
-                Tee-Object -FilePath (Join-Path 'diag' "$Pdb.dump.txt") |
-                ForEach-Object { Write-Host $_ }
-              Write-Host "LLVM_PDBUTIL_EXIT[$Pdb]=$LASTEXITCODE"
-            }
-          } else {
-            Write-Host 'llvm-pdbutil.exe is unavailable on this runner'
-          }
+          $ErrorActionPreference = 'Stop'
+          @'
+          import pathlib
+          import struct
 
-      - name: Retain parser output
+          source = pathlib.Path('diag/subject-fast-p2.o')
+          original = source.read_bytes()
+
+          def section(data, wanted):
+              machine, count, timestamp, symbols, symbol_count, optional_size, flags = struct.unpack_from('<HHLLLHH', data, 0)
+              string_table = b''
+              if symbols and symbol_count:
+                  start = symbols + symbol_count * 18
+                  size = struct.unpack_from('<L', data, start)[0]
+                  string_table = data[start:start + size]
+              table = 20 + optional_size
+              for index in range(count):
+                  offset = table + index * 40
+                  raw_name = data[offset:offset + 8]
+                  if raw_name.startswith(b'/'):
+                      name_offset = int(raw_name[1:].split(b'\0', 1)[0])
+                      name = string_table[name_offset:].split(b'\0', 1)[0]
+                  else:
+                      name = raw_name.split(b'\0', 1)[0]
+                  size, file_offset = struct.unpack_from('<LL', data, offset + 16)
+                  if name.decode('ascii') == wanted:
+                      return file_offset, size
+              raise RuntimeError(f'missing section {wanted}')
+
+          def symbol_records(data):
+              section_offset, section_size = section(data, '.debug$S')
+              view = memoryview(data)[section_offset:section_offset + section_size]
+              if struct.unpack_from('<L', view, 0)[0] != 4:
+                  raise RuntimeError('unexpected CodeView signature')
+              subsection = 4
+              while subsection + 8 <= len(view):
+                  subsection = (subsection + 3) & ~3
+                  kind, length = struct.unpack_from('<LL', view, subsection)
+                  payload = subsection + 8
+                  if payload + length > len(view):
+                      raise RuntimeError('truncated CodeView subsection')
+                  if kind == 0xF1 and length:
+                      record = payload
+                      procedure = ''
+                      local = ''
+                      previous_register = None
+                      while record + 4 <= payload + length:
+                          record_length, record_type = struct.unpack_from('<HH', view, record)
+                          total = record_length + 2
+                          if total < 4 or record + total > payload + length:
+                              raise RuntimeError('truncated CodeView symbol record')
+                          absolute = section_offset + record
+                          if record_type == 0x1110:
+                              procedure = bytes(view[record + 39:record + total]).split(b'\0', 1)[0].decode('utf-8')
+                              local = ''
+                              previous_register = None
+                          elif record_type == 0x113E:
+                              local = bytes(view[record + 10:record + total]).split(b'\0', 1)[0].decode('utf-8')
+                              previous_register = None
+                          elif record_type == 0x1141:
+                              reg, attrs, start, segment, extent = struct.unpack_from('<HHIHH', view, record + 4)
+                              current = {
+                                  'absolute': absolute,
+                                  'procedure': procedure,
+                                  'local': local,
+                                  'reg': reg,
+                                  'start': start,
+                                  'extent': extent,
+                                  'previous': previous_register,
+                              }
+                              yield current
+                              previous_register = current
+                          else:
+                              previous_register = None
+                          record += total
+                  subsection = (payload + length + 3) & ~3
+
+          records = list(symbol_records(original))
+          print('register_records=', len(records))
+          for item in records:
+              print(item['procedure'], item['local'], item['reg'], item['start'], item['extent'])
+
+          def to_frame(buffer, record, frame=-16):
+              offset = record['absolute']
+              struct.pack_into('<H', buffer, offset + 2, 0x1142)
+              struct.pack_into('<i', buffer, offset + 4, frame)
+
+          def write(name, predicate):
+              data = bytearray(original)
+              changed = 0
+              for item in records:
+                  if predicate(item):
+                      to_frame(data, item)
+                      changed += 1
+              pathlib.Path(f'diag/{name}.o').write_bytes(data)
+              print(name, 'changed=', changed)
+
+          pathlib.Path('diag/original.o').write_bytes(original)
+          write('no-many-ints-registers', lambda item: item['procedure'] == 'many_ints')
+          write('no-large-registers', lambda item: item['procedure'] == 'large')
+          write('no-pair-registers', lambda item: item['procedure'] == 'pair')
+          write('no-registers', lambda item: True)
+          write('no-adjacent-second', lambda item: item['previous'] is not None and
+                item['previous']['reg'] == item['reg'] and
+                item['previous']['start'] + item['previous']['extent'] == item['start'])
+
+          data = bytearray(original)
+          merged = 0
+          for item in records:
+              previous = item['previous']
+              if previous is None or previous['reg'] != item['reg'] or previous['start'] + previous['extent'] != item['start']:
+                  continue
+              first = previous['absolute']
+              second = item['absolute']
+              struct.pack_into('<H', data, first + 14, previous['extent'] + item['extent'])
+              struct.pack_into('<H', data, second + 2, 0x113E)
+              struct.pack_into('<I', data, second + 4, 0x74)
+              struct.pack_into('<H', data, second + 8, 0)
+              data[second + 10:second + 16] = b'x\0\0\0\0\0'
+              merged += 1
+          pathlib.Path('diag/merge-adjacent-registers.o').write_bytes(data)
+          print('merge-adjacent-registers changed=', merged)
+          '@ | Set-Content -Encoding utf8 diag\patch.py
+          python diag\patch.py
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          llvm-objcopy.exe '--remove-section=.debug$S' diag\original.o diag\no-debug-s.o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Link every variant
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $Sanitizer = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          $LibraryArgs = @()
+          foreach ($LibraryPath in @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })) { $LibraryArgs += "-L$LibraryPath" }
+          $Results = @()
+          foreach ($Name in @(
+            'original',
+            'no-many-ints-registers',
+            'no-large-registers',
+            'no-pair-registers',
+            'no-registers',
+            'no-adjacent-second',
+            'merge-adjacent-registers',
+            'no-debug-s'
+          )) {
+            $Object = "diag\$Name.o"
+            $Output = "diag\$Name.exe"
+            Write-Host "===== LINK $Name ====="
+            & clang.exe @Sanitizer @LibraryArgs diag\caller.o $Object -o $Output 2>&1 |
+              Tee-Object -FilePath "diag\link-$Name.log" |
+              ForEach-Object { Write-Host $_ }
+            $Code = $LASTEXITCODE
+            $Results += "$Name=$Code"
+            Write-Host "LINK_RESULT $Name=$Code"
+          }
+          $Results | Set-Content -Encoding ascii diag\bisect-summary.txt
+          Get-Content diag\bisect-summary.txt
+
+      - name: Retain bisection output
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-786-codeview-parser-${{ github.run_id }}
-          path: diag/*.txt
+          name: issue-786-codeview-bisect-${{ github.run_id }}
+          path: |
+            diag/bisect-summary.txt
+            diag/link-*.log
+            diag/patch.py
           retention-days: 3
           if-no-files-found: error
           compression-level: 6
