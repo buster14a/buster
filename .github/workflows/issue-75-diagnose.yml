@@ -3,6 +3,8 @@ name: Issue 75 diagnostic
 on:
   push:
     branches: [codex/issue-75-diagnose-20260917]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
