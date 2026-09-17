@@ -1,4 +1,4 @@
-name: Preserve issue 513 cutover conflicts
+name: Split issue 513 cutover conflicts
 on:
   push:
     branches: [codex/513-reconcile-probe]
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Replay and preserve conflict neighborhoods
+      - name: Replay and split conflicts
         shell: bash
         run: |
           set -euo pipefail
@@ -22,29 +22,33 @@ jobs:
           git fetch origin main recovery/6aa84ae5/522-514-cutover-review
           git checkout --detach origin/main
           git cherry-pick --no-commit 0f7676b27def833143727947fa0e20682007a73f >/tmp/replay.log 2>&1 || true
-          python3 - <<'PY' >/tmp/issue513-conflicts.txt
+          rm -rf /tmp/issue513-conflicts
+          mkdir -p /tmp/issue513-conflicts
+          python3 - <<'PY'
           from pathlib import Path
-          print(Path('/tmp/replay.log').read_text(errors='replace'))
           paths = [
               'src/buster/lib/compiler/codegen/codegen.c',
               'src/buster/lib/compiler/codegen/codegen_internal.h',
               'src/buster/tests/compiler/driver/driver_test.c',
           ]
+          out = Path('/tmp/issue513-conflicts')
           for name in paths:
               lines = Path(name).read_text(errors='replace').splitlines()
               starts = [i for i, line in enumerate(lines) if line.startswith('<<<<<<<')]
-              print(f'\n===== {name}: {len(starts)} conflict(s), {len(lines)} lines =====')
+              stem = name.replace('/', '__')
               for n, start in enumerate(starts, 1):
-                  lo = max(0, start - 25)
-                  end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('>>>>>>>'))
-                  hi = min(len(lines), end + 26)
-                  print(f'\n--- conflict {n}: lines {start + 1}-{end + 1} ---')
-                  for i in range(lo, hi):
-                      print(f'{i + 1:07d}: {lines[i]}')
+                  sep = next(i for i in range(start + 1, len(lines)) if lines[i] == '=======')
+                  end = next(i for i in range(sep + 1, len(lines)) if lines[i].startswith('>>>>>>>'))
+                  lo = max(0, start - 20)
+                  hi = min(len(lines), end + 21)
+                  body = [f'path={name}', f'conflict={n}', f'start={start + 1}', f'separator={sep + 1}', f'end={end + 1}', '']
+                  body.extend(f'{i + 1:07d}: {lines[i]}' for i in range(lo, hi))
+                  (out / f'{stem}.{n}.txt').write_text('\n'.join(body) + '\n')
           PY
           git reset --hard origin/main
           git checkout -B codex/513-reconcile-probe origin/codex/513-reconcile-probe
-          cp /tmp/issue513-conflicts.txt issue513-conflicts.txt
-          git add issue513-conflicts.txt
-          git commit -m 'ci: preserve issue 513 merge conflicts [skip ci]'
+          rm -rf issue513-conflict-blocks
+          cp -R /tmp/issue513-conflicts issue513-conflict-blocks
+          git add issue513-conflict-blocks
+          git commit -m 'ci: split issue 513 merge conflicts [skip ci]'
           git push origin HEAD:codex/513-reconcile-probe
