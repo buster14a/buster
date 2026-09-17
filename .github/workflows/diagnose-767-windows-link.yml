@@ -1,4 +1,4 @@
-name: Diagnose PR 767 Windows ABI link
+name: Publish PR 767 CodeView repair
 
 on:
   push:
@@ -8,27 +8,31 @@ on:
       - .github/workflows/diagnose-767-windows-link.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  publish:
     runs-on: windows-2025
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
-      - name: Check out exact diagnostic revision
+      - name: Check out owned PR branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          persist-credentials: false
+          ref: claude/clever-cori-qh0b15
+          fetch-depth: 0
+          persist-credentials: true
 
-      - name: Patch, test, and reproduce target-promotion ABI link
+      - name: Apply focused source and regression repair
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $Expected = '814fa99a8d026404371d299463ef4a56076ca5c0'
+          $Actual = (git rev-parse HEAD).Trim()
+          if ($Actual -ne $Expected) { throw "PR head moved: expected $Expected, found $Actual" }
           @'
           from pathlib import Path
 
-          path = Path("src/buster/lib/compiler/codeview/codeview.c")
-          text = path.read_text()
+          source = Path("src/buster/lib/compiler/codeview/codeview.c")
+          text = source.read_text()
           old = '''            else if (piece->kind == DEBUG_LOCATION_FRAME)
                       {
                           u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
@@ -40,38 +44,93 @@ jobs:
                           codeview_record_end(symbols, record);
                       }
           '''
-          new = '''            else if (piece->kind == DEBUG_LOCATION_FRAME)
-                      {
-                          // S_DEFRANGE_SUBFIELD describes its source through a DIA
-                          // location program. DebugLocationPiece carries an abstract
-                          // frame offset but no program or concrete frame-base register,
-                          // so the old zero program lost frame_offset and link.exe
-                          // rejected the resulting symbol stream. Leave this fragment
-                          // unavailable until that representation exists; emitting the
-                          // register-backed fragments still preserves the valid pieces.
-                      }
+          new = '''            // A frame-backed fragment needs a DIA location program or a
+                      // concrete register-relative base. DebugLocationPiece carries only
+                      // the abstract frame offset, so the old zero program discarded
+                      // frame_offset and link.exe rejected the resulting symbol stream.
+                      // Leave that fragment unavailable until the representation exists;
+                      // register-backed fragments above remain independently valid.
           '''
           if text.count(old) != 1:
               raise SystemExit(f"expected one CodeView frame-subfield block, found {text.count(old)}")
-          path.write_text(text.replace(old, new))
-          '@ | python -
+          source.write_text(text.replace(old, new))
 
+          test = Path("src/buster/tests/compiler/codeview/codeview_test.c")
+          text = test.read_text()
+          replacements = [
+              (
+                  '''    bool found_frame = false;
+              bool found_subfield = false;
+              bool found_inline = false;
+          ''',
+                  '''    bool found_frame = false;
+              bool found_frame_subfield = false;
+              bool found_register_subfield = false;
+              bool found_inline = false;
+          ''',
+              ),
+              (
+                  '''                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                          found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD || record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
+                          found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
+          ''',
+                  '''                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                          found_frame_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD;
+                          found_register_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
+                          found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
+          ''',
+              ),
+              (
+                  '''    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
+          ''',
+                  '''    // Frame pieces have no representable DIA program yet: omitting
+              // them is valid and keeps strict COFF consumers from rejecting the
+              // stream. Register pieces and whole-frame ranges remain present.
+              BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame &&
+                                         !found_frame_subfield && found_register_subfield && found_inline);
+          ''',
+              ),
+          ]
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected one CodeView test block, found {text.count(old)}")
+              text = text.replace(old, new)
+          test.write_text(text)
+          '@ | python -
+          git diff --check
+          git config user.name 'ChatGPT Codex Connector'
+          git config user.email 'noreply@openai.com'
+          git add src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codeview/codeview_test.c
+          git commit -m 'codeview: omit unrepresentable frame subfield ranges'
+          git fetch origin main
+          git merge --no-edit origin/main
+
+      - name: Build and run Release tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
           & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-
-          $Driver = Join-Path $env:RUNNER_TEMP 'diagnostic-build.exe'
+          $Driver = Join-Path $env:RUNNER_TEMP 'publish-build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Driver generate --cc clang --ci --linker DEFAULT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Driver build --config Release -t test_all
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          exit $LASTEXITCODE
 
+      - name: Prove target-promotion object links with MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
           $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
-          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
           New-Item -ItemType Directory -Force -Path evidence | Out-Null
           $Include = "$PWD\tests\differential"
           $Caller = "$PWD\evidence\caller.o"
@@ -79,31 +138,23 @@ jobs:
           $Program = "$PWD\evidence\program.exe"
           & clang.exe -O0 -fwrapv -fno-strict-aliasing -funsigned-char "-I$Include" tests\differential\abi_host.c -c -o $Caller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $Candidate = @(
-            'cc'
-            '-fregister-allocator=fast'
-            '-fno-machine-fallback'
-            '-fno-canonical-local-promotion'
-            '-ftarget-local-promotion'
-            '-fno-frontend-ssa'
-            '-fverify-codegen'
-            '-fwrapv'
-            '-fno-strict-aliasing'
-            '-funsigned-char'
-            "-I$Include"
-          )
+          $Candidate = @('cc','-fregister-allocator=fast','-fno-machine-fallback','-fno-canonical-local-promotion','-ftarget-local-promotion','-fno-frontend-ssa','-fverify-codegen','-fwrapv','-fno-strict-aliasing','-funsigned-char',"-I$Include")
           foreach ($LibraryPath in $LibraryPaths) { $Candidate += "-L$LibraryPath" }
-          $Candidate += @('tests\differential\abi.c', '-c', '-o', $Subject)
+          $Candidate += @('tests\differential\abi.c','-c','-o',$Subject)
           & build\Release\ide.exe @Candidate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          & llvm-readobj.exe --codeview $Subject
+          & llvm-readobj.exe --codeview $Subject | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $Link = @()
           foreach ($LibraryPath in $LibraryPaths) { $Link += "-L$LibraryPath" }
-          $Link += @($Caller, $Subject, '-o', $Program)
+          $Link += @($Caller,$Subject,'-o',$Program)
           & clang.exe @Link
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Program
           exit $LASTEXITCODE
+
+      - name: Publish validated commits
+        shell: pwsh
+        run: |
+          git diff --exit-code
+          git push origin HEAD:claude/clever-cori-qh0b15
