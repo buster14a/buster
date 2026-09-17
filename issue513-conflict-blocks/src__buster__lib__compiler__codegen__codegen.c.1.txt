@@ -1,0 +1,339 @@
+path=src/buster/lib/compiler/codegen/codegen.c
+conflict=1
+start=2327
+separator=2618
+end=2619
+
+0002307:                 buffer->error = CODEGEN_ERROR_CAPACITY;
+0002308:             }
+0002309:         }
+0002310:     }
+0002311: 
+0002312:     return true;
+0002313: }
+0002314: 
+0002315: 
+0002316: 
+0002317: 
+0002318: 
+0002319: 
+0002320: 
+0002321: 
+0002322: 
+0002323: 
+0002324: 
+0002325: 
+0002326: 
+0002327: <<<<<<< HEAD
+0002328: // popcnt eax/rax, eax/rax. The C frontend only produces this operation when
+0002329: // the target has POPCNT and expands the SWAR form itself otherwise, so there
+0002330: // is no second sequence to keep in step here.
+0002331: BUSTER_GLOBAL_LOCAL void x64_emit_population_count(CodegenBuffer* buffer, u32 width)
+0002332: {
+0002333:     if (width != 32 && width != 64)
+0002334:     {
+0002335:         buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+0002336:         return;
+0002337:     }
+0002338:     BusterX86MetadataPhysicalOperand operands[2] = {
+0002339:         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)width),
+0002340:         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)width),
+0002341:     };
+0002342:     String8 feature_names[] = {S8("popcnt")};
+0002343:     (void)codegen_canonical_x64_metadata_emit_features(buffer, S8("POPCNT"), operands, BUSTER_ARRAY_LENGTH(operands),
+0002344:                                                         (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
+0002345: }
+0002346: 
+0002347: 
+0002348: void x64_emit_vector_native_memory(X64Builder* builder, bool store, u32 size, X64Register base)
+0002349: {
+0002350:     if (size != 32 && size != 64)
+0002351:     {
+0002352:         builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+0002353:         return;
+0002354:     }
+0002355:     u16 vector_width = (u16)(size * 8);
+0002356:     // The legacy native load/store opcode is VMOVUPS for both YMM and ZMM
+0002357:     // widths.  Keep the aggregate memory atom at the 256-bit lane shape used
+0002358:     // by the metadata schema; EVEX selects the 512-bit register width from
+0002359:     // the ZMM physical class while AVX512F gates the wide form.
+0002360:     String8 mnemonic = S8("VMOVUPS");
+0002361:     u16 memory_width = 32;
+0002362:     BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0);
+0002363:     BusterX86MetadataPhysicalOperand vector = codegen_canonical_x64_metadata_vector(0, vector_width);
+0002364:     BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : vector, store ? vector : memory};
+0002365:     String8 feature_names[2] = {0};
+0002366:     u32 feature_count = 0;
+0002367:     if (size == 64)
+0002368:     {
+0002369:         feature_names[feature_count++] = S8("avx512f");
+0002370:     }
+0002371:     else
+0002372:     {
+0002373:         feature_names[feature_count++] = S8("avx");
+0002374:     }
+0002375:     (void)codegen_canonical_x64_metadata_emit_features(
+0002376:         &builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+0002377:         (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
+0002378: }
+0002379: 
+0002380: // Emit a native packed operation from an explicit IR element kind/width.
+0002381: // The legacy opcode prefix is not sufficient to classify this operation:
+0002382: // 0x66 is used by both packed integer and packed-double forms.  Keep the
+0002383: // classification at the call site and use the physical metadata encoder for
+0002384: // every form.
+0002385: BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation_kind(X64Builder* builder, bool integer_operation, u16 element_width,
+0002386:                                                                        u8 prefix, u8 opcode, u32 size, X64Register base)
+0002387: {
+0002388:     (void)prefix;
+0002389:     if (size != 32 && size != 64)
+0002390:     {
+0002391:         builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+0002392:         return;
+0002393:     }
+0002394:     String8 mnemonic = {0};
+0002395:     u16 memory_width = 0;
+0002396:     if (integer_operation)
+0002397:     {
+0002398:         switch (opcode)
+0002399:         {
+0002400:         case 0xfc: mnemonic = S8("VPADDB"); memory_width = 8; break;
+0002401:         case 0xfd: mnemonic = S8("VPADDW"); memory_width = 16; break;
+0002402:         case 0xfe: mnemonic = S8("VPADDD"); memory_width = 32; break;
+0002403:         case 0xd4: mnemonic = S8("VPADDQ"); memory_width = 64; break;
+0002404:         case 0xf8: mnemonic = S8("VPSUBB"); memory_width = 8; break;
+0002405:         case 0xf9: mnemonic = S8("VPSUBW"); memory_width = 16; break;
+0002406:         case 0xfa: mnemonic = S8("VPSUBD"); memory_width = 32; break;
+0002407:         case 0xfb: mnemonic = S8("VPSUBQ"); memory_width = 64; break;
+0002408:         case 0xdb:
+0002409:             mnemonic = size == 64 ? (element_width <= 32 ? S8("VPANDD") : S8("VPANDQ")) : S8("VPAND");
+0002410:             // The AVX-512 D/Q logical forms use their tuple element width
+0002411:             // (dword/qword) for memory matching even when the IR vector is
+0002412:             // byte/word-granular: the operation is bitwise and does not
+0002413:             // change its result based on the logical lane size.
+0002414:             memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
+0002415:             break;
+0002416:         case 0xeb:
+0002417:             mnemonic = size == 64 ? (element_width <= 32 ? S8("VPORD") : S8("VPORQ")) : S8("VPOR");
+0002418:             memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
+0002419:             break;
+0002420:         case 0xef:
+0002421:             mnemonic = size == 64 ? (element_width <= 32 ? S8("VPXORD") : S8("VPXORQ")) : S8("VPXOR");
+0002422:             memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
+0002423:             break;
+0002424:         default: break;
+0002425:         }
+0002426:     }
+0002427:     else
+0002428:     {
+0002429:         bool double_precision = element_width == 64;
+0002430:         switch (opcode)
+0002431:         {
+0002432:         case 0x58: mnemonic = double_precision ? S8("VADDPD") : S8("VADDPS"); memory_width = double_precision ? 64 : 32; break;
+0002433:         case 0x5c: mnemonic = double_precision ? S8("VSUBPD") : S8("VSUBPS"); memory_width = double_precision ? 64 : 32; break;
+0002434:         case 0x59: mnemonic = double_precision ? S8("VMULPD") : S8("VMULPS"); memory_width = double_precision ? 64 : 32; break;
+0002435:         case 0x5e: mnemonic = double_precision ? S8("VDIVPD") : S8("VDIVPS"); memory_width = double_precision ? 64 : 32; break;
+0002436:         default: break;
+0002437:         }
+0002438:     }
+0002439:     if (!mnemonic.length)
+0002440:     {
+0002441:         builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+0002442:         return;
+0002443:     }
+0002444:     u16 vector_width = (u16)(size * 8);
+0002445:     BusterX86MetadataPhysicalOperand memory_operand = codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0);
+0002446:     // Vector memory operands carry the scalar element width used by the
+0002447:     // tuple encoding together with their aggregate source width.  The
+0002448:     // latter is what lets metadata distinguish (for example) a dword
+0002449:     // tuple in a zmmword operand from an ordinary scalar dword load.
+0002450:     memory_operand.memory.source_width = vector_width;
+0002451:     BusterX86MetadataPhysicalOperand operands[3] = {
+0002452:         codegen_canonical_x64_metadata_vector(0, vector_width),
+0002453:         codegen_canonical_x64_metadata_vector(0, vector_width),
+0002454:         memory_operand,
+0002455:     };
+0002456:     String8 feature_names[2] = {0};
+0002457:     u32 feature_count = 0;
+0002458:     if (size == 64)
+0002459:     {
+0002460:         feature_names[feature_count++] = S8("avx512f");
+0002461:         if (integer_operation && (memory_width == 8 || memory_width == 16)) feature_names[feature_count++] = S8("avx512bw");
+0002462:     }
+0002463:     else
+0002464:     {
+0002465:         feature_names[feature_count++] = integer_operation ? S8("avx2") : S8("avx");
+0002466:     }
+0002467:     (void)codegen_canonical_x64_metadata_emit_features(
+0002468:         &builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+0002469:         (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
+0002470: }
+0002471: 
+0002472: // Keep the internal declaration's historical signature for out-of-line
+0002473: // callers, while routing the canonical vector path through the explicit
+0002474: // element-kind helper above.  This wrapper only serves legacy tests/tools;
+0002475: // production call sites pass element kind and width directly below.
+0002476: void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base)
+0002477: {
+0002478:     bool integer_operation = opcode != 0x58 && opcode != 0x5c && opcode != 0x59 && opcode != 0x5e;
+0002479:     u16 element_width = 32;
+0002480:     if (integer_operation)
+0002481:     {
+0002482:         element_width = opcode == 0xfc || opcode == 0xf8 ? 8 : opcode == 0xfd || opcode == 0xf9 ? 16 : opcode == 0xfe || opcode == 0xfa ? 32 : 64;
+0002483:     }
+0002484:     else if (prefix == 0x66)
+0002485:     {
+0002486:         element_width = 64;
+0002487:     }
+0002488:     x64_emit_vector_native_binary_operation_kind(builder, integer_operation, element_width, prefix, opcode, size, base);
+0002489: }
+0002490: 
+0002491: // A vector element the canonical emitters have lane instructions for: any of
+0002492: // the four integer widths they address, and a float lane only at the two IEEE
+0002493: // widths their arithmetic implements. The scalarized lane loops already asked
+0002494: // this of a float before operating; the shape guards at the top of both
+0002495: // emitters did not, so a binary16 lane was admitted and then selected the
+0002496: // binary32 or binary64 encoding. The MIR selectors spell the same rule.
+0002497: BUSTER_GLOBAL_LOCAL bool codegen_vector_element_supported(IrType* element)
+0002498: {
+0002499:     return element &&
+0002500:            ((element->kind == IR_TYPE_INTEGER &&
+0002501:              (element->bit_width == 8 || element->bit_width == 16 || element->bit_width == 32 || element->bit_width == 64)) ||
+0002502:             (element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64)));
+0002503: }
+0002504: 
+0002505: bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
+0002506: {
+0002507:     if (size <= 16 || size > target_vector_register_size(target))
+0002508:     {
+0002509:         return false;
+0002510:     }
+0002511:     // The packed float arithmetic here is ADDPS/ADDPD and their siblings, so
+0002512:     // a float lane narrower than binary32 has no encoding at all: binary16
+0002513:     // needs AVX512-FP16's ADDPH, which this backend does not select. Without
+0002514:     // this the binary32/binary64 pair was chosen for a `_Float16` lane and the
+0002515:     // vector was added as if its lanes were twice as wide.
+0002516:     if (!integer_operation && element_width < 32)
+0002517:     {
+0002518:         return false;
+0002519:     }
+0002520:     if (integer_operation)
+0002521:     {
+0002522:         if (size == 32)
+0002523:         {
+0002524:             return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2);
+0002525:         }
+0002526:         if (size == 64 && element_width < 32)
+0002527:         {
+0002528:             return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
+0002529:         }
+0002530:     }
+0002531: 
+0002532:     return true;
+0002533: }
+0002534: 
+0002535: BUSTER_GLOBAL_LOCAL bool x64_vector_binary_is_commutative(IrBinaryOperation operation)
+0002536: {
+0002537:     return operation == IR_BINARY_VECTOR_INTEGER_ADD || operation == IR_BINARY_VECTOR_INTEGER_BITWISE_AND || operation == IR_BINARY_VECTOR_INTEGER_BITWISE_OR ||
+0002538:            operation == IR_BINARY_VECTOR_INTEGER_BITWISE_XOR;
+0002539: }
+0002540: 
+0002541: void x64_emit_vzeroupper(X64Builder* builder)
+0002542: {
+0002543:     if (!builder->upper_vector_dirty)
+0002544:     {
+0002545:         return;
+0002546:     }
+0002547:     String8 feature_names[] = {S8("avx")};
+0002548:     (void)codegen_canonical_x64_metadata_emit_features(
+0002549:         &builder->buffer, S8("VZEROUPPER"), 0, 0,
+0002550:         (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
+0002551:     builder->upper_vector_dirty = false;
+0002552:     builder->last_wide_vector_result = IR_VALUE_ID_INVALID;
+0002553:     builder->last_wide_vector_size = 0;
+0002554:     builder->vzeroupper_count += 1;
+0002555: }
+0002556: 
+0002557: BUSTER_GLOBAL_LOCAL bool x64_vector_comparison_condition(IrBinaryOperation operation, u8* condition_out, bool* ordered_out, bool* unordered_out)
+0002558: {
+0002559:     u8 condition = 0;
+0002560:     bool ordered = false;
+0002561:     bool unordered = false;
+0002562:     switch (operation)
+0002563:     {
+0002564:     case IR_BINARY_VECTOR_INTEGER_EQUAL:
+0002565:     case IR_BINARY_VECTOR_FLOAT_EQUAL:
+0002566:         condition = 0x94;
+0002567:         ordered = operation == IR_BINARY_VECTOR_FLOAT_EQUAL;
+0002568:         break;
+0002569:     case IR_BINARY_VECTOR_INTEGER_NOT_EQUAL:
+0002570:     case IR_BINARY_VECTOR_FLOAT_NOT_EQUAL:
+0002571:         condition = 0x95;
+0002572:         unordered = operation == IR_BINARY_VECTOR_FLOAT_NOT_EQUAL;
+0002573:         break;
+0002574:     case IR_BINARY_VECTOR_SIGNED_LESS:
+0002575:         condition = 0x9c;
+0002576:         break;
+0002577:     case IR_BINARY_VECTOR_SIGNED_LESS_EQUAL:
+0002578:         condition = 0x9e;
+0002579:         break;
+0002580:     case IR_BINARY_VECTOR_SIGNED_GREATER:
+0002581:         condition = 0x9f;
+0002582:         break;
+0002583:     case IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL:
+0002584:         condition = 0x9d;
+0002585:         break;
+0002586:     case IR_BINARY_VECTOR_UNSIGNED_LESS:
+0002587:     case IR_BINARY_VECTOR_FLOAT_LESS:
+0002588:         condition = 0x92;
+0002589:         ordered = operation == IR_BINARY_VECTOR_FLOAT_LESS;
+0002590:         break;
+0002591:     case IR_BINARY_VECTOR_UNSIGNED_LESS_EQUAL:
+0002592:     case IR_BINARY_VECTOR_FLOAT_LESS_EQUAL:
+0002593:         condition = 0x96;
+0002594:         ordered = operation == IR_BINARY_VECTOR_FLOAT_LESS_EQUAL;
+0002595:         break;
+0002596:     case IR_BINARY_VECTOR_UNSIGNED_GREATER:
+0002597:     case IR_BINARY_VECTOR_FLOAT_GREATER:
+0002598:         condition = 0x97;
+0002599:         break;
+0002600:     case IR_BINARY_VECTOR_UNSIGNED_GREATER_EQUAL:
+0002601:     case IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL:
+0002602:         condition = 0x93;
+0002603:         break;
+0002604:     default:
+0002605:         return false;
+0002606:     }
+0002607:     *condition_out = condition;
+0002608:     *ordered_out = ordered;
+0002609:     *unordered_out = unordered;
+0002610:     return true;
+0002611: }
+0002612: 
+0002613: 
+0002614: // `source_limit` is the first source id the record cannot name: at most
+0002615: // UINT16_MAX + 1, and the program's source count when the caller knows it, so
+0002616: // a stored source is always an index into the source table and the object
+0002617: // writer can hand the array to the DWARF and CodeView builders as it is.
+0002618: =======
+0002619: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0002620: BUSTER_GLOBAL_LOCAL BUSTER_INLINE void codegen_record_line_hot(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source,
+0002621:                                                                u32 source_limit, u32 line, u32 column)
+0002622: {
+0002623:     if (entries && line && *count < capacity)
+0002624:     {
+0002625:         // The 12-byte record stores these as u16; saturate rather than truncate
+0002626:         // so an overflowing source cannot alias an unrelated file.
+0002627:         u16 stored_source = source < source_limit ? (u16)source : 0;
+0002628:         u16 stored_column = column <= UINT16_MAX ? (u16)column : UINT16_MAX;
+0002629:         if (*count)
+0002630:         {
+0002631:             CodegenLineEntry* last = entries + (*count - 1);
+0002632:             if (last->code_offset == code_offset || (last->source == stored_source && last->line == line && last->column == stored_column))
+0002633:             {
+0002634:                 return;
+0002635:             }
+0002636:         }
+0002637:         entries[*count] = (CodegenLineEntry){
+0002638:             .code_offset = code_offset,
+0002639:             .source = stored_source,

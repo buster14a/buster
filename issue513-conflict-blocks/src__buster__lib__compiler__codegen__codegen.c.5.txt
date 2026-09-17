@@ -1,0 +1,89 @@
+path=src/buster/lib/compiler/codegen/codegen.c
+conflict=5
+start=9410
+separator=9429
+end=9452
+
+0009390:                 // a placement that evicted nothing has nothing to save.
+0009391:                 if (placement.valid && placement.reload_count + placement.spill_count > 0 &&
+0009392:                     options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
+0009393:                 {
+0009394:                     MachineScheduleResult scheduled = machine_schedule_function(machine_scratch.arena, &selected.function);
+0009395:                     if (scheduled.moved)
+0009396:                     {
+0009397:                         bool scheduled_valid = true;
+0009398:                         if (options.verify_invariants)
+0009399:                         {
+0009400:                             result.statistics.verified_scheduled_function_count += 1;
+0009401:                             if (machine_verify_function(&scheduled.function).error != MACHINE_VERIFY_NONE)
+0009402:                             {
+0009403:                                 fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+0009404:                                 scheduled_valid = false;
+0009405:                                 placement.valid = false;
+0009406:                             }
+0009407:                         }
+0009408:                         if (scheduled_valid)
+0009409:                         {
+0009410: <<<<<<< HEAD
+0009411:                             buffer.error = CODEGEN_ERROR_INVALID_IR;
+0009412:                             scratch_end(machine_scratch);
+0009413:                             break;
+0009414:                         }
+0009415:                         u32 placement_saved_registers = 0;
+0009416:                         u32 scheduled_saved_registers = 0;
+0009417:                         for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
+0009418:                         {
+0009419:                             placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
+0009420:                             scheduled_saved_registers += (u32)((scheduled_placement.callee_saved_mask >> physical_register) & 1u);
+0009421:                         }
+0009422:                         if (scheduled_placement.valid &&
+0009423:                             scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
+0009424:                                 placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
+0009425:                         {
+0009426:                             result.statistics.allocator_schedule_kept_count += 1;
+0009427:                             selected.function = scheduled.function;
+0009428:                             placement = scheduled_placement;
+0009429: =======
+0009430:                             result.statistics.allocator_scheduled_function_count += 1;
+0009431:                             MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
+0009432:                             if (options.verify_invariants && !scheduled_placement.valid)
+0009433:                             {
+0009434:                                 fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+0009435:                                 placement.valid = false;
+0009436:                             }
+0009437:                             u32 placement_saved_registers = 0;
+0009438:                             u32 scheduled_saved_registers = 0;
+0009439:                             for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
+0009440:                             {
+0009441:                                 placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
+0009442:                                 scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
+0009443:                             }
+0009444:                             if (scheduled_placement.valid &&
+0009445:                                 scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
+0009446:                                     placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
+0009447:                             {
+0009448:                                 result.statistics.allocator_schedule_kept_count += 1;
+0009449:                                 selected.function = scheduled.function;
+0009450:                                 placement = scheduled_placement;
+0009451:                             }
+0009452: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0009453:                         }
+0009454:                     }
+0009455:                 }
+0009456:                 if (!placement.valid)
+0009457:                 {
+0009458:                     if (fallback_reason != CODEGEN_FALLBACK_VERIFICATION)
+0009459:                     {
+0009460:                         fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
+0009461:                     }
+0009462:                 }
+0009463:                 if (placement.valid)
+0009464:                 {
+0009465:                     MachineEncodeResult encoded;
+0009466: 
+0009467:                     switch (target.cpu_arch)
+0009468:                     {
+0009469:                         break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement);
+0009470:                         break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+0009471:                         break; default: BUSTER_TODO();
+0009472:                     }

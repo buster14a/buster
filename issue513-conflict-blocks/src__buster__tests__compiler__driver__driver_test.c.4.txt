@@ -1,0 +1,77 @@
+path=src/buster/tests/compiler/driver/driver_test.c
+conflict=4
+start=14670
+separator=14697
+end=14700
+
+0014650:         S8("tests/basic_c_bit_field_alignas.c"),
+0014651:     };
+0014652:     CompilerDriverResult c_bit_field_alignas = compiler_driver_execute_invocation(
+0014653:         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_bit_field_alignas_command_line)));
+0014654:     BUSTER_TEST(arguments, c_bit_field_alignas.error != COMPILER_DRIVER_ERROR_NONE);
+0014655:     BUSTER_TEST(arguments, string_first_sequence(c_bit_field_alignas.diagnostic, S8("alignment specifier cannot be applied to a bit-field")) != BUSTER_STRING_NO_MATCH);
+0014656:     // The refused half of #830: an assignment between incompatible function
+0014657:     // prototypes. It used to compile in silence, which is what flipped
+0014658:     // CPython's readline probe. The assertion is on the diagnostic because a
+0014659:     // successful compile is the failure mode.
+0014660:     String8 c_function_pointer_conflict_command_line[] = {
+0014661:         S8("-S"),
+0014662:         S8("-target"),
+0014663:         S8("x86_64-unknown-linux-gnu"),
+0014664:         S8("tests/basic_c_function_pointer_conflict.c"),
+0014665:     };
+0014666:     CompilerDriverResult c_function_pointer_conflict = compiler_driver_execute_invocation(
+0014667:         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_conflict_command_line)));
+0014668:     BUSTER_TEST(arguments, c_function_pointer_conflict.error != COMPILER_DRIVER_ERROR_NONE);
+0014669:     BUSTER_TEST(arguments, string_first_sequence(c_function_pointer_conflict.diagnostic, S8("incompatible function pointer type")) != BUSTER_STRING_NO_MATCH);
+0014670: <<<<<<< HEAD
+0014671:     // A later prototype is authoritative even when the entity's first
+0014672:     // declaration used an empty, unprototyped parameter list.  The callable
+0014673:     // signature may reuse the entity's canonical parameter IDs, but must not
+0014674:     // inherit that first declaration's relaxed arity rule.
+0014675:     String8 c_prototype_authority_path =
+0014676:         buster_test_temporary_path(arguments->arena, S8("buster-c-prototype-authority"), S8(".c"));
+0014677:     String8 c_prototype_authority_source =
+0014678:         S8("static int f();\n"
+0014679:            "static int f(int x);\n"
+0014680:            "static int f(int x) { return x; }\n"
+0014681:            "int main(void) { return f(1, 2); }\n");
+0014682:     BUSTER_TEST(arguments, file_write(c_prototype_authority_path,
+0014683:                                       BUSTER_SLICE_TO_BYTE_SLICE(c_prototype_authority_source)));
+0014684:     String8 c_prototype_authority_command_line[] = {
+0014685:         S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux-gnu"), c_prototype_authority_path,
+0014686:     };
+0014687:     CompilerDriverResult c_prototype_authority = compiler_driver_execute_invocation(
+0014688:         arguments->arena,
+0014689:         compiler_driver_parse_arguments(arguments->arena,
+0014690:                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prototype_authority_command_line)));
+0014691:     BUSTER_TEST(arguments, c_prototype_authority.error != COMPILER_DRIVER_ERROR_NONE);
+0014692:     BUSTER_TEST(arguments,
+0014693:                 string_first_sequence(c_prototype_authority.diagnostic, S8("too many arguments")) != BUSTER_STRING_NO_MATCH);
+0014694:     // An inline-assembly template the emitter refuses must name the rule that
+0014695:     // refused it and the register it named, not leak an opcode number (#831).
+0014696:     // The refusal itself is by design, so the assertion is on the wording; the
+0014697: =======
+0014698:     // An inline-assembly template the emitter refuses must retain its
+0014699:     // structured opcode reason (#831). The refusal itself is by design, so the
+0014700: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0014701:     // fixture is expected never to compile.
+0014702:     String8 c_asm_literal_register_command_line[] = {
+0014703:         S8("-S"),
+0014704:         S8("-target"),
+0014705:         S8("x86_64-unknown-linux-gnu"),
+0014706:         S8("tests/basic_c_asm_literal_register.c"),
+0014707:     };
+0014708:     CompilerDriverResult c_asm_literal_register = compiler_driver_execute_invocation(
+0014709:         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_literal_register_command_line)));
+0014710:     BUSTER_TEST(arguments, c_asm_literal_register.error == COMPILER_DRIVER_ERROR_CODEGEN);
+0014711:     BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("kind=codegen.unsupported-instruction")) != BUSTER_STRING_NO_MATCH);
+0014712:     BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("reason=opcode")) != BUSTER_STRING_NO_MATCH);
+0014713:     // Decimal literals with a large exponent still require correctly rounded
+0014714:     // binary conversion.  This exact bit pattern is the value Clang emits
+0014715:     // for 123e+127; an accumulated decimal f64 can drift by two ulps.
+0014716:     buster_test_arena_end(arguments, driver_fixture, true);
+0014717:     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_literal_path"), false);
+0014718:     String8 c_float_literal_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-literal"), S8(""));
+0014719:     String8 c_float_literal_command_line[] = {
+0014720:         S8("-o"),

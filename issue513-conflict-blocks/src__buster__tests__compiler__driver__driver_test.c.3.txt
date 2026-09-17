@@ -1,0 +1,75 @@
+path=src/buster/tests/compiler/driver/driver_test.c
+conflict=3
+start=8644
+separator=8667
+end=8672
+
+0008624:            "{\n"
+0008625:            "    int type_name_form = (int)sizeof(struct { char a; long long b; });\n"
+0008626:            "    int literal_form = (int)sizeof((union { char a[9]; long long b; }){0});\n"
+0008627:            "    int result = type_name_form == 16 ? 0 : 1;\n"
+0008628:            "    return !result && literal_form != 16 ? 2 : result;\n"
+0008629:            "}\n");
+0008630:     String8 c_sizeof_anonymous_source_path =
+0008631:         buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous-source"), S8(".c"));
+0008632:     BUSTER_TEST(arguments, file_write(c_sizeof_anonymous_source_path,
+0008633:                                       BUSTER_SLICE_TO_BYTE_SLICE(c_sizeof_anonymous_source)));
+0008634:     String8 c_sizeof_anonymous_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous"), S8(""));
+0008635:     String8 c_sizeof_anonymous_command_line[] = {
+0008636:         S8("-fno-machine-fallback"),
+0008637:         S8("-fverify-codegen"),
+0008638:         S8("-o"),
+0008639:         c_sizeof_anonymous_path,
+0008640:         c_sizeof_anonymous_source_path,
+0008641:     };
+0008642:     CompilerDriverResult c_sizeof_anonymous = compiler_driver_execute_invocation(
+0008643:         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_command_line)));
+0008644: <<<<<<< HEAD
+0008645:     BUSTER_TEST(arguments, c_sizeof_anonymous.error == COMPILER_DRIVER_ERROR_NONE);
+0008646:     BUSTER_TEST(arguments, c_sizeof_anonymous.codegen_statistics.fallback_function_count == 0);
+0008647:     if (c_sizeof_anonymous.error == COMPILER_DRIVER_ERROR_NONE)
+0008648:     {
+0008649:         String8 c_sizeof_anonymous_run_arguments[] = {
+0008650:             c_sizeof_anonymous_path,
+0008651:         };
+0008652:         ProcessSpawnResult c_sizeof_anonymous_spawn =
+0008653:             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_run_arguments), (SliceString8){0}, (SliceString8){0},
+0008654:                              (ProcessSpawnOptions){
+0008655:                                  .use_process_environment = true,
+0008656:                              });
+0008657:         BUSTER_TEST(arguments, c_sizeof_anonymous_spawn.handle != 0);
+0008658:         if (c_sizeof_anonymous_spawn.handle)
+0008659:         {
+0008660:             ProcessWaitResult c_sizeof_anonymous_wait = os_process_wait_sync(arguments->arena, c_sizeof_anonymous_spawn);
+0008661:             BUSTER_TEST(arguments, c_sizeof_anonymous_wait.result == PROCESS_RESULT_SUCCESS);
+0008662:         }
+0008663:     }
+0008664:     // 256-bit vector arguments, once through the default pipeline and once
+0008665:     // through the canonical emitter, whose VMOVDQU move is the shape the
+0008666:     // default pipeline only reaches through per-function fallback.
+0008667: =======
+0008668:     BUSTER_TEST(arguments, c_sizeof_anonymous.error != COMPILER_DRIVER_ERROR_NONE);
+0008669:     BUSTER_TEST(arguments, !c_sizeof_anonymous.has_object);
+0008670:     // 256-bit vector arguments through the default and MIR_STACK-compatible
+0008671:     // allocator spellings. Both lanes exercise the same MIR machine path.
+0008672: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0008673:     for (u32 ymm_mode = 0; ymm_mode < 2; ymm_mode += 1)
+0008674:     {
+0008675:         String8 c_ymm_vector_path = buster_test_temporary_path(
+0008676:             arguments->arena, ymm_mode ? S8("buster-c-vector-ymm-canonical") : S8("buster-c-vector-ymm"), S8(""));
+0008677:         String8 c_ymm_vector_command_line[] = {
+0008678:             ymm_mode ? S8("-fno-register-allocator") : S8("-fregister-allocator=fast"),
+0008679:             S8("-o"),
+0008680:             c_ymm_vector_path,
+0008681:             S8("tests/basic_c_vector_argument_ymm.c"),
+0008682:         };
+0008683:         CompilerDriverResult c_ymm_vector = compiler_driver_execute_invocation(
+0008684:             arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_ymm_vector_command_line)));
+0008685:         BUSTER_TEST(arguments, c_ymm_vector.error == COMPILER_DRIVER_ERROR_NONE);
+0008686:         if (c_ymm_vector.error == COMPILER_DRIVER_ERROR_NONE)
+0008687:         {
+0008688:             String8 c_ymm_vector_arguments[] = {
+0008689:                 c_ymm_vector_path,
+0008690:             };
+0008691:             ProcessSpawnResult c_ymm_vector_spawn =
+0008692:                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_ymm_vector_arguments), (SliceString8){0}, (SliceString8){0},

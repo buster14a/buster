@@ -1,0 +1,162 @@
+path=src/buster/lib/compiler/codegen/codegen.c
+conflict=3
+start=2788
+separator=2902
+end=2903
+
+0002768:     bool appended = result && end > start;
+0002769:     if (appended && result->debug_location_count >= sink->capacity)
+0002770:     {
+0002771:         appended = codegen_debug_locations_reserve(result, sink, 1);
+0002772:     }
+0002773:     if (appended)
+0002774:     {
+0002775:         result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
+0002776:             .function_symbol = symbol,
+0002777:             .local = local,
+0002778:             .start = start,
+0002779:             .end = end,
+0002780:             .location = location,
+0002781:         };
+0002782:     }
+0002783:     return appended;
+0002784: }
+0002785: 
+0002786: // Block IDs are graph identities, not an execution order. Keep the entry
+0002787: // first and every other block in ID order; debug ranges use this same layout.
+0002788: <<<<<<< HEAD
+0002789: BUSTER_GLOBAL_LOCAL u32 codegen_canonical_layout_block(IrFunction* function, u32 ordinal)
+0002790: {
+0002791:     return ordinal == 0 ? function->entry.value : ordinal <= function->entry.value ? ordinal - 1 : ordinal;
+0002792: }
+0002793: 
+0002794: BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* result, IrFunction* function, u32* value_offsets, u32* block_offsets,
+0002795:                                                              u32 function_start, u32 function_end, Target target, u32 frame_size,
+0002796:                                                              s32 frame_base_offset, CodegenDebugLocationSink* sink)
+0002797: {
+0002798:     if (!result || !function || !function->debug_local_count || !result->debug_locations)
+0002799:     {
+0002800:         return;
+0002801:     }
+0002802:     TemporalArena temporary = scratch_begin(0, 0);
+0002803:     IrValueId* local_places = arena_allocate(temporary.arena, IrValueId, function->local_count);
+0002804:     memset(local_places, 0xff, sizeof(*local_places) * function->local_count);
+0002805:     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+0002806:     {
+0002807:         IrInstruction* instruction = function->instructions + instruction_index;
+0002808:         if (instruction->result.value < function->value_count && instruction->canonical_local.value < function->local_count &&
+0002809:             (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
+0002810:             local_places[instruction->canonical_local.value].value == IR_ID_UNDERLYING_INVALID)
+0002811:         {
+0002812:             local_places[instruction->canonical_local.value] = instruction->result;
+0002813:         }
+0002814:     }
+0002815:     for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+0002816:     {
+0002817:         IrDebugLocal* local = function->debug_locals + local_index;
+0002818:         if (local->id.value == IR_ID_UNDERLYING_INVALID)
+0002819:         {
+0002820:             continue;
+0002821:         }
+0002822:         bool emitted = false;
+0002823:         IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+0002824:         if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
+0002825:         {
+0002826:             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+0002827:             {
+0002828:                 IrInstruction* instruction = function->instructions + instruction_index;
+0002829:                 if (instruction->result.value < function->value_count && instruction->canonical_local.value == local->id.value &&
+0002830:                     (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+0002831:                 {
+0002832:                     place = instruction->result;
+0002833:                     break;
+0002834:                 }
+0002835:             }
+0002836:         }
+0002837:         if (place.value != IR_ID_UNDERLYING_INVALID)
+0002838:         {
+0002839:             codegen_canonical_location_append(result, sink, function->symbol, local->id, function_start, function_end,
+0002840:                                               codegen_debug_canonical_value_location(place, function, value_offsets, target, frame_size, frame_base_offset));
+0002841:             emitted = true;
+0002842:         }
+0002843:         if (!emitted && block_offsets)
+0002844:         {
+0002845:             for (u32 ordinal = 0; ordinal < function->block_count; ordinal += 1)
+0002846:             {
+0002847:                 u32 block_index = codegen_canonical_layout_block(function, ordinal);
+0002848:                 IrBlock* block = function->blocks + block_index;
+0002849:                 IrValueId value = IR_VALUE_ID_INVALID;
+0002850:                 if (block->local_values && local->id.value < function->local_count)
+0002851:                 {
+0002852:                     value = block->local_values[local->id.value];
+0002853:                 }
+0002854:                 if (value.value == IR_ID_UNDERLYING_INVALID)
+0002855:                 {
+0002856:                     IrCfgBlock const* published_block = function->published_cfg->blocks + block->id.value;
+0002857:                     for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
+0002858:                     {
+0002859:                         IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
+0002860:                         if (parameter->canonical_local.value == local->id.value)
+0002861:                         {
+0002862:                             value = parameter->value;
+0002863:                             break;
+0002864:                         }
+0002865:                     }
+0002866:                 }
+0002867:                 if (value.value == IR_ID_UNDERLYING_INVALID)
+0002868:                 {
+0002869:                     continue;
+0002870:                 }
+0002871:                 u32 start = BUSTER_MAX(block_offsets[block_index], function_start);
+0002872:                 u32 end = ordinal + 1 < function->block_count ? block_offsets[codegen_canonical_layout_block(function, ordinal + 1)] : function_end;
+0002873:                 end = BUSTER_MIN(end, function_end);
+0002874:                 codegen_canonical_location_append(result, sink, function->symbol, local->id, start, end,
+0002875:                                                   codegen_debug_canonical_value_location(value, function, value_offsets, target, frame_size, frame_base_offset));
+0002876:                 emitted |= end > start;
+0002877:             }
+0002878:         }
+0002879:         if (!emitted)
+0002880:         {
+0002881:             codegen_canonical_location_append(result, sink, function->symbol, local->id, function_start, function_end,
+0002882:                                               (DebugLocation){
+0002883:                                                   .kind = DEBUG_LOCATION_UNAVAILABLE,
+0002884:                                               });
+0002885:         }
+0002886:     }
+0002887:     scratch_end(temporary);
+0002888: }
+0002889: 
+0002890: typedef struct A64Relocation A64Relocation;
+0002891: struct A64Relocation
+0002892: {
+0002893:     A64Relocation* next;
+0002894:     IrBlockId target;
+0002895:     u32 instruction_offset;
+0002896:     bool conditional;
+0002897:     u8 reserved[3];
+0002898: };
+0002899: 
+0002900: #define A64_VALUE_SLOT_COMPONENT_COUNT 4
+0002901: 
+0002902: =======
+0002903: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0002904: BUSTER_GLOBAL_LOCAL void a64_emit_instruction_word(CodegenBuffer* buffer, u32 instruction)
+0002905: {
+0002906:     codegen_emit_u32(buffer, instruction);
+0002907: }
+0002908: 
+0002909: BUSTER_GLOBAL_LOCAL void a64_emit_constant(CodegenBuffer* buffer, u32 target, u64 value)
+0002910: {
+0002911:     a64_emit_instruction_word(buffer, 0xd2800000 | ((u32)(value & 0xffff) << 5) | target);
+0002912:     for (u32 shift = 16; shift < 64; shift += 16)
+0002913:     {
+0002914:         a64_emit_instruction_word(buffer, 0xf2800000 | ((shift / 16) << 21) | ((u32)((value >> shift) & 0xffff) << 5) | target);
+0002915:     }
+0002916: }
+0002917: 
+0002918: // The same materialization without the fixed four-word cost: movz on the
+0002919: // lowest halfword that carries a bit, movk on each higher halfword that
+0002920: // does. A value below 2^16 therefore still costs exactly the one movz that
+0002921: // the callers used to emit inline, so widening a caller past that boundary
+0002922: // changes no byte of any program that already compiled.
+0002923: u32 codegen_a64_windows_save_area_size(u32 saved_register_count)

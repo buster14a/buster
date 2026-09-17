@@ -1,0 +1,95 @@
+path=src/buster/lib/compiler/codegen/codegen.c
+conflict=2
+start=2680
+separator=2706
+end=2728
+
+0002660:     if (target.cpu_arch == CPU_ARCH_AARCH64)
+0002661:     {
+0002662:         result -= frame_size;
+0002663:     }
+0002664:     else if (negative_offsets)
+0002665:     {
+0002666:         result = -result;
+0002667:     }
+0002668:     if (result < INT32_MIN)
+0002669:     {
+0002670:         result = INT32_MIN;
+0002671:     }
+0002672:     else if (result > INT32_MAX)
+0002673:     {
+0002674:         result = INT32_MAX;
+0002675:     }
+0002676:     return (s32)result;
+0002677: }
+0002678: 
+0002679: 
+0002680: <<<<<<< HEAD
+0002681: BUSTER_GLOBAL_LOCAL DebugLocation codegen_debug_canonical_value_location(IrValueId value, IrFunction* function, u32* value_offsets, Target target,
+0002682:                                                                          u32 frame_size, s32 frame_base_offset)
+0002683: {
+0002684:     if (!function || !value_offsets || value.value >= function->value_count)
+0002685:     {
+0002686:         return (DebugLocation){
+0002687:             .kind = DEBUG_LOCATION_UNAVAILABLE,
+0002688:         };
+0002689:     }
+0002690:     u32 offset = value_offsets[value.value];
+0002691:     s32 frame_offset = target.cpu_arch == CPU_ARCH_X86_64 ? (s32)((s64)frame_base_offset - (s64)offset)
+0002692:                                                           : codegen_debug_frame_offset(offset, target, true, frame_size);
+0002693:     return (DebugLocation){
+0002694:         .kind = DEBUG_LOCATION_FRAME,
+0002695:         .frame_offset = frame_offset,
+0002696:     };
+0002697: }
+0002698: 
+0002699: // Where recorded debug-location seeds land. Seeds are appended one at a time
+0002700: // and the array grows by doubling from its arena, so the storage a function
+0002701: // needs is its emitted seeds, never a worst case derived from its shape. A
+0002702: // null arena keeps a caller-owned fixed array instead: an overflow then
+0002703: // reports CODEGEN_ERROR_CAPACITY rather than reallocating storage the caller
+0002704: // owns.
+0002705: #define CODEGEN_DEBUG_LOCATION_SEED_MINIMUM 256u
+0002706: =======
+0002707: BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result, u32 capacity, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
+0002708:                                                             DebugLocation location)
+0002709: {
+0002710:     if (!result || end <= start)
+0002711:     {
+0002712:         return false;
+0002713:     }
+0002714:     if (result->debug_location_count >= capacity)
+0002715:     {
+0002716:         result->error = CODEGEN_ERROR_CAPACITY;
+0002717:         return false;
+0002718:     }
+0002719:     result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
+0002720:         .function_symbol = symbol,
+0002721:         .local = local,
+0002722:         .start = start,
+0002723:         .end = end,
+0002724:         .location = location,
+0002725:     };
+0002726:     return true;
+0002727: }
+0002728: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0002729: 
+0002730: typedef struct CodegenDebugLocationSink CodegenDebugLocationSink;
+0002731: struct CodegenDebugLocationSink
+0002732: {
+0002733:     Arena* arena;
+0002734:     u32 capacity;
+0002735:     u8 reserved[4];
+0002736: };
+0002737: 
+0002738: BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(CodegenModule* result, CodegenDebugLocationSink* sink, u64 additional)
+0002739: {
+0002740:     u64 required = (u64)result->debug_location_count + additional;
+0002741:     bool reserved = required <= UINT32_MAX;
+0002742:     if (reserved && required > sink->capacity)
+0002743:     {
+0002744:         reserved = sink->arena != 0;
+0002745:         if (reserved)
+0002746:         {
+0002747:             u64 doubled = BUSTER_MAX((u64)sink->capacity * 2u, (u64)CODEGEN_DEBUG_LOCATION_SEED_MINIMUM);
+0002748:             u32 grown_capacity = (u32)BUSTER_MIN(BUSTER_MAX(required, doubled), (u64)UINT32_MAX);

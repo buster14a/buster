@@ -1,0 +1,144 @@
+path=src/buster/lib/compiler/codegen/codegen.c
+conflict=7
+start=20053
+separator=20147
+end=20150
+
+0020033:                         codegen_emit_u32(&buffer, 0xd65f03c0);
+0020034:                     }
+0020035:                     else
+0020036:                     {
+0020037:                         result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+0020038:                         return result;
+0020039:                     }
+0020040:                 }
+0020041:                 if (buffer.error != CODEGEN_ERROR_NONE)
+0020042:                 {
+0020043:                     result.error = buffer.error;
+0020044:                     return result;
+0020045:                 }
+0020046:                 instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+0020047: =======
+0020048: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0020049:             }
+0020050:         }
+0020051:         else if (function->instruction_count)
+0020052:         {
+0020053: <<<<<<< HEAD
+0020054:             CCanonicalBranchPatch patch = emitter.branch_patches[patch_index];
+0020055:             if (patch.target.value >= function->block_count)
+0020056:             {
+0020057:                 result.error = CODEGEN_ERROR_INVALID_IR;
+0020058:                 return result;
+0020059:             }
+0020060:             u32 target_offset = block_offsets[patch.target.value];
+0020061:             if (!patch.label_address && function->blocks[patch.target.value].parameter_count)
+0020062:             {
+0020063:                 target_offset = c_canonical_edge_thunk(&emitter, program, function, patch,
+0020064:                                                        (u32)edge_copy_offset_64, target_offset);
+0020065:                 if (buffer.error)
+0020066:                 {
+0020067:                     result.error = buffer.error;
+0020068:                     return result;
+0020069:                 }
+0020070:             }
+0020071:             s64 delta = (s64)target_offset - (s64)patch.offset;
+0020072:             if (!patch.aarch64)
+0020073:             {
+0020074:                 delta -= 4;
+0020075:                 if (delta < INT32_MIN || delta > INT32_MAX)
+0020076:                 {
+0020077:                     result.error = CODEGEN_ERROR_CAPACITY;
+0020078:                     return result;
+0020079:                 }
+0020080:                 s32 encoded = (s32)delta;
+0020081:                 memcpy(buffer.bytes + patch.offset, &encoded, sizeof(encoded));
+0020082:             }
+0020083:             else
+0020084:             {
+0020085:                 if (patch.label_address)
+0020086:                 {
+0020087:                     if (!patch.secondary_offset || patch.secondary_offset < patch.offset || patch.secondary_offset > buffer.count || buffer.count - patch.secondary_offset < 20)
+0020088:                     {
+0020089:                         result.error = CODEGEN_ERROR_CAPACITY;
+0020090:                         return result;
+0020091:                     }
+0020092:                     s64 label_address_delta = (s64)block_offsets[patch.target.value] - (s64)patch.offset;
+0020093:                     u64 bits = (u64)label_address_delta;
+0020094:                     u32 movz = UINT32_C(0xd280000a) | ((u32)(bits & 0xffff) << 5);
+0020095:                     u32 movk16 = UINT32_C(0xf2a0000a) | ((u32)((bits >> 16) & 0xffff) << 5);
+0020096:                     u32 movk32 = UINT32_C(0xf2c0000a) | ((u32)((bits >> 32) & 0xffff) << 5);
+0020097:                     u32 movk48 = UINT32_C(0xf2e0000a) | ((u32)((bits >> 48) & 0xffff) << 5);
+0020098:                     memcpy(buffer.bytes + patch.secondary_offset, &movz, sizeof(movz));
+0020099:                     memcpy(buffer.bytes + patch.secondary_offset + 4, &movk16, sizeof(movk16));
+0020100:                     memcpy(buffer.bytes + patch.secondary_offset + 8, &movk32, sizeof(movk32));
+0020101:                     memcpy(buffer.bytes + patch.secondary_offset + 12, &movk48, sizeof(movk48));
+0020102:                     continue;
+0020103:                 }
+0020104:                 if ((delta & 3) || (patch.conditional ? delta < -(1 << 20) || delta >= (1 << 20) : delta < -(1 << 27) || delta >= (1 << 27)))
+0020105:                 {
+0020106:                     result.error = CODEGEN_ERROR_CAPACITY;
+0020107:                     return result;
+0020108:                 }
+0020109:                 u32 instruction = 0;
+0020110:                 memcpy(&instruction, buffer.bytes + patch.offset, sizeof(instruction));
+0020111:                 u32 immediate = (u32)(delta >> 2);
+0020112:                 instruction |= patch.conditional ? (immediate & 0x7ffff) << 5 : immediate & 0x03ffffff;
+0020113:                 memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
+0020114:             }
+0020115:         }
+0020116:         u32 kept_label_address_count = 0;
+0020117:         for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
+0020118:         {
+0020119:             u32 relocation_index = label_address_relocation_indices[side_index];
+0020120:             CodegenModuleRelocation* relocation = result.relocations + relocation_index;
+0020121:             if (relocation->symbol.value != function->symbol.value)
+0020122:             {
+0020123:                 label_address_relocation_indices[kept_label_address_count++] = relocation_index;
+0020124:                 continue;
+0020125:             }
+0020126:             if (relocation->label_block.value >= function->block_count)
+0020127:             {
+0020128:                 result.error = CODEGEN_ERROR_INVALID_IR;
+0020129:                 return result;
+0020130:             }
+0020131:             s64 block_addend = (s64)block_offsets[relocation->label_block.value] - (s64)descriptor->code_offset;
+0020132:             if ((block_addend > 0 && relocation->addend > INT64_MAX - block_addend) ||
+0020133:                 (block_addend < 0 && relocation->addend < INT64_MIN - block_addend))
+0020134:             {
+0020135:                 result.error = CODEGEN_ERROR_CAPACITY;
+0020136:                 return result;
+0020137:             }
+0020138:             relocation->addend += block_addend;
+0020139:             relocation->label_address = false;
+0020140:         }
+0020141:         label_address_relocation_count = kept_label_address_count;
+0020142:         descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
+0020143:         if (options.debug_info)
+0020144:         {
+0020145:             codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, descriptor->code_offset, (u32)buffer.count, target, frame_size,
+0020146:                                                (s32)canonical_x64_frame_base_offset, &debug_location_sink);
+0020147: =======
+0020148:             result.failed_instruction = (IrInstructionId){.value = 0};
+0020149:             result.failed_opcode = function->instructions[0].opcode;
+0020150: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0020151:         }
+0020152:         result.error = transaction_error != CODEGEN_ERROR_NONE ? transaction_error
+0020153:                        : fallback_reason == CODEGEN_FALLBACK_SIGNATURE ? CODEGEN_ERROR_UNSUPPORTED_ABI
+0020154:                        : fallback_reason == CODEGEN_FALLBACK_VERIFICATION ? CODEGEN_ERROR_INVALID_IR
+0020155:                        : fallback_reason == CODEGEN_FALLBACK_PLACEMENT || fallback_reason == CODEGEN_FALLBACK_OUTPUT_CAPACITY
+0020156:                            ? CODEGEN_ERROR_CAPACITY
+0020157:                            : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+0020158:         return result;
+0020159:     }
+0020160: 
+0020161:     for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
+0020162:     {
+0020163:         if (result.relocations[relocation_index].label_address)
+0020164:         {
+0020165:             result.error = CODEGEN_ERROR_INVALID_IR;
+0020166:             return result;
+0020167:         }
+0020168:     }
+0020169:     if (target.cpu_arch == CPU_ARCH_X86_64 && module->assembly_count)
+0020170:     {

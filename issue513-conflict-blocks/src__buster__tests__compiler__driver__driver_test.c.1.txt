@@ -1,0 +1,91 @@
+path=src/buster/tests/compiler/driver/driver_test.c
+conflict=1
+start=2154
+separator=2194
+end=2198
+
+0002134:         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+0002135:         {
+0002136:             for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+0002137:             {
+0002138:                 for (u32 pic = 0; pic < 2; pic += 1)
+0002139:                 {
+0002140:                     for (u32 cpu = 0; cpu < (target < 6 ? BUSTER_ARRAY_LENGTH(cpus) : 1u); cpu += 1)
+0002141:                     {
+0002142:                         for (u32 fixture = target < 6 ? 0u : 4u; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
+0002143:                         {
+0002144:                             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+0002145:                             String8 object = buster_test_temporary_path(temporary.arena, S8("buster-frame-vector"), S8(".o"));
+0002146:                             String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], cpus[cpu], modes[mode],
+0002147:                                 frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), sources[fixture], S8("-o"), object,
+0002148:                                 S8("-DBUSTER_SIGNBIT_BINARY128_REJECTION=1")};
+0002149:                             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+0002150:                             invocation.reject_machine_fallback = mode != 0;
+0002151:                             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+0002152:                             String8 description = string_format(temporary.arena, S8("frame vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
+0002153:                                 sources[fixture], targets[target], modes[mode], frontends[frontend], cpus[cpu], pic, compiled.diagnostic);
+0002154: <<<<<<< HEAD
+0002155:                             TargetDataLayout layout = target_data_layout(invocation.target);
+0002156:                             // No x86-64 allocator implements binary128 loads.
+0002157:                             // Require the structured refusal so selecting the
+0002158:                             // Android ABI can never silently reuse x87.
+0002159:                             bool x86_quad_control = fixture == 6 &&
+0002160:                                 invocation.target.cpu_arch == CPU_ARCH_X86_64 &&
+0002161:                                 layout.long_double_type.bit_width == 128;
+0002162:                             // The archived direct implementation cannot load a
+0002163:                             // binary128 value through a pointer. Retain that
+0002164:                             // failed control; it is not the semantic oracle.
+0002165:                             bool direct_quad_control = fixture == 6 && mode == 0 &&
+0002166:                                 invocation.target.cpu_arch == CPU_ARCH_AARCH64 &&
+0002167:                                 layout.long_double_type.bit_width == 128;
+0002168:                             bool explicit_x86_unsupported = compiled.error == COMPILER_DRIVER_ERROR_CODEGEN &&
+0002169:                                 compiled.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !compiled.has_object &&
+0002170:                                 string_first_sequence(compiled.diagnostic, S8("kind=codegen.unsupported-instruction")) < compiled.diagnostic.length &&
+0002171:                                 string_first_sequence(compiled.diagnostic, S8("opcode=load")) < compiled.diagnostic.length &&
+0002172:                                 string_first_sequence(compiled.diagnostic, targets[target]) < compiled.diagnostic.length;
+0002173:                             BUSTER_TEST_RAW(arguments, x86_quad_control
+0002174:                                 ? explicit_x86_unsupported
+0002175:                                 : direct_quad_control
+0002176:                                 ? compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object
+0002177:                                 : compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+0002178:                             if (x86_quad_control)
+0002179:                             {
+0002180:                                 command[BUSTER_ARRAY_LENGTH(command) - 1] = S8("-UBUSTER_SIGNBIT_BINARY128_REJECTION");
+0002181:                                 CompilerDriverInvocation positive = compiler_driver_parse_arguments(temporary.arena,
+0002182:                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+0002183:                                 positive.reject_machine_fallback = mode != 0;
+0002184:                                 CompilerDriverResult supported = compiler_driver_execute_invocation(temporary.arena, positive);
+0002185:                                 BUSTER_TEST_RAW(arguments, supported.error == COMPILER_DRIVER_ERROR_NONE && supported.has_object &&
+0002186:                                     supported.codegen_statistics.function_count == 2 &&
+0002187:                                     supported.codegen_statistics.fallback_function_count == 0, description);
+0002188:                             }
+0002189:                             else
+0002190:                             {
+0002191:                                 BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == function_counts[fixture] &&
+0002192:                                     compiled.codegen_statistics.fallback_function_count == 0, description);
+0002193:                             }
+0002194: =======
+0002195:                             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+0002196:                             BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == function_counts[fixture] &&
+0002197:                                 compiled.codegen_statistics.fallback_function_count == 0, description);
+0002198: >>>>>>> 0f7676b2 (recovery: preserve #522/#514 MIR cutover from session 6aa810a4)
+0002199: #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+0002200:                             u32 native_base = BUSTER_CPU_ARCH_AARCH64 ? 6u : 0u;
+0002201:                             bool native_target = (target == native_base && BUSTER_LINUX) || (target == native_base + 1 && BUSTER_MACOS) ||
+0002202:                                                  (target == native_base + 2 && BUSTER_WINDOWS);
+0002203:                             u32 observer = fixture == 9 ? 3u : fixture >= 4 && fixture <= 6 ? fixture - 4 : UINT32_MAX;
+0002204:                             bool executable_cpu = cpu == 0 || (fixture >= 7 &&
+0002205:                                 (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+0002206:                                           : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
+0002207:                             if (native_target && executable_cpu && fixture != 3 && compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+0002208:                                 (observer == UINT32_MAX || host_compiled[observer]))
+0002209:                             {
+0002210:                                 String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-frame-vector-run"), S8(".exe"));
+0002211:                                 String8 link_command[10];
+0002212:                                 u32 link_count = 0;
+0002213:                                 link_command[link_count++] = host_compiler;
+0002214:                                 if (configured_clang && S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+0002215: #if BUSTER_LINUX
+0002216:                                 link_command[link_count++] = S8("-no-pie");
+0002217: #endif
+0002218:                                 link_command[link_count++] = object;
