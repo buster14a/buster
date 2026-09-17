@@ -1,0 +1,128 @@
+name: Apply issue 409 artifact upload update
+
+on:
+  push:
+    branches: [codex/issue-409-upload-artifact-v7-bootstrap]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: true
+      - name: Apply and validate the focused patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          old_sha = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+          new_sha = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+          old_ref = f"actions/upload-artifact@{old_sha}"
+          new_ref = f"actions/upload-artifact@{new_sha}"
+
+          workflow = Path(".github/workflows/ci.yml")
+          workflow_text = workflow.read_text(encoding="utf-8")
+          if workflow_text.count(old_ref) != 8:
+              raise SystemExit(f"expected 8 Buster CI upload-artifact v4 references, found {workflow_text.count(old_ref)}")
+          if new_ref in workflow_text:
+              raise SystemExit("Buster CI already contains the proposed upload-artifact v7 reference")
+          workflow_text = workflow_text.replace(
+              old_ref + " # v4.6.2",
+              new_ref + " # v7.0.1",
+          )
+          if old_ref in workflow_text or workflow_text.count(new_ref) != 8:
+              raise SystemExit("upload-artifact reference replacement was incomplete")
+          workflow.write_text(workflow_text, encoding="utf-8")
+
+          checker = Path("tools/check_action_pins.py")
+          checker_text = checker.read_text(encoding="utf-8")
+          old_allowlist = f'    "actions/upload-artifact": {{"{old_sha}"}},'
+          new_allowlist = f'    "actions/upload-artifact": {{"{old_sha}", "{new_sha}"}},'
+          if checker_text.count(old_allowlist) != 1:
+              raise SystemExit("unexpected upload-artifact allowlist shape")
+          checker.write_text(checker_text.replace(old_allowlist, new_allowlist), encoding="utf-8")
+
+          documentation = Path("docs/ci-action-pins.md")
+          documentation_text = documentation.read_text(encoding="utf-8")
+          old_policy = (
+              "Its allowlist preserves the existing\n"
+              "GitHub workflow revisions; this migration does not update any action source."
+          )
+          new_policy = (
+              "Its allowlist preserves existing revisions and records staged migrations; an\n"
+              "older pin remains approved only while at least one reviewed workflow still uses it."
+          )
+          old_row = f"| `actions/upload-artifact` | `{old_sha}` | v4.6.2 |"
+          new_rows = (
+              f"| `actions/upload-artifact` | `{old_sha}` | v4.6.2 (legacy workflows; Node 20) |\n"
+              f"| `actions/upload-artifact` | `{new_sha}` | v7.0.1 (Buster CI; Node 24) |"
+          )
+          if documentation_text.count(old_policy) != 1 or documentation_text.count(old_row) != 1:
+              raise SystemExit("unexpected action-pin documentation shape")
+          documentation_text = documentation_text.replace(old_policy, new_policy).replace(old_row, new_rows)
+          marker = (
+              "| `actions/cache/save` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4.3.0 |\n\n"
+          )
+          note = (
+              "The Buster CI workflow moved to the immutable v7.0.1 commit after run\n"
+              "35167957822 completed its required Windows x86-64 Release work but the final\n"
+              "v4.6.2 artifact step, which GitHub forced from Node 20 onto Node 24, failed\n"
+              "while creating the artifact. The v7 action declares Node 24 natively and keeps\n"
+              "the existing artifact names, paths, retention, compression and failure policy.\n"
+              "Other workflows remain on v4.6.2 until their independent validation.\n\n"
+          )
+          if documentation_text.count(marker) != 1:
+              raise SystemExit("action-pin table terminator was not found exactly once")
+          documentation.write_text(documentation_text.replace(marker, marker + note), encoding="utf-8")
+
+          tests = Path("tests/action_pins_test.py")
+          tests_text = tests.read_text(encoding="utf-8")
+          constant_marker = (
+              'PIN = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"\n'
+          )
+          constants = (
+              constant_marker
+              + f'UPLOAD_ARTIFACT_V4_SHA = "{old_sha}"\n'
+              + f'UPLOAD_ARTIFACT_V7_SHA = "{new_sha}"\n'
+              + 'UPLOAD_ARTIFACT_V4_PIN = "actions/upload-artifact@" + UPLOAD_ARTIFACT_V4_SHA\n'
+              + 'UPLOAD_ARTIFACT_V7_PIN = "actions/upload-artifact@" + UPLOAD_ARTIFACT_V7_SHA\n'
+          )
+          test_marker = (
+              "    def test_actionlint_is_pinned(self):\n"
+          )
+          new_test = (
+              "    def test_buster_ci_uses_native_node24_artifact_action(self):\n"
+              "        github = (ROOT / \".github/workflows/ci.yml\").read_text()\n"
+              "        self.assertNotIn(UPLOAD_ARTIFACT_V4_PIN, github)\n"
+              "        self.assertEqual(github.count(UPLOAD_ARTIFACT_V7_PIN), 8)\n"
+              "        self.assertEqual(PINS.APPROVED[\"actions/upload-artifact\"],\n"
+              "                         {UPLOAD_ARTIFACT_V4_SHA, UPLOAD_ARTIFACT_V7_SHA})\n\n"
+          )
+          if tests_text.count(constant_marker) != 1 or tests_text.count(test_marker) != 1:
+              raise SystemExit("unexpected action-pin test shape")
+          tests_text = tests_text.replace(constant_marker, constants)
+          tests.write_text(tests_text.replace(test_marker, new_test + test_marker), encoding="utf-8")
+
+          Path(".github/workflows/codex-issue-409-patch.yml").unlink()
+          PY
+          git diff --check
+          python3 tools/check_action_pins.py
+          python3 tests/action_pins_test.py
+          python3 tests/ci_tools_test.py -v
+      - name: Commit the validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "ci: run artifact uploads on native Node 24"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
