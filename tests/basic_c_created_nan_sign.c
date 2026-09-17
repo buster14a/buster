@@ -27,8 +27,8 @@
 // Windows ABIs, and the 128-bit quad on AArch64 Linux -- the one width whose
 // arithmetic the frontend does not lower yet, so the widened operation is
 // spelled only where a lowering exists.  The `long double` cast below needs no
-// such guard: a conversion is not arithmetic.
-#if !defined(__aarch64__) || defined(__APPLE__)
+// arithmetic guard; binary128 widening is currently AArch64-only.
+#if __LDBL_MANT_DIG__ != 113
 #define FIXTURE_LONG_DOUBLE_ARITHMETIC 1
 #else
 #define FIXTURE_LONG_DOUBLE_ARITHMETIC 0
@@ -68,7 +68,9 @@ int main(void)
     // forces on a float spelling.
     if (!is_nan_double(0.0/0.0) || __builtin_signbit(0.0/0.0)) return 9;
     if (!is_nan_double(0.0f/0.0) || __builtin_signbit(0.0f/0.0)) return 10;
+#if __LDBL_MANT_DIG__ != 113 || defined(__aarch64__)
     if (__builtin_signbitl((long double)(0.0f/0.0f))) return 11;
+#endif
 #if FIXTURE_LONG_DOUBLE_ARITHMETIC
     if (__builtin_signbitl(0.0f/0.0L)) return 12;
 #endif

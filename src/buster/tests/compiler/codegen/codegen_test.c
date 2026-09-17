@@ -147,7 +147,7 @@ BUSTER_GLOBAL_LOCAL void codegen_test_patch_local_canonical_calls(CodegenModule*
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation* relocation = module->relocations + relocation_index;
-        if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute || relocation->aarch64 ||
+        if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_absolute(relocation->kind) || codegen_module_relocation_kind_is_aarch64(relocation->kind) ||
             relocation->offset > module->code.length || module->code.length - relocation->offset < 4)
         {
             continue;
@@ -1987,7 +1987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
                 if (high || low)
                 {
                     bool fits = relocation->offset <= generated.code.length && 4 <= generated.code.length - relocation->offset;
-                    BUSTER_TEST(arguments, fits && relocation->aarch64 && !relocation->absolute && !relocation->is_thread_local);
+                    BUSTER_TEST(arguments, fits && codegen_module_relocation_kind_is_aarch64(relocation->kind) && !codegen_module_relocation_kind_is_absolute(relocation->kind) && !codegen_module_relocation_kind_is_thread_local(relocation->kind));
                     if (fits)
                     {
                         u32 word = 0;
@@ -2806,7 +2806,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 {
                     CodegenModuleRelocation* relocation = canonical_windows_module.relocations + relocation_index;
                     BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
-                    if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->aarch64 || relocation->absolute || relocation->offset == 0 ||
+                    if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_aarch64(relocation->kind) || codegen_module_relocation_kind_is_absolute(relocation->kind) || relocation->offset == 0 ||
                         relocation->offset <= dynamic_layout_descriptor->code_offset || relocation->offset + 4 > dynamic_function_end ||
                         canonical_windows_module.code.pointer[relocation->offset - 1] != 0xe8)
                     {
@@ -2856,7 +2856,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             {
                 CodegenModuleRelocation* relocation = canonical_windows_module.relocations + relocation_index;
                 BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
-                if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->aarch64 || relocation->absolute || relocation->offset == 0 ||
+                if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_aarch64(relocation->kind) || codegen_module_relocation_kind_is_absolute(relocation->kind) || relocation->offset == 0 ||
                     relocation->offset > canonical_windows_module.code.length || canonical_windows_module.code.pointer[relocation->offset - 1] != 0xe8)
                 {
                     continue;
@@ -3637,7 +3637,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                                                ? f80_native_program->symbols.symbols + relocation->symbol.value
                                                : 0;
                         String8 symbol_name = symbol && symbol->link_name.length ? symbol->link_name : symbol ? symbol->name : (String8){0};
-                        if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute || relocation->aarch64 ||
+                        if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_absolute(relocation->kind) || codegen_module_relocation_kind_is_aarch64(relocation->kind) ||
                             !string_equal(symbol_name, S8("f80_host_probe")) || relocation->offset > f80_native_codegen.code.length ||
                             f80_native_codegen.code.length - relocation->offset < 4)
                         {

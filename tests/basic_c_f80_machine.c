@@ -1,3 +1,5 @@
+// This fixture observes the x87 format, including its 64-bit significand.
+#if __LDBL_MANT_DIG__ == 64
 // SysV x87 values retain all 64 significand bits through MIR frame values,
 // arithmetic, control-flow joins, conversions and call boundaries.
 typedef union F80Image
@@ -154,4 +156,8 @@ int main(void)
 #endif
     return failed;
 }
+#endif
+
+#else
+int main(void) { return 0; }
 #endif

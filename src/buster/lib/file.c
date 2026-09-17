@@ -1,7 +1,8 @@
 // File content ownership and transfer policy: file_write_checked preserves
-// transfer/close failures; file_read owns padded arena reads; file_map_read and
-// file_map_unmap own optional mappings; file_copy_checked streams into a
-// staging file beside its destination and publishes it with os_file_replace.
+// transfer/close failures; file_read owns padded arena and normalized APK asset
+// reads; file_map_read and file_map_unmap own optional mappings; file_copy_checked
+// streams into a staging file beside its destination and publishes it with
+// os_file_replace.
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
@@ -13,6 +14,42 @@
 #include <android/asset_manager.h>
 AAssetManager* buster_android_asset_manager = 0;
 String8 buster_android_internal_data_path = {0};
+
+// APK assets are a rooted namespace rather than a host filesystem. Normalize
+// safe relative segments before lookup because AAssetManager does not resolve
+// the `..` produced by a quoted include in a nested source file. Never permit a
+// relative asset path to escape that root.
+BUSTER_GLOBAL_LOCAL String8 file_android_asset_path(Arena* arena, String8 path)
+{
+    char8* bytes = arena_allocate(arena, char8, path.length + 1);
+    u64 length = 0;
+    bool valid = path.length && path.pointer[0] != '/' && path.pointer[0] != '\\';
+    for (u64 offset = 0; valid && offset < path.length;)
+    {
+        while (offset < path.length && (path.pointer[offset] == '/' || path.pointer[offset] == '\\')) { offset += 1; }
+        u64 end = offset;
+        while (end < path.length && path.pointer[end] != '/' && path.pointer[end] != '\\' && path.pointer[end] != 0) { end += 1; }
+        valid = end == path.length || path.pointer[end] != 0;
+        String8 segment = string_slice(path, offset, end);
+        if (string_equal(segment, S8("..")))
+        {
+            valid = length != 0;
+            while (length && bytes[length - 1] != '/') { length -= 1; }
+            if (length) { length -= 1; }
+        }
+        else if (segment.length && !string_equal(segment, S8(".")))
+        {
+            if (length) { bytes[length++] = '/'; }
+            memcpy(bytes + length, segment.pointer, segment.length);
+            length += segment.length;
+        }
+        offset = end;
+    }
+    valid &= length != 0;
+    bytes[length] = 0;
+    String8 result = valid ? (String8){.pointer = bytes, .length = length} : (String8){0};
+    return result;
+}
 #endif
 
 #if BUSTER_IOS
@@ -186,11 +223,8 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     // The app has no test files on disk; relative paths resolve to APK assets.
     if (buster_android_asset_manager && path.length && path.pointer[0] != '/')
     {
-        char* asset_path = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
-        memcpy(asset_path, path.pointer, path.length);
-        asset_path[path.length] = 0;
-
-        AAsset* asset = AAssetManager_open(buster_android_asset_manager, asset_path, AASSET_MODE_BUFFER);
+        String8 asset_path = file_android_asset_path(arena, path);
+        AAsset* asset = asset_path.length ? AAssetManager_open(buster_android_asset_manager, (char*)asset_path.pointer, AASSET_MODE_BUFFER) : 0;
         if (asset)
         {
             u64 file_size = (u64)AAsset_getLength64(asset);

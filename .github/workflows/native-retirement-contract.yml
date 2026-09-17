@@ -18,12 +18,24 @@ on:
       - docs/native-retirement-census.md
       - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-applicability-v1.tsv
+      - docs/native-retirement-dependencies-v1.json
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
       - tools/native_retirement_archive.py
       - tools/native_retirement_evidence_upload_test.py
+      - tools/native_retirement_materializer.py
+      - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_external.py
+      - tools/native_retirement_sdks.py
+      - tools/native_retirement_sdks_test.py
+      - tools/native_retirement_reference.py
+      - tools/native-retirement-mingw/**
+      - docs/native-retirement-sdks-v1.json
+      - tools/native_retirement_external_test.py
       - tools/native_retirement_result_input.py
       - tools/native_retirement_result_input_test.py
       - tools/native_retirement_performance_binding.py
@@ -68,6 +80,69 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Materialize pinned target SDK headers
+        run: python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+      - name: Prepare the pinned external closure
+        run: >-
+          python3 tools/native_retirement_external.py prepare
+          --manifest docs/native-retirement-dependencies-v1.json
+          --source-root "$(pwd)"
       - name: Build and validate the manifest producer
         run: |
           clang --version
@@ -76,6 +151,11 @@ jobs:
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
           python3 tools/native_retirement_evidence_upload_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_external.py self-test
+          python3 tools/native_retirement_external_test.py -v
+          python3 tools/native_retirement_sdks_test.py -v
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
@@ -102,6 +182,10 @@ jobs:
           git restore -- tests/basic_c_operations.c
       - name: Exercise frozen resource and replacement environment
         run: |
+          python3 tools/native_retirement_materializer.py materialize \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" \
+            --output "$(pwd)/evidence/dependency-materialized"
           resource_include="$(clang -print-resource-dir)/include"
           if "$RUNNER_TEMP/retirement-build" native_retirement_census \
             --ide /bin/false \
@@ -111,6 +195,9 @@ jobs:
             --fixture basic_c_operations.c \
             --target x86_64-unknown-linux-gnu \
             --resource-include "$resource_include" \
+            --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include" \
+            --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json" \
+            --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json" \
             --out evidence/resource-smoke; then
             echo 'error: the deliberately failing compiler was accepted' >&2
             exit 1

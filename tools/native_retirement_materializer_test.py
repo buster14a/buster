@@ -203,7 +203,7 @@ class MaterializerTests(unittest.TestCase):
         descriptor_path.parent.mkdir(parents=True)
         descriptor_record = {
             "kind": "project-header", "source": "src/buster/lib/header.h",
-            "provenance": "repo:src/header.h",
+            "provenance": "repo:src/buster/lib/header.h",
             "destination": "dependencies/project-include/buster/lib/header.h",
             "bytes": descriptor_header.stat().st_size, "sha256": digest(descriptor_header.read_bytes()),
         }
@@ -215,6 +215,23 @@ class MaterializerTests(unittest.TestCase):
         self.assertEqual(archived["descriptor_sha256"], digest(descriptor_path.read_bytes()))
         archived_again = materializer.materialize_file(descriptor_path, descriptor_root, self.root / "archived-again")
         self.assertEqual(archived_again, archived)
+        repository = Path(__file__).resolve().parents[1]
+        production_descriptor = json.loads(
+            (repository / "docs/native-retirement-dependencies-v1.json").read_text(encoding="utf-8"))
+        production_records, _metadata = materializer.parse_manifest(production_descriptor)
+        replay = materializer._archived_replay(production_descriptor, production_records)
+        materializer._verify_archived_fixture_inputs(replay, repository)
+        self.assertEqual(replay["projection"], {
+            "fixtures": 28, "mir_candidate_rows": 4032,
+            "repo_owned_project_header_rows_closed": 264,
+            "remaining_diagnostic_rows": 3768,
+            "ios_simd_rows_pending_targetconditionals": 24})
+        self.assertEqual(replay["row_identity_sha256"],
+                         "9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6")
+        self.assertEqual(len(replay["rows"]), 4032)
+        production_descriptor["archived_replay"]["projection"]["row_identity_sha256"] = "0" * 64
+        with self.assertRaisesRegex(materializer.MaterializationError, "row identity digest"):
+            materializer._archived_replay(production_descriptor, production_records)
         with self.assertRaisesRegex(materializer.MaterializationError, "descriptor-relative root"):
             materializer.materialize_file(descriptor_path, self.root, self.root / "alternate-root")
 
@@ -358,7 +375,8 @@ class ArchivedReplayTests(unittest.TestCase):
 
     def test_unpatched_historical_pin_rejects_other_contract(self):
         self.assertEqual(materializer.SUPPORT_CONTRACT_SHA256,
-                         "24ae23cff2ab5bd6ff46304a878ed4dc3e5d639422751de93ea74dabde7e437e")
+                         digest((Path(__file__).resolve().parents[1] /
+                                 "docs/native-retirement-support-v1.tsv").read_bytes()))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())

@@ -11,6 +11,11 @@ observer cover those images across the native target/mode/frontend/PIC matrix.
 AArch64 binary128 widening uses ordinary MIR frame images; see the machine
 guide for its exact conversion and native floating-environment checks. This
 does not claim binary128 scalar ABI or arithmetic support.
+The host FENV fixture in `tests/host_aarch64_float_to_f128.c` uses ordinary
+GNU inline asm for `mrs`/`msr` reads and writes of `fpsr`/`fpcr`; the baseline
+AArch64 inline-assembly vocabulary selects these checked system-register rows
+as closed MIR transactions, with strict no-fallback compilation retaining
+their source/debug locations.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
@@ -191,9 +196,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   emitter adds one to `IrProgram.symbols` when the search misses, which is what
   lets a startup object define `_start`. Two things follow from the AT&T/Intel
   dialect being x86-only: the emitter passes `ASSEMBLY_SYNTAX_DEFAULT` for
-  every other target, and the assembler's AArch64 vocabulary is the bootstrap
-  control-flow set, so an AArch64 block gets `bl`, `brk`, `ret` and `nop` and
-  not an ADRP/ADD page pair. A block that fails reports through
+  every other target. The assembler's AArch64 vocabulary contains the
+  bootstrap control-flow set (`bl`, `brk`, `ret` and `nop`) and the checked
+  baseline `mrs`/`msr` system-register rows for `fpsr` and `fpcr`, but not an
+  ADRP/ADD page pair. A block that fails reports through
   `CodegenModule.failed_in_assembly` and the block/line beside it, which is what
   keeps the driver's diagnostic off the next C function in the file. The
   *inline*-assembly arm of `codegen_generate_canonical_module_attempt` shares

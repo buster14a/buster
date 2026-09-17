@@ -10,7 +10,7 @@ __asm__(".text\n"
 #elif defined(__aarch64__) || defined(_M_ARM64)
 __asm__(".text\n"
         ".globl global_asm_answer\n"
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__APPLE__)
         ".type global_asm_answer, %function\n"
 #endif
         "global_asm_answer:\n"

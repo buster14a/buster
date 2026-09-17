@@ -747,3 +747,12 @@ chains them against every pending slot access. No architecture-specific
 scheduler exception is needed. The stack-alias tests explicitly recognize
 incoming reads independently of that metadata; otherwise a missing descriptor
 bit could disappear from both the scheduler and its test oracle.
+
+## AArch64 large aggregate copies
+
+The three frame/pointer copy rows emit a bounded eight-byte loop at 256 bytes
+and above, followed by exact 4/2/1-byte tails. X9/X10 are declared cursor clobbers;
+reserved X16/X17 carry the count and data. CBNZ preserves flags. Pointer operands
+are captured before either cursor is overwritten, and the encoder reserves a
+constant 128-byte capacity for this form. Smaller copies retain inline accesses.
+The same memory effects and source/destination ownership apply in every allocator.
