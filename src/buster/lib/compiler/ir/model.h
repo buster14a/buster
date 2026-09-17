@@ -194,6 +194,13 @@ struct IrSourceMapCursor
 
 #define IR_SOURCE_MAP_CURSOR_EMPTY ((IrSourceMapCursor){.memo_offset = UINT32_MAX})
 
+typedef enum IrFloatFormat
+{
+    IR_FLOAT_FORMAT_IEEE,
+    IR_FLOAT_FORMAT_BFLOAT16,
+    IR_FLOAT_FORMAT_COUNT,
+} IrFloatFormat;
+
 typedef enum IrTypeKind
 {
     IR_TYPE_VOID,
@@ -403,6 +410,7 @@ struct IrType
     // the type `void (i32, ...)`. `(void)` and C23's `()` are ordinary
     // zero-parameter prototypes and never set it.
     bool is_unprototyped;
+    u8 float_format;
 };
 
 typedef struct IrTypeTable IrTypeTable;

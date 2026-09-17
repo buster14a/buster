@@ -384,19 +384,12 @@ class BootstrapWorkflowTests(unittest.TestCase):
         policy = self.steps["Workflow tool regression tests"]
         self.assertIn("timeout-minutes: 2", policy)
         self.assertNotIn("bootstrap_wrapper_test.py", policy)
-        for suite in ("tests/ci_tools_test.py", "tools/analyzer_selection_test.py",
-                      "tools/differential_ci_policy_test.py", "tools/ci_configure_evidence_test.py"):
+        for suite in ("tests/ci_tools_test.py", "tools/analyzer_selection_test.py", "tools/differential_ci_policy_test.py"):
             self.assertIn(suite + " -v", policy)
-        evidence = self.steps["Collect CMake configure evidence"]
-        self.assertIn("id: configure_evidence", evidence)
-        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", evidence)
-        self.assertIn("timeout-minutes: 2", evidence)
-        self.assertIn("tools/ci_configure_evidence.py", evidence)
-        self.assertNotIn("continue-on-error:", evidence)
         self.assertIn("path: ${{ runner.temp }}/buster-ci/", self.steps["Retain desktop logs"])
         self.assertEqual(len(re.findall(r"(?m)^          - name:", self.desktop)), 6)
 
-    def test_both_desktop_required_lists_reject_unsuccessful_wrapper_and_evidence_work(self):
+    def test_both_desktop_required_lists_reject_unsuccessful_wrapper_work(self):
         sys.path.insert(0, str(ROOT / "tools"))
         self.addCleanup(sys.path.pop, 0)
         import ci_summary
@@ -405,19 +398,18 @@ class BootstrapWorkflowTests(unittest.TestCase):
         self.assertIn("tools/ci_summary.py", summary)
         expression = re.search(r"BUSTER_CI_REQUIRED: (.+)", summary).group(1)
         lists = re.findall(r"'(workflow_tools[^']*)'", expression)
-        self.assertEqual(lists, ["workflow_tools bootstrap_wrappers zig combinations_unix configure_evidence",
-                                 "workflow_tools bootstrap_wrappers zig combinations_windows configure_evidence"])
+        self.assertEqual(lists, ["workflow_tools bootstrap_wrappers zig combinations_unix",
+                                 "workflow_tools bootstrap_wrappers zig combinations_windows"])
         for required in lists:
-            for required_step in ("bootstrap_wrappers", "configure_evidence"):
-                for outcome in (None, "skipped", "cancelled", "failure", "timed_out", "success"):
-                    with self.subTest(required=required, required_step=required_step, outcome=outcome):
-                        steps = {name: {"outcome": "success"} for name in required.split()}
-                        if outcome is None:
-                            del steps[required_step]
-                        else:
-                            steps[required_step] = {"outcome": outcome, "conclusion": "success"}
-                        self.assertEqual(ci_summary.assess(steps, required.split()),
-                                         [] if outcome == "success" else [required_step])
+            for outcome in (None, "skipped", "cancelled", "failure", "timed_out", "success"):
+                with self.subTest(required=required, outcome=outcome):
+                    steps = {name: {"outcome": "success"} for name in required.split()}
+                    if outcome is None:
+                        del steps["bootstrap_wrappers"]
+                    else:
+                        steps["bootstrap_wrappers"] = {"outcome": outcome, "conclusion": "success"}
+                    self.assertEqual(ci_summary.assess(steps, required.split()),
+                                     [] if outcome == "success" else ["bootstrap_wrappers"])
 
 
 class BootstrapBuildGraphTests(unittest.TestCase):

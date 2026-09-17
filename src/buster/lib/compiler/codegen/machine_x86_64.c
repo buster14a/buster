@@ -2587,14 +2587,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
         {
             if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
             {
+                IrType* source_float = ir_type_from_id(&program->types, source_type_id);
+                IrType* target_float = ir_type_from_id(&program->types, instruction->canonical_type);
                 bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
-                u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                               .opcode = (u16)(extend ? MACHINE_X64_CVT_F32_TO_F64 : MACHINE_X64_CVT_F64_TO_F32),
-                                                           });
-                machine_x64_define(selector, result_register, row);
-                selected = true;
+                bool ieee = source_float && target_float && source_float->float_format == IR_FLOAT_FORMAT_IEEE &&
+                            target_float->float_format == IR_FLOAT_FORMAT_IEEE &&
+                            source_float->bit_width == (extend ? 32 : 64) && target_float->bit_width == (extend ? 64 : 32);
+                if (ieee)
+                {
+                    u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                                   .opcode = (u16)(extend ? MACHINE_X64_CVT_F32_TO_F64 : MACHINE_X64_CVT_F64_TO_F32),
+                                                               });
+                    machine_x64_define(selector, result_register, row);
+                    selected = true;
+                }
             }
             else if (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
                      instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)

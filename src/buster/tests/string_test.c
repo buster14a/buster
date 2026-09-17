@@ -174,6 +174,69 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
         {
             StringIntegerParserCase parser = parsers[i];
+            // Independent explicit ranges cover every byte, including NUL,
+            // high-bit bytes and the punctuation gap between '9' and 'A'.
+            for (u32 byte = 0; byte <= UINT8_MAX; byte += 1)
+            {
+                u32 digit = parser.base;
+                if (byte >= '0' && byte <= '9')
+                {
+                    digit = byte - '0';
+                }
+                else if (parser.base == 16 && byte >= 'A' && byte <= 'F')
+                {
+                    digit = byte - 'A' + 10;
+                }
+                else if (parser.base == 16 && byte >= 'a' && byte <= 'f')
+                {
+                    digit = byte - 'a' + 10;
+                }
+                bool valid = digit < parser.base;
+                IntegerParsingStatus status = valid ? INTEGER_PARSING_SUCCESS : INTEGER_PARSING_INVALID;
+                u64 value = valid ? digit : 0;
+                u64 length = valid ? 1 : 0;
+                char8 code_unit = (char8)byte;
+                IntegerParsingU64 parsed = string_test_parse_u64((String8){.pointer = &code_unit, .length = 1}, parser.base);
+                BUSTER_TEST(arguments, parsed.status == status && parsed.value == value && parsed.length == length);
+                if (committed)
+                {
+                    pages[page_size - 1] = code_unit;
+                    parsed = string_test_parse_u64((String8){.pointer = pages + page_size - 1, .length = 1}, parser.base);
+                    BUSTER_TEST(arguments, parsed.status == status && parsed.value == value && parsed.length == length);
+                }
+                // A trailing digit must not resume parsing after an invalid byte.
+                char8 prefixed[] = {'1', code_unit, '1'};
+                u64 prefix_value = valid ? (u64)parser.base * parser.base + digit * parser.base + 1 : 1;
+                u64 prefix_length = valid ? BUSTER_ARRAY_LENGTH(prefixed) : 1;
+                parsed = string_test_parse_u64((String8){.pointer = prefixed, .length = BUSTER_ARRAY_LENGTH(prefixed)}, parser.base);
+                BUSTER_TEST(arguments, parsed.status == INTEGER_PARSING_SUCCESS && parsed.value == prefix_value && parsed.length == prefix_length);
+            }
+            String8 empty_inputs[] = {S8(""), {0}, {.length = UINT64_MAX}};
+            for (u64 j = 0; j < BUSTER_ARRAY_LENGTH(empty_inputs); j += 1)
+            {
+                IntegerParsingU64 parsed = string_test_parse_u64(empty_inputs[j], parser.base);
+                BUSTER_TEST(arguments, parsed.status == INTEGER_PARSING_INVALID && parsed.value == 0 && parsed.length == 0);
+            }
+            // Neither the largest value nor an overflow may consume punctuation.
+            // The longest prefix has 65 binary digits, then a separator and digit.
+            String8 boundary_prefixes[] = {parser.maximum, parser.overflow};
+            for (u64 j = 0; j < BUSTER_ARRAY_LENGTH(boundary_prefixes); j += 1)
+            {
+                char8 with_tail[67];
+                String8 prefix = boundary_prefixes[j];
+                if (BUSTER_REQUIRE(arguments, prefix.length <= BUSTER_ARRAY_LENGTH(with_tail) - 2))
+                {
+                    memcpy(with_tail, prefix.pointer, prefix.length);
+                    with_tail[prefix.length + 1] = '1';
+                    IntegerParsingStatus status = j == 0 ? INTEGER_PARSING_SUCCESS : INTEGER_PARSING_OVERFLOW;
+                    for (u32 punctuation = ':'; punctuation <= '?'; punctuation += 1)
+                    {
+                        with_tail[prefix.length] = (char8)punctuation;
+                        IntegerParsingU64 parsed = string_test_parse_u64((String8){.pointer = with_tail, .length = prefix.length + 2}, parser.base);
+                        BUSTER_TEST(arguments, parsed.status == status && parsed.value == UINT64_MAX && parsed.length == prefix.length);
+                    }
+                }
+            }
             String8 inputs[] = {
                 (String8){0}, (String8){.length = 1}, parser.invalid, S8("+1"), S8("-1"),
                 S8("0"), S8("000000000000000000000000000000000000000000000000000000000000000000001"),
@@ -201,7 +264,7 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             if (committed)
             {
                 IntegerParsingU64 empty_guard = string_test_parse_u64((String8){.pointer = pages + page_size}, parser.base);
-                BUSTER_TEST(arguments, empty_guard.status == INTEGER_PARSING_INVALID && empty_guard.length == 0);
+                BUSTER_TEST(arguments, empty_guard.status == INTEGER_PARSING_INVALID && empty_guard.value == 0 && empty_guard.length == 0);
                 // Overflow still consumes the complete digit prefix and stops
                 // before a tail instead of returning a plausible wrapped value.
                 memset(pages + page_size - 100, '1', 99);

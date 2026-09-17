@@ -1,8 +1,9 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Six desktop combination lanes, four
+# Build/test policy remains in build.c. Two shards per desktop lane, four
 # independent Unix mode/differential lanes and three mobile lanes retain full
 # coverage. See docs/ci-suite-partition.md for suite ownership and measurement;
+# docs/ci-combination-shards.md describes the internal combination partition;
 # docs/ci-workflow-audit.md documents cache boundaries and reproduction.
 on:
   pull_request:
@@ -12,12 +13,6 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
-    inputs:
-      cmake_profile:
-        description: 'Diagnostic CMake profiles (not an uninstrumented timing run)'
-        type: boolean
-        required: false
-        default: false
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -103,41 +98,51 @@ jobs:
 
   test:
     env:
+      BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
-      # Reuse native matrix profiling; ordinary CI keeps the same configure flags.
-      BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
+      # Profiling is diagnostic and opt-in. Set the repository variable to
+      # true only for an intentional manual dispatch; every other event stays
+      # uninstrumented, including ordinary manual runs while it is unset.
+      BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && vars.BUSTER_CMAKE_PROFILE == 'true' && '1' || '0' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: ${{ matrix.name }}
+    name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
+        lane: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64]
+        shard: [release, checks]
         include:
           - name: Linux x86-64
+            lane: linux-x86_64
             runner: ubuntu-26.04
             platform: unix
             os: linux
             arch: x86_64
             zig_target: x86_64-linux
           - name: Linux AArch64
+            lane: linux-aarch64
             runner: ubuntu-26.04-arm
             platform: unix
             os: linux
             arch: aarch64
             zig_target: aarch64-linux
           - name: macOS x86-64
+            lane: macos-x86_64
             runner: macos-26-intel
             platform: unix
             os: macos
             arch: x86_64
             zig_target: x86_64-macos
           - name: macOS AArch64
+            lane: macos-aarch64
             runner: macos-26
             platform: unix
             os: macos
             arch: aarch64
             zig_target: aarch64-macos
           - name: Windows x86-64
+            lane: windows-x86_64
             runner: windows-2025
             platform: windows
             os: windows
@@ -147,6 +152,7 @@ jobs:
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
             clang_arch: x86_64
           - name: Windows AArch64
+            lane: windows-aarch64
             runner: windows-11-arm
             platform: windows
             os: windows
@@ -165,6 +171,7 @@ jobs:
 
       - name: Workflow tool regression tests
         id: workflow_tools
+        if: ${{ matrix.shard == 'release' }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -173,6 +180,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
+          "$BUSTER_CI_PYTHON" tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-shard.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
 
@@ -185,6 +193,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Preserve the wrapper lifecycle guard on every shard, but run its
+          # expensive regression suite only in its canonical Release owner.
+          if [[ "$BUSTER_MATRIX_SHARD" == checks ]]; then
+            printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
 
@@ -216,6 +230,8 @@ jobs:
           ZIG_TARGET: ${{ matrix.zig_target }}
         run: |
           set -euo pipefail
+          # This step also runs without the Release-only preflight steps.
+          mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
       # Publish immediately after verification, before compiler build/tests.
@@ -292,8 +308,10 @@ jobs:
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Redirect inside cmd, so native stderr is not a terminating PS error.
-          cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:BUSTER_MATRIX_SHARD -eq 'release') {
+            cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -314,8 +332,9 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix configure_evidence' || 'workflow_tools bootstrap_wrappers zig combinations_windows configure_evidence' }}
-          BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
+          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows') || (matrix.platform == 'unix' && 'zig combinations_unix' || 'zig combinations_windows') }}
+          BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
+          BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
           BUSTER_CI_COVERAGE_REQUIRED: "1"
           BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
@@ -326,7 +345,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: ignore
           retention-days: 7
@@ -800,12 +819,32 @@ jobs:
 
   complete:
     name: CI complete
+    permissions:
+      contents: read
+      actions: read
     needs: [lint, test, native, mobile, uefi, analyzer]
     if: ${{ always() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify every desktop partition exists
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: 'python3 tools/github_ci_time.py require-jobs --output "$RUNNER_TEMP/desktop-partitions.json"'
+      - name: Retain desktop partition inventory
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop-partitions.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Require every shard
+        if: ${{ always() }}
         shell: bash
         env:
           LINT_RESULT: ${{ needs.lint.result }}
@@ -816,7 +855,7 @@ jobs:
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
         run: |
           {
-            printf '| Shards | Result |\n| --- | --- |\n| All six desktop lanes | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| Shards | Result |\n| --- | --- |\n| All twelve desktop shards | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
             printf '| All four native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
