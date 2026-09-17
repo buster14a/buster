@@ -1,0 +1,44 @@
+name: PR 725 conflict probe
+
+on:
+  push:
+    branches:
+      - fix/665-builtin-capabilities
+    paths:
+      - .github/workflows/pr725-conflict-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out topic branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show merge conflicts against current main
+        shell: bash
+        run: |
+          set -uo pipefail
+          git fetch --no-tags origin main
+          set +e
+          git merge --no-commit --no-ff origin/main
+          merge_status=$?
+          set -e
+          printf 'PR725_MERGE_STATUS=%s\n' "$merge_status"
+          git status --short
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          printf 'PR725_CONFLICT_COUNT=%s\n' "${#conflicts[@]}"
+          for path in "${conflicts[@]}"; do
+              printf 'PR725_CONFLICT_FILE=%s\n' "$path"
+              git checkout --conflict=merge -- "$path" || true
+              echo "----- conflict markers: $path -----"
+              grep -n -B 35 -A 35 -E '^(<<<<<<<|=======|>>>>>>>)' "$path" || true
+              echo "----- combined diff: $path -----"
+              git diff --cc -- "$path" || true
+          done
+          git merge --abort || true
