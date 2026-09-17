@@ -12,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import ci_android_sdk  # noqa: E402
+import mobile_coverage  # noqa: E402
 
 PACKAGES = (
     "emulator",
@@ -86,6 +87,15 @@ if mode == "corrupt-success":
     raise SystemExit(0)
 raise SystemExit(2)
 '''
+
+
+class AndroidWorkflowContractTests(unittest.TestCase):
+    def test_mobile_summary_tracks_sdk_setup_before_payload(self):
+        lanes = mobile_coverage._workflow_mobile_lanes(ROOT / ".github/workflows/ci.yml")
+        self.assertEqual(
+            {(lane["os"], lane["arch"]) for lane in lanes},
+            {("android", "x86_64"), ("ios", "x86_64"), ("ios", "aarch64")},
+        )
 
 
 class AndroidSdkInstallerTests(unittest.TestCase):
