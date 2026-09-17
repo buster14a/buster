@@ -1,5 +1,9 @@
 # UEFI compiler target
 
+The [AArch64 ABI contract](uefi-aarch64-abi.md) records the LP64/AAPCS64
+decision, reference provenance, variadic regression gates, and the deliberate
+AArch64 UEFI LLVM-bitcode exclusion. PE/COFF does not imply Windows C layout.
+
 Buster can compile C directly to freestanding PE32+ EFI applications without a host compiler, CRT, import library, or external linker.
 
 ## Supported targets

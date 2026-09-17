@@ -174,6 +174,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   target-dependent where the layout rule above is not.
   `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
   Clang's answers baked in, including the padding.
+- **GNU scalar atomic builtins need an atomic pointer view in canonical IR.**
+  Their ordinary scalar operand pointers are cast to pointers to the matching
+  atomic-qualified type before dereferencing; the declared object's type and
+  its ordinary accesses stay unchanged, and a volatile operand keeps that
+  qualifier. Pointer fetch-add/subtract take an integer byte offset in IR for
+  both families: C11 scales by the pointee size and GNU does not. The strict
+  `-fverify-codegen` witnesses in `tests/basic_c_has_builtin.c` cover ordinary
+  and volatile objects, byte-offset pointer RMWs, and both frontend SSA paths.
+  Do not relax the atomic-place or operand-type validation to accept the GNU
+  spelling's surface types.
 - **Aggregate C11 exchange and compare-exchange use integer representations
   in canonical IR.** `c_ir_atomic_aggregate_bits_place` preserves the atomic
   qualifier on an integer pointer view of the same promoted object.

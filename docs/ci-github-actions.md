@@ -49,18 +49,21 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains the six desktop runners and names above for the full
-combination matrix. Four independent `native` lanes run the Unix execution-mode
-and configuration-differential suites together, reusing their fresh Release
-compiler. The `mobile` matrix retains its three independent suite-level shards.
-`lint` validates every GitHub workflow. **Require the aggregate `CI complete`
-check**, which fails unless lint and every desktop, native and mobile lane
-succeed. The six desktop names alone do not include native or mobile results.
-See [suite partitioning](ci-suite-partition.md) for ownership and measurement.
+The `test` matrix retains all six desktop runner labels, with two internal
+combination jobs per platform: `<platform> release` and `<platform> checks`.
+Four independent `native` lanes retain the Unix execution-mode and
+configuration-differential suites together, reusing their fresh Release
+compiler. Mobile retains its three independent suite-level shards; lint,
+UEFI and the independent analyzer remain required. **Require `CI complete`**,
+which checks all groups and the exact 23-job inventory, including all twelve
+desktop partitions. The old six names alone do not prove coverage.
+See [combination sharding](ci-combination-shards.md) for native ownership,
+fail-closed completion, reproduction and mandatory performance qualification;
+[suite partitioning](ci-suite-partition.md) documents the earlier split.
 
 | Work | Runners | Command |
 |---|---|---|
-| Combination matrix | all six desktop lanes | `test_all_combinations_ci` |
+| Combination matrix | `release` and `checks` on each of six desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
 | Execution-mode matrix | the four independent Unix native lanes | `test_mode_matrix --config Release` |
 | Native differential matrix | the same four native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
@@ -274,8 +277,67 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all six desktop combination jobs, four
-native jobs, three mobile jobs and workflow lint.
+The aggregate `CI complete` requires all twelve desktop combination jobs, four
+native jobs, three mobile jobs, workflow lint, UEFI and the analyzer. Its
+read-only Actions inventory rejects missing shard identities even when a
+smaller surviving matrix group reports success.
+
+The Android summary also exposes the existing wrapper records from
+`RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
+`result.json`'s `android` field. Its two configuration rows show batch status,
+payload phase/status, monitor reader/producer statuses, the deadline, and the
+payload's elapsed time and remaining headroom. Separate
+batch and final-CI records distinguish a failed Debug payload followed by a
+passing Release from required emulator cleanup failing after successful tests.
+A terminal `BUSTER_ANDROID_TEST_RESULT:0` describes one payload, not the entire
+Debug/Release job. Monitor reader status 10 denotes the success marker. The
+wrapper then sends `SIGTERM` to the GNU `timeout`/`adb logcat` process group and
+records the raw status returned by waiting for the `timeout` group leader. The
+real emulator lane's `adb logcat` exits normally with status 15 after that stop,
+so `timeout` propagates 15. The offline shell fake is instead terminated by
+signal 15, so `timeout` re-raises `SIGTERM` and Bash reports `128 + 15 = 143`.
+Both 15 and 143 are normal signal-derived producer statuses after reader status
+10; the reader result remains authoritative.
+
+A `Payload deadline:` line names either outcome the table alone leaves implicit.
+Reader status 0 with producer status 124/137 is an exhausted payload deadline —
+the wrapper says so at the failure itself, reports how many log lines the payload
+emitted with a truncated last line, and states that emulator cleanup has not run
+yet; that tail is printed by the workflow trap only when the status is already
+nonzero, so it is never the cause. A configuration that passes with less headroom
+than `BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT` (default 25) of its deadline
+is reported as thin on a green run, before a slower runner or new tests cross it.
+Headroom reporting changes no deadline and fails nothing by itself.
+
+These are diagnostics, not a replacement acceptance gate: the existing required
+step outcomes remain authoritative even when logs are missing or contradictory.
+Only complete, anchored wrapper records are copied, never emulator text, command
+echoes or arbitrary payload output. Missing/ambiguous records remain explicitly
+missing; duplicate records cannot replace an earlier failure with a later pass.
+The scan is capped at 64 MiB with 4 KiB line fragments and reports truncation.
+`python3 android/ci_summary_test.py -v` covers these cases without an SDK; the
+existing Linux/macOS mobile lifecycle workflow runs it independently and retains
+`android-summary.log`. No payload deadline, cleanup policy or test selection is
+changed. See [#685](https://github.com/buster14a/buster/issues/685) for the original
+Debug-timeout/Release-success diagnosis and [#686](https://github.com/buster14a/buster/pull/686)
+for the already-landed producer and lifecycle repairs.
+
+### Why the runs in #685 failed
+
+The three `Android x86-64` attempts cited in
+[#685](https://github.com/buster14a/buster/issues/685) — runs `35008982632`
+(`fe9569a`) and `35012645467` attempts 1 and 2 (`c6ccdc6`) — were not emulator
+teardown failures. In each, the Debug payload reached its 60-second deadline and
+`error: Android Debug tests failed with status 1` before Release ran and reported
+`BUSTER_ANDROID_TEST_RESULT:0`; the success text quoted in that issue belongs to
+Release alone. The extra Debug time came from an `O(values x rows)` residue in
+the MIR debug-location recorder that put roughly 33 seconds into one
+`codegen_tests` fixture, fixed inside
+[#676](https://github.com/buster14a/buster/pull/676) (`f9f817d`), after which the
+lane passed again on `af4efd6`. The same-day passing runs simply carried no such
+payload regression. No deadline was raised, no cleanup policy relaxed and no test
+skipped; what the diagnostics above add is that the next occurrence is legible
+from the job summary instead of from a complete-log reading.
 
 The iOS launcher retains separate signing logs for each Debug/Release bundle
 and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
@@ -309,8 +371,8 @@ attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
-accepts historical six-, eleven- and fifteen-job workflows and the current
-seventeen-job suite-partitioned workflow; all applicable suites must succeed on
+accepts historical six-, eleven-, fifteen- and seventeen-job workflows and the
+current twenty-three-job combination-partitioned workflow; all applicable suites must succeed on
 a complete first attempt. The four native jobs must report both mode and
 differential success, and the UEFI and analyzer gates must report their key
 coverage steps. Their execution intervals and runner seconds are included. Workflow hashes

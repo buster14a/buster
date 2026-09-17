@@ -96,7 +96,8 @@ BUSTER_GLOBAL_LOCAL IntegerParsingU64 string_parse_u64(String8 string, u32 base)
         if (base == 16)
         {
             u32 alpha = ((u32)(u8)string.pointer[i] | 0x20u) - 'a';
-            digit = alpha < 6 ? alpha + 10 : digit;
+            // ':' through '?' also subtract to 10..15, but are not hex digits.
+            digit = digit < 10 ? digit : alpha < 6 ? alpha + 10 : base;
         }
         if (digit >= base)
         {

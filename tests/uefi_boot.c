@@ -2,6 +2,8 @@
 // across a real stack frame and relocated initialized pointers, then prints
 // an architecture-specific marker and requests EFI_RESET_SHUTDOWN.
 // The small declarations below describe only the UEFI 2.x fields we use.
+#include "uefi_abi_contract.h"
+
 typedef unsigned long long EfiUintn;
 typedef unsigned int EfiUint32;
 typedef unsigned short EfiChar16;
@@ -81,7 +83,7 @@ EfiUintn UefiMain(void *image_handle, EfiSystemTable *table)
                      firmware_call(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 5765 &&
                      relocated_call(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 5765;
         zero_data[3] = 0x4567;
-        passed = passed && zero_data[3] == 0x4567;
+        passed = passed && zero_data[3] == 0x4567 && uefi_abi_contract_test();
 #if defined(BUSTER_UEFI_NEGATIVE) && BUSTER_UEFI_NEGATIVE
         passed = 0;
 #endif

@@ -144,6 +144,17 @@ if [[ $arch == arm64 && ${GITHUB_ACTIONS:-false} == true && -z ${BUSTER_IOS_LAUN
     export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=300
 fi
 
+# Signing is an infrastructure operation, not test execution. The hosted
+# Apple-Silicon Debug bundle exceeded 60 seconds in PR #687's run 35158376755
+# before any test launched; Release and simulator cleanup succeeded. Keep a
+# finite signing budget without altering local/self-hosted policy, native
+# command failures, result-marker requirements or explicit caller overrides.
+if [[ $arch == arm64 && ${GITHUB_ACTIONS:-false} == true &&
+      ${RUNNER_ENVIRONMENT:-} == github-hosted && ${RUNNER_OS:-} == macOS &&
+      -z ${BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS:-} ]]; then
+    export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=180
+fi
+
 launch_args=(--batch)
 for index in "${!build_configs[@]}"; do
     launch_args+=("${build_configs[$index]}" "${app_paths[$index]}")

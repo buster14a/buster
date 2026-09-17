@@ -1,0 +1,109 @@
+name: Windows driver fixture attribution
+
+# A diagnostic companion, not a replacement for Buster CI or an acceptance
+# timing sample. No ordinary PR pays for a second Windows combination matrix.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/driver-test-attribution.yml'
+      - 'src/buster/tests/test.c'
+      - 'src/buster/tests/test.h'
+
+permissions:
+  contents: read
+
+# Preserve attempts rather than canceling a measurement when the head advances.
+concurrency:
+  group: driver-attribution-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  attribution:
+    if: >-
+      ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          (github.event_name == 'workflow_dispatch' || github.head_ref == 'diagnostics/708-driver-fixture-timing') }}
+    name: Windows x86-64 fixture attribution
+    runs-on: windows-2025
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install verified Zig
+        id: zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          python tools/ci_zig.py --target x86_64-windows --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
+
+      - name: Full combination matrix with fixture attribution
+        id: combinations_windows
+        shell: powershell
+        env:
+          BUSTER_TEST_FIXTURE_TIMING: compiler_driver_tests
+          VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          git rev-parse HEAD | Tee-Object -FilePath (Join-Path $Logs 'source-sha.txt')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion RUNNER_ARCH=$env:RUNNER_ARCH fixture_timing=$env:BUSTER_TEST_FIXTURE_TIMING" | Set-Content (Join-Path $Logs 'attribution-environment.txt')
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
+          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
+          $VsPath = $VsPaths[0].Trim()
+          if (-not $VsPath) { throw 'Visual Studio path is empty' }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          # Preserve the compiler search path for the independent coverage probe.
+          $PathDelimiter = 'BUSTER_ATTRIBUTION_WINDOWS_COMPILER_PATH'
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
+          foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
+            where.exe $Compiler
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $ClangVersion = (& clang --version) -join "`n"
+          Write-Output $ClangVersion
+          if ($ClangVersion -notmatch 'Target:\s*x86_64-') { throw 'clang does not default to x86-64' }
+          New-Item -ItemType Directory -Force -Path 'build' | Out-Null
+          $Driver = Join-Path (Get-Location) 'build\build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Build/configuration/sanitizer policy and concurrency remain in build.c.
+          cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Matrix coverage and result
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: windows-2025
+          BUSTER_CI_REQUIRED: zig combinations_windows
+          BUSTER_CI_REPRO: See docs/driver-test-timing.md. Instrumented attribution is not a performance acceptance sample.
+          BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
+          BUSTER_CI_COVERAGE_REQUIRED: '1'
+          BUSTER_CI_COVERAGE_PLATFORM: windows
+          BUSTER_CI_COVERAGE_ARCH: x86_64
+        run: python tools/ci_summary.py
+
+      - name: Retain diagnostic logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: driver-attribution-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/
+          if-no-files-found: warn
+          retention-days: 14

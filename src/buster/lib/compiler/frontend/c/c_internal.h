@@ -130,7 +130,7 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[74];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[75];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);
@@ -466,6 +466,27 @@ typedef enum CSymbolWellKnown
 // branch.
 #define C_SYMBOL_WELL_KNOWN_BIT(name) (1ull << (u64)(C_SYMBOL_WELL_KNOWN_##name))
 BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
+
+// The binding walk and __has_attribute share these spelling sets. Keep the
+// interned-token fast path: querying support must not add spelling comparisons
+// to every declaration's binding scan (#666).
+#define C_ATTRIBUTE_WORDS_WEAK (C_SYMBOL_WELL_KNOWN_BIT(WEAK) | C_SYMBOL_WELL_KNOWN_BIT(WEAK_GNU))
+#define C_ATTRIBUTE_WORDS_ALIAS (C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU))
+#define C_ATTRIBUTE_WORDS_CONSTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU))
+#define C_ATTRIBUTE_WORDS_DESTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU))
+
+// _Noreturn is a declaration specifier, not a GNU attribute query spelling.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_noreturn_word(String8 spelling)
+{
+    return string_equal(spelling, S8("noreturn")) || string_equal(spelling, S8("__noreturn__"));
+}
+
+// Only the native object pipeline carries symbol aliases and initializer
+// arrays. Core Wasm and eBPF have neither lifecycle registration mechanism.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding_target(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
+}
 
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
 BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];

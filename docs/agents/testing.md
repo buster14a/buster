@@ -103,11 +103,21 @@
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
   compilation and device/simulator execution remain separate CI gates.
+- On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
+  codesign deadline when the caller has not supplied one. This is separate
+  from the test-execution, boot, install, and shutdown deadlines. Local and
+  self-hosted defaults remain unchanged, and an explicit
+  `BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS` is preserved for launcher validation.
+  No signing retry or failure suppression is introduced. The policy and native
+  status propagation are covered by `python3 ios/hosted_signing_budget_test.py`
+  in the mobile lifecycle workflow; actual Apple signing and simulator tests
+  remain a distinct native CI gate.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
-  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses and the
-  monitor deadline), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
+  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses, the monitor
+  deadline, and the payload's `elapsed_seconds`, `headroom_seconds` and
+  `headroom_warning`), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
   configuration, `not-run` when a configuration never reached execution), and
   `ANDROID_BATCH_RESULT` (test_ci.sh batch phase, first failed configuration,
   preserved overall status, and emulator cleanup status). The workflow step
@@ -116,6 +126,14 @@
   failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
   Release — plus the batch line's `status=` field; a missing per-config line or
   `status=not-run` is itself evidence of an incomplete run.
+  `android/run_tests.sh` bounds each complete suite with a 180-second monitor
+  watchdog, independently of adb command/install/boot deadlines. Debug compiler
+  fixtures exceeded the former 60-second budget while still reporting progress
+  in PR #687's run `35157195321`; this is a correctness-suite execution budget,
+  not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
+  overrides it. Terminal markers end monitoring immediately, and timeout,
+  malformed or missing markers still fail; the fake monitor suite checks the
+  default and override without lengthening its short timeout failure controls.
   Payload interruption statuses 130/143 stop the batch immediately and remain
   the workflow status even when emulator cleanup also fails; unstarted
   configurations remain `not-run`. Ordinary test failures still run the later
@@ -123,6 +141,15 @@
   alongside the frozen shared mobile suite to cover both attribution and
   cancellation through the real workflow body. Android/workflow changes also
   schedule the unchanged frozen-support contract checks automatically.
+  Reader status 0 with producer status 124/137 is the payload exhausting its own
+  `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` deadline, not emulator teardown: the
+  wrapper names that at the failure, reports how many log lines the payload
+  emitted with a truncated last line, and the summary repeats it as a
+  `Payload deadline:` note. A payload that passes with less than
+  `BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT` (default 25) of its deadline
+  left reports `headroom_warning=yes` and a wrapper warning while still passing.
+  Treat that as a signal to find the payload regression, not as a reason to
+  raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
   this path deterministically. Unknown process-state queries remain fail-closed.
