@@ -178,7 +178,7 @@ jobs:
       - name: Workflow tool regression tests
         id: workflow_tools
         if: ${{ matrix.shard == 'release' }}
-        timeout-minutes: 3
+        timeout-minutes: 2
         shell: bash
         run: |
           set -euo pipefail
