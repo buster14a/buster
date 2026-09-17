@@ -40,6 +40,16 @@
   module-local function is `BUSTER_GLOBAL_LOCAL`, and a function that a header
   already declares carries no macro at all — the header declaration is what
   gives it internal linkage in the unity build.
+- **`BUSTER_MIN`, `BUSTER_MAX`, and the `BUSTER_CLAMP*` macros do not promise
+  single evaluation.** They remain ordinary conditional-expression macros so
+  constant expressions and every supported C compiler use the same portable
+  definition. Pass only cheap, side-effect-free scalar values that are already
+  loaded or computed. Cache function calls, volatile or atomic accesses,
+  increments/decrements, assignments, allocation, scans, and other nontrivial
+  expressions in named locals before invoking these macros. A change that puts
+  nontrivial work behind one of them must include a focused evaluation-count
+  regression; do not replace the macros with statement expressions, `typeof`,
+  or another compiler-specific single-evaluation extension.
 
 - **C only.** No C++, no exceptions. `-fwrapv`, `-fno-strict-aliasing`,
   `-funsigned-char`.
