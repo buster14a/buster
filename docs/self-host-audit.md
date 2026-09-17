@@ -134,6 +134,7 @@ The producer is the field-order specification in
 The snapshots are diagnostic semantic projections, not a replay/interchange
 format. They do not serialize pointers, padding, capacity, lazy ABI caches or
 physical source byte offsets. Canonical IDs/types/values/blocks/instructions,
+floating-format identity, binary16 and bfloat16 target layouts,
 edge arguments, symbols/globals/relocations, and selected machine instructions,
 registers/blocks/edges/copy sources and side tables are explicit. Line-mark
 instruction IDs are included. Debug-bearing compiler executables are compared

@@ -15,10 +15,13 @@ import sys
 
 APPROVED = {
     "actions/checkout": {"11bd71901bbe5b1630ceea73d27597364c9af683"},
-    "actions/upload-artifact": {"ea165f8d65b6e75b540449e92b4886f43607fa02"},
+    "actions/upload-artifact": {"ea165f8d65b6e75b540449e92b4886f43607fa02", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"},
     "actions/cache/restore": {"0057852bfaa89a56745cba8c7296529d2fc39830"},
     "actions/cache/save": {"0057852bfaa89a56745cba8c7296529d2fc39830"},
 }
+# GitHub binds this literal reusable workflow to the caller's own commit.
+# This is not a general local-action exemption; review additions with the docs.
+APPROVED_LOCAL_WORKFLOWS = {"./.github/workflows/throughput-real-source.yml"}
 ACTION = re.compile(r"\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 BLOCK = re.compile(r"\s*(?:-\s+)?[A-Za-z_][A-Za-z0-9_-]*:\s*[|>][-+]?\s*$")
 QUOTED_KEY = re.compile(r"\s*(?:-\s+)?[\"']")
@@ -84,11 +87,12 @@ def check_text(text, path):
             value = action.group(1)
             if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
                 value = value[1:-1]
-            match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})", value)
-            if not match:
-                problem = "uses must contain a GitHub owner/repository action path and full lowercase commit SHA"
-            elif match.group(2) not in APPROVED.get(match.group(1), set()):
-                problem = "action path and revision have not been reviewed"
+            if value not in APPROVED_LOCAL_WORKFLOWS:
+                match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})", value)
+                if not match:
+                    problem = "uses must contain a GitHub owner/repository action path and full lowercase commit SHA"
+                elif match.group(2) not in APPROVED.get(match.group(1), set()):
+                    problem = "action path and revision have not been reviewed"
         elif re.search(r"\buses\s*:", line) and problem is None:
             problem = "uses must be a plain block-mapping key"
         if problem:

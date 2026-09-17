@@ -1362,6 +1362,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
     return result;
 }
 
+// Rejected wide escapes must leave both absent and existing output paths
+// untouched. Exercise the production driver, not only decoder descriptors.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("buster-wide-hex-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-wide-hex-output"), S8(".o"));
+    u64 attempt_position = arena->position;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("x86_64-pc-windows")};
+#define BUSTER_WIDE_HEX_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_WIDE_HEX_ALLOCATOR)};
+#undef BUSTER_WIDE_HEX_ALLOCATOR
+    String8 invalid[] = {
+        S8("__WCHAR_TYPE__ value[] = L\"\\x100000000\";"),
+        S8("unsigned short value[] = u\"\\x100000000\";"),
+        S8("unsigned int value[] = U\"\\x100000000\";"),
+        S8("__WCHAR_TYPE__ value[8] = L\"A\\xffffffffffffffffg\";"),
+        S8("__WCHAR_TYPE__ value[] = L\"A\" L\"\\x100000000g\" L\"B\";"),
+        S8("int value(void) { __WCHAR_TYPE__ local[] = L\"\\x100000000\"; return local[0]; }"),
+        S8("int value(void) { return L'\\x100000000'; }"),
+    };
+    String8 valid = S8("__WCHAR_TYPE__ wide[] = L\"\\x000000041\" L\"B\";"
+                       "unsigned short utf16[] = u\"\\x000000041\"; unsigned int utf32[] = U\"\\x000000041\";"
+                       "int value(void) { return L'\\x000000041'; }");
+    String8 sentinel = S8("existing output must survive a rejected wide escape");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            String8 command[] = {S8("-target"), targets[target], allocators[mode], S8("-nostdinc"), S8("-c"), S8("-o"), output, input};
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(valid))))
+            {
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+            }
+            arena_set_position(arena, attempt_position);
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+            {
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid[index]))))
+                {
+                    for (u32 existing = 0; existing < 2; existing += 1)
+                    {
+                        if (existing)
+                        {
+                            BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                        }
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                        {
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_ANALYSIS, invalid[index]);
+                            BUSTER_TEST_RAW(arguments, compiled.diagnostic_count != 0 && compiled.diagnostic.length != 0, invalid[index]);
+                            if (existing)
+                            {
+                                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                                if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length == sentinel.length))
+                                {
+                                    BUSTER_TEST(arguments, memory_compare(bytes.pointer, sentinel.pointer, bytes.length));
+                                }
+                                BUSTER_TEST(arguments, os_file_delete(output));
+                            }
+                            else
+                            {
+                                OsFileDescriptor* file = os_file_open(output, (OpenFlags){.read = 1}, (OpenPermissions){0});
+                                BUSTER_TEST(arguments, file == 0);
+                                if (file)
+                                {
+                                    BUSTER_TEST(arguments, os_file_close(file));
+                                    BUSTER_TEST(arguments, os_file_delete(output));
+                                }
+                            }
+                        }
+                        arena_set_position(arena, attempt_position);
+                    }
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    arena_set_position(arena, position);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1999,6 +2090,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_sseup(UnitTestArgum
                         ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
                             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
                         bool link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST(arguments, link_ok);
+                        if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_va_list(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-android"), S8("x86_64-ios")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-sysv-va-list-host"), S8(".o"));
+    String8 host_command[12];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    host_command[host_count++] = S8("-O0");
+    host_command[host_count++] = S8("-fno-inline");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = S8("tests/differential/sysv_va_list_host.c");
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+    bool host_compiled = host_spawn.handle && os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-va-list"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], S8("-march=baseline"), modes[mode],
+                        frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"),
+                        S8("-DSYSV_VA_LIST_NO_MAIN=1"), S8("tests/basic_c_sysv_va_list.c"), S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 9 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                    if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-va-list-run"), S8(""));
+                        String8 link_command[10];
+                        u32 link_count = 0;
+                        link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+#if BUSTER_LINUX
+                        link_command[link_count++] = S8("-no-pie");
+#endif
+                        link_command[link_count++] = object;
+                        link_command[link_count++] = host_object;
+                        link_command[link_count++] = S8("-o");
+                        link_command[link_count++] = executable;
+                        ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
                         BUSTER_TEST(arguments, link_ok);
                         if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
                     }
@@ -3535,6 +3698,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     return result;
 }
 
+typedef struct CompilerDriverWasm64NodeRun CompilerDriverWasm64NodeRun;
+struct CompilerDriverWasm64NodeRun
+{
+    ProcessWaitResult wait;
+    bool spawned;
+};
+
+BUSTER_GLOBAL_LOCAL CompilerDriverWasm64NodeRun compiler_driver_test_wasm64_stack_node_run(UnitTestArguments* arguments, Arena* arena, String8 mode,
+                                                                                            SliceString8 node_arguments)
+{
+    CompilerDriverWasm64NodeRun result = {
+        .wait = {.result = PROCESS_RESULT_NOT_EXISTENT},
+    };
+    u64 start = os_now_microseconds();
+    ProcessSpawnResult spawn = os_process_spawn(node_arguments, (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                               ((u64)1 << STANDARD_STREAM_ERROR),
+                                                    .use_process_environment = 1,
+                                                });
+    result.spawned = spawn.handle != 0;
+    if (spawn.handle)
+    {
+        result.wait = os_process_wait_deadline(arena, spawn, 30000000);
+    }
+    arguments->show(arguments,
+                    S8("WASM64_STACK_PROCESS mode={S8} spawned={u32} result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64}\n"
+                       "stdout:\n{S8}stderr:\n{S8}\n"),
+                    mode, (u32)result.spawned, (u32)result.wait.result, result.wait.platform_status, (u32)result.wait.timed_out,
+                    os_now_microseconds() - start, BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]),
+                    BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm64_stack_provenance(Arena* arena, ByteSlice stdout_bytes, String8 module_hash)
+{
+    String8 text = BYTE_SLICE_TO_STRING(8, stdout_bytes);
+    String8 digest = string_format(arena, S8("\"module_sha256\":\"{S8}\""), module_hash);
+    String8 required[] = {
+        S8("WASM64_STACK_RUNTIME {"),
+        S8("\"process.execPath\":"),
+        S8("\"process.execArgv\":["),
+        S8("\"memory64_flags\":["),
+        S8("\"NODE_OPTIONS\":"),
+        S8("\"node\":\""),
+        S8("\"v8\":\""),
+        digest,
+    };
+    bool result = string_first_sequence(text, S8("memory64_flags=")) == BUSTER_STRING_NO_MATCH;
+    for (u32 required_index = 0; result && required_index < BUSTER_ARRAY_LENGTH(required); required_index += 1)
+    {
+        result = string_first_sequence(text, required[required_index]) != BUSTER_STRING_NO_MATCH;
+    }
+    return result;
+}
+
 // Compile the stack-layout fixture through both C lowering paths, require
 // deterministic module bytes, then validate and execute them in an independent
 // Memory64 engine. The source is generated here so the native-retirement input
@@ -3638,33 +3857,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
         "const fs = require(\"fs\");\n"
         "const crypto = require(\"crypto\");\n"
         "const assert = require(\"assert\").strict;\n"
-        "if (process.argv.length !== 3) throw new Error(\"usage: node wasm64-stack.cjs module.wasm\");\n"
+        "const provenanceOnly = process.argv.length === 4 && process.argv[3] === \"--provenance-only\";\n"
+        "if (process.argv.length !== 3 && !provenanceOnly) throw new Error(\"usage: node wasm64-stack.cjs module.wasm [--provenance-only]\");\n"
         "const bytes = fs.readFileSync(process.argv[2]);\n"
         "const digest = crypto.createHash(\"sha256\").update(bytes).digest(\"hex\");\n"
-        "console.log(`WASM64_STACK_RUNTIME runtime=${process.version} v8=${process.versions.v8} memory64_flags=default module_sha256=${digest}`);\n"
-        "assert.equal(WebAssembly.validate(bytes), true, \"valid Memory64 module\");\n"
-        "const wasmModule = new WebAssembly.Module(bytes);\n"
-        "const instance = new WebAssembly.Instance(wasmModule);\n"
-        "const e = instance.exports;\n"
-        "assert.equal(e.memory.buffer.byteLength, 3 * 65536, \"minimal three-page layout\");\n"
-        "for (let repetition = 0; repetition < 4; ++repetition) {\n"
-        "    assert.equal(e.wasm_stack_frame32(13 + repetition), 0, \"materialized fixed frame\");\n"
-        "    assert.equal(e.wasm_stack_nested(), 0, \"simultaneously live recursive frames\");\n"
-        "    assert.equal(e.wasm_stack_mixed(97), 0, \"mixed fixed and dynamic frames\");\n"
-        "    assert.equal(e.wasm_stack_vla(65, repetition & 1), 0, \"VLA scope and early return restoration\");\n"
-        "    assert.equal(e.wasm_stack_zero_alignment(), 0n, \"zero-size and alignment boundaries\");\n"
+        "const provenance = {\n"
+        "    \"process.execPath\": process.execPath,\n"
+        "    \"process.execArgv\": process.execArgv,\n"
+        "    \"memory64_flags\": process.execArgv.filter(argument => argument.includes(\"wasm-memory64\")),\n"
+        "    \"NODE_OPTIONS\": Object.prototype.hasOwnProperty.call(process.env, \"NODE_OPTIONS\") ? process.env.NODE_OPTIONS : null,\n"
+        "    \"node\": process.version,\n"
+        "    \"v8\": process.versions.v8,\n"
+        "    \"module_sha256\": digest,\n"
+        "};\n"
+        "console.log(\"WASM64_STACK_RUNTIME \" + JSON.stringify(provenance));\n"
+        "function execute() {\n"
+        "    const memory64Probe = Uint8Array.of(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x04, 0x01);\n"
+        "    if (!WebAssembly.validate(memory64Probe)) {\n"
+        "        console.log(\"WASM64_STACK_CAPABILITY \" + JSON.stringify({status: \"unsupported\", reason: \"memory64-probe-rejected\"}));\n"
+        "        process.exitCode = 2;\n"
+        "        return;\n"
+        "    }\n"
+        "    assert.equal(WebAssembly.validate(bytes), true, \"valid Memory64 module\");\n"
+        "    const wasmModule = new WebAssembly.Module(bytes);\n"
+        "    const instance = new WebAssembly.Instance(wasmModule);\n"
+        "    const e = instance.exports;\n"
+        "    assert.equal(e.memory.buffer.byteLength, 3 * 65536, \"minimal three-page layout\");\n"
+        "    for (let repetition = 0; repetition < 4; ++repetition) {\n"
+        "        assert.equal(e.wasm_stack_frame32(13 + repetition), 0, \"materialized fixed frame\");\n"
+        "        assert.equal(e.wasm_stack_nested(), 0, \"simultaneously live recursive frames\");\n"
+        "        assert.equal(e.wasm_stack_mixed(97), 0, \"mixed fixed and dynamic frames\");\n"
+        "        assert.equal(e.wasm_stack_vla(65, repetition & 1), 0, \"VLA scope and early return restoration\");\n"
+        "        assert.equal(e.wasm_stack_zero_alignment(), 0n, \"zero-size and alignment boundaries\");\n"
+        "    }\n"
+        "    assert.equal(e.wasm_stack_exact_limit(), 0, \"complete 64-KiB reserve is usable\");\n"
+        "    assert.equal(e.wasm_stack_dynamic_limit(), 131056n, \"exact-limit dynamic allocation starts at stack base\");\n"
+        "    assert.equal(e.wasm_stack_frame32(91), 0, \"exact-limit call restored stack\");\n"
+        "    function expectStackTrap(size, label) {\n"
+        "        const isolated = new WebAssembly.Instance(wasmModule);\n"
+        "        assert.throws(() => isolated.exports.wasm_stack_dynamic_store(size), error =>\n"
+        "            error instanceof WebAssembly.RuntimeError && /unreachable/.test(error.message), label + \" deliberate overflow trap\");\n"
+        "    }\n"
+        "    expectStackTrap(65537n, \"over-limit allocation\");\n"
+        "    expectStackTrap(0xffffffffffffffffn, \"wrapping allocation\");\n"
+        "    console.log(\"WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0\");\n"
         "}\n"
-        "assert.equal(e.wasm_stack_exact_limit(), 0, \"complete 64-KiB reserve is usable\");\n"
-        "assert.equal(e.wasm_stack_dynamic_limit(), 131056n, \"exact-limit dynamic allocation starts at stack base\");\n"
-        "assert.equal(e.wasm_stack_frame32(91), 0, \"exact-limit call restored stack\");\n"
-        "function expectStackTrap(size, label) {\n"
-        "    const isolated = new WebAssembly.Instance(wasmModule);\n"
-        "    assert.throws(() => isolated.exports.wasm_stack_dynamic_store(size), error =>\n"
-        "        error instanceof WebAssembly.RuntimeError && /unreachable/.test(error.message), label + \" deliberate overflow trap\");\n"
-        "}\n"
-        "expectStackTrap(65537n, \"over-limit allocation\");\n"
-        "expectStackTrap(0xffffffffffffffffn, \"wrapping allocation\");\n"
-        "console.log(\"WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0\");\n");
+        "if (!provenanceOnly) execute();\n");
     bool prepared = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
     BUSTER_TEST(arguments, prepared);
     char8 source_hash_bytes[SHA256_HEX_CAPACITY];
@@ -3700,19 +3938,109 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
             String8 node = executable_resolve_in_path(arena, S8("node"));
             if (node.length)
             {
-                String8 node_arguments[] = {node, script_path, output};
-                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                           (ProcessSpawnOptions){.use_process_environment = 1});
-                BUSTER_TEST(arguments, spawn.handle != 0);
-                if (spawn.handle)
+                String8 module_hash_text = (String8){module_hash_bytes, 64};
+                String8 provenance_flag = string_format(arena, S8("--title=buster-wasm64-provenance-{u64}"), os_get_current_process_id());
+                String8 direct_arguments[] = {node, script_path, output};
+                CompilerDriverWasm64NodeRun direct = compiler_driver_test_wasm64_stack_node_run(
+                    arguments, arena, S8("direct"), (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_arguments));
+                BUSTER_TEST(arguments, direct.spawned);
+                bool execution_succeeded = false;
+                bool capability_unavailable = false;
+                if (direct.spawned)
                 {
-                    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
-                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                    String8 direct_stdout = BYTE_SLICE_TO_STRING(8, direct.wait.streams[STANDARD_STREAM_OUTPUT]);
+                    bool provenance = compiler_driver_test_wasm64_stack_provenance(
+                        arena, direct.wait.streams[STANDARD_STREAM_OUTPUT], module_hash_text);
+                    bool negative_control = string_first_sequence(direct_stdout, provenance_flag) == BUSTER_STRING_NO_MATCH;
+                    bool execution = !direct.wait.timed_out && direct.wait.result == PROCESS_RESULT_SUCCESS &&
+                                     direct.wait.streams[STANDARD_STREAM_ERROR].length == 0 &&
+                                     string_first_sequence(direct_stdout, S8("WASM64_STACK_RESULT validation=pass execution=pass")) !=
+                                         BUSTER_STRING_NO_MATCH &&
+                                     string_first_sequence(direct_stdout, S8("WASM64_STACK_CAPABILITY ")) == BUSTER_STRING_NO_MATCH;
+                    bool unsupported = !direct.wait.timed_out && direct.wait.result == PROCESS_RESULT_FAILED_TRY_AGAIN &&
+                                       direct.wait.streams[STANDARD_STREAM_ERROR].length == 0 &&
+                                       string_first_sequence(direct_stdout,
+                                                             S8("WASM64_STACK_CAPABILITY {\"status\":\"unsupported\","
+                                                                "\"reason\":\"memory64-probe-rejected\"}")) !=
+                                           BUSTER_STRING_NO_MATCH &&
+                                       string_first_sequence(direct_stdout, S8("WASM64_STACK_RESULT ")) == BUSTER_STRING_NO_MATCH;
+                    BUSTER_TEST(arguments, provenance);
+                    BUSTER_TEST(arguments, negative_control);
+                    BUSTER_TEST(arguments, execution || unsupported);
+                    execution_succeeded = execution;
+                    capability_unavailable = unsupported;
+                }
+
+                String8 control_arguments[] = {node, provenance_flag, script_path, output, S8("--provenance-only")};
+                CompilerDriverWasm64NodeRun control = compiler_driver_test_wasm64_stack_node_run(
+                    arguments, arena, S8("flagged-provenance-control"), (SliceString8)BUSTER_ARRAY_TO_SLICE(control_arguments));
+                BUSTER_TEST(arguments, control.spawned);
+                if (control.spawned)
+                {
+                    String8 control_stdout = BYTE_SLICE_TO_STRING(8, control.wait.streams[STANDARD_STREAM_OUTPUT]);
+                    bool control_succeeded = !control.wait.timed_out && control.wait.result == PROCESS_RESULT_SUCCESS &&
+                                             control.wait.streams[STANDARD_STREAM_ERROR].length == 0;
+                    bool provenance = compiler_driver_test_wasm64_stack_provenance(
+                        arena, control.wait.streams[STANDARD_STREAM_OUTPUT], module_hash_text);
+                    bool positive_control = string_first_sequence(control_stdout, provenance_flag) != BUSTER_STRING_NO_MATCH;
+                    bool provenance_only = string_first_sequence(control_stdout, S8("WASM64_STACK_RESULT ")) == BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(control_stdout, S8("WASM64_STACK_CAPABILITY ")) == BUSTER_STRING_NO_MATCH;
+                    BUSTER_TEST(arguments, control_succeeded);
+                    BUSTER_TEST(arguments, provenance);
+                    BUSTER_TEST(arguments, positive_control);
+                    BUSTER_TEST(arguments, provenance_only);
+                }
+
+                if (!execution_succeeded && capability_unavailable)
+                {
+                    String8 memory64_flag = S8("--experimental-wasm-memory64");
+                    String8 feature_arguments[] = {node, memory64_flag, script_path, output};
+                    CompilerDriverWasm64NodeRun feature = compiler_driver_test_wasm64_stack_node_run(
+                        arguments, arena, S8("memory64-feature-flag"), (SliceString8)BUSTER_ARRAY_TO_SLICE(feature_arguments));
+                    BUSTER_TEST(arguments, feature.spawned);
+                    if (feature.spawned)
+                    {
+                        String8 feature_stdout = BYTE_SLICE_TO_STRING(8, feature.wait.streams[STANDARD_STREAM_OUTPUT]);
+                        String8 feature_stderr = BYTE_SLICE_TO_STRING(8, feature.wait.streams[STANDARD_STREAM_ERROR]);
+                        bool provenance = compiler_driver_test_wasm64_stack_provenance(
+                            arena, feature.wait.streams[STANDARD_STREAM_OUTPUT], module_hash_text);
+                        bool flag_reported = string_first_sequence(feature_stdout, memory64_flag) != BUSTER_STRING_NO_MATCH;
+                        bool execution = !feature.wait.timed_out && feature.wait.result == PROCESS_RESULT_SUCCESS &&
+                                         feature.wait.streams[STANDARD_STREAM_ERROR].length == 0 && provenance && flag_reported &&
+                                         string_first_sequence(feature_stdout, S8("WASM64_STACK_RESULT validation=pass execution=pass")) !=
+                                             BUSTER_STRING_NO_MATCH;
+                        bool unsupported = !feature.wait.timed_out && feature.wait.result == PROCESS_RESULT_FAILED_TRY_AGAIN &&
+                                           feature.wait.streams[STANDARD_STREAM_ERROR].length == 0 && provenance && flag_reported &&
+                                           string_first_sequence(feature_stdout, S8("WASM64_STACK_CAPABILITY ")) != BUSTER_STRING_NO_MATCH;
+                        bool flag_rejected = !feature.wait.timed_out && feature.wait.result != PROCESS_RESULT_SUCCESS && !provenance &&
+                                             string_first_sequence(feature_stderr, memory64_flag) != BUSTER_STRING_NO_MATCH &&
+                                             (string_first_sequence(feature_stderr, S8("bad option")) != BUSTER_STRING_NO_MATCH ||
+                                              string_first_sequence(feature_stderr, S8("unknown option")) != BUSTER_STRING_NO_MATCH ||
+                                              string_first_sequence(feature_stderr, S8("unrecognized option")) != BUSTER_STRING_NO_MATCH);
+                        BUSTER_TEST(arguments, execution || unsupported || flag_rejected);
+                        execution_succeeded = execution;
+                        capability_unavailable = unsupported || flag_rejected;
+                        if (flag_rejected)
+                        {
+                            arguments->show(arguments,
+                                            S8("WASM64_STACK_CAPABILITY {{\"status\":\"unsupported\","
+                                               "\"reason\":\"memory64-flag-rejected\","
+                                               "\"flag\":\"--experimental-wasm-memory64\"}}\n"));
+                        }
+                    }
+                }
+                if (!execution_succeeded && capability_unavailable)
+                {
+                    arguments->show(arguments,
+                                    S8("WASM64_STACK_EXECUTION {{\"status\":\"not-executed\","
+                                       "\"reason\":\"runtime-capability-unavailable\"}}\n"));
                 }
             }
             else
             {
-                arguments->show(arguments, S8("Wasm64 stack engine execution unavailable: Node is not installed\n"));
+                arguments->show(arguments,
+                                S8("WASM64_STACK_CAPABILITY {{\"status\":\"unavailable\","
+                                   "\"reason\":\"node-not-found\"}}\n"));
             }
         }
     }
@@ -3836,6 +4164,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
                 ByteSlice first = observations[0][phase];
                 bool equal = first.length == evidence.length && evidence.length && memory_compare(first.pointer, evidence.pointer, evidence.length);
                 BUSTER_TEST(arguments, repetition == 2 ? !equal : equal);
+            }
+        }
+    }
+    ByteSlice narrow_observations[5] = {0};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(narrow_observations); variant += 1)
+    {
+        IrType narrow = {
+            .name = S8("same-narrow-name"),
+            .id = {.value = 0},
+            .element_type = IR_TYPE_ID_INVALID,
+            .return_type = IR_TYPE_ID_INVALID,
+            .unqualified_type = IR_TYPE_ID_INVALID,
+            .kind = IR_TYPE_FLOAT,
+            .bit_width = 16,
+            .float_format = variant == 1 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE,
+            .layout = {.size = 2, .alignment = 2, .resolved = true},
+        };
+        IrProgram narrow_program = {
+            .data_layout = target_data_layout(target_native),
+            .types = {.types = &narrow, .count = 1},
+        };
+        IrModule narrow_module = {.name = S8("narrow-format-probe")};
+        if (variant == 2) narrow_program.data_layout.bfloat16_type.alignment = 4;
+        if (variant == 3) narrow_program.data_layout.float16_type.alignment = 4;
+        String8 path = buster_test_temporary_path(arena, S8("bootstrap-narrow-float"), S8(".ir"));
+        BootstrapTrace trace = bootstrap_trace_open(arena, path, S8("canonical IR"));
+        BUSTER_TEST(arguments, !trace.failed);
+        bootstrap_trace_ir(&trace, &narrow_program, &narrow_module);
+        BUSTER_TEST(arguments, bootstrap_trace_close(&trace));
+        ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+        narrow_observations[variant] = bytes;
+        if (BUSTER_REQUIRE(arguments, bytes.pointer != 0 && bytes.length > 40))
+        {
+            BUSTER_TEST(arguments, memory_compare(bytes.pointer + bytes.length - 8, "BSTREND1", 8));
+            if (variant && BUSTER_REQUIRE(arguments, narrow_observations[0].pointer != 0))
+            {
+                ByteSlice first = narrow_observations[0];
+                bool equal = first.length == bytes.length && memory_compare(first.pointer, bytes.pointer, bytes.length);
+                BUSTER_TEST(arguments, variant == 4 ? equal : !equal);
             }
         }
     }
@@ -4667,6 +5034,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_declarator_trailing_tokens(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    } invalid[] = {
+        {S8("int x y;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("int x 3;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("float f g;\nint take(void) { return 1; }\n"), 1, 9},
+        {S8("int x, y z;\nint take(void) { return 1; }\n"), 1, 10},
+        {S8("typedef int T; unsigned T v;\nint take(void) { return 1; }\n"), 1, 27},
+        {S8("typedef int T; T U v;\nint take(void) { return 1; }\n"), 1, 20},
+        {S8("int take(void) { int x y; return 1; }\n"), 1, 24},
+    };
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 sentinel = S8("existing output must survive a stray declarator token");
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-declarator-token-{u32}-{u32}"), case_index, frontend);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid[case_index].source))) &&
+                BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+            {
+                String8 syntax_arguments[] = {S8("-fsyntax-only"), S8("-std=c17"), S8("-target"), S8("x86_64-linux"),
+                    frontends[frontend], input};
+                CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_arguments)));
+                bool coded = false;
+                for (u32 diagnostic_index = 0; diagnostic_index < syntax.diagnostic_count; diagnostic_index += 1)
+                {
+                    coded |= string_equal(syntax.diagnostics[diagnostic_index].code, S8("c.expected-declaration")) &&
+                             syntax.diagnostics[diagnostic_index].primary.position.line == invalid[case_index].line &&
+                             syntax.diagnostics[diagnostic_index].primary.position.column == invalid[case_index].column;
+                }
+                BUSTER_TEST_RAW(arguments, syntax.error != COMPILER_DRIVER_ERROR_NONE && !syntax.has_object, invalid[case_index].source);
+                BUSTER_TEST_RAW(arguments, coded, invalid[case_index].source);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, S8("unexpected token after declarator")) != BUSTER_STRING_NO_MATCH,
+                                invalid[case_index].source);
+
+                String8 compile_arguments[] = {S8("-c"), S8("-std=c17"), S8("-target"), S8("x86_64-linux"),
+                    frontends[frontend], S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments)));
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object, invalid[case_index].source);
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+                BUSTER_TEST(arguments, os_file_delete(input));
+                BUSTER_TEST(arguments, os_file_delete(output));
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 valid = S8("int a, b;\nint (*callback)(int);\nint (*(*nested)(void))(int);\n"
+                       "typedef int T; T value; int take(void) { T local = value; return local; }\n");
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 name = string_format(arena, S8("buster-declarator-token-valid-{u32}"), frontend);
+        String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+        String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(valid))))
+        {
+            String8 compile_arguments[] = {S8("-c"), S8("-std=c17"), S8("-target"), S8("x86_64-linux"),
+                frontends[frontend], S8("-o"), output, input};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+            BUSTER_TEST(arguments, os_file_delete(input));
+            BUSTER_TEST(arguments, os_file_delete(output));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5008,6 +5460,172 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
     return result;
 }
 
+// #665: a positive query must reach the selected non-native backend too.
+// Atomic queries stay false on both; complex construction remains usable on
+// Wasm64, whereas eBPF has no floating-point operations.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 target_names[] = {S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 body = S8(
+        "#if __has_builtin(__builtin_offsetof) != 1\n#error hidden offsetof\n#endif\n"
+        "#if __has_builtin(__builtin_complex) != QUERY_COMPLEX\n#error wrong complex support\n#endif\n"
+        "#if __has_builtin(__atomic_load_n) || __has_builtin(__c11_atomic_load) || __has_builtin(__sync_synchronize)\n"
+        "#error unsupported atomic IR advertised\n#endif\n"
+        "struct query_record { char tag; int values[3]; };\n"
+        "int query_offset(void) { return __builtin_offsetof(struct query_record, values[2]); }\n"
+        "#if QUERY_COMPLEX\n"
+        "double query_complex(double real, double imag) {\n"
+        " double _Complex value = __builtin_complex(real, imag);\n"
+        " return __real__ value + __imag__ value;\n}\n#endif\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 source = string_format(arena, S8("#define QUERY_COMPLEX {u32}\n{S8}"), (u32)(target_index == 0), body);
+            String8 input = buster_test_temporary_path(arena, S8("buster-has-builtin-target"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-has-builtin-target"), S8(".bin"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-target"), target_names[target_index], S8("-nostdinc"), forms[form], S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    BUSTER_TEST(arguments, target_index == 0 ? compiled.has_wasm64 : compiled.has_ebpf);
+                    BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// #666: inspect the bytes the selected object writer actually emitted, not
+// just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
+// guarded fixture must also survive native source/object linking and exit.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_attribute_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct { String8 triple; bool weak; bool lifecycle; } targets[] = {
+        {S8("x86_64-unknown-linux-gnu"), true, true},
+        {S8("aarch64-unknown-linux-gnu"), true, true},
+        {S8("x86_64-apple-macos"), true, true},
+        {S8("aarch64-apple-macos"), true, true},
+        {S8("x86_64-pc-windows-msvc"), false, true},
+        {S8("aarch64-pc-windows-msvc"), false, true},
+        {S8("x86_64-unknown-uefi"), false, false},
+        {S8("aarch64-unknown-uefi"), false, false},
+    };
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 path = buster_test_temporary_path(arena, S8("buster-attribute-query"), S8(".o"));
+            String8 command[] = {
+                S8("-c"), S8("-g0"), S8("-target"), targets[target_index].triple,
+                string_format(arena, S8("-fregister-allocator={S8}"), modes[mode_index]),
+                S8("-o"), path, S8("tests/basic_c_attribute_queries.c"),
+            };
+            CompilerDriverResult built = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE, built.diagnostic);
+            if (BUSTER_REQUIRE(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object))
+            {
+                FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, map.bytes.length != 0))
+                {
+                    ObjectFile object = object_read(arena, map.bytes, built.object.target);
+                    if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE && object.symbols && object.sections))
+                    {
+                        CompilerDriverWeakAliasExpectation symbols[] = {
+                            {.name = S8("query_target"), .global = true},
+                            {.name = S8("query_object"), .global = true},
+                            {.name = S8("query_alias"), .target = S8("query_target"), .global = true},
+                            {.name = S8("query_object_alias"), .target = S8("query_object"), .global = true},
+                            {.name = S8("query_weak_object"), .global = true, .weak = targets[target_index].weak},
+                            {.name = S8("query_weak_function"), .global = true, .weak = targets[target_index].weak},
+                            {.name = S8("query_unconditional_weak"), .global = true, .weak = targets[target_index].weak},
+                            {.name = S8("weak"), .global = true},
+                            {.name = S8("alias"), .global = true},
+                        };
+                        for (u32 symbol_index = 0; symbol_index < BUSTER_ARRAY_LENGTH(symbols); symbol_index += 1)
+                        {
+                            CompilerDriverWeakAliasExpectation expected = symbols[symbol_index];
+                            ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(&object, expected.name);
+                            if (BUSTER_REQUIRE(arguments, symbol != 0))
+                            {
+                                BUSTER_TEST(arguments, symbol->global == expected.global && symbol->weak == expected.weak &&
+                                                           symbol->section != OBJECT_SECTION_UNDEFINED);
+                                if (expected.target.length)
+                                {
+                                    ObjectSymbol* target = compiler_driver_test_symbol_by_name(&object, expected.target);
+                                    BUSTER_TEST(arguments, target && symbol->section == target->section && symbol->value == target->value &&
+                                                               symbol->size == target->size && symbol->kind == target->kind);
+                                }
+                            }
+                        }
+                        if (BUSTER_REQUIRE(arguments, object.section_count > OBJECT_SECTION_FINI_ARRAY))
+                        {
+                            // Both the plain and reserved guard must register a pointer.
+                            u64 expected_bytes = targets[target_index].lifecycle ? 2 * sizeof(u64) : 0;
+                            BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_INIT_ARRAY].data.length == expected_bytes);
+                            BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_FINI_ARRAY].data.length == expected_bytes);
+                        }
+                    }
+                }
+                file_map_unmap(map);
+            }
+            scratch_end(temporary);
+        }
+    }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 mode = string_format(arena, S8("-fregister-allocator={S8}"), modes[mode_index]);
+        String8 object_path = buster_test_temporary_path(arena, S8("buster-attribute-query-native"), S8(".o"));
+        String8 compile[] = {S8("-c"), mode, S8("-o"), object_path, S8("tests/basic_c_attribute_queries.c")};
+        CompilerDriverResult object = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+        BUSTER_TEST_RAW(arguments, object.error == COMPILER_DRIVER_ERROR_NONE, object.diagnostic);
+        for (u32 route = 0; route < 2; route += 1)
+        {
+            if (route == 0 || object.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 image = buster_test_temporary_path(arena, S8("buster-attribute-query-native"), S8(".exe"));
+                String8 link[] = {mode, S8("-o"), image, route ? object_path : S8("tests/basic_c_attribute_queries.c")};
+                CompilerDriverResult linked = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {image};
+                    ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                  (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
+                    {
+                        ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+                        BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5017,7 +5635,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
@@ -5047,6 +5669,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
@@ -10258,6 +10881,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             bool supported;
         } half_element_rows[] = {
             {S8("_Float16"), false},
+            {S8("__bf16"), false},
             {S8("float"), true},
             {S8("double"), true},
             {S8("short"), true},
@@ -13821,6 +14445,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_created_nan_sign.c"),
         S8("tests/basic_c_static_compound_literal.c"),
         S8("tests/basic_c_va_list_places.c"),
+        S8("tests/basic_c_sysv_va_list.c"),
         S8("tests/basic_c_typeof_conditional.c"),
         S8("tests/basic_c_typeof_expression_frames.c"),
         S8("tests/basic_c_qualified_aggregate_call.c"),
@@ -13841,6 +14466,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-created-nan-sign"),
         S8("buster-c-static-compound-literal"),
         S8("buster-c-va-list-places"),
+        S8("buster-c-sysv-va-list"),
         S8("buster-c-typeof-conditional"),
         S8("buster-c-typeof-expression-frames"),
         S8("buster-c-qualified-aggregate-call"),
