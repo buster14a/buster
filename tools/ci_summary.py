@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI summary entry point with fail-closed metamorphic evidence retention."""
+"""CI summary entry point with fail-closed retained evidence."""
 
 from __future__ import annotations
 
@@ -10,9 +10,26 @@ import sys
 
 import ci_summary_core as _core
 import ci_metamorphic_evidence as _metamorphic
+import mobile_coverage as _mobile
 
 
 _core_write_report = _core.write_report
+_core_validate_coverage_manifest = _core.validate_coverage_manifest
+_core_coverage_summary = _core._coverage_summary
+
+
+def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"):
+    if isinstance(manifest, dict) and manifest.get("kind") == _mobile.KIND:
+        if expected_mode != "ci":
+            return ["mobile coverage manifest mode does not match consumer expectation"]
+        return _mobile.validate_manifest(manifest, environment or {})
+    return _core_validate_coverage_manifest(manifest, environment, expected_mode=expected_mode)
+
+
+def coverage_summary(manifest, errors):
+    if isinstance(manifest, dict) and manifest.get("kind") == _mobile.KIND:
+        return _mobile.coverage_summary(manifest, errors)
+    return _core_coverage_summary(manifest, errors)
 
 
 def write_report(environment, *, expected_coverage_mode="ci"):
@@ -35,6 +52,8 @@ def write_report(environment, *, expected_coverage_mode="ci"):
         if "metamorphic_evidence" not in required:
             required.append("metamorphic_evidence")
         effective["BUSTER_CI_REQUIRED"] = " ".join(required)
+
+    _mobile.prepare_summary(effective)
     return _core_write_report(effective, expected_coverage_mode=expected_coverage_mode)
 
 
@@ -47,6 +66,8 @@ def main():
     return status
 
 
+_core.validate_coverage_manifest = validate_coverage_manifest
+_core._coverage_summary = coverage_summary
 _core.write_report = write_report
 _core.main = main
 sys.modules[__name__] = _core
