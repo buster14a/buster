@@ -40,72 +40,7 @@ jobs:
           echo 'b9c421338b75ba825bdac88a8f9b9cdf0b8f467636e9c71e53713cb810a7d82e  '"$RUNNER_TEMP/pr568-review.patch" | sha256sum --check
           git -C target apply --check "$RUNNER_TEMP/pr568-review.patch"
           git -C target apply --index "$RUNNER_TEMP/pr568-review.patch"
-          python3 - <<'PY'
-          from pathlib import Path
-
-          guide = Path("target/docs/agents/benchmarking.md")
-          text = guide.read_text()
-          old = """  `python3 tools/native_retirement_performance_binding.py <record.json>
-            --evidence-root <bundle> --repository-root <immutable-checkout>`; the
-          """
-          new = """  `python3 tools/native_retirement_performance_binding.py <record.json>
-            --evidence-root <bundle> --repository-root <immutable-checkout>
-            --trusted-execution-receipt-sha256 <independently-obtained-sha256>`; the
-          """
-          if text.count(old) != 1:
-              raise SystemExit("primary benchmarking command changed unexpectedly")
-          text = text.replace(old, new)
-          anchor = """  relations. This validation does not itself accept a performance result.
-          """
-          addition = """  relations. The trusted execution-receipt digest must come out of band
-            from the authenticated admitted control service for the exact job and attempt;
-            never derive it from the result bundle being validated. This validation does
-            not itself accept a performance result.
-          """
-          if text.count(anchor) != 1:
-              raise SystemExit("primary benchmarking trust-boundary text changed unexpectedly")
-          guide.write_text(text.replace(anchor, addition))
-
-          tests = Path("target/tools/native_retirement_performance_binding_test.py")
-          text = tests.read_text()
-          old = """        row[\"eligibility\"] = {
-                      \"compiler_wall_time\": True, \"compiler_peak_rss\": True,
-                      \"generated_code_bytes\": True, \"generated_runtime\": True,
-                      \"runtime_oracle\": \"independent-native-executable-oracle\",
-                      \"code_section\": \"deterministic-code-section\",
-                  }
-          """
-          new = """        row[\"eligibility\"] = {
-                      \"compiler_wall_time\": True, \"compiler_peak_rss\": True,
-                      \"generated_code_bytes\": True, \"generated_runtime\": False,
-                      \"runtime_oracle\": \"not-applicable\",
-                      \"code_section\": \"deterministic-code-section\",
-                  }
-          """
-          if text.count(old) != 1:
-              raise SystemExit("bounded evidence fixture eligibility changed unexpectedly")
-          text = text.replace(old, new)
-          old = """        oracle[\"records\"][0].update({
-                      \"row\": 0, \"runtime_oracle_status\": \"passed-native\",
-                      \"runtime_exit_code\": 0, \"native_runtime\": True,
-                  })
-          """
-          new = """        oracle[\"records\"][0].update({
-                      \"row\": 0, \"runtime_oracle_status\": \"not-applicable\",
-                      \"runtime_exit_code\": -1, \"native_runtime\": False,
-                  })
-          """
-          if text.count(old) != 1:
-              raise SystemExit("bounded evidence fixture oracle changed unexpectedly")
-          text = text.replace(old, new)
-          old = """                        for metric in binding.METRICS
-          """
-          new = """                        for metric in binding.METRICS if row[\"eligibility\"][metric]
-          """
-          if text.count(old) != 1:
-              raise SystemExit("bounded evidence fixture measurement loop changed unexpectedly")
-          tests.write_text(text.replace(old, new))
-          PY
+          python3 helper/.github/pr568-review-fix/post_apply.py target
           rm -rf target/.github/pr568-patch
           git -C target rm .github/workflows/pr568-apply-review-fixes.yml
           git -C target add -A
@@ -119,7 +54,7 @@ jobs:
         working-directory: target
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e844403f0015caf20e275f891b
+          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e84443f0015caf20e275f891b
           test -z "$(git status --porcelain)"
           python3 -m py_compile \
             tools/native_retirement_performance_binding.py \
