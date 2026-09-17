@@ -29,14 +29,17 @@ jobs:
           path = Path("src/buster/tests/compiler/driver/driver_test.c")
           text = path.read_text()
 
-          def escape_format_object(source: str, marker: str, prefix: str) -> str:
+          def object_brace(source: str, marker: str, prefix: str) -> tuple[int, int]:
               if source.count(marker) != 1:
                   raise SystemExit(f"expected one marker, found {source.count(marker)}: {marker}")
               marker_index = source.index(marker)
               object_start = source.rfind(prefix, 0, marker_index)
               if object_start < 0 or marker_index - object_start > 512:
                   raise SystemExit(f"formatter prefix not found near marker: {marker}")
-              brace = object_start + len(prefix)
+              return marker_index, object_start + len(prefix)
+
+          def escape_format_object(source: str, marker: str, prefix: str) -> str:
+              marker_index, brace = object_brace(source, marker, prefix)
               if source[brace:brace + 2] == "{{" or source[brace] != "{":
                   raise SystemExit(f"unexpected opening brace state near marker: {marker}")
               source = source[:brace] + "{" + source[brace:]
@@ -45,8 +48,7 @@ jobs:
               close = source.find(close_marker, marker_index)
               if close < 0 or close - marker_index > 512:
                   raise SystemExit(f"formatter closing brace not found near marker: {marker}")
-              source = source[:close] + "}" + source[close:]
-              return source
+              return source[:close] + "}" + source[close:]
 
           repairs = [
               (r'\"reason\":\"memory64-flag-rejected\"', r'S8("WASM64_STACK_CAPABILITY '),
@@ -67,10 +69,12 @@ jobs:
           for needle in required:
               if text.count(needle) != 1:
                   raise SystemExit(f"repaired formatter string missing or duplicated: {needle}")
-          comparison = (r'S8("WASM64_STACK_CAPABILITY {\"status\":\"unsupported\","'
-                        r'\n                                                                "\"reason\":\"memory64-probe-rejected\"}"))')
-          if comparison not in text:
+
+          probe_marker = r'\"reason\":\"memory64-probe-rejected\"'
+          _, probe_brace = object_brace(text, probe_marker, r'S8("WASM64_STACK_CAPABILITY ')
+          if text[probe_brace] != "{" or text[probe_brace:probe_brace + 2] == "{{":
               raise SystemExit("the direct-runtime comparison oracle was modified")
+
           path.write_text(text)
           PY
           git diff --check
