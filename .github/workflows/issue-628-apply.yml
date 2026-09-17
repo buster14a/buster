@@ -17,6 +17,18 @@ jobs:
         with:
           ref: fix/628-sanitizer-provenance
           fetch-depth: 0
+      - name: Record failing sanitizer-name baseline
+        run: |
+          mkdir -p build/issue-628
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/issue-628/baseline-driver
+          set +e
+          BUSTER_TEST_JOBS=2 build/issue-628/baseline-driver test_differential --self-test >build/issue-628/baseline.log 2>&1
+          status=$?
+          set -e
+          cat build/issue-628/baseline.log
+          test "$status" -ne 0
+          grep -F 'DIFFERENTIAL_SELF_TEST_FAIL child=sanitizer-name-stdout' build/issue-628/baseline.log
+          grep -F 'DIFFERENTIAL_SELF_TEST_FAIL child=sanitizer-name-stderr' build/issue-628/baseline.log
       - name: Apply exact source edits
         run: python3 tools/issue_628_patch.py
       - name: Verify patch shape
@@ -24,6 +36,11 @@ jobs:
           git diff --check
           git diff --exit-code -- tools/issue_628_patch.py
           test -n "$(git status --short -- tools/differential.c tools/gpu_toolchains.c docs/differential-testing.md)"
+      - name: Validate candidate controls
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/issue-628/candidate-driver
+          BUSTER_TEST_JOBS=2 build/issue-628/candidate-driver test_differential --self-test
+          build/issue-628/candidate-driver test_gpu_toolchains --self-test
       - name: Commit source edits
         run: |
           git config user.name github-actions[bot]
