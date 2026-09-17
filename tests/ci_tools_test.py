@@ -19,6 +19,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import check_action_pins
 import ci_pack_evidence
 import ci_summary
 import ci_zig
@@ -771,8 +772,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIn("persist-credentials: false", text)
                 self.assertIn("concurrency:", text)
                 self.assertIn("timeout-minutes:", text)
-                for action in re.findall(r"uses:\s*(\S+)", text):
-                    self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
+                self.assertEqual(check_action_pins.check_text(text, path), [])
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("restore-keys:", text)
         self.assertNotIn("install-vulkan-sdk", text)

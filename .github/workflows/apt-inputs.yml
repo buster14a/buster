@@ -1,0 +1,72 @@
+name: Pinned apt input qualification
+
+on:
+  pull_request:
+    paths:
+      - .github/apt-inputs.json
+      - .github/workflows/apt-inputs.yml
+      - .github/workflows/gpu-toolchains.yml
+      - .github/workflows/throughput-real-source.yml
+      - tools/ci_apt.py
+      - tests/ci_apt_test.py
+  push:
+    branches: [main]
+    paths:
+      - .github/apt-inputs.json
+      - .github/workflows/apt-inputs.yml
+      - .github/workflows/gpu-toolchains.yml
+      - .github/workflows/throughput-real-source.yml
+      - tools/ci_apt.py
+      - tests/ci_apt_test.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-inputs-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  inputs:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Pinned apt inputs (${{ matrix.profile }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [gpu, readline]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Offline fail-closed controls
+        run: python3 tests/ci_apt_test.py -v
+      - name: Check repeatable signed provisioning and consumer selection
+        shell: bash
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci_apt.py "$PROFILE" --out "$RUNNER_TEMP/apt-first"
+          python3 tools/ci_apt.py "$PROFILE" --out "$RUNNER_TEMP/apt-second"
+          cmp "$RUNNER_TEMP/apt-first/pinned.identity.json" "$RUNNER_TEMP/apt-second/pinned.identity.json"
+          cmp "$RUNNER_TEMP/apt-first/selected.identity.json" "$RUNNER_TEMP/apt-second/selected.identity.json"
+      - name: Retain provisioning and binding evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apt-inputs-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/apt-first
+            ${{ runner.temp }}/apt-second
+          if-no-files-found: warn
+          retention-days: 14
+
+  real-source:
+    needs: inputs
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    uses: ./.github/workflows/throughput-real-source.yml
+    with:
+      qualify_pinned_inputs: true

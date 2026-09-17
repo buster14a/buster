@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "ubuntu": "26.04",
+  "suite": "resolute",
+  "architecture": "amd64",
+  "snapshot": "20260915T000000Z",
+  "profiles": {
+    "gpu": {
+      "clang-18": "1:18.1.8-20ubuntu8",
+      "libclang-common-18-dev": "1:18.1.8-20ubuntu8",
+      "libclang-cpp18": "1:18.1.8-20ubuntu8",
+      "libclang1-18": "1:18.1.8-20ubuntu8",
+      "libllvm18": "1:18.1.8-20ubuntu8",
+      "lld-18": "1:18.1.8-20ubuntu8",
+      "llvm-18": "1:18.1.8-20ubuntu8",
+      "llvm-18-linker-tools": "1:18.1.8-20ubuntu8",
+      "llvm-18-runtime": "1:18.1.8-20ubuntu8",
+      "spirv-tools": "2026.1-1"
+    },
+    "readline": {
+      "libncurses-dev": "6.6+20251231-1",
+      "libncurses6": "6.6+20251231-1",
+      "libncursesw6": "6.6+20251231-1",
+      "libreadline-dev": "8.3-4",
+      "libreadline8t64": "8.3-4",
+      "libtinfo6": "6.6+20251231-1",
+      "readline-common": "8.3-4"
+    }
+  }
+}

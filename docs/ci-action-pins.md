@@ -4,7 +4,7 @@
 `.github/workflows/`. Each `uses` value must name an approved GitHub action
 path and a full lowercase commit SHA. Mutable branches/tags, unlisted paths
 and unapproved revisions fail. Local and container actions require a separate
-policy decision before use.
+policy decision before use; the one same-commit workflow exception is below.
 
 The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
 actionlint. The checker now lives under `tools/` because the Forgejo workflows
@@ -29,6 +29,23 @@ Other workflows remain on v4.6.2 until their independent validation.
 Checkout necessarily precedes repository-local checks; its literal pin must
 itself be reviewed in the PR. This policy cannot prevent a PR author from
 changing the checker together with a workflow.
+
+## Approved same-commit reusable workflow
+
+`./.github/workflows/throughput-real-source.yml` is the only approved local
+reference. It reuses the existing native workload qualification after both
+pinned apt profiles pass, without copying its build/admission commands into a
+second harness. GitHub resolves this literal `./` workflow from the caller's
+same commit; there is no floating external branch, tag or downloaded action.
+The called workflow retains read-only contents permission and its existing
+source identity, native oracle, admission and artifact checks. Direct PR runs
+remain opt-in; only the path-filtered apt qualification sets the new boolean
+input. See [pinned input qualification](ci-apt-inputs.md).
+
+The checker does not accept arbitrary local actions, path traversal, local
+`@ref` suffixes, expressions or unreviewed remote references. The additional
+controls in `tests/ci_apt_test.py` exercise those rejection boundaries; the
+existing action-policy tests and independent actionlint remain required.
 
 ## Updating an action
 
