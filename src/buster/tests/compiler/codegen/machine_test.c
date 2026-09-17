@@ -2570,6 +2570,127 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_edge_index(UnitTestArgument
     return result;
 }
 
+// Frame objects whose touched rows miss each other share storage; the ones
+// whose storage has to outlive their rows do not. The fixture writes and reads
+// slot zero, then slot one, in one straight-line block — disjoint ranges — and
+// hands slot two's address to a register, which puts every later read of it
+// out of the rows' reach. A second fixture puts a slot's only rows on both
+// sides of a backward edge, so a loop re-executes the rows between them.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u32 slot_count = 4;
+    u32 value_count = 5;
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    MachineRef values[5];
+    u32 definition_rows[5] = {0, 2, 4, 5, 7};
+    for (u32 index = 0; index < value_count; index += 1)
+    {
+        u32 value = machine_builder_virtual_register(
+            &builder, (MachineVirtualRegister){.definition_point = machine_point_make(definition_rows[index], MACHINE_POINT_AFTER),
+                                               .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        values[index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    }
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RI,
+                                                               .operands = {values[0], machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}});
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64,
+                                                                   .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), values[slot]}});
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
+                                                                   .operands = {values[slot + 1u], machine_ref_make(MACHINE_REF_STACK_SLOT, slot)}});
+    }
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LEA_FRAME,
+                                                               .operands = {values[3], machine_ref_make(MACHINE_REF_STACK_SLOT, 2)}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64,
+                                                               .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 3), values[3]}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
+                                                               .operands = {values[4], machine_ref_make(MACHINE_REF_STACK_SLOT, 3)}});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    function.immediates = arena_allocate(arena, u64, 1);
+    function.immediate_count = 1;
+    function.stack_slot_sizes = arena_allocate(arena, u32, slot_count);
+    function.stack_slot_alignments = arena_allocate(arena, u32, slot_count);
+    for (u32 slot = 0; slot < slot_count; slot += 1)
+    {
+        function.stack_slot_sizes[slot] = 8;
+        function.stack_slot_alignments[slot] = 8;
+    }
+    function.stack_slot_count = slot_count;
+    // The selectors certify this; a hand-built function has to say so itself,
+    // and an uncertified one must keep one object per storage.
+    function.returns_twice_absence_certified = true;
+    BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement dedicated = machine_stack_placement_build(arena, &function);
+    MachineStackPlacement reused = machine_fast_placement_build(arena, &function);
+    BUSTER_TEST(arguments, dedicated.valid && reused.valid);
+    BUSTER_TEST(arguments, dedicated.stack_slot_offsets[0] != dedicated.stack_slot_offsets[1] &&
+                               dedicated.stack_slot_offsets[0] != dedicated.stack_slot_offsets[3]);
+    BUSTER_TEST(arguments, reused.stack_slot_offsets[0] == reused.stack_slot_offsets[1] &&
+                               reused.stack_slot_offsets[0] == reused.stack_slot_offsets[3]);
+    BUSTER_TEST(arguments, reused.stack_slot_offsets[2] != reused.stack_slot_offsets[0]);
+    BUSTER_TEST(arguments, reused.frame_size < dedicated.frame_size);
+    function.returns_twice_absence_certified = false;
+    MachineStackPlacement uncertified = machine_fast_placement_build(arena, &function);
+    BUSTER_TEST(arguments, uncertified.valid && uncertified.stack_slot_offsets[0] != uncertified.stack_slot_offsets[1]);
+
+    // Slot zero is written before the loop and read after it, so the loop can
+    // re-execute every row between — including slot one's — and the two ranges
+    // that look disjoint in row order are not.
+    MachineFunctionBuilder loop_builder = machine_function_builder_begin(arena);
+    MachineRef loop_values[3];
+    u32 loop_definition_rows[3] = {0, 4, 6};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(loop_values); index += 1)
+    {
+        u32 loop_value = machine_builder_virtual_register(
+            &loop_builder, (MachineVirtualRegister){.definition_point = machine_point_make(loop_definition_rows[index], MACHINE_POINT_AFTER),
+                                                    .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        loop_values[index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, loop_value);
+    }
+    machine_builder_block_begin(&loop_builder);
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RI,
+                                                                    .operands = {loop_values[0], machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64,
+                                                                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 0), loop_values[0]}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_JMP,
+                                                                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+    machine_builder_block_end(&loop_builder, (MachineBlock){0});
+    machine_builder_block_begin(&loop_builder);
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64,
+                                                                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 1), loop_values[0]}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
+                                                                    .operands = {loop_values[1], machine_ref_make(MACHINE_REF_STACK_SLOT, 1)}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_JMP,
+                                                                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+    machine_builder_block_end(&loop_builder, (MachineBlock){0});
+    machine_builder_block_begin(&loop_builder);
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
+                                                                    .operands = {loop_values[2], machine_ref_make(MACHINE_REF_STACK_SLOT, 0)}});
+    machine_builder_instruction(&loop_builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&loop_builder, (MachineBlock){0});
+    MachineFunction loop_function = machine_function_builder_finish(arena, &loop_builder);
+    loop_function.target = machine_target_x86_64();
+    loop_function.immediates = arena_allocate(arena, u64, 1);
+    loop_function.immediate_count = 1;
+    loop_function.stack_slot_sizes = arena_allocate(arena, u32, 2);
+    loop_function.stack_slot_alignments = arena_allocate(arena, u32, 2);
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        loop_function.stack_slot_sizes[slot] = 8;
+        loop_function.stack_slot_alignments[slot] = 8;
+    }
+    loop_function.stack_slot_count = 2;
+    loop_function.returns_twice_absence_certified = true;
+    MachineStackPlacement loop_placement = machine_fast_placement_build(arena, &loop_function);
+    BUSTER_TEST(arguments, loop_placement.valid && loop_placement.stack_slot_offsets[0] != loop_placement.stack_slot_offsets[1]);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_disconnected_dominance(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6011,6 +6132,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
     BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);

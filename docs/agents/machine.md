@@ -152,6 +152,20 @@
   on assignment and read only after the pin-map membership check. Instruction
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
+- Shared FAST/QUALITY placement colors frame storage by lifetime instead of
+  giving every spilled value and every stack slot its own bytes. Spill homes
+  take their rows from the allocator's memory edits; selector slots take theirs
+  from a block-level liveness fixed point over covering writes and reads, so a
+  slot written and read inside one iteration does not widen to its loop. Both
+  are assigned by one linear scan in start order with a free-color stack; no
+  interference graph is built. Scalar (8-byte) and vector (64-byte, 16-byte
+  aligned) homes keep separate pools. Reuse requires a linear block/row tiling
+  and `MachineFunction.returns_twice_absence_certified`, which the selectors
+  publish when no call in the function returns twice: a `longjmp` can re-enter
+  the frame at a row no machine edge reaches. Address-taken, volatile-tainted,
+  inline-assembly, variadic, outgoing-argument and unproven-form objects, homes
+  crossing their defining block, and escaping values all keep storage of their
+  own. Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent

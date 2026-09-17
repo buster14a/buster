@@ -262,56 +262,13 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     // latch alive at its head. Overlapping and touching spans merge into
     // disjoint regions first, which makes one ascending pass exact: no
     // extension can reach past its own merged region into an earlier one,
-    // so nothing cascades and nothing needs a second look. The merged,
-    // sorted spans double as the split candidate's region table below.
+    // so nothing cascades and nothing needs a second look. The prepass hands
+    // over exactly that table — sorted by packed start and merged — because
+    // the frame layout closes its storage ranges over the same regions. The
+    // merged, sorted spans double as the split candidate's region table below.
     u64* loop_spans = prepass.loop_spans;
-    u32 loop_span_count = prepass.loop_span_count;
-    u64* loop_span_scratch = arena_allocate(scratch.arena, u64, loop_span_count ? loop_span_count : 1);
-    // Bottom-up stable merge sort by packed start, then the standard
-    // overlap merge; touching spans merge too, since an interval ending
-    // exactly where the next span starts meets both.
-    for (u32 width = 1; width < loop_span_count; width *= 2)
-    {
-        for (u32 sort_start = 0; sort_start < loop_span_count; sort_start += 2 * width)
-        {
-            u32 middle = BUSTER_MIN(sort_start + width, loop_span_count);
-            u32 limit = BUSTER_MIN(sort_start + 2 * width, loop_span_count);
-            u32 left = sort_start;
-            u32 right = middle;
-            u32 out = sort_start;
-            while (left < middle && right < limit)
-            {
-                loop_span_scratch[out++] = loop_spans[right] < loop_spans[left] ? loop_spans[right++] : loop_spans[left++];
-            }
-            while (left < middle)
-            {
-                loop_span_scratch[out++] = loop_spans[left++];
-            }
-            while (right < limit)
-            {
-                loop_span_scratch[out++] = loop_spans[right++];
-            }
-        }
-        for (u32 span_index = 0; span_index < loop_span_count; span_index += 1)
-        {
-            loop_spans[span_index] = loop_span_scratch[span_index];
-        }
-    }
-    u32 merged_span_count = 0;
-    for (u32 span_index = 0; span_index < loop_span_count; span_index += 1)
-    {
-        u32 span_start = (u32)(loop_spans[span_index] >> 32);
-        u32 span_end = (u32)loop_spans[span_index];
-        if (merged_span_count && span_start <= (u32)loop_spans[merged_span_count - 1])
-        {
-            u32 merged_end = BUSTER_MAX((u32)loop_spans[merged_span_count - 1], span_end);
-            loop_spans[merged_span_count - 1] = (loop_spans[merged_span_count - 1] & ~(u64)UINT32_MAX) | merged_end;
-            continue;
-        }
-        loop_spans[merged_span_count] = ((u64)span_start << 32) | span_end;
-        merged_span_count += 1;
-    }
-    BUSTER_QUALITY_COUNT(raw_loop_spans, loop_span_count);
+    u32 merged_span_count = prepass.loop_span_count;
+    BUSTER_QUALITY_COUNT(raw_loop_spans, merged_span_count);
     BUSTER_QUALITY_COUNT(merged_regions, merged_span_count);
     BUSTER_QUALITY_COUNT(closure_value_tests, (u64)merged_span_count * register_count);
     for (u32 span_index = 0; span_index < merged_span_count; span_index += 1)
