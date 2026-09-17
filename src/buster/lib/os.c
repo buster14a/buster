@@ -1172,7 +1172,255 @@ BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(Arena* arena, String8 path, DWO
 }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+#if defined(__linux__) || defined(__APPLE__)
+typedef struct OsDirectoryDeleteFrame OsDirectoryDeleteFrame;
+struct OsDirectoryDeleteFrame
+{
+    OsDirectoryDeleteFrame* parent;
+    DIR* directory;
+    String8 name;
+    dev_t device;
+    ino_t inode;
+};
+
+BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8 path)
+{
+    int result;
+    do
+    {
+        result = open((const char*)path.pointer, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int os_directory_delete_open_at(int parent, String8 name)
+{
+    int result;
+    do
+    {
+        result = openat(parent, (const char*)name.pointer, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int os_directory_delete_stat(int descriptor, struct stat* stats)
+{
+    int result;
+    do
+    {
+        result = fstat(descriptor, stats);
+    } while (result != 0 && errno == EINTR);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8 name, struct stat* stats)
+{
+    int result;
+    do
+    {
+        result = fstatat(parent, (const char*)name.pointer, stats, AT_SYMLINK_NOFOLLOW);
+    } while (result != 0 && errno == EINTR);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int os_directory_delete_unlink_at(int parent, String8 name, int flags)
+{
+    int result;
+    do
+    {
+        result = unlinkat(parent, (const char*)name.pointer, flags);
+    } while (result != 0 && errno == EINTR);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
+{
+    // Keep every parent descriptor until its child has been removed. Every
+    // descendant lookup is then one component beneath an already retained
+    // directory, and O_NOFOLLOW plus unlinkat make link traversal impossible.
+    // Linux openat2 would duplicate this single-component containment rule;
+    // the descriptor-relative path is the portable invariant itself.
+    bool result = true;
+    u64 root_end = root.length;
+    while (root_end > 1 && root.pointer[root_end - 1] == '/')
+    {
+        root_end -= 1;
+    }
+    u64 separator = root_end;
+    while (separator && root.pointer[separator - 1] != '/')
+    {
+        separator -= 1;
+    }
+
+    String8 parent_path;
+    String8 root_name;
+    if (separator)
+    {
+        u64 parent_length = separator == 1 ? 1 : separator - 1;
+        parent_path = (String8){.pointer = root.pointer, .length = parent_length};
+        root_name = (String8){.pointer = root.pointer + separator, .length = root_end - separator};
+    }
+    else
+    {
+        parent_path = S8(".");
+        root_name = (String8){.pointer = root.pointer, .length = root_end};
+    }
+    if (!root_name.length)
+    {
+        root_name = S8(".");
+    }
+    parent_path = string_duplicate_arena(arena, parent_path, true);
+    root_name = string_duplicate_arena(arena, root_name, true);
+
+    int root_parent = os_directory_delete_open_path(parent_path);
+    OsDirectoryDeleteFrame* frame = 0;
+    if (root_parent < 0)
+    {
+        result = errno == ENOENT;
+    }
+    else
+    {
+        struct stat selected;
+        if (os_directory_delete_stat_at(root_parent, root_name, &selected) != 0)
+        {
+            result = errno == ENOENT;
+        }
+        else if (S_ISLNK(selected.st_mode))
+        {
+            result = os_directory_delete_unlink_at(root_parent, root_name, 0) == 0 || errno == ENOENT;
+        }
+        else if (!S_ISDIR(selected.st_mode))
+        {
+            result = false;
+        }
+        else
+        {
+            int descriptor = os_directory_delete_open_at(root_parent, root_name);
+            int open_error = descriptor < 0 ? errno : 0;
+            struct stat opened;
+            bool same = descriptor >= 0 && os_directory_delete_stat(descriptor, &opened) == 0 &&
+                        opened.st_dev == selected.st_dev && opened.st_ino == selected.st_ino;
+            DIR* directory = same ? fdopendir(descriptor) : 0;
+            if (!same || !directory)
+            {
+                if (descriptor >= 0)
+                {
+                    close(descriptor);
+                }
+                result = descriptor < 0 && open_error == ENOENT;
+            }
+            else
+            {
+                frame = arena_allocate(arena, OsDirectoryDeleteFrame, 1);
+                *frame = (OsDirectoryDeleteFrame){
+                    .directory = directory,
+                    .name = root_name,
+                    .device = opened.st_dev,
+                    .inode = opened.st_ino,
+                };
+            }
+        }
+
+        while (frame)
+        {
+            errno = 0;
+            struct dirent* entry = readdir(frame->directory);
+            if (entry)
+            {
+                String8 name = string_from_pointer((const char8*)entry->d_name);
+                if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+                {
+                    int directory = dirfd(frame->directory);
+                    struct stat entry_stats;
+                    if (os_directory_delete_stat_at(directory, name, &entry_stats) != 0)
+                    {
+                        if (errno != ENOENT)
+                        {
+                            result = false;
+                        }
+                    }
+                    else if (S_ISDIR(entry_stats.st_mode))
+                    {
+                        int child = os_directory_delete_open_at(directory, name);
+                        int open_error = child < 0 ? errno : 0;
+                        struct stat opened;
+                        bool same = child >= 0 && os_directory_delete_stat(child, &opened) == 0 &&
+                                    opened.st_dev == entry_stats.st_dev && opened.st_ino == entry_stats.st_ino;
+                        DIR* child_directory = same ? fdopendir(child) : 0;
+                        if (!same || !child_directory)
+                        {
+                            if (child >= 0)
+                            {
+                                close(child);
+                            }
+                            if (child >= 0 || open_error != ENOENT)
+                            {
+                                result = false;
+                            }
+                        }
+                        else
+                        {
+                            OsDirectoryDeleteFrame* child_frame = arena_allocate(arena, OsDirectoryDeleteFrame, 1);
+                            *child_frame = (OsDirectoryDeleteFrame){
+                                .parent = frame,
+                                .directory = child_directory,
+                                .name = string_duplicate_arena(arena, name, true),
+                                .device = opened.st_dev,
+                                .inode = opened.st_ino,
+                            };
+                            frame = child_frame;
+                        }
+                    }
+                    else if (os_directory_delete_unlink_at(directory, name, 0) != 0 && errno != ENOENT)
+                    {
+                        result = false;
+                    }
+                }
+            }
+            else
+            {
+                int read_error = errno;
+                OsDirectoryDeleteFrame* finished = frame;
+                OsDirectoryDeleteFrame* parent = finished->parent;
+                int parent_descriptor = parent ? dirfd(parent->directory) : root_parent;
+                struct stat selected_again;
+                if (os_directory_delete_stat_at(parent_descriptor, finished->name, &selected_again) == 0)
+                {
+                    bool same = S_ISDIR(selected_again.st_mode) && selected_again.st_dev == finished->device &&
+                                selected_again.st_ino == finished->inode;
+                    if (!same)
+                    {
+                        result = false;
+                    }
+                    else if (os_directory_delete_unlink_at(parent_descriptor, finished->name, AT_REMOVEDIR) != 0 &&
+                             errno != ENOENT)
+                    {
+                        result = false;
+                    }
+                }
+                else if (errno != ENOENT)
+                {
+                    result = false;
+                }
+                if (read_error)
+                {
+                    result = false;
+                }
+                if (closedir(finished->directory) != 0)
+                {
+                    result = false;
+                }
+                frame = parent;
+            }
+        }
+        if (close(root_parent) != 0)
+        {
+            result = false;
+        }
+    }
+    return result;
+}
+#elif defined(_WIN32)
 typedef enum OsDirectoryDeleteTaskKind
 {
     OS_DIRECTORY_DELETE_ENTER,
@@ -1205,10 +1453,6 @@ BUSTER_GLOBAL_LOCAL void os_directory_delete_task_push(Arena* arena, OsDirectory
 
 BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
 {
-    // ENTER tasks enumerate and close one directory before its children are
-    // processed. POST tasks then remove it after those children. Re-checking
-    // every ENTER target prevents a directory swapped for a link from being
-    // followed between enumeration and processing.
     bool result = true;
     OsDirectoryDeleteTask* tasks = 0;
     os_directory_delete_task_push(arena, &tasks, root, OS_DIRECTORY_DELETE_ENTER, 0);
@@ -1216,66 +1460,6 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
     {
         OsDirectoryDeleteTask* task = tasks;
         tasks = task->next;
-#if defined(__linux__) || defined(__APPLE__)
-        if (task->kind == OS_DIRECTORY_DELETE_POST)
-        {
-            result = (rmdir((const char*)task->path.pointer) == 0 || errno == ENOENT) && result;
-            continue;
-        }
-        if (task->kind == OS_DIRECTORY_DELETE_ENTRY)
-        {
-            result = os_file_delete(task->path) && result;
-            continue;
-        }
-
-        struct stat path_stats;
-        if (lstat((const char*)task->path.pointer, &path_stats) != 0)
-        {
-            result = errno == ENOENT && result;
-            continue;
-        }
-        if (S_ISLNK(path_stats.st_mode))
-        {
-            result = os_file_delete(task->path) && result;
-            continue;
-        }
-        if (!S_ISDIR(path_stats.st_mode))
-        {
-            result = false;
-            continue;
-        }
-        DIR* directory = opendir((const char*)task->path.pointer);
-        if (!directory)
-        {
-            result = errno == ENOENT && result;
-            continue;
-        }
-        os_directory_delete_task_push(arena, &tasks, task->path, OS_DIRECTORY_DELETE_POST, 0);
-        for (;;)
-        {
-            errno = 0;
-            struct dirent* directory_entry = readdir(directory);
-            if (!directory_entry)
-            {
-                result = errno == 0 && result;
-                break;
-            }
-            String8 name = string_from_pointer((const char8*)directory_entry->d_name);
-            if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
-            {
-                continue;
-            }
-            String8 entry_path = string_format_z(arena, S8("{S8}/{S8}"), task->path, name);
-            bool descend = directory_entry->d_type == DT_DIR;
-            if (directory_entry->d_type == DT_UNKNOWN)
-            {
-                struct stat entry_stats;
-                descend = lstat((const char*)entry_path.pointer, &entry_stats) == 0 && S_ISDIR(entry_stats.st_mode);
-            }
-            os_directory_delete_task_push(arena, &tasks, entry_path, descend ? OS_DIRECTORY_DELETE_ENTER : OS_DIRECTORY_DELETE_ENTRY, 0);
-        }
-        closedir(directory);
-#elif defined(_WIN32)
         if (task->kind == OS_DIRECTORY_DELETE_POST || task->kind == OS_DIRECTORY_DELETE_ENTRY)
         {
             result = os_windows_entry_delete(arena, task->path, task->attributes) && result;
@@ -1326,7 +1510,6 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
         }
         result = GetLastError() == ERROR_NO_MORE_FILES && result;
         FindClose(find);
-#endif
     }
     return result;
 }
@@ -1339,10 +1522,9 @@ bool os_directory_delete(String8 path)
     if (path.length)
     {
         BUSTER_VALIDATE(!path.pointer[path.length]);
-        // The walk holds its pending worklist in this arena for the whole
-        // traversal. A scratch arena would be reachable from any nested
-        // scratch_begin(0, 0) inside the walk, whose scratch_end would rewind the
-        // tasks still queued above it, so own the storage outright instead.
+        // The walk retains its descriptor frames or pending Windows tasks
+        // for the whole traversal. Own their arena so nested scratch scopes can
+        // never rewind live frame names or tasks.
         Arena* arena = arena_create((ArenaCreation){0});
         result = os_directory_delete_walk(arena, path);
         arena_destroy(arena, 1);
