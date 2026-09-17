@@ -108,6 +108,8 @@ jobs:
           /usr/bin/gcc-13 -g0 -O0 -fPIE -c main.c -o legacy-main.o
           /usr/bin/gcc-13 -g0 -O0 -no-pie legacy-main.o -L . -ldataprobe \
             -Wl,-rpath,'$ORIGIN' -o legacy-reference
+          readelf -rW legacy-reference | tee legacy.relocations
+          test "$(grep -c R_X86_64_COPY legacy.relocations)" -ge 2
           set +e
           env -i LD_LIBRARY_PATH="$root" ./legacy-reference > legacy.stdout 2> legacy.stderr
           legacy_status=$?
@@ -123,9 +125,21 @@ jobs:
           clang_path="$(command -v clang)"
           for compiler in /usr/bin/gcc-13 "$clang_path"; do
             tag="$(basename "$compiler")"
-            "$compiler" -g0 -O0 -fPIC -pie main.c -L . -ldataprobe \
-              -Wl,-rpath,'$ORIGIN' -o "reference-$tag"
-            env -i LD_LIBRARY_PATH="$root" "./reference-$tag" | tee "reference-$tag.stdout"
+            work="$root/$tag"
+            mkdir -p "$work"
+            cp library.c main.c "$work/"
+            (
+              cd "$work"
+              "$compiler" -g0 -O0 -fPIC -shared library.c -o libdataprobe.so
+              "$compiler" -g0 -O0 -fPIC -pie main.c -L . -ldataprobe \
+                -Wl,-rpath,'$ORIGIN' -o reference
+              readelf -rW reference | tee relocations
+              if grep -q R_X86_64_COPY relocations; then
+                echo "$tag PIC/PIE reference unexpectedly contains a copy relocation" >&2
+                exit 1
+              fi
+              env -i LD_LIBRARY_PATH="$work" ./reference | tee reference.stdout
+            )
           done
 
       - name: Acceptance result and reproduction
