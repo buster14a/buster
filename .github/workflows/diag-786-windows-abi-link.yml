@@ -1,4 +1,4 @@
-name: Isolate issue 786 parameter e ranges
+name: Measure issue 786 CodeView range floor
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  isolate:
+  measure:
     runs-on: windows-2025
     timeout-minutes: 12
     steps:
@@ -21,7 +21,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh run download 35282867175 --repo buster14a/buster --name issue-786-windows-abi-link-35282867175 --dir diag
 
-      - name: Build parameter-e variants
+      - name: Build extent variants
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -53,9 +53,9 @@ jobs:
               raise RuntimeError(wanted)
 
           section_offset, section_size = section(original, '.debug$S')
-          section_end = section_offset + section_size
           cursor = section_offset + 4
-          ranges = []
+          section_end = section_offset + section_size
+          target = None
           while cursor + 8 <= section_end:
               cursor = (cursor + 3) & ~3
               kind, length = struct.unpack_from('<LL', original, cursor)
@@ -64,6 +64,7 @@ jobs:
                   record = payload
                   procedure = ''
                   local = ''
+                  seen = 0
                   while record + 4 <= payload + length:
                       record_length, record_type = struct.unpack_from('<HH', original, record)
                       total = record_length + 2
@@ -71,68 +72,24 @@ jobs:
                           procedure = original[record + 39:record + total].split(b'\0', 1)[0].decode('utf-8')
                       elif record_type == 0x113E:
                           local = original[record + 10:record + total].split(b'\0', 1)[0].decode('utf-8')
+                          seen = 0
                       elif procedure == 'many_ints' and local == 'e' and record_type in (0x1141, 0x1142):
-                          start = struct.unpack_from('<I', original, record + 8)[0]
-                          extent = struct.unpack_from('<H', original, record + 14)[0]
-                          ranges.append({'offset': record, 'type': record_type, 'start': start, 'extent': extent})
+                          if seen == 3:
+                              target = record
+                          seen += 1
                       record += total
               cursor = (payload + length + 3) & ~3
-
-          if len(ranges) != 4:
-              raise RuntimeError(ranges)
-          print([(hex(item['type']), item['start'], item['extent']) for item in ranges])
-
-          def dummy(data, index):
-              offset = ranges[index]['offset']
-              struct.pack_into('<H', data, offset + 2, 0x113E)
-              struct.pack_into('<I', data, offset + 4, 0x74)
-              struct.pack_into('<H', data, offset + 8, 0)
-              data[offset + 10:offset + 16] = b'x\0\0\0\0\0'
-
-          def write(name, remove=(), mutate=None):
+          if target is None:
+              raise RuntimeError('target range not found')
+          print('target=', target, 'start=', struct.unpack_from('<I', original, target + 8)[0])
+          for extent in range(1, 33):
               data = bytearray(original)
-              for index in remove:
-                  dummy(data, index)
-              if mutate:
-                  mutate(data)
-              pathlib.Path(f'diag/{name}.o').write_bytes(data)
+              struct.pack_into('<H', data, target + 14, extent)
+              pathlib.Path(f'diag/extent-{extent}.o').write_bytes(data)
+          '@ | Set-Content -Encoding utf8 diag\extent.py
+          python diag\extent.py
 
-          pathlib.Path('diag/original.o').write_bytes(original)
-          for index in range(4):
-              write(f'drop-e-{index}', (index,))
-          write('keep-e-0', (1,2,3))
-          write('keep-e-01', (2,3))
-          write('keep-e-012', (3,))
-          write('drop-e-12', (1,2))
-          write('drop-e-13', (1,3))
-          write('drop-e-23', (2,3))
-
-          def frames_to_register(data):
-              for index in (1,3):
-                  offset = ranges[index]['offset']
-                  struct.pack_into('<H', data, offset + 2, 0x1141)
-                  struct.pack_into('<HH', data, offset + 4, 328, 0)
-          write('e-frames-to-register', mutate=frames_to_register)
-
-          def bridge_first_gap(data):
-              offset = ranges[1]['offset']
-              struct.pack_into('<I', data, offset + 8, 90)
-              struct.pack_into('<H', data, offset + 14, 71)
-          write('e-bridge-first-gap', mutate=bridge_first_gap)
-
-          def bridge_last_gap(data):
-              offset = ranges[3]['offset']
-              struct.pack_into('<I', data, offset + 8, 192)
-              struct.pack_into('<H', data, offset + 14, 15)
-          write('e-bridge-last-gap', mutate=bridge_last_gap)
-
-          def extend_last(data):
-              struct.pack_into('<H', data, ranges[3]['offset'] + 14, 16)
-          write('e-extend-last', mutate=extend_last)
-          '@ | Set-Content -Encoding utf8 diag\parameter-e.py
-          python diag\parameter-e.py
-
-      - name: Link parameter-e variants
+      - name: Link every extent
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -143,29 +100,26 @@ jobs:
           $Sanitizer = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
           $LibraryArgs = @()
           foreach ($LibraryPath in @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })) { $LibraryArgs += "-L$LibraryPath" }
-          $Names = @('original','drop-e-0','drop-e-1','drop-e-2','drop-e-3','keep-e-0','keep-e-01','keep-e-012','drop-e-12','drop-e-13','drop-e-23','e-frames-to-register','e-bridge-first-gap','e-bridge-last-gap','e-extend-last')
           $Results = @()
-          foreach ($Name in $Names) {
-            & clang.exe @Sanitizer @LibraryArgs diag\caller.o "diag\$Name.o" -o "diag\$Name.exe" 2>&1 |
-              Tee-Object -FilePath "diag\link-$Name.log" |
-              ForEach-Object { Write-Host $_ }
+          foreach ($Extent in 1..32) {
+            & clang.exe @Sanitizer @LibraryArgs diag\caller.o "diag\extent-$Extent.o" -o "diag\extent-$Extent.exe" *> "diag\link-extent-$Extent.log"
             $Code = $LASTEXITCODE
-            $Results += "$Name=$Code"
-            Write-Host "LINK_RESULT $Name=$Code"
+            $Results += "$Extent=$Code"
+            Write-Host "LINK_RESULT extent=$Extent code=$Code"
           }
-          $Results | Set-Content -Encoding ascii diag\parameter-e-summary.txt
-          Get-Content diag\parameter-e-summary.txt
+          $Results | Set-Content -Encoding ascii diag\extent-summary.txt
+          Get-Content diag\extent-summary.txt
           exit 0
 
-      - name: Retain parameter-e isolation output
+      - name: Retain range-floor output
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-786-parameter-e-${{ github.run_id }}
+          name: issue-786-range-floor-${{ github.run_id }}
           path: |
-            diag/parameter-e-summary.txt
-            diag/link-*.log
-            diag/parameter-e.py
+            diag/extent-summary.txt
+            diag/link-extent-*.log
+            diag/extent.py
           retention-days: 3
           if-no-files-found: error
           compression-level: 6
