@@ -34,11 +34,11 @@ jobs:
           status=$?
           set -e
           while (( status != 0 )) && { test -d .git/rebase-merge || test -d .git/rebase-apply; }; do
-            conflicts="$(git diff --name-only --diff-filter=U)"
+            conflicts="$(git diff --name-only --diff-filter=U | sort)"
             printf '\nCONFLICTS\n%s\n' "$conflicts" >> "$out/rebase.log"
-            unknown="$(printf '%s\n' "$conflicts" | grep -Ev '^(docs/native-retirement-support-v1\.tsv|docs/native-retirement-census\.md)$' || true)"
-            if [[ -z "$conflicts" || -n "$unknown" ]]; then break; fi
-            CONFLICT_FILES="$conflicts" python3 - <<'PY'
+
+            if [[ -n "$conflicts" ]] && ! printf '%s\n' "$conflicts" | grep -Eqv '^(docs/native-retirement-support-v1\.tsv|docs/native-retirement-census\.md)$'; then
+              CONFLICT_FILES="$conflicts" python3 - <<'PY'
           from collections import Counter
           from hashlib import sha256
           from pathlib import Path
@@ -57,7 +57,8 @@ jobs:
           data = Path('tests/ci_tools_test.py').read_bytes()
           row = f"tests/ci_tools_test.py\tsupport-file\tdependency-only\t{len(data)}\t{sha256(data).hexdigest()}"
           matches = [i for i, line in enumerate(lines) if line.startswith('tests/ci_tools_test.py\t')]
-          if len(matches) != 1: raise SystemExit(f'ci_tools rows: {len(matches)}')
+          if len(matches) != 1:
+              raise SystemExit(f'ci_tools rows: {len(matches)}')
           lines[matches[0]] = row
           ledger.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
@@ -76,10 +77,78 @@ jobs:
               f"{roles['support-file']} support files\nand {roles['dormant-custom-language']} dormant custom-language files."
           )
           prose, count = pattern.subn(generated, prose)
-          if count != 1: raise SystemExit(f'census paragraphs: {count}')
+          if count != 1:
+              raise SystemExit(f'census paragraphs: {count}')
           census.write_text(prose, encoding='utf-8')
           PY
-            git add docs/native-retirement-support-v1.tsv docs/native-retirement-census.md
+              git add docs/native-retirement-support-v1.tsv docs/native-retirement-census.md
+
+            elif [[ "$conflicts" == $'docs/agents/testing.md\nsrc/buster/lib/compiler/frontend/c/c_gen.c' ]]; then
+              python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          marker = re.compile(r'<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>>[^\n]*\n', re.S)
+
+          docs = Path('docs/agents/testing.md')
+          docs_text = docs.read_text(encoding='utf-8')
+          docs_matches = list(marker.finditer(docs_text))
+          if len(docs_matches) != 1:
+              raise SystemExit(f'expected one testing.md conflict, found {len(docs_matches)}')
+          ours, topic = docs_matches[0].group(1), docs_matches[0].group(2)
+          ios_start = ours.find('- On GitHub-hosted macOS arm64')
+          if ios_start < 0:
+              raise SystemExit('hosted iOS policy missing from current testing.md side')
+          merged_docs = topic.rstrip() + '\n' + ours[ios_start:]
+          docs_text = docs_text[:docs_matches[0].start()] + merged_docs + docs_text[docs_matches[0].end():]
+          docs.write_text(docs_text, encoding='utf-8')
+
+          c_path = Path('src/buster/lib/compiler/frontend/c/c_gen.c')
+          c_text = c_path.read_text(encoding='utf-8')
+          blocks = list(marker.finditer(c_text))
+          if len(blocks) != 3:
+              raise SystemExit(f'expected three c_gen.c conflicts, found {len(blocks)}')
+
+          cast_and_guard = '''                    // Canonical pointer RMW takes an integer byte offset,
+                    // including GNU's unscaled offset, never a pointer value.
+                              value = c_ir_emit_cast(builder, value, builder->ptrdiff_type, source);
+                              if (value.value == IR_ID_UNDERLYING_INVALID)
+                              {
+                                  return false;
+                              }
+                              if (!selected->builtin_atomic_gnu)
+          '''
+          replacements = [blocks[0].group(2), cast_and_guard, '']
+          pieces = []
+          cursor = 0
+          for block, replacement in zip(blocks, replacements):
+              pieces.append(c_text[cursor:block.start()])
+              pieces.append(replacement)
+              cursor = block.end()
+          pieces.append(c_text[cursor:])
+          c_text = ''.join(pieces)
+
+          unsafe = '''                        IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
+                                  IrType* element = ir_type_from_id(&builder->program->types, value_type->element_type);
+                                  if (!element || !element->layout.resolved || !element->layout.size || value.value == IR_ID_UNDERLYING_INVALID)
+          '''
+          safe = '''                        IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
+                                  IrType* element = value_type ? ir_type_from_id(&builder->program->types, value_type->element_type) : 0;
+                                  if (!value_type || !element || !element->layout.resolved || !element->layout.size)
+          '''
+          if c_text.count(unsafe) != 1:
+              raise SystemExit(f'expected one pointer scaling guard, found {c_text.count(unsafe)}')
+          c_text = c_text.replace(unsafe, safe, 1)
+          if '<<<<<<<' in c_text or '>>>>>>>' in c_text:
+              raise SystemExit('unresolved marker remains in c_gen.c')
+          c_path.write_text(c_text, encoding='utf-8')
+          PY
+              git add docs/agents/testing.md src/buster/lib/compiler/frontend/c/c_gen.c
+
+            else
+              break
+            fi
+
             set +e
             GIT_EDITOR=true git rebase --continue >> "$out/rebase.log" 2>&1
             status=$?
