@@ -1,0 +1,150 @@
+name: GCC 13 sanitized runtime acceptance
+
+# The ordinary GCC combination row is compile-only. This opt-in gate executes
+# the complete registered suite with GCC 13's fatal ASan/UBSan/LSan policy and
+# retains the host-toolchain alias control that originally exposed #594.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/gcc13-sanitized.yml'
+      - 'docs/gcc13-sanitized-acceptance.md'
+
+permissions:
+  contents: read
+
+# Preserve acceptance attempts rather than cancelling a nearly complete suite
+# when its diagnostic branch advances.
+concurrency:
+  group: gcc13-sanitized-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    if: >-
+      ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          (github.event_name == 'workflow_dispatch' || github.head_ref == 'codex/571-594-gcc13-acceptance') }}
+    name: GCC 13 ASan/UBSan/LSan test_all
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout exact candidate
+        id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve GCC 13
+        id: gcc
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          if [[ ! -x /usr/bin/gcc-13 ]]; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes gcc-13
+          fi
+          /usr/bin/gcc-13 --version | tee "$RUNNER_TEMP/buster-ci/gcc13-version.log"
+          test "$(/usr/bin/gcc-13 -dumpfullversion -dumpversion | cut -d. -f1)" = 13
+          clang --version | tee "$RUNNER_TEMP/buster-ci/bootstrap-clang-version.log"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/buster-ci/source-sha.txt"
+
+      - name: Run GCC 13 fatal-sanitizer registered suite
+        id: suite
+        shell: bash
+        env:
+          BUSTER_GCC: /usr/bin/gcc-13
+          BUSTER_TEST_JOBS: '1'
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          exec > >(tee "$RUNNER_TEMP/buster-ci/gcc13-sanitized-test-all.log") 2>&1
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --sanitize --cc gcc --ci --linker DEFAULT -- \
+            -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          grep -E '^(CMAKE_C_COMPILER|CMAKE_C_COMPILER_ID|CMAKE_C_COMPILER_VERSION)(:|=)' build/CMakeCache.txt || true
+          "$driver" build --config Debug -t test_all -- -j4
+
+      - name: Reproduce and repair the ELF alias reference boundary
+        id: alias_oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/elf-data-alias"
+          rm -rf "$root"
+          mkdir -p "$root" "$RUNNER_TEMP/buster-ci"
+          exec > >(tee "$RUNNER_TEMP/buster-ci/elf-data-alias.log") 2>&1
+
+          cat > "$root/library.c" <<'EOF'
+          long data_0 = 7;
+          extern long pair_0 __attribute__((alias("data_0")));
+          long read_0(void) { return data_0; }
+          EOF
+
+          cat > "$root/main.c" <<'EOF'
+          #include <stdio.h>
+
+          extern long data_0;
+          extern long pair_0;
+          extern long read_0(void);
+
+          int main(void)
+          {
+              long *volatile left = &pair_0;
+              long *volatile right = &data_0;
+              printf("before equal=%d data_0=%ld read_0=%ld\n", left == right, data_0, read_0());
+              if (left != right || data_0 != 7 || read_0() != 7) return 1;
+              pair_0++;
+              printf("after equal=%d data_0=%ld read_0=%ld\n", left == right, data_0, read_0());
+              return data_0 == 8 && read_0() == 8 ? 0 : 2;
+          }
+          EOF
+
+          cd "$root"
+          /usr/bin/gcc-13 -g0 -O0 -fPIC -shared library.c -o libdataprobe.so
+          /usr/bin/gcc-13 -g0 -O0 -fPIE -c main.c -o legacy-main.o
+          /usr/bin/gcc-13 -g0 -O0 -no-pie legacy-main.o -L . -ldataprobe \
+            -Wl,-rpath,'$ORIGIN' -o legacy-reference
+          set +e
+          env -i LD_LIBRARY_PATH="$root" ./legacy-reference > legacy.stdout 2> legacy.stderr
+          legacy_status=$?
+          set -e
+          cat legacy.stdout
+          cat legacy.stderr >&2
+          printf 'legacy_status=%s\n' "$legacy_status"
+          if [[ "$legacy_status" -eq 0 ]]; then
+            echo 'legacy GCC 13 non-PIE control unexpectedly preserved alias identity' >&2
+            exit 1
+          fi
+
+          clang_path="$(command -v clang)"
+          for compiler in /usr/bin/gcc-13 "$clang_path"; do
+            tag="$(basename "$compiler")"
+            "$compiler" -g0 -O0 -fPIC -pie main.c -L . -ldataprobe \
+              -Wl,-rpath,'$ORIGIN' -o "reference-$tag"
+            env -i LD_LIBRARY_PATH="$root" "./reference-$tag" | tee "reference-$tag.stdout"
+          done
+
+      - name: Acceptance result and reproduction
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ubuntu-24.04
+          BUSTER_CI_REQUIRED: gcc suite alias_oracle
+          BUSTER_CI_REPRO: See docs/gcc13-sanitized-acceptance.md for the exact GCC 13 fatal-sanitizer and ELF alias commands.
+        run: python3 tools/ci_summary.py
+
+      - name: Retain GCC 13 acceptance evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gcc13-sanitized-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/buster-ci/
+            ${{ runner.temp }}/elf-data-alias/
+          if-no-files-found: error
+          retention-days: 14
