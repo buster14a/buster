@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RAW="$RUNNER_TEMP/issue-67-raw"
+EVIDENCE="docs/performance-audits/evidence/2026-09-17-issue-67"
+mkdir -p "$RAW" "$EVIDENCE"
+
+clang --version > "$EVIDENCE/compiler.txt"
+uname -a > "$EVIDENCE/host.txt"
+lscpu >> "$EVIDENCE/host.txt"
+grep '^MemTotal:' /proc/meminfo > "$EVIDENCE/memory.txt"
+printf '%s\n' "$GITHUB_SHA" > "$EVIDENCE/baseline-commit.txt"
+printf 'https://github.com/%s/actions/runs/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$EVIDENCE/workflow-run.txt"
+
+configure_measurement_tree() {
+    local directory="$1"
+    cmake -S . -B "$directory" -G Ninja \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_BUILD_TYPE=Release \
+        "-DCMAKE_C_FLAGS_RELEASE=-O1 -g" \
+        -DBUSTER_CI=OFF \
+        -DBUSTER_UNITY_BUILD=OFF \
+        -DBUSTER_DEBUG_INFO=OFF \
+        -DBUSTER_FRAME_POINTERS=OFF \
+        -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
+        -DBUSTER_REQUIRE_VULKAN_SDK=OFF \
+        > "$RAW/$(basename "$directory")-configure.log" 2>&1
+}
+
+configure_true_optimized_tree() {
+    local directory="$1"
+    cmake -S . -B "$directory" -G Ninja \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUSTER_CI=OFF \
+        -DBUSTER_UNITY_BUILD=ON \
+        -DBUSTER_DEBUG_INFO=OFF \
+        -DBUSTER_FRAME_POINTERS=OFF \
+        -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
+        -DBUSTER_REQUIRE_VULKAN_SDK=OFF \
+        > "$RAW/$(basename "$directory")-configure.log" 2>&1
+}
+
+metadata_target() {
+    local directory="$1"
+    ninja -C "$directory" -t targets all | \
+        sed -n '/x86_64_metadata_test\.c\.o:/ {s/:.*//; p; q;}'
+}
+
+run_timed() {
+    local label="$1"
+    shift
+    set +e
+    /usr/bin/time -v -o "$EVIDENCE/${label}.time" \
+        "$@" > "$RAW/${label}.log" 2>&1
+    local status=$?
+    set -e
+    printf '%s\n' "$status" > "$EVIDENCE/${label}.status"
+}
+
+capture_module_summary() {
+    local label="$1"
+    grep -E 'TEST_MODULE_TIMING .*module=(x86_64_metadata_tests|x86_64_completion_census_tests) ' \
+        "$RAW/${label}.log" > "$EVIDENCE/${label}-modules.txt" || true
+}
+
+# Current-source baseline: reproduce the audited optimization/debug combination
+# on this exact runner before changing the build graph.
+BASELINE_DIR="build/issue-67-baseline"
+configure_measurement_tree "$BASELINE_DIR"
+BASELINE_TARGET="$(metadata_target "$BASELINE_DIR")"
+test -n "$BASELINE_TARGET"
+ninja -C "$BASELINE_DIR" -t commands "$BASELINE_TARGET" > "$EVIDENCE/baseline-object-command.txt"
+run_timed baseline-object ninja -C "$BASELINE_DIR" -j1 "$BASELINE_TARGET"
+if [[ "$(cat "$EVIDENCE/baseline-object.status")" == 0 ]]; then
+    stat -c '%s' "$BASELINE_DIR/$BASELINE_TARGET" > "$EVIDENCE/baseline-object.bytes"
+    run_timed baseline-build ninja -C "$BASELINE_DIR" -j1 ide
+    if [[ "$(cat "$EVIDENCE/baseline-build.status")" == 0 ]]; then
+        run_timed baseline-test timeout 2400s env \
+            BUSTER_TEST_JOBS=1 BUSTER_TEST_TABLE_AUDITS=1 \
+            "$GITHUB_WORKSPACE/$BASELINE_DIR/ide" test --verbose=1 --ci=1
+        capture_module_summary baseline-test
+    fi
+fi
+
+# Apply the focused source/build-graph repair. Exact replacement counts make
+# this fail closed if main moved underneath the session.
+python3 - <<'PY'
+from pathlib import Path
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+cmake_path = Path("CMakeLists.txt")
+cmake = cmake_path.read_text()
+cmake = replace_once(
+    cmake,
+    "# Test sources follow the selected build mode: test.c includes them in unity\n"
+    "# builds, while CMake compiles them as independent translation units otherwise.\n",
+    "# Most test sources follow the selected build mode: test.c includes them in\n"
+    "# unity builds, while CMake compiles them independently otherwise. The x86\n"
+    "# metadata tests stay standalone in every mode: optimizing their very large\n"
+    "# assertion body has historically exceeded 3.9 GiB of compiler RSS, and\n"
+    "# folding it into ide.c would transfer that peak to the unity translation unit.\n",
+    "test source comment",
+)
+cmake = replace_once(
+    cmake,
+    "    src/buster/tests/compiler/assembly/x86_64_forwarding_test.c\n"
+    "    src/buster/tests/compiler/assembly/x86_64_metadata_test.c\n"
+    "    src/buster/tests/compiler/assembly/x86_64_tls_test.c\n",
+    "    src/buster/tests/compiler/assembly/x86_64_forwarding_test.c\n"
+    "    src/buster/tests/compiler/assembly/x86_64_tls_test.c\n",
+    "ordinary test source inventory",
+)
+cmake = replace_once(
+    cmake,
+    "    src/buster/tests/compiler/driver/object_path_test.c\n"
+    ")\n"
+    "set(BUSTER_TEST_HEADERS\n",
+    "    src/buster/tests/compiler/driver/object_path_test.c\n"
+    ")\n"
+    "set(BUSTER_STANDALONE_TEST_SOURCES\n"
+    "    src/buster/tests/compiler/assembly/x86_64_metadata_test.c\n"
+    ")\n"
+    "set(BUSTER_TEST_HEADERS\n",
+    "standalone test source inventory",
+)
+cmake = replace_once(
+    cmake,
+    "set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)\n",
+    "set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)\n"
+    "\n"
+    "# Runtime behavior and whole-table coverage do not depend on optimizing this\n"
+    "# assertion harness. Keep only this source at O0 in optimized configurations,\n"
+    "# and omit its debug records in non-sanitized optimized builds. Production\n"
+    "# code and every other test retain the requested configuration.\n"
+    "set(BUSTER_X86_METADATA_TEST_SOURCE\n"
+    "    \"${CMAKE_CURRENT_SOURCE_DIR}/src/buster/tests/compiler/assembly/x86_64_metadata_test.c\"\n"
+    ")\n"
+    "if (C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)\n"
+    "    set_property(SOURCE \"${BUSTER_X86_METADATA_TEST_SOURCE}\" APPEND PROPERTY COMPILE_OPTIONS\n"
+    "        \"$<${BUSTER_OPTIMIZE_CONDITION}:-O0>\"\n"
+    "        \"$<$<AND:${BUSTER_OPTIMIZE_CONDITION},$<NOT:$<BOOL:${BUSTER_SANITIZE}>>>:-g0>\"\n"
+    "    )\n"
+    "elseif (C_COMPILER_MSVC_FAMILIY)\n"
+    "    set_property(SOURCE \"${BUSTER_X86_METADATA_TEST_SOURCE}\" APPEND PROPERTY COMPILE_OPTIONS\n"
+    "        \"$<${BUSTER_OPTIMIZE_CONDITION}:/Od>\"\n"
+    "    )\n"
+    "endif()\n",
+    "per-source memory policy",
+)
+cmake = replace_once(
+    cmake,
+    "    if (${is_buster_program})\n"
+    "        target_sources(${name} PRIVATE ${BUSTER_TEST_HEADERS})\n"
+    "        set(test_sources ${BUSTER_TEST_SOURCES})\n",
+    "    if (${is_buster_program})\n"
+    "        target_sources(${name} PRIVATE ${BUSTER_TEST_HEADERS})\n"
+    "        foreach(standalone_test_source IN LISTS BUSTER_STANDALONE_TEST_SOURCES)\n"
+    "            target_sources(${name} PRIVATE \"${CMAKE_CURRENT_SOURCE_DIR}/${standalone_test_source}\")\n"
+    "        endforeach()\n"
+    "        set(test_sources ${BUSTER_TEST_SOURCES})\n",
+    "standalone target sources",
+)
+cmake_path.write_text(cmake)
+
+test_path = Path("src/buster/tests/test.c")
+test_source = test_path.read_text()
+test_source = replace_once(
+    test_source,
+    "#include <buster/tests/compiler/assembly/x86_64_metadata_test.c>\n",
+    "",
+    "unity metadata implementation include",
+)
+test_path.write_text(test_source)
+PY
+
+git diff --check
+
+# Same-host, same-Clang before/after measurement.
+CANDIDATE_DIR="build/issue-67-candidate"
+configure_measurement_tree "$CANDIDATE_DIR"
+CANDIDATE_TARGET="$(metadata_target "$CANDIDATE_DIR")"
+test -n "$CANDIDATE_TARGET"
+ninja -C "$CANDIDATE_DIR" -t commands "$CANDIDATE_TARGET" > "$EVIDENCE/candidate-object-command.txt"
+grep -q -- '-O0' "$EVIDENCE/candidate-object-command.txt"
+grep -q -- '-g0' "$EVIDENCE/candidate-object-command.txt"
+run_timed candidate-object ninja -C "$CANDIDATE_DIR" -j1 "$CANDIDATE_TARGET"
+if [[ "$(cat "$EVIDENCE/candidate-object.status")" == 0 ]]; then
+    stat -c '%s' "$CANDIDATE_DIR/$CANDIDATE_TARGET" > "$EVIDENCE/candidate-object.bytes"
+fi
+run_timed candidate-build ninja -C "$CANDIDATE_DIR" -j1 ide
+if [[ "$(cat "$EVIDENCE/candidate-build.status")" == 0 ]]; then
+    run_timed candidate-test timeout 2400s env \
+        BUSTER_TEST_JOBS=1 BUSTER_TEST_TABLE_AUDITS=1 \
+        "$GITHUB_WORKSPACE/$CANDIDATE_DIR/ide" test --verbose=1 --ci=1
+    capture_module_summary candidate-test
+fi
+
+# A fresh default Release tree proves that the actual optimized unity product
+# plus the standalone low-memory test object builds and runs.
+UNITY_DIR="build/issue-67-unity-release"
+configure_true_optimized_tree "$UNITY_DIR"
+UNITY_TARGET="$(metadata_target "$UNITY_DIR")"
+test -n "$UNITY_TARGET"
+ninja -C "$UNITY_DIR" -t commands "$UNITY_TARGET" > "$EVIDENCE/candidate-unity-object-command.txt"
+grep -q -- '-DBUSTER_UNITY_BUILD=1' "$EVIDENCE/candidate-unity-object-command.txt"
+grep -q -- '-O0' "$EVIDENCE/candidate-unity-object-command.txt"
+grep -q -- '-g0' "$EVIDENCE/candidate-unity-object-command.txt"
+run_timed candidate-unity-build ninja -C "$UNITY_DIR" -j1 ide
+if [[ "$(cat "$EVIDENCE/candidate-unity-build.status")" == 0 ]]; then
+    run_timed candidate-unity-test timeout 2400s env \
+        BUSTER_TEST_JOBS=1 BUSTER_TEST_TABLE_AUDITS=1 \
+        "$GITHUB_WORKSPACE/$UNITY_DIR/ide" test --verbose=1 --ci=1
+    capture_module_summary candidate-unity-test
+fi
+
+# Preserve compact evidence and generate the audit from observed data.
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+
+evidence = Path("docs/performance-audits/evidence/2026-09-17-issue-67")
+
+
+def text(path: str, default: str = "not run") -> str:
+    file = evidence / path
+    return file.read_text().strip() if file.exists() else default
+
+
+def status(label: str) -> str:
+    value = text(f"{label}.status")
+    return "pass" if value == "0" else f"exit {value}"
+
+
+def time_metrics(label: str) -> tuple[str, int | None]:
+    body = text(f"{label}.time", "")
+    elapsed = "not run"
+    rss = None
+    for line in body.splitlines():
+        if "Elapsed (wall clock) time" in line:
+            elapsed = line.rsplit(": ", 1)[-1].strip()
+        elif "Maximum resident set size (kbytes)" in line:
+            rss = int(line.rsplit(":", 1)[-1].strip())
+    return elapsed, rss
+
+
+def rss_cell(value: int | None) -> str:
+    if value is None:
+        return "not run"
+    return f"{value:,} KiB ({value / 1024:.1f} MiB)"
+
+
+def object_bytes(label: str) -> str:
+    value = text(f"{label}.bytes", "")
+    return f"{int(value):,}" if value else "not produced"
+
+
+def module_records(label: str) -> dict[str, dict[str, str]]:
+    records: dict[str, dict[str, str]] = {}
+    body = text(f"{label}-modules.txt", "")
+    for line in body.splitlines():
+        fields = dict(re.findall(r"([a-z_]+)=([^ ]+)", line))
+        module = fields.get("module")
+        if module:
+            records[module] = fields
+    return records
+
+
+baseline_modules = module_records("baseline-test")
+candidate_modules = module_records("candidate-test")
+unity_modules = module_records("candidate-unity-test")
+required_modules = {"x86_64_metadata_tests", "x86_64_completion_census_tests"}
+if required_modules - candidate_modules.keys():
+    raise SystemExit("candidate non-unity test log is missing required x86 module summaries")
+if required_modules - unity_modules.keys():
+    raise SystemExit("candidate unity test log is missing required x86 module summaries")
+
+comparison_fields = ("passed", "failed", "assertions", "status")
+for module in required_modules:
+    for field in comparison_fields:
+        if candidate_modules[module].get(field) != unity_modules[module].get(field):
+            raise SystemExit(f"candidate split/unity mismatch: {module} {field}")
+        if module in baseline_modules and baseline_modules[module].get(field) != candidate_modules[module].get(field):
+            raise SystemExit(f"baseline/candidate mismatch: {module} {field}")
+
+candidate_elapsed, candidate_rss = time_metrics("candidate-object")
+unity_build_elapsed, unity_build_rss = time_metrics("candidate-unity-build")
+if candidate_rss is None or candidate_rss >= 1572864:
+    raise SystemExit(f"candidate metadata object exceeded 1.5 GiB budget: {candidate_rss}")
+if unity_build_rss is None or unity_build_rss >= 3145728:
+    raise SystemExit(f"candidate optimized full build exceeded 3 GiB budget: {unity_build_rss}")
+
+baseline_elapsed, baseline_rss = time_metrics("baseline-object")
+baseline_test_elapsed, _ = time_metrics("baseline-test")
+candidate_test_elapsed, _ = time_metrics("candidate-test")
+unity_test_elapsed, _ = time_metrics("candidate-unity-test")
+
+
+def module_cell(records: dict[str, dict[str, str]], module: str) -> str:
+    record = records.get(module)
+    if not record:
+        return "not run"
+    duration = int(record.get("duration_ns", "0")) / 1_000_000
+    return (f"{record.get('assertions', '?')} assertions, "
+            f"{record.get('failed', '?')} failed, {duration:.1f} ms")
+
+
+memory_drop = "not available"
+if baseline_rss:
+    memory_drop = f"{(1.0 - candidate_rss / baseline_rss) * 100:.1f}%"
+
+run_url = text("workflow-run.txt")
+compiler = text("compiler.txt").splitlines()[0]
+baseline_commit = text("baseline-commit.txt")
+audit = f"""# X86 metadata test compile-memory audit — 2026-09-17
+
+## Scope
+
+Issue #67 reported that isolated Clang `-O1 -g` compilation of
+`x86_64_metadata_test.c` reached about 3,925,872 KiB RSS. This audit repeats
+that source-level measurement before and after the focused build-graph change
+on one GitHub-hosted runner, then builds and executes a fresh default Release
+unity tree. The baseline source commit is `{baseline_commit}`; the temporary
+measurement workflow is preserved at [run {run_url.rsplit('/', 1)[-1]}]({run_url}).
+
+The repair does not split or remove assertions. It keeps the existing registered
+`x86_64_metadata_tests` function and the separate canonical-tree-only completion
+census, but always compiles the heavyweight metadata test source as its own
+object. In optimized configurations only that assertion harness uses `-O0`;
+non-sanitized optimized builds also use `-g0`. Production modules and all other
+tests retain the requested optimization/debug policy.
+
+## Environment
+
+- Compiler: `{compiler}`
+- Runner: `ubuntu-24.04`; details are in `evidence/2026-09-17-issue-67/host.txt`.
+- Serial compilation (`ninja -j1`) and `BUSTER_TEST_JOBS=1` remove parallel-RSS
+  ambiguity. Table audits were explicitly enabled for every test run.
+
+## Isolated metadata object
+
+Both rows use the same compiler, host, non-unity CMake graph, and explicit
+`-O1 -g` Release baseline. The candidate's source policy appears last in its
+compile command and therefore changes only this object.
+
+| Source | Status | Wall time | Peak RSS | Object bytes |
+|---|---:|---:|---:|---:|
+| Baseline `-O1 -g` | {status('baseline-object')} | {baseline_elapsed} | {rss_cell(baseline_rss)} | {object_bytes('baseline-object')} |
+| Candidate standalone `-O0 -g0` | {status('candidate-object')} | {candidate_elapsed} | {rss_cell(candidate_rss)} | {object_bytes('candidate-object')} |
+
+Peak metadata-object RSS fell by **{memory_drop}**. The enforced regression
+budget is **1.5 GiB** for this object, well below the historical ~3.93 GiB peak.
+
+## Runtime and optimized-tree acceptance
+
+| Tree | Build/test status | Full-suite wall time | Metadata module | Completion census |
+|---|---:|---:|---|---|
+| Baseline non-unity `-O1 -g` | {status('baseline-build')} / {status('baseline-test')} | {baseline_test_elapsed} | {module_cell(baseline_modules, 'x86_64_metadata_tests')} | {module_cell(baseline_modules, 'x86_64_completion_census_tests')} |
+| Candidate non-unity `-O1 -g` | {status('candidate-build')} / {status('candidate-test')} | {candidate_test_elapsed} | {module_cell(candidate_modules, 'x86_64_metadata_tests')} | {module_cell(candidate_modules, 'x86_64_completion_census_tests')} |
+| Candidate unity default Release (`-O3` product) | {status('candidate-unity-build')} / {status('candidate-unity-test')} | {unity_test_elapsed} | {module_cell(unity_modules, 'x86_64_metadata_tests')} | {module_cell(unity_modules, 'x86_64_completion_census_tests')} |
+
+The fresh optimized unity build completed in {unity_build_elapsed} with peak
+compiler/build RSS {rss_cell(unity_build_rss)}. The workflow enforces a **3 GiB**
+full-build ceiling. Split and unity runs produced identical pass/fail/assertion
+counts for both x86 modules; when the baseline suite completed, its same fields
+were also required to match. Durations are observations, not claimed speedups:
+the candidate intentionally trades optimization of test-only assertion code for
+bounded compiler memory.
+
+## Reproduction
+
+The exact compiler invocations and GNU `time -v` records are committed under
+`docs/performance-audits/evidence/2026-09-17-issue-67/`. The measurement trees
+used:
+
+```sh
+cmake -S . -B build/issue-67-baseline -G Ninja \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release \
+  "-DCMAKE_C_FLAGS_RELEASE=-O1 -g" -DBUSTER_UNITY_BUILD=OFF \
+  -DBUSTER_DEBUG_INFO=OFF -DBUSTER_FRAME_POINTERS=OFF
+ninja -C build/issue-67-baseline -j1 \
+  CMakeFiles/ide.dir/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+
+cmake -S . -B build/issue-67-unity-release -G Ninja \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release \
+  -DBUSTER_UNITY_BUILD=ON -DBUSTER_DEBUG_INFO=OFF \
+  -DBUSTER_FRAME_POINTERS=OFF
+ninja -C build/issue-67-unity-release -j1 ide
+BUSTER_TEST_JOBS=1 BUSTER_TEST_TABLE_AUDITS=1 \
+  build/issue-67-unity-release/ide test --verbose=1 --ci=1
+```
+"""
+Path("docs/performance-audits/2026-09-17-x86-metadata-test-memory.md").write_text(audit)
+PY
+
+# Candidate correctness is mandatory; baseline failure is retained as evidence
+# but does not prevent the repair from being published.
+test "$(cat "$EVIDENCE/candidate-object.status")" == 0
+test "$(cat "$EVIDENCE/candidate-build.status")" == 0
+test "$(cat "$EVIDENCE/candidate-test.status")" == 0
+test "$(cat "$EVIDENCE/candidate-unity-build.status")" == 0
+test "$(cat "$EVIDENCE/candidate-unity-test.status")" == 0
+git diff --check
