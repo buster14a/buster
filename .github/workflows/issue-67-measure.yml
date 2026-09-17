@@ -43,7 +43,6 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
           "$driver" generate --cc clang --ci --linker DEFAULT -- \
             -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-          "$driver" build --config Release -t dependencies -- -j1
 
           ninja_file=build-Release.ninja
           ninja -C build -f "$ninja_file" -t targets all > "$evidence/targets.txt"
