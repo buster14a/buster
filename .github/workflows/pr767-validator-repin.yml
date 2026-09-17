@@ -1,0 +1,93 @@
+name: PR 767 validator support repin
+
+on:
+  push:
+    branches:
+      - claude/clever-cori-qh0b15
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr-767-validator-support-repin
+  cancel-in-progress: false
+
+jobs:
+  repin:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact repair revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Repin every validator-owned support identity
+        env:
+          OLD_DIGEST: aa883c302a326143ff5e2f670bdb5e66dd85162e45033246c40df5f5a3411c21
+          NEW_DIGEST: 1990e8a8c219d019d256a7f5dbe8a78a5d9fb18b9be11a6ab0962f7edb2e2b24
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          old = os.environ['OLD_DIGEST']
+          new = os.environ['NEW_DIGEST']
+          support = Path('docs/native-retirement-support-v1.tsv')
+          actual = hashlib.sha256(support.read_bytes()).hexdigest()
+          if actual != new:
+              raise SystemExit(f'refusing repin: support declaration is {actual}, expected {new}')
+
+          replacements = {
+              Path('tools/native_retirement_contract.py'): (
+                  f'FULL_SUPPORT_CONTRACT_SHA256 = "{old}"',
+                  f'FULL_SUPPORT_CONTRACT_SHA256 = "{new}"',
+              ),
+              Path('tools/native_retirement_materializer.py'): (
+                  f'SUPPORT_CONTRACT_SHA256 = "{old}"',
+                  f'SUPPORT_CONTRACT_SHA256 = "{new}"',
+              ),
+          }
+          for path, (before, after) in replacements.items():
+              text = path.read_text(encoding='utf-8')
+              if text.count(before) != 1:
+                  raise SystemExit(f'refusing repin: expected old identity exactly once in {path}')
+              if new in text:
+                  raise SystemExit(f'refusing repin: new identity already occurs unexpectedly in {path}')
+              path.write_text(text.replace(before, after), encoding='utf-8')
+
+          binding = Path('tools/native_retirement_performance_binding.py').read_text(encoding='utf-8')
+          expected_binding = f'SUPPORT_DECLARATION_SHA256 = "{new}"'
+          if binding.count(expected_binding) != 1 or old in binding:
+              raise SystemExit('performance binding does not already carry the reviewed merged identity')
+
+          Path('.github/workflows/pr767-validator-repin.yml').unlink()
+          PY
+          git add -A
+          git diff --cached --check
+          git commit -m 'Repin validator-owned native retirement support identity'
+          test -z "$(git status --porcelain)"
+      - name: Validate the clean repinned tree
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_performance_identity_test.py
+          python3 tools/native_retirement_performance_binding_test.py
+          git show --check --format=fuller --stat HEAD
+          test -z "$(git status --porcelain)"
+      - name: Push validated repair
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
