@@ -1,84 +1,35 @@
-name: Assemble issue 513 reconciled candidate
+name: Validate issue 513 reconciled candidate
 on:
   push:
     branches: [codex/513-reconcile-probe]
     paths: [.github/workflows/issue513-merge-probe.yml]
 permissions:
-  contents: write
+  contents: read
 jobs:
-  assemble:
+  test-all:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: codex/513-reconciled-candidate
           fetch-depth: 0
-      - name: Reconcile the recovered cutover with current main
+      - name: Static cutover guards
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin main recovery/6aa84ae5/522-514-cutover-review
-          git checkout -B codex/513-reconciled-candidate origin/main
-          git cherry-pick --no-commit 0f7676b27def833143727947fa0e20682007a73f >/tmp/replay.log 2>&1 || true
-          cat /tmp/replay.log
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def resolve(path: str, choices: list[str]) -> None:
-              source = Path(path)
-              lines = source.read_text().splitlines(keepends=True)
-              result: list[str] = []
-              index = 0
-              conflict = 0
-              while index < len(lines):
-                  if not lines[index].startswith('<<<<<<<'):
-                      result.append(lines[index])
-                      index += 1
-                      continue
-                  start = index
-                  separator = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip('\n') == '=======')
-                  end = next(i for i in range(separator + 1, len(lines)) if lines[i].startswith('>>>>>>>'))
-                  ours = lines[start + 1:separator]
-                  theirs = lines[separator + 1:end]
-                  if conflict >= len(choices):
-                      raise RuntimeError(f'{path}: unexpected conflict {conflict + 1}')
-                  choice = choices[conflict]
-                  if choice == 'ours':
-                      result.extend(ours)
-                  elif choice == 'theirs':
-                      result.extend(theirs)
-                  elif choice == 'both':
-                      result.extend(ours)
-                      result.extend(theirs)
-                  else:
-                      raise RuntimeError(f'{path}: unknown choice {choice!r}')
-                  conflict += 1
-                  index = end + 1
-              if conflict != len(choices):
-                  raise RuntimeError(f'{path}: resolved {conflict}, expected {len(choices)}')
-              source.write_text(''.join(result))
-
-          resolve('src/buster/lib/compiler/codegen/codegen.c',
-                  ['theirs', 'ours', 'ours', 'theirs', 'theirs', 'theirs', 'theirs'])
-          resolve('src/buster/lib/compiler/codegen/codegen_internal.h', ['both'])
-          resolve('src/buster/tests/compiler/driver/driver_test.c',
-                  ['ours', 'theirs', 'ours', 'ours'])
-
-          driver = Path('src/buster/tests/compiler/driver/driver_test.c')
-          text = driver.read_text()
-          text = text.replace(
-              '// 256-bit vector arguments, once through the default pipeline and once\n'
-              '    // through the canonical emitter, whose VMOVDQU move is the shape the\n'
-              '    // default pipeline only reaches through per-function fallback.\n',
-              '// 256-bit vector arguments through the default and MIR_STACK-compatible\n'
-              '    // allocator spellings. Both lanes exercise the same MIR machine path.\n')
-          driver.write_text(text)
-          PY
+          git diff --check origin/main...HEAD
           ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- '*.c' '*.h' '*.md' '*.py'
-          git add -A
-          test -z "$(git diff --name-only --diff-filter=U)"
-          git diff --cached --check
-          git commit -m 'compiler: retire the direct native canonical backend'
-          git push --force origin HEAD:codex/513-reconciled-candidate
+          test "$(git rev-list --count origin/main..HEAD)" = 1
+      - name: Release test suite
+        run: ./build.sh test_all --config Release
+  self-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/513-reconciled-candidate
+          fetch-depth: 0
+      - name: Release fixed point
+        run: ./build.sh test_self_host --config Release
