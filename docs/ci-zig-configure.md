@@ -53,11 +53,12 @@ files. The artifact is never restored as a build or test cache.
 ## Diagnostic run
 
 The normal PR, push, tag, and merge-group paths keep profiling disabled. A
-manual **Buster CI** dispatch also remains uninstrumented unless the repository
-variable `BUSTER_CMAKE_PROFILE` is explicitly set to `true`. For one diagnostic
-cohort, set that variable, dispatch the workflow, and clear it after the runs
-have been created. The workflow maps it to the existing native
-`BUSTER_CMAKE_PROFILE=1` switch only for `workflow_dispatch` events.
+manual **Buster CI** dispatch also remains uninstrumented unless its boolean
+`cmake_profile` input is enabled. That value is captured in the dispatch event
+and is therefore immutable for every delayed or retried job in the run; no
+repository setting needs to be changed or cleared. The workflow maps the input
+to the existing native `BUSTER_CMAKE_PROFILE=1` switch only for
+`workflow_dispatch` events.
 
 This control changes instrumentation only. It does not merge the `release` and
 `checks` partitions, remove a row, or create a configure-only workflow. The
