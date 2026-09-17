@@ -1,0 +1,29 @@
+name: Inspect issue 708 source anchors
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/issue-708-inspect.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: ${{ github.head_ref == 'fix/708-native-frame-link-cache' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('src/buster/tests/compiler/driver/driver_test.c').read_text()
+          function = text[text.index('BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors'):]
+          start = function.index('if (native_target && executable_cpu')
+          end = function.index('scratch_end(temporary);', start)
+          print(repr(function[start-40:end+len('scratch_end(temporary);')+10]))
+          PY
