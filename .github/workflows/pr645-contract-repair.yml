@@ -84,7 +84,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Refresh every repository-owned project receipt
+      - name: Refresh every present repository-owned project receipt
         shell: bash
         run: |
           set -euo pipefail
@@ -92,7 +92,7 @@ jobs:
           mkdir -p "$out"
           git rev-parse HEAD > "$out/original-head.txt"
           git rev-parse 'HEAD^{tree}' > "$out/original-tree.txt"
-          python3 - "$out/changed-identities.tsv" <<'PY'
+          python3 - "$out/changed-identities.tsv" "$out/deferred-generated-identities.txt" <<'PY'
           from hashlib import sha256
           from pathlib import Path
           import json
@@ -101,14 +101,17 @@ jobs:
 
           manifest_path = Path('docs/native-retirement-dependencies-v1.json')
           change_path = Path(sys.argv[1])
+          deferred_path = Path(sys.argv[2])
           original = manifest_path.read_text(encoding='utf-8')
           manifest = json.loads(original)
           changes = []
+          deferred = []
 
           for row in manifest.get('projects', []):
               source = Path(row['source'])
               if not source.is_file():
-                  raise SystemExit(f'missing repository-owned project source: {source}')
+                  deferred.append(str(source))
+                  continue
               data = source.read_bytes()
               actual_bytes = len(data)
               actual_sha = sha256(data).hexdigest()
@@ -116,7 +119,7 @@ jobs:
                   changes.append((str(source), row.get('bytes'), actual_bytes, row.get('sha256'), actual_sha))
 
           if not changes:
-              raise SystemExit('expected at least one stale repository-owned project receipt')
+              raise SystemExit('expected at least one stale present project receipt')
 
           lines = original.splitlines(keepends=True)
           for source, old_bytes, actual_bytes, old_sha, actual_sha in changes:
@@ -142,14 +145,15 @@ jobs:
               stream.write('source\told_bytes\tnew_bytes\told_sha256\tnew_sha256\n')
               for change in changes:
                   stream.write('\t'.join(str(value) for value in change) + '\n')
-          print(f'refreshed {len(changes)} repository-owned project receipt(s)')
+          deferred_path.write_text('\n'.join(deferred) + ('\n' if deferred else ''), encoding='utf-8')
+          print(f'refreshed {len(changes)} present project receipt(s); deferred {len(deferred)} generated source(s)')
           for source, old_bytes, actual_bytes, old_sha, actual_sha in changes:
               print(f'{source}: {old_bytes}/{old_sha} -> {actual_bytes}/{actual_sha}')
           PY
           git diff --check
           git diff -- docs/native-retirement-dependencies-v1.json > "$out/manifest.patch"
 
-      - name: Replay pinned external closure
+      - name: Regenerate and replay pinned external closure
         shell: bash
         run: |
           set -euo pipefail
