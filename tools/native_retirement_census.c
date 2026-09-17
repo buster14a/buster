@@ -42,8 +42,8 @@ BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER(
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
-BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("aea04fb09de00349eea368c1cf97af315bfe943a2c6ce73c5951fd44a548dcdd");
-BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 341;
+BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER("a4496cc2d236b1c705c147a89ba1decb80a42c1abbd63a4f65db72d73c67d040");
+BUSTER_GLOBAL_LOCAL u64 const nrc_applicability_ledger_count = 359;
 
 typedef struct NrcInput NrcInput;
 struct NrcInput { String8 path; String8 role; String8 compile_obligation; String8 sha256; u64 hash; u64 bytes; };
@@ -1236,7 +1236,9 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             disposition = baseline_supported ? (statistics.valid && records_valid ? S8("supported-native-gap") : S8("supported-native-gap-missing-telemetry"))
                                              : S8("baseline-and-mir-unresolved");
             settings->gaps += baseline_supported;
-            settings->failures += baseline_supported && (!statistics.valid || !records_valid);
+            // An unresolved reference does not excuse a failing MIR child.
+            // Keep the reference counter separate, as the validator does.
+            settings->failures += !baseline_supported || !statistics.valid || !records_valid;
         }
         fprintf(settings->rows, "%llu\t%llu\t%.*s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.*s\t%.*s\t%llu\t%llu\t%.*s\n",
             (unsigned long long)row, (unsigned long long)group,

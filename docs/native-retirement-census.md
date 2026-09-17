@@ -20,8 +20,25 @@ The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 558 inputs,
 410 subjects, 19,680 groups and 78,720 rows: 404 supported-object
 subjects plus 6 registered non-object controls. The original 192-row
-historical gap ledger and all 341 applicability classifications remain
-explicit and source-bound.
+historical gap ledger and the original 341 applicability classifications remain
+explicit and source-bound. Eighteen additional source-bound target exclusions
+bring the applicability ledger to 359 entries:
+
+| Fixture | Object targets retained | Why the other targets are inapplicable |
+| --- | --- | --- |
+| `tests/basic_c_aarch64_abi_contract.c` | All six AArch64 targets | The fixture explicitly rejects non-AArch64 targets. |
+| `tests/uefi_boot.c` | Both UEFI targets | Its included ABI contract asserts the freestanding UEFI data model. |
+| `tests/issue36_target_wchar.c` | All ten hosted targets | Its expected typedef covers hosted ABIs; UEFI's unsigned 16-bit wchar contract has separate UEFI coverage. |
+
+These additions preserve every fixture byte and census row. Their 288
+non-executed rows carry authenticated skip provenance; the 288 rows for the
+three fixtures' applicable targets still execute. They do not waive missing
+libc headers, host-observer assembly failures, function-count disagreements,
+or unresolved archived references. Both clean-candidate and clean-acceptance
+requirements remain active. The validator prints every failing fixture and its
+row count before rejecting an incomplete census, with full detail in the JSON
+and TSV evidence. The producer also counts failed MIR children when their
+direct reference fails, instead of omitting them from its failure counter.
 
 When integrating an admitted inventory update, keep the producer's full-profile
 dimensions and the validator dimensions synchronized. The historical gap ledger
@@ -372,7 +389,7 @@ zero-artifact/zero-counter shape; malformed status, process, fallback, object
 or telemetry evidence remains fatal, and a caller-supplied disposition cannot
 select the skip path. A production manifest is admitted only as
 `profile=full-census`: it must bind
-the exact 549-input/403-subject/77,376-row, four-shard population. The producer
+the exact 558-input/410-subject/78,720-row, four-shard population. The producer
 also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
 directory and binds its SHA-256 in the manifest. The validator checks that
 authenticated seven-column ledger, including all 192 immutable row identities,
@@ -381,11 +398,11 @@ reclassify a declared gap. Smaller fixtures must explicitly use
 `profile=self-test` and can never satisfy production profile acceptance.
 The producer also copies the immutable
 `docs/native-retirement-applicability-v1.tsv` projection and binds its SHA-256.
-For the full profile it must contain the exact authenticated 341 fixture/target
+For the full profile it must contain the exact authenticated 359 fixture/target
 entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
 Only this projection can classify a target-specific residual as
 `platform-inapplicable` or `unavailable`; a result disposition, row count,
-fallback counter or diagnostic cannot forge applicability. Every 77,376 row
+fallback counter or diagnostic cannot forge applicability. Every 78,720 row
 identity and input byte remains in the manifest and validation partition.
 The six whole-fixture non-object controls are authenticated by the support
 contract instead of receiving row outcome classes in this fixture/target

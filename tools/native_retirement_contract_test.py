@@ -429,6 +429,28 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.validate(require_clean=False)
 
+    def test_target_contract_fixtures_keep_their_applicable_object_rows(self):
+        root = Path(__file__).resolve().parents[1]
+        _fields, records = read_table(root / "docs/native-retirement-applicability-v1.tsv")
+        projection = {(record["fixture"], record["target"]): record for record in records}
+        cases = {
+            "tests/basic_c_aarch64_abi_contract.c": {
+                target for target in contract.TARGETS if target.startswith("aarch64-")},
+            "tests/uefi_boot.c": {
+                target for target in contract.TARGETS if target.endswith("-uefi")},
+            "tests/issue36_target_wchar.c": {
+                target for target in contract.TARGETS if not target.endswith("-uefi")},
+        }
+        for fixture, applicable in cases.items():
+            for target in contract.TARGETS:
+                with self.subTest(fixture=fixture, target=target):
+                    record = projection.get((fixture, target))
+                    if target in applicable:
+                        self.assertIsNone(record)
+                    else:
+                        self.assertEqual(record["applicability"], "platform-inapplicable")
+                        self.assertEqual(record["fixture_sha256"], sha((root / fixture).read_bytes()))
+
     def test_authenticated_admitted_supported_precedes_structured_reference_state(self):
         target = next(iter(contract.TARGETS))
         self.install_applicability({("tests/unit.c", target, "admitted-supported", "source-reviewed-residual")})

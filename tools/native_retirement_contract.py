@@ -41,8 +41,8 @@ MAX_RESIDUAL_ROWS = 256
 SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", "allocator", "admission", "reason")
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
-FULL_APPLICABILITY_LEDGER_COUNT = 341
-FULL_APPLICABILITY_LEDGER_SHA256 = "aea04fb09de00349eea368c1cf97af315bfe943a2c6ce73c5951fd44a548dcdd"
+FULL_APPLICABILITY_LEDGER_COUNT = 359
+FULL_APPLICABILITY_LEDGER_SHA256 = "a4496cc2d236b1c705c147a89ba1decb80a42c1abbd63a4f65db72d73c67d040"
 FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "6639387fe418cea3a31e51ca4683809920168b624ea3f270bc0a520b96d2003d"
 FULL_DEPENDENCY_RECEIPT_SHA256 = "28feba705367c1998e13cb306f30d9e8e5bf89f0dd3b373433960c39dcb711f7"
 FULL_DEPENDENCY_PROJECT_SHA256 = "b341e623f5475088fb5abd46b29628fba9accb135c41662e5cedf615635fcb76"
@@ -1411,6 +1411,14 @@ def validate_shards(directories, output, require_clean_candidate=False, require_
         "global_identity_unique": True,
     }
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Print source identities before failing the gate. A prefix of numeric row
+    # IDs hides independent failures in later fixtures and the retained report.
+    for label, failures in (("candidate", candidate_failures), ("reference", reference_failures)):
+        if failures:
+            by_fixture = Counter(row_records[str(row)]["fixture"] for row in failures)
+            print(f"NATIVE_RETIREMENT_FAILURES side={label} rows={len(failures)} fixtures={len(by_fixture)} report={output}")
+            for fixture, count in sorted(by_fixture.items()):
+                print(f"  {fixture}: {count} unresolved rows")
     if require_clean_candidate:
         assert not candidate_failures, f"candidate has unresolved rows: {candidate_failures[:8]}"
     if require_clean_acceptance:
