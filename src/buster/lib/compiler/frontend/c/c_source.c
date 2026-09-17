@@ -3217,6 +3217,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
     S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
     S8_INITIALIZER("_Float16"),
+    S8_INITIALIZER("__bf16"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -5288,16 +5289,29 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
     return result;
 }
 
-// `__has_attribute` answers for the GNU attributes whose semantics this
-// frontend actually implements, by asking the parser's own spelling
-// predicates rather than keeping a second list beside them: `packed` and
-// `aligned` are collected by c_parse_layout_attributes and change the record
-// layout, `vector_size` builds the vector types. An attribute whose spelling
-// is merely accepted and stepped over is not supported and answers 0, so
-// source that selects a layout on this query cannot silently lose it (#639).
-BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)
+// GNU queries use the same spelling predicates/sets as layout and semantic
+// lowering, not a list of attributes the parser merely skips (#639, #666).
+// The selected target matters: the COFF writer cannot preserve weak
+// definitions, and UEFI images refuse lifecycle registrations even though a
+// UEFI relocatable object can carry their arrays. Keep those answers false.
+BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CToken token, Target target)
 {
-    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name);
+    String8 name = c_token_spelling(base, token);
+    u64 binding_words = 0;
+    if (c_attribute_native_binding_target(target))
+    {
+        binding_words = C_ATTRIBUTE_WORDS_ALIAS;
+        if (target.os != OPERATING_SYSTEM_WINDOWS && target.os != OPERATING_SYSTEM_UEFI)
+        {
+            binding_words |= C_ATTRIBUTE_WORDS_WEAK;
+        }
+        if (target.os != OPERATING_SYSTEM_UEFI)
+        {
+            binding_words |= C_ATTRIBUTE_WORDS_CONSTRUCTOR | C_ATTRIBUTE_WORDS_DESTRUCTOR;
+        }
+    }
+    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name) ||
+           c_attribute_noreturn_word(name) || c_token_in_well_known_set(base, token, binding_words);
 }
 
 // `__has_c_attribute` is a different operator over a different namespace, and
@@ -5467,7 +5481,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         {
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),
                                                                     options ? options->target.cpu_arch : CPU_ARCH_COUNT)
-                                    : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
+                                    : c_conditional_attribute_supported(base, arguments[0],
+                                                                        options ? options->target : target_native);
         }
         else if (has_c_attribute && argument_count)
         {

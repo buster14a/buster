@@ -91,6 +91,7 @@ BUSTER_GLOBAL_LOCAL void bootstrap_trace_type(BootstrapTrace* trace, IrType* typ
     bootstrap_trace_u64(trace, (u64)type->calling_convention);
     bootstrap_trace_u64(trace, (u64)type->element_count);
     bootstrap_trace_u64(trace, (u64)type->bit_width);
+    bootstrap_trace_u64(trace, (u64)type->float_format);
     bootstrap_trace_u64(trace, (u64)type->is_signed);
     bootstrap_trace_u64(trace, (u64)type->is_variadic);
     bootstrap_trace_u64(trace, (u64)type->is_atomic);
@@ -344,6 +345,12 @@ void bootstrap_trace_ir(BootstrapTrace* trace, IrProgram* program, IrModule* mod
     bootstrap_trace_u64(trace, (u64)program->data_layout.unsigned_integer128.size);
     bootstrap_trace_u64(trace, (u64)program->data_layout.unsigned_integer128.alignment);
     bootstrap_trace_u64(trace, (u64)program->data_layout.unsigned_integer128.bit_width);
+    bootstrap_trace_u64(trace, (u64)program->data_layout.float16_type.size);
+    bootstrap_trace_u64(trace, (u64)program->data_layout.float16_type.alignment);
+    bootstrap_trace_u64(trace, (u64)program->data_layout.float16_type.bit_width);
+    bootstrap_trace_u64(trace, (u64)program->data_layout.bfloat16_type.size);
+    bootstrap_trace_u64(trace, (u64)program->data_layout.bfloat16_type.alignment);
+    bootstrap_trace_u64(trace, (u64)program->data_layout.bfloat16_type.bit_width);
     bootstrap_trace_u64(trace, (u64)program->data_layout.float_type.size);
     bootstrap_trace_u64(trace, (u64)program->data_layout.float_type.alignment);
     bootstrap_trace_u64(trace, (u64)program->data_layout.float_type.bit_width);

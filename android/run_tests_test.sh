@@ -257,7 +257,8 @@ run_case() {
     local scenario=$1
     local expected_status=$2
     local max_elapsed_ms=$3
-    local state=$test_root/$scenario
+    local case_name=${5:-$scenario}
+    local state=$test_root/$case_name
     local start_ns
     local end_ns
     local elapsed_ms
@@ -281,6 +282,10 @@ run_case() {
             marker_delay_seconds=3
             ;;
     esac
+    # Preserve per-scenario defaults, explicit overrides, and an empty value
+    # that exercises the production wrapper's normal whole-suite deadline.
+    timeout_seconds=${4-$timeout_seconds}
+    local monitor_timeout_seconds=${timeout_seconds:-180}
 
     start_ns=$(date +%s%N)
     set +e
@@ -306,7 +311,7 @@ run_case() {
     end_ns=$(date +%s%N)
     elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-    printf 'CASE %s status=%s elapsed_ms=%s\n' "$scenario" "$status" "$elapsed_ms"
+    printf 'CASE %s status=%s elapsed_ms=%s\n' "$case_name" "$status" "$elapsed_ms"
     if [[ $status -ne $expected_status ]]; then
         echo "assertion failed: $scenario returned $status, expected $expected_status" >&2
         return 1
@@ -316,22 +321,25 @@ run_case() {
         return 1
     fi
     assert_no_owned_producer "$state"
+    if [[ $scenario != install_failure && $scenario != launch_failure ]]; then
+        assert_log_contains "ANDROID_MONITOR_START config=standalone timeout_seconds=$monitor_timeout_seconds" "$state"
+    fi
 
     case "$scenario" in
         success)
             assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=10' "$state"
-            assert_log_matches 'ANDROID_MONITOR_RESULT config=standalone reader_status=10 producer_status=[0-9]+ timeout_seconds=3 elapsed_seconds=[0-9]+ headroom_seconds=[0-9]+ headroom_warning=no$' "$state"
+            assert_log_matches "ANDROID_MONITOR_RESULT config=standalone reader_status=10 producer_status=[0-9]+ timeout_seconds=$monitor_timeout_seconds elapsed_seconds=[0-9]+ headroom_seconds=[0-9]+ headroom_warning=no$" "$state"
             assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=0' "$state"
-            if grep -qF 'of its 3s deadline' "$state/run.log"; then
+            if grep -qF "of its ${monitor_timeout_seconds}s deadline" "$state/run.log"; then
                 echo "assertion failed: comfortable headroom reported a deadline warning" >&2
                 return 1
             fi
             ;;
         slow_success)
-            assert_log_matches 'ANDROID_MONITOR_RESULT config=standalone reader_status=10 producer_status=[0-9]+ timeout_seconds=6 elapsed_seconds=[0-9]+ headroom_seconds=[0-9]+ headroom_warning=yes$' "$state"
+            assert_log_matches "ANDROID_MONITOR_RESULT config=standalone reader_status=10 producer_status=[0-9]+ timeout_seconds=$monitor_timeout_seconds elapsed_seconds=[0-9]+ headroom_seconds=[0-9]+ headroom_warning=yes$" "$state"
             assert_log_contains 'ANDROID_PAYLOAD_RESULT config=standalone phase=monitor status=0' "$state"
             assert_log_contains 'Android compiler tests passed' "$state"
-            assert_log_matches 'warning: Android standalone payload used [0-9]+s of its 6s deadline; [0-9]+s of headroom remain \(warning margin 4s at 75%\)' "$state"
+            assert_log_matches "warning: Android standalone payload used [0-9]+s of its ${monitor_timeout_seconds}s deadline; [0-9]+s of headroom remain \(warning margin $((monitor_timeout_seconds * headroom_percent / 100))s at ${headroom_percent}%\)" "$state"
             ;;
         failure)
             assert_log_contains 'ANDROID_MONITOR_RESULT config=standalone reader_status=11' "$state"
@@ -376,7 +384,7 @@ run_case() {
     if [[ $scenario == success || $scenario == slow_success ]]; then
         marker_ns=$(<"$state/marker.ns")
         marker_tail_ms=$(( (end_ns - marker_ns) / 1000000 ))
-        printf 'CASE %s marker_to_wrapper_ms=%s\n' "$scenario" "$marker_tail_ms"
+        printf 'CASE %s marker_to_wrapper_ms=%s\n' "$case_name" "$marker_tail_ms"
         if (( marker_tail_ms >= 2000 )); then
             echo "assertion failed: success marker tail was ${marker_tail_ms}ms" >&2
             return 1
@@ -392,6 +400,12 @@ run_case malformed 1 6000
 run_case missing_marker 1 2000
 run_case launch_failure 23 2000
 run_case install_failure 24 2000
+# The normal whole-suite budget must not delay either terminal result. Keep
+# the short explicit timeout/malformed-marker controls above as real failures.
+run_case success 0 2000 '' default_deadline_success
+run_case failure 1 2000 '' default_deadline_failure
+run_case success 0 2000 5 override_deadline_success
+run_case slow_success 0 6000 8 override_deadline_slow_success
 
 state=$test_root/interrupt
 mkdir -p "$state"

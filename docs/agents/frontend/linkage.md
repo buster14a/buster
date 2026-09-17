@@ -40,6 +40,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   difference. `static const unsigned short *const ptable = table+128;` in
   musl's `__ctype_b_loc.c` is the shape, and `FILE *const stdout` is the one
   every program has.
+- **GNU attribute feature queries follow semantic support, not parser tolerance.**
+  `c_conditional_attribute_supported` shares spelling sets with the binding
+  walk and the `noreturn` reader. Plain/reserved `noreturn` answers true;
+  native aliases and lifecycle attributes answer true where their consumers
+  preserve them. `weak` remains false on Windows/UEFI because COFF cannot
+  serialize weak definitions. Core Wasm/eBPF do not advertise these native
+  binding families, and UEFI does not advertise lifecycle attributes because
+  its image linker refuses registrations. `_Noreturn` is a specifier, not a
+  GNU query spelling. Keep `__has_c_attribute` separate; this change does not
+  expand its namespace/version contract. `c_test_gnu_attribute_queries` pins
+  the target/spelling matrix and guarded noreturn control flow;
+  `compiler_driver_test_attribute_queries` reads emitted ELF/Mach-O/COFF
+  symbols and initializer arrays, then runs the guarded fixture through
+  native source and object links in all four allocators (GitHub #666).
 - **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
   object file, because musl publishes `malloc`, `free`, `errno` and most of
   its pthread surface as weak aliases of internal names. Weak is
