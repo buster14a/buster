@@ -455,11 +455,17 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 // Invariants may become optimizer assumptions in Release. Validation may not:
 // anything derived from source text, object bytes, file sizes, system calls or
 // other fallible inputs must retain its branch and failure in every build.
+// BUSTER_CHECK states a proven invariant and may become an optimizer
+// assumption. BUSTER_ASSERT is diagnostic only and disappears in optimized
+// builds. BUSTER_VALIDATE retains both its branch and defined failure in every
+// build, so resource and input failures must use it (or return an error).
 #define BUSTER_VALIDATE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("validation failed")), 0) : 0))
 #if BUSTER_OPTIMIZE
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
+#define BUSTER_ASSERT(ok) ((void)sizeof(!!(ok)))
 #else
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
+#define BUSTER_ASSERT(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
 #endif
 // Stated by every global table that is still built on first use. Those builds
 // are unsynchronized on purpose: they run once and every later read is a plain

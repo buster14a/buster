@@ -29,7 +29,10 @@
   item, never by completion order — so the self-hosting fixed point stays
   byte-identical at any lane count. `lane_run` keeps a persistent worker gang
   on the calling thread context and reuses it across phases; do not add phase-
-  local thread creation. Variable-duration work uses an atomic take-index,
+  local thread creation. Gang construction is transactional: new workers stay
+  behind a startup gate until every barrier and thread exists, and a partial
+  construction is cancelled, joined, and destroyed before owner state is
+  published. Variable-duration work uses an atomic take-index,
   writes function- or item-local fragments into stable source-indexed slots,
   and merges them only after a lane barrier.
 - **A global built on first use is prewarmed, never raced.** Several hot

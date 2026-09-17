@@ -104,6 +104,7 @@ BUSTER_F_DECL void arena_reset_to_start(Arena* arena);
 // handful of instructions at each of its ~1.400 call sites.
 BUSTER_F_DECL void arena_allocate_commit(Arena* arena, u64 aligned_size_after);
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void arena_test_fail_next_reserve(void);
 BUSTER_F_DECL void arena_test_fail_next_commit(void);
 #endif
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
