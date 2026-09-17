@@ -1,10 +1,10 @@
-name: Inspect issue 513 cutover conflicts
+name: Preserve issue 513 cutover conflicts
 on:
   push:
     branches: [codex/513-reconcile-probe]
     paths: [.github/workflows/issue513-merge-probe.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
   probe:
     runs-on: ubuntu-24.04
@@ -13,18 +13,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Replay and print conflict neighborhoods
+      - name: Replay and preserve conflict neighborhoods
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main recovery/6aa84ae5/522-514-cutover-review
           git checkout --detach origin/main
           git cherry-pick --no-commit 0f7676b27def833143727947fa0e20682007a73f >/tmp/replay.log 2>&1 || true
-          cat /tmp/replay.log
-          python3 - <<'PY'
+          python3 - <<'PY' >/tmp/issue513-conflicts.txt
           from pathlib import Path
+          print(Path('/tmp/replay.log').read_text(errors='replace'))
           paths = [
               'src/buster/lib/compiler/codegen/codegen.c',
               'src/buster/lib/compiler/codegen/codegen_internal.h',
@@ -35,21 +35,16 @@ jobs:
               starts = [i for i, line in enumerate(lines) if line.startswith('<<<<<<<')]
               print(f'\n===== {name}: {len(starts)} conflict(s), {len(lines)} lines =====')
               for n, start in enumerate(starts, 1):
-                  lo = max(0, start - 50)
-                  end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('>>>>>>>')), start)
-                  hi = min(len(lines), end + 51)
+                  lo = max(0, start - 25)
+                  end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('>>>>>>>'))
+                  hi = min(len(lines), end + 26)
                   print(f'\n--- conflict {n}: lines {start + 1}-{end + 1} ---')
                   for i in range(lo, hi):
                       print(f'{i + 1:07d}: {lines[i]}')
           PY
-          printf '\n===== stage statistics =====\n'
-          for path in \
-            src/buster/lib/compiler/codegen/codegen.c \
-            src/buster/lib/compiler/codegen/codegen_internal.h \
-            src/buster/tests/compiler/driver/driver_test.c; do
-            printf '\n%s\n' "$path"
-            for stage in 1 2 3; do
-              printf 'stage %s: ' "$stage"
-              git show ":$stage:$path" 2>/dev/null | wc -l || true
-            done
-          done
+          git cherry-pick --abort || true
+          git checkout -B codex/513-reconcile-probe origin/codex/513-reconcile-probe
+          cp /tmp/issue513-conflicts.txt issue513-conflicts.txt
+          git add issue513-conflicts.txt
+          git commit -m 'ci: preserve issue 513 merge conflicts [skip ci]'
+          git push origin HEAD:codex/513-reconcile-probe
