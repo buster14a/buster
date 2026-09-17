@@ -19,6 +19,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import check_action_pins
 import ci_pack_evidence
 import ci_summary
 import ci_zig
@@ -771,8 +772,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIn("persist-credentials: false", text)
                 self.assertIn("concurrency:", text)
                 self.assertIn("timeout-minutes:", text)
-                for action in re.findall(r"uses:\s*(\S+)", text):
-                    self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
+                self.assertEqual(check_action_pins.check_text(text, path), [])
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("restore-keys:", text)
         self.assertNotIn("install-vulkan-sdk", text)
@@ -833,20 +833,35 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
 
     def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
-        expected = ("  pull_request:", "  push:", "    branches: [main]",
-                    "    tags: ['**']", "  merge_group:",
-                    "    types: [checks_requested]", "  workflow_dispatch:")
+        common = ("  pull_request:", "  push:", "    branches: [main]",
+                  "    tags: ['**']", "  merge_group:",
+                  "    types: [checks_requested]")
+        expected = {
+            "ci.yml": common + (
+                "  workflow_dispatch:",
+                "    inputs:",
+                "      cmake_profile:",
+                "        description: Retain native per-tree CMake command profiles",
+                "        required: false",
+                "        default: false",
+                "        type: boolean",
+            ),
+            "self-host-audit.yml": common + ("  workflow_dispatch:",),
+        }
         for name in ("ci.yml", "self-host-audit.yml"):
             with self.subTest(workflow=name):
-                text = (ROOT / ".github/workflows" / name).read_text()
-                block = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", text)
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                block = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", workflow)
                 self.assertIsNotNone(block)
                 lines = tuple(line.rstrip() for line in block.group(1).splitlines()
                               if line.strip() and not line.lstrip().startswith("#"))
-                self.assertEqual(lines, expected)
+                self.assertEqual(lines, expected[name])
                 # Default checkout is the PR/merge-group merge revision, not
                 # an independently selected head or a stale branch ref.
-                self.assertNotRegex(text, r"(?m)^\s+(ref|repository):")
+                self.assertNotRegex(workflow, r"(?m)^\s+(ref|repository):")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("inputs.cmake_profile", ci)
+        self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
         suffix = ("${{ github.workflow }}-${{ github.event_name }}-"
@@ -1003,7 +1018,28 @@ printf '%s\n' "$checked"
             source = root / "probe.c"
             executable = root / "probe"
             source.write_text("int main(void) { volatile int x = 2147483647; volatile int y = x + 1; (void)y; return 0; }\n")
-            subprocess.run([compiler, "-fsanitize=undefined", "-fsanitize-recover=all", str(source), "-o", str(executable)], check=True, timeout=30, capture_output=True)
+            try:
+                subprocess.run(
+                    [compiler, "-fsanitize=undefined", "-fsanitize-recover=all",
+                     str(source), "-o", str(executable)],
+                    check=True, timeout=30, capture_output=True, text=True)
+            except subprocess.CalledProcessError as error:
+                diagnostics = "\n".join(
+                    output.strip() for output in (error.stdout, error.stderr)
+                    if output and output.strip()) or "(compiler produced no diagnostics)"
+                runtime = re.search(
+                    r"[^\s:'\"]*libclang_rt\.ubsan[^\s:'\"]*", diagnostics)
+                missing = re.search(
+                    r"(?:cannot (?:find|open)|unable to find|no such file|not found)",
+                    diagnostics, re.IGNORECASE)
+                if runtime and missing:
+                    self.fail(
+                        "UBSan fatality gate unavailable: missing Clang compiler-rt "
+                        f"runtime {runtime.group(0)}.\n"
+                        f"Compiler diagnostics:\n{diagnostics}")
+                self.fail(
+                    "UBSan fatality probe compilation failed before policy validation.\n"
+                    f"Compiler diagnostics:\n{diagnostics}")
             recovering = subprocess.run([str(executable)], env=dict(os.environ, UBSAN_OPTIONS="halt_on_error=0"), capture_output=True, text=True, timeout=30)
             self.assertEqual(recovering.returncode, 0)
             self.assertIn("runtime error", recovering.stderr)

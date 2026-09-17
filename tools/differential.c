@@ -32,6 +32,7 @@ BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
     {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
     {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    {S8("sysv-va-list"), S8("tests/differential/sysv_va_list.c"), S8("tests/differential/sysv_va_list_host.c"), false, {0}, true, true},
     {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true, true},
 #endif
     {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},

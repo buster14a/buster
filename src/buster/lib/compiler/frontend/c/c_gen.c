@@ -269,22 +269,22 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             else if (depth == 2 && inner.kind == C_TOKEN_IDENTIFIER)
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                                              C_SYMBOL_WELL_KNOWN_BIT(WEAK) | C_SYMBOL_WELL_KNOWN_BIT(WEAK_GNU));
+                                                              C_ATTRIBUTE_WORDS_WEAK);
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                              C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU)))
+                                              C_ATTRIBUTE_WORDS_CONSTRUCTOR))
                 {
                     binding->is_constructor = true;
                     binding->constructor_priority = c_declaration_initializer_priority(preprocess, item, end);
                 }
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                              C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU)))
+                                              C_ATTRIBUTE_WORDS_DESTRUCTOR))
                 {
                     binding->is_destructor = true;
                     binding->destructor_priority = c_declaration_initializer_priority(preprocess, item, end);
                 }
                 ByteSlice decoded = {0};
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
-                                              C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU)) &&
+                                              C_ATTRIBUTE_WORDS_ALIAS) &&
                     item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                     preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
                     c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
@@ -1348,7 +1348,7 @@ CType* c_type_from_id(CParseResult* parse, CTypeId id)
 // it.
 BUSTER_C_INTERNAL bool c_ir_noreturn_spelling(String8 spelling)
 {
-    return string_equal(spelling, S8("noreturn")) || string_equal(spelling, S8("__noreturn__")) || string_equal(spelling, S8("_Noreturn"));
+    return c_attribute_noreturn_word(spelling) || string_equal(spelling, S8("_Noreturn"));
 }
 
 /* Whether an attribute in [start, end) marks the declaration noreturn. The
@@ -17939,7 +17939,29 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 {
                     return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
-                place = c_ir_emit_dereference_place(builder, child_value, source);
+                IrValueId pointer = child_value;
+                if (selected->builtin_atomic_gnu && pointer.value < builder->function->value_count)
+                {
+                    IrType* pointer_type = ir_type_from_id(&builder->program->types, builder->function->values[pointer.value].canonical_type);
+                    IrType* object = pointer_type && pointer_type->kind == IR_TYPE_POINTER
+                                         ? ir_type_from_id(&builder->program->types, pointer_type->element_type) : 0;
+                    bool scalar = object && (object->kind == IR_TYPE_INTEGER || object->kind == IR_TYPE_BOOLEAN ||
+                                             object->kind == IR_TYPE_ENUM || object->kind == IR_TYPE_POINTER);
+                    if (scalar && !object->is_atomic)
+                    {
+                        // GNU builtins accept ordinary scalar pointers, but
+                        // canonical atomic instructions require an atomic
+                        // place. Cast the pointer view, not the underlying
+                        // object's type; plain accesses retain their semantics.
+                        IrTypeId value_type = object->is_volatile ? object->unqualified_type : object->id;
+                        IrTypeId view_type = c_ir_add_qualified_type(builder->program, value_type, true, object->is_volatile);
+                        IrTypeId view_pointer = view_type.value != IR_ID_UNDERLYING_INVALID
+                                                    ? c_ir_add_pointer_type(builder->program, builder->pointer_types, view_type) : IR_TYPE_ID_INVALID;
+                        pointer = view_pointer.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_emit_cast(builder, pointer, view_pointer, source) : IR_VALUE_ID_INVALID;
+                    }
+                }
+                place = c_ir_emit_dereference_place(builder, pointer, source);
                 frame->as.prepared_call.state->place = place;
             }
             IrTypeId atomic_type = place.value < builder->function->value_count ? builder->function->values[place.value].canonical_type : IR_TYPE_ID_INVALID;
@@ -18174,9 +18196,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // two *bytes* in clang and gcc alike, measured 2026-08-30, so
                 // the GNU spelling deliberately skips the scaling below and
                 // recomputes its answer as an integer.
-                bool pointer_arithmetic = pointer_value && !selected->builtin_atomic_gnu &&
-                                          (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD ||
-                                           selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT);
+                bool pointer_arithmetic = pointer_value && (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD ||
+                                                            selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT);
                 // The scaling below turns an element count into a byte count
                 // for the instruction; `__atomic_add_fetch` has to re-apply the
                 // operation to the value the caller wrote, so the operand is
@@ -18184,15 +18205,20 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrValueId operand_value = value;
                 if (pointer_arithmetic)
                 {
-                    IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
-                    IrType* element = ir_type_from_id(&builder->program->types, value_type->element_type);
+                    // Canonical pointer RMW takes an integer byte offset,
+                    // including GNU's unscaled offset, never a pointer value.
                     value = c_ir_emit_cast(builder, value, builder->ptrdiff_type, source);
-                    if (!element || !element->layout.resolved || !element->layout.size || value.value == IR_ID_UNDERLYING_INVALID)
+                    if (!selected->builtin_atomic_gnu)
                     {
-                        return false;
+                        IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
+                        IrType* element = ir_type_from_id(&builder->program->types, value_type->element_type);
+                        if (!element || !element->layout.resolved || !element->layout.size || value.value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            return false;
+                        }
+                        IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, token, builder->ptrdiff_type);
+                        value = c_ir_emit_binary_value(builder, value, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
                     }
-                    IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, token, builder->ptrdiff_type);
-                    value = c_ir_emit_binary_value(builder, value, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
                 }
                 else
                 {
@@ -48077,7 +48103,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // one function of its own and eBPF has no startup at all -- so there the
     // attribute is a refusal rather than a silently dropped marker, which is
     // what it was everywhere before issue 771.
-    bool initializer_target = target.cpu_arch != CPU_ARCH_WASM64 && target.cpu_arch != CPU_ARCH_BPFEL;
+    bool initializer_target = c_attribute_native_binding_target(target);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];

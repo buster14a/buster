@@ -26,6 +26,16 @@ both directions. Every MIR leg is strict; NONE is a separately checked direct
 oracle. This case checks actual payloads against the host compiler, so matching
 Buster outputs cannot conceal a shared ABI-classification defect.
 
+Desktop SysV x86-64 also runs `sysv-va-list`. Actual public 24-byte,
+eight-aligned lists cross the Clang/GCC boundary in both directions, including
+native-owned destinations, independent copies, named and unnamed GP/FP pool
+exhaustion, and guarded member/array/dereference destinations. A native source
+ends at an inaccessible page to detect oversized reads as well as writes.
+Every MIR leg is strict; the registered driver suite additionally checks all
+four allocators and both frontend forms on Linux/macOS/Android/iOS objects,
+executing the matching desktop ABI with its configured host compiler.
+Cross-generated mobile objects are not native mobile execution evidence.
+
 The native variadic case also exercises ELF AArch64's independent integer
 and floating-point argument files. Its ten-float call exhausts the floating
 registers, and its mixed named parameters check the anonymous integer cursor.
@@ -97,8 +107,9 @@ trials disables automatic reduction. `--no-verify` exists for testing older
 compiler binaries that lack the verification flag, and is recorded explicitly.
 `--strict-mir` requires `-fno-machine-fallback` for every MIR allocator and the
 default mode, retaining NONE and its alias as direct controls. It is recorded in
-the manifest and exact child arguments. The built-in `sysv-sseup` case always
-requires this strict policy, including reductions, without an extra option.
+the manifest and exact child arguments. The built-in `sysv-sseup` and
+`sysv-va-list` cases always require this strict policy, including reductions,
+without an extra option.
 
 ## Configuration authority
 

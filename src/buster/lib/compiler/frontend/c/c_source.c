@@ -5224,7 +5224,7 @@ BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions o
 
 BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* tokens, u32 token_count, String8* name_out, bool* quoted_out);
 
-BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
+BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch)
 {
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_acos",
@@ -5255,7 +5255,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_ia32_pause",
-        "__builtin_types_compatible_p",
+        "__builtin_types_compatible_p", "__builtin_offsetof",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",
@@ -5271,19 +5271,47 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
 
+    if (!result)
+    {
+        // These exact-name classes match the implemented complex constructor
+        // and c_ir_atomic_builtin_spelling, not arbitrary __atomic_* prefixes.
+        // Do not advertise every recognized builtin: other classes include
+        // aliases and target intrinsics outside this query's support contract.
+        // Native backends implement atomic IR; Wasm64 and eBPF reject it, and
+        // eBPF also rejects floating-point operations. Operand type/width
+        // restrictions remain the responsibility of semantic lowering.
+        CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+        bool native = cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+        result = (builtin == C_SYMBOL_BUILTIN_ATOMIC && native) ||
+                 (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64));
+    }
+
     return result;
 }
 
-// `__has_attribute` answers for the GNU attributes whose semantics this
-// frontend actually implements, by asking the parser's own spelling
-// predicates rather than keeping a second list beside them: `packed` and
-// `aligned` are collected by c_parse_layout_attributes and change the record
-// layout, `vector_size` builds the vector types. An attribute whose spelling
-// is merely accepted and stepped over is not supported and answers 0, so
-// source that selects a layout on this query cannot silently lose it (#639).
-BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)
+// GNU queries use the same spelling predicates/sets as layout and semantic
+// lowering, not a list of attributes the parser merely skips (#639, #666).
+// The selected target matters: the COFF writer cannot preserve weak
+// definitions, and UEFI images refuse lifecycle registrations even though a
+// UEFI relocatable object can carry their arrays. Keep those answers false.
+BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CToken token, Target target)
 {
-    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name);
+    String8 name = c_token_spelling(base, token);
+    u64 binding_words = 0;
+    if (c_attribute_native_binding_target(target))
+    {
+        binding_words = C_ATTRIBUTE_WORDS_ALIAS;
+        if (target.os != OPERATING_SYSTEM_WINDOWS && target.os != OPERATING_SYSTEM_UEFI)
+        {
+            binding_words |= C_ATTRIBUTE_WORDS_WEAK;
+        }
+        if (target.os != OPERATING_SYSTEM_UEFI)
+        {
+            binding_words |= C_ATTRIBUTE_WORDS_CONSTRUCTOR | C_ATTRIBUTE_WORDS_DESTRUCTOR;
+        }
+    }
+    return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name) ||
+           c_attribute_noreturn_word(name) || c_token_in_well_known_set(base, token, binding_words);
 }
 
 // `__has_c_attribute` is a different operator over a different namespace, and
@@ -5451,8 +5479,10 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         }
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
-            supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]))
-                                    : c_conditional_attribute_supported(c_token_spelling(base, arguments[0]));
+            supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),
+                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT)
+                                    : c_conditional_attribute_supported(base, arguments[0],
+                                                                        options ? options->target : target_native);
         }
         else if (has_c_attribute && argument_count)
         {

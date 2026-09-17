@@ -13,6 +13,12 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      cmake_profile:
+        description: Retain native per-tree CMake command profiles
+        required: false
+        default: false
+        type: boolean
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -89,7 +95,7 @@ jobs:
           printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/actionlint.log
@@ -100,6 +106,10 @@ jobs:
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
+      # Profiling is diagnostic and opt-in. The manual dispatch input is
+      # captured in the event payload, so delayed and retried jobs use one value.
+      # Every non-dispatch event and the default manual run stay uninstrumented.
+      BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
@@ -178,6 +188,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
           "$BUSTER_CI_PYTHON" tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-shard.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
+          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
@@ -310,6 +321,17 @@ jobs:
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Postprocess only: build.c still owns every configure, probe and build.
+      # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
+      - name: Collect CMake configure evidence
+        id: configure_evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence.py --build-root build --output "$RUNNER_TEMP/buster-ci/configure" --profile-requested "$BUSTER_CMAKE_PROFILE"
+
       - name: Desktop result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
@@ -327,7 +349,7 @@ jobs:
 
       - name: Retain desktop logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
@@ -433,7 +455,7 @@ jobs:
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-ci-upload/
@@ -455,7 +477,7 @@ jobs:
       # A packing failure already fails this lane; still retain the original tree.
       - name: Retain unpacked native logs
         if: ${{ !cancelled() && steps.pack.outcome != 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -603,7 +625,7 @@ jobs:
 
       - name: Retain mobile logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
@@ -651,7 +673,7 @@ jobs:
           build/uefi-driver test_uefi build/uefi-compiler/Release/ide build/uefi
       - name: Retain firmware execution evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: uefi-boot-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -790,7 +812,7 @@ jobs:
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Retain analyzer inventory, results and measurements
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: clang-analyzer-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -821,7 +843,7 @@ jobs:
         run: 'python3 tools/github_ci_time.py require-jobs --output "$RUNNER_TEMP/desktop-partitions.json"'
       - name: Retain desktop partition inventory
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/desktop-partitions.json
