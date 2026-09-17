@@ -1406,11 +1406,15 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                absolute32s_rel_roundtrip.relocation_count == 1 &&
                                absolute32s_rel_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S &&
                                absolute32s_rel_roundtrip.relocations[0].addend == -4);
-    // The three GOTPCREL spellings are one kind on the way in, which is what
+    // Each GOTPCREL spelling keeps its own kind on the way in, which is what
     // lets a -fPIC object -- this compiler's or clang's -- be linked here at
-    // all.  Local dynamic is the one thread-local model with no kind, and the
-    // refusal names it.
+    // all: the relaxable spellings also say how many bytes of the instruction
+    // precede the field, and the linker rewrites a different instruction
+    // without that.  Every kind writes its own type back out.  Local dynamic
+    // is the one thread-local model with no kind, and the refusal names it.
     u32 gotpc_rel_types[] = {9, 41, 42};
+    ObjectRelocationKind gotpc_rel_kinds[] = {OBJECT_RELOCATION_X86_64_GOTPCREL, OBJECT_RELOCATION_X86_64_GOTPCRELX,
+                                              OBJECT_RELOCATION_X86_64_REX_GOTPCRELX};
     for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(gotpc_rel_types); type_index += 1)
     {
         ObjectArtifact gotpc_rel_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
@@ -1426,7 +1430,21 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         ObjectFile gotpc_rel_roundtrip = object_read(arguments->arena, gotpc_rel_elf.bytes, absolute32s_object.target);
         BUSTER_TEST(arguments, gotpc_rel_offsets_valid && gotpc_rel_roundtrip.error == OBJECT_ERROR_NONE &&
                                    gotpc_rel_roundtrip.relocation_count == 1 &&
-                                   gotpc_rel_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_GOTPCREL);
+                                   gotpc_rel_roundtrip.relocations[0].kind == gotpc_rel_kinds[type_index] &&
+                                   object_relocation_kind_is_x86_got(gotpc_rel_roundtrip.relocations[0].kind));
+        ObjectArtifact gotpc_rel_written = object_write(arguments->arena, &gotpc_rel_roundtrip, OBJECT_FORMAT_ELF64);
+        u64 gotpc_rel_written_section = 0;
+        u64 gotpc_rel_written_target = 0;
+        u64 gotpc_rel_written_data = 0;
+        u32 gotpc_rel_written_type = 0;
+        bool gotpc_rel_written_valid =
+            object_test_elf_relocation_offsets(gotpc_rel_written.bytes, &gotpc_rel_written_section, &gotpc_rel_written_target);
+        if (gotpc_rel_written_valid)
+        {
+            memcpy(&gotpc_rel_written_data, gotpc_rel_written.bytes.pointer + gotpc_rel_written_section + 24, sizeof(gotpc_rel_written_data));
+            memcpy(&gotpc_rel_written_type, gotpc_rel_written.bytes.pointer + gotpc_rel_written_data + 8, sizeof(gotpc_rel_written_type));
+        }
+        BUSTER_TEST(arguments, gotpc_rel_written_valid && gotpc_rel_written_type == gotpc_rel_types[type_index]);
     }
     ObjectArtifact tls_local_dynamic_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
     u64 tls_local_dynamic_section = 0;
