@@ -25,7 +25,7 @@ jobs:
           path = Path("tools/issue_74_apply.py")
           text = path.read_text()
           old = "the C11 name spells in\n"
-          new = "the C11 name spells;\n"
+          new = "the C11 spelling puts in\n"
           if text.count(old) != 2:
               raise SystemExit(f"expected two stale comment anchors, found {text.count(old)}")
           path.write_text(text.replace(old, new))
