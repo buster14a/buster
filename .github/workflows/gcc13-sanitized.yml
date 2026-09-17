@@ -107,7 +107,7 @@ jobs:
           /usr/bin/gcc-13 -g0 -O0 -fPIC -shared library.c -o libdataprobe.so
           /usr/bin/gcc-13 -g0 -O0 -fPIE -c main.c -o legacy-main.o
           /usr/bin/gcc-13 -g0 -O0 -no-pie legacy-main.o -L . -ldataprobe \
-            -Wl,-rpath,'$ORIGIN' -o legacy-reference
+            -Wl,-rpath,\$ORIGIN -o legacy-reference
           readelf -rW legacy-reference | tee legacy.relocations
           test "$(grep -c R_X86_64_COPY legacy.relocations)" -ge 2
           set +e
@@ -132,7 +132,7 @@ jobs:
               cd "$work"
               "$compiler" -g0 -O0 -fPIC -shared library.c -o libdataprobe.so
               "$compiler" -g0 -O0 -fPIC -pie main.c -L . -ldataprobe \
-                -Wl,-rpath,'$ORIGIN' -o reference
+                -Wl,-rpath,\$ORIGIN -o reference
               readelf -rW reference | tee relocations
               if grep -q R_X86_64_COPY relocations; then
                 echo "$tag PIC/PIE reference unexpectedly contains a copy relocation" >&2
