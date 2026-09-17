@@ -1,0 +1,93 @@
+name: Issue 75 diagnostic
+
+on:
+  push:
+    branches: [codex/issue-75-diagnose-20260917]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Buster
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install build and diagnostic tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            clang cmake gdb mold ninja-build strace tcc xz-utils
+
+      - name: Fetch pinned QuickJS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/bellard/quickjs.git "$RUNNER_TEMP/quickjs"
+          git -C "$RUNNER_TEMP/quickjs" checkout --detach 3d5e064e9dd67c70f7962836505a7fa067bf0a4e
+          test -z "$(git -C "$RUNNER_TEMP/quickjs" status --porcelain --untracked-files=all)"
+
+      - name: Build compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh generate --cc clang
+          ./build.sh build --config Release -t ide
+
+      - name: Run QuickJS harness and diagnose failure
+        id: harness
+        shell: bash
+        env:
+          QUICKJS_SOURCE: ${{ runner.temp }}/quickjs
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/issue-75"
+          set +e
+          ./build.sh test_quickjs --config Release "$QUICKJS_SOURCE" 2>&1 | tee "$RUNNER_TEMP/issue-75/harness.log"
+          harness_status=${PIPESTATUS[0]}
+          set -e
+          printf 'status=%s\n' "$harness_status" >> "$GITHUB_OUTPUT"
+
+          output_directory="$({ find "$GITHUB_WORKSPACE/build" -maxdepth 1 -type d -name 'quickjs-2026-06-04-*' -printf '%T@ %p\n' 2>/dev/null || true; } | sort -nr | head -n1 | cut -d' ' -f2-)"
+          printf 'output_directory=%s\n' "$output_directory" | tee "$RUNNER_TEMP/issue-75/output-directory.txt"
+
+          if [[ "$harness_status" -ne 0 && -n "$output_directory" && -x "$output_directory/none/qjs" ]]; then
+            (
+              cd "$QUICKJS_SOURCE"
+              set +e
+              ulimit -c unlimited || true
+              gdb -q -batch \
+                -ex 'set pagination off' \
+                -ex 'set confirm off' \
+                -ex run \
+                -ex 'info registers' \
+                -ex 'x/24i $pc-32' \
+                -ex 'thread apply all bt full' \
+                --args "$output_directory/none/qjs" --stack-size 64M tests/test_std.js \
+                > "$RUNNER_TEMP/issue-75/gdb.log" 2>&1
+              strace -ff -o "$RUNNER_TEMP/issue-75/strace" \
+                "$output_directory/none/qjs" --stack-size 64M tests/test_std.js \
+                > "$RUNNER_TEMP/issue-75/strace.stdout" 2> "$RUNNER_TEMP/issue-75/strace.stderr"
+              printf '%s\n' "$?" > "$RUNNER_TEMP/issue-75/strace-status.txt"
+              set -e
+            )
+            cp "$output_directory/none/qjs" "$RUNNER_TEMP/issue-75/qjs-none" || true
+            find "$output_directory/metrics/none" -type f -maxdepth 1 -print -exec cp {} "$RUNNER_TEMP/issue-75/" \; 2>/dev/null || true
+          fi
+
+          exit "$harness_status"
+
+      - name: Retain diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-75-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-75
+          if-no-files-found: warn
+          retention-days: 7
