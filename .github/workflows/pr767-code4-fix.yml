@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: pr-767-code4-repair
+  group: pr-767-code4-repair-v2
   cancel-in-progress: false
 
 jobs:
