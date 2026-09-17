@@ -145,7 +145,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #elif BUSTER_LINUX || BUSTER_MACOS
     {
-        char* path_buffer = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
+        u64 path_buffer_size;
+        BUSTER_VALIDATE(u64_add_checked(path.length, 1, &path_buffer_size));
+        char* path_buffer = (char*)arena_allocate_bytes(arena, path_buffer_size, 1);
         memcpy(path_buffer, path.pointer, path.length);
         path_buffer[path.length] = 0;
 

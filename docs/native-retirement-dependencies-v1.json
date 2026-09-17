@@ -562,8 +562,8 @@
       "source": "src/buster/lib/file.c",
       "provenance": "repo:src/buster/lib/file.c",
       "destination": "dependencies/project-include/buster/lib/file.c",
-      "bytes": 19499,
-      "sha256": "fc34165ff12b303274a270158cb41e65b53908717e1fb0df87302a02d6b70115"
+      "bytes": 19607,
+      "sha256": "f739ab24c2633f694b288df0de7b8950b384f3a20c2d97688a8f63edbe08d9cc"
     },
     {
       "source": "src/buster/lib/file.h",
@@ -611,15 +611,15 @@
       "source": "src/buster/lib/integer.h",
       "provenance": "repo:src/buster/lib/integer.h",
       "destination": "dependencies/project-include/buster/lib/integer.h",
-      "bytes": 1126,
-      "sha256": "afd6daab7d382e927fd2d13590a07743b567e9aed3a9949881aed2e1c9040ff7"
+      "bytes": 1479,
+      "sha256": "6e23390bec10298d876e1992c1c16aeead1d53768520965f08870ad70ad6c92e"
     },
     {
       "source": "src/buster/lib/os.c",
       "provenance": "repo:src/buster/lib/os.c",
       "destination": "dependencies/project-include/buster/lib/os.c",
-      "bytes": 196028,
-      "sha256": "0cd259aab21dbb3b6dee0e849df8a315031232b5d2907335c66644704903e6fc"
+      "bytes": 196414,
+      "sha256": "e3f63eaa0f4bdcdf38feb979dd010786c63b47a82e66191e61487906b4f4f94c"
     },
     {
       "source": "src/buster/lib/os.h",
@@ -639,15 +639,15 @@
       "source": "src/buster/lib/simd.h",
       "provenance": "repo:src/buster/lib/simd.h",
       "destination": "dependencies/project-include/buster/lib/simd.h",
-      "bytes": 31793,
-      "sha256": "ea861439d302c1f1d265ea58e3db953f798c247059d9054dbc31edb3ee19a130"
+      "bytes": 32019,
+      "sha256": "7e12a18fd0258e86618080a17c90c6314b11649c442768e122fc30909a834a64"
     },
     {
       "source": "src/buster/lib/string.c",
       "provenance": "repo:src/buster/lib/string.c",
       "destination": "dependencies/project-include/buster/lib/string.c",
-      "bytes": 66519,
-      "sha256": "fac69daa66e2ab369bd419311d9cbe5f9f08aaa063204b720115d1172db772d8"
+      "bytes": 67013,
+      "sha256": "1e7580e8adbc7d3a0636bce36cff8af6e4949bfd8bbe35a0c0bfc0843dd5dfc1"
     },
     {
       "source": "src/buster/lib/string.h",

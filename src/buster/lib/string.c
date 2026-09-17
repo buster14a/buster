@@ -1596,7 +1596,9 @@ String16 string16_from_pointer(const char16* pointer)
 
 PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 parts)
 {
-    PosixChar** list = arena_allocate(arena, PosixChar*, parts.length + 1);
+    u64 list_count;
+    BUSTER_VALIDATE(u64_add_checked(parts.length, 1, &list_count));
+    PosixChar** list = arena_allocate(arena, PosixChar*, list_count);
 
     for (u64 i = 0; i < parts.length; i += 1)
     {
@@ -1612,9 +1614,11 @@ PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString
 {
     BUSTER_CHECK(keys.length == values.length);
 
+    u64 environment_count;
+    BUSTER_VALIDATE(u64_add_checked(keys.length, 1, &environment_count));
     // Always return a valid NULL-terminated array, even for zero keys: a NULL PosixStringList
     // (as opposed to an array containing just the terminator) is not a valid execve()/posix_spawn() envp.
-    PosixStringList result = arena_allocate(arena, char8*, keys.length + 1);
+    PosixStringList result = arena_allocate(arena, char8*, environment_count);
 
     for (u64 i = 0; i < keys.length; i += 1)
     {
@@ -1691,11 +1695,13 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
     if (command_line)
     {
         u64 command_line_length = string16_length(command_line);
-        String8* strings = arena_allocate(arena, String8, command_line_length + 1);
+        u64 command_line_capacity;
+        BUSTER_VALIDATE(u64_add_checked(command_line_length, 1, &command_line_capacity));
+        String8* strings = arena_allocate(arena, String8, command_line_capacity);
         // Decoding never expands UTF-16. Reuse one buffer for every argument;
         // each UTF-8 conversion copies its result into independent storage.
         // Allocating the remaining suffix per argument made arena growth quadratic.
-        char16* argument = arena_allocate(arena, char16, command_line_length + 1);
+        char16* argument = arena_allocate(arena, char16, command_line_capacity);
         u64 string_count = 0;
 
         for (u64 i = 0; i < command_line_length;)
@@ -1790,7 +1796,9 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
     // it alone, so one input byte never produces more than one code unit
     // except in a well-formed four-byte sequence, which produces two from
     // four. The UTF-8 byte count is therefore a valid upper bound (#106).
-    char16* pointer = arena_allocate(arena, char16, string.length + null_terminate);
+    u64 code_unit_capacity;
+    BUSTER_VALIDATE(u64_add_checked(string.length, null_terminate, &code_unit_capacity));
+    char16* pointer = arena_allocate(arena, char16, code_unit_capacity);
     u64 result_length = 0;
 
     for (u64 i = 0; i < string.length;)
@@ -1919,7 +1927,9 @@ WindowsStringList windows_environment_block_from_slice_string(Arena* arena, Slic
 
 char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 strings)
 {
-    char** result = arena_allocate(arena, char*, strings.length + 1);
+    u64 list_count;
+    BUSTER_VALIDATE(u64_add_checked(strings.length, 1, &list_count));
+    char** result = arena_allocate(arena, char*, list_count);
     for (u64 i = 0; i < strings.length; i += 1)
     {
         result[i] = string_duplicate_arena(arena, strings.pointer[i], true).pointer;
