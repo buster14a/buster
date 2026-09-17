@@ -1,20 +1,20 @@
-name: Apply issue 409 artifact upload update
+name: Export issue 409 artifact upload update
 
 on:
   push:
     branches: [codex/issue-409-upload-artifact-v7-bootstrap]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch:
+  export:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          persist-credentials: true
+          persist-credentials: false
       - name: Apply and validate the focused patch
         shell: bash
         run: |
@@ -116,13 +116,22 @@ jobs:
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
           python3 tests/ci_tools_test.py -v
-      - name: Commit the validated patch
+      - name: Export validated files
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --cached --check
-          git commit -m "ci: run artifact uploads on native Node 24"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          output="$RUNNER_TEMP/issue-409-output"
+          mkdir -p "$output/.github/workflows" "$output/tools" "$output/docs" "$output/tests"
+          cp .github/workflows/ci.yml "$output/.github/workflows/ci.yml"
+          cp tools/check_action_pins.py "$output/tools/check_action_pins.py"
+          cp docs/ci-action-pins.md "$output/docs/ci-action-pins.md"
+          cp tests/action_pins_test.py "$output/tests/action_pins_test.py"
+          git diff --binary -- .github/workflows/ci.yml tools/check_action_pins.py docs/ci-action-pins.md tests/action_pins_test.py > "$output/issue-409.patch"
+          printf 'base=%s\nnew_upload_artifact=043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n' "$(git rev-parse HEAD^)" > "$output/metadata.txt"
+      - name: Upload validated files with native Node 24 action
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-409-validated-files-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-409-output/
+          if-no-files-found: error
+          retention-days: 1
