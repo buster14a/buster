@@ -1,8 +1,9 @@
 // CodeView emission from the canonical debug model: the .debug$S symbol
 // and .debug$T type streams a COFF object carries for Windows debuggers,
 // built from DebugModule records. codeview_emit_field_list chains bounded
-// type records, and codeview_scope_walk_make indexes scopes once per build.
-// ByteWriter owns bounded primitive writes; this file owns allocation/layout.
+// type records, codeview_scope_walk_make indexes scopes once per build, and
+// codeview_symbol_stream_offset keeps scope links in concatenated symbol-payload
+// coordinates. ByteWriter owns bounded writes; this file owns allocation/layout.
 // pdb.c packages these streams into a standalone PDB at link time.
 
 #include <buster/lib/compiler/codeview/codeview.h>
@@ -81,6 +82,41 @@ BUSTER_GLOBAL_LOCAL void codeview_subsection_end(ByteWriter* buffer, u64 length_
 {
     byte_writer_patch_u32_le(buffer, length_offset, (u32)(buffer->count - (length_offset + 4)));
     byte_writer_align4(buffer);
+}
+
+// Scope links name records in the module symbol stream: its four-byte
+// signature followed by every DEBUG_S_SYMBOLS payload, with all subsection
+// headers and interleaved C13 data removed. Translate a raw .debug$S record
+// offset while the subsection that owns it is still being emitted.
+BUSTER_GLOBAL_LOCAL u32 codeview_symbol_stream_offset(ByteWriter* buffer, u64 symbol_stream_offset, u64 length_offset, u64 record_offset)
+{
+    u32 result = 0;
+    u64 payload_offset = length_offset + 4;
+    if (record_offset < payload_offset || symbol_stream_offset > UINT32_MAX ||
+        record_offset - payload_offset > UINT32_MAX - symbol_stream_offset)
+    {
+        buffer->overflow = true;
+    }
+    else
+    {
+        result = (u32)(symbol_stream_offset + record_offset - payload_offset);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_symbol_subsection_end(ByteWriter* buffer, u64 length_offset, u64* symbol_stream_offset)
+{
+    u64 payload_offset = length_offset + 4;
+    if (!symbol_stream_offset || buffer->count < payload_offset || *symbol_stream_offset > UINT32_MAX ||
+        buffer->count - payload_offset > UINT32_MAX - *symbol_stream_offset)
+    {
+        buffer->overflow = true;
+    }
+    else
+    {
+        *symbol_stream_offset += buffer->count - payload_offset;
+    }
+    codeview_subsection_end(buffer, length_offset);
 }
 
 // Opens a symbol record and returns the offset of its length field; the
@@ -314,8 +350,10 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_scope_variables(ByteWriter* symbols, Debu
 typedef struct CodeviewScopeFrame CodeviewScopeFrame;
 struct CodeviewScopeFrame
 {
+    u64 end_pointer_offset;
     DebugScopeId scope;
     u32 next_child;
+    u32 record_offset;
 };
 
 typedef struct CodeviewScopeWalk CodeviewScopeWalk;
@@ -353,13 +391,18 @@ BUSTER_GLOBAL_LOCAL CodeviewScopeWalk codeview_scope_walk_make(Arena* arena, Deb
 }
 
 BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
-                                                  CodeviewScopeWalk* walk)
+                                                  CodeviewScopeWalk* walk, u64 symbol_stream_offset, u64 subsection_length_offset,
+                                                  u32 procedure_offset)
 {
     if (model && root != DEBUG_SCOPE_INVALID && root < model->scope_count)
     {
         CodeviewScopeFrame* stack = walk->stack;
         u32 stack_count = 1;
-        stack[0] = (CodeviewScopeFrame){.scope = root, .next_child = walk->first_child[root]};
+        stack[0] = (CodeviewScopeFrame){
+            .scope = root,
+            .next_child = walk->first_child[root],
+            .record_offset = procedure_offset,
+        };
         while (!symbols->overflow)
         {
             CodeviewScopeFrame* frame = stack + stack_count - 1;
@@ -374,7 +417,9 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugMode
                 }
                 DebugScope* scope = model->scopes + child;
                 u64 block = codeview_record_begin(symbols, S_BLOCK32);
-                byte_writer_emit_u32_le(symbols, 0);
+                u32 block_offset = codeview_symbol_stream_offset(symbols, symbol_stream_offset, subsection_length_offset, block);
+                byte_writer_emit_u32_le(symbols, frame->record_offset);
+                u64 end_pointer_offset = symbols->count;
                 byte_writer_emit_u32_le(symbols, 0);
                 byte_writer_emit_u32_le(symbols, scope->end > scope->start ? scope->end - scope->start : 1);
                 byte_writer_emit_u32_le(symbols, scope->start >= function_offset ? scope->start - function_offset : 0);
@@ -382,7 +427,12 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugMode
                 codeview_emit_name(symbols, S8("scope"));
                 codeview_record_end(symbols, block);
                 codeview_emit_scope_variables(symbols, model, scope, function_offset, machine);
-                stack[stack_count++] = (CodeviewScopeFrame){.scope = child, .next_child = walk->first_child[child]};
+                stack[stack_count++] = (CodeviewScopeFrame){
+                    .end_pointer_offset = end_pointer_offset,
+                    .scope = child,
+                    .next_child = walk->first_child[child],
+                    .record_offset = block_offset,
+                };
             }
             else if (stack_count == 1)
             {
@@ -390,6 +440,8 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugMode
             }
             else
             {
+                u32 end_offset = codeview_symbol_stream_offset(symbols, symbol_stream_offset, subsection_length_offset, symbols->count);
+                byte_writer_patch_u32_le(symbols, frame->end_pointer_offset, end_offset);
                 u64 end = codeview_record_begin(symbols, S_END);
                 codeview_record_end(symbols, end);
                 stack_count -= 1;
@@ -652,6 +704,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         }
         result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity);
         byte_writer_emit_u32_le(&symbols, CV_SIGNATURE_C13);
+        u64 symbol_stream_offset = sizeof(u32);
 
         // Translation-unit records: object name and compiler description.
         u64 unit_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
@@ -670,7 +723,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         byte_writer_emit_bytes(&symbols, input.producer.pointer, input.producer.length);
         byte_writer_emit_u8(&symbols, 0);
         codeview_record_end(&symbols, compile3);
-        codeview_subsection_end(&symbols, unit_symbols);
+        codeview_symbol_subsection_end(&symbols, unit_symbols, &symbol_stream_offset);
 
         if (input.model && input.model->valid)
         {
@@ -683,7 +736,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                     codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
                 }
             }
-            codeview_subsection_end(&symbols, globals);
+            codeview_symbol_subsection_end(&symbols, globals, &symbol_stream_offset);
         }
 
         // One scratch stack and one child index for the whole module, not a
@@ -701,6 +754,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             DwarfFunction* function = input.functions + function_index;
             u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
             u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
+            u32 procedure_offset = codeview_symbol_stream_offset(&symbols, symbol_stream_offset, function_symbols, procedure);
             byte_writer_emit_u32_le(&symbols, 0);
             u64 end_pointer_offset = symbols.count;
             byte_writer_emit_u32_le(&symbols, 0);
@@ -737,7 +791,8 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 if (debug_function->scope < input.model->scope_count)
                 {
                     codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset, input.machine);
-                    codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, &scope_walk);
+                    codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, &scope_walk,
+                                             symbol_stream_offset, function_symbols, procedure_offset);
                 }
                 for (u32 inline_index = 0; inline_index < input.model->inline_site_count; inline_index += 1)
                 {
@@ -747,22 +802,22 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                         continue;
                     }
                     u64 inline_record = codeview_record_begin(&symbols, S_INLINESITE);
-                    byte_writer_emit_u32_le(&symbols, 0);
+                    byte_writer_emit_u32_le(&symbols, procedure_offset);
+                    u64 inline_end_pointer_offset = symbols.count;
                     byte_writer_emit_u32_le(&symbols, 0);
                     byte_writer_emit_u32_le(&symbols, 0x1000u + (u32)(debug_function - input.model->functions));
                     codeview_record_end(&symbols, inline_record);
+                    u32 inline_end_offset = codeview_symbol_stream_offset(&symbols, symbol_stream_offset, function_symbols, symbols.count);
+                    byte_writer_patch_u32_le(&symbols, inline_end_pointer_offset, inline_end_offset);
                     u64 inline_end = codeview_record_begin(&symbols, S_INLINESITE_END);
                     codeview_record_end(&symbols, inline_end);
                 }
             }
-            u64 end_record = symbols.count;
+            u32 end_record = codeview_symbol_stream_offset(&symbols, symbol_stream_offset, function_symbols, symbols.count);
             u64 end_marker = codeview_record_begin(&symbols, S_END);
             codeview_record_end(&symbols, end_marker);
-            if (end_record <= UINT32_MAX)
-            {
-                byte_writer_patch_u32_le(&symbols, end_pointer_offset, (u32)end_record);
-            }
-            codeview_subsection_end(&symbols, function_symbols);
+            byte_writer_patch_u32_le(&symbols, end_pointer_offset, end_record);
+            codeview_symbol_subsection_end(&symbols, function_symbols, &symbol_stream_offset);
 
             u64 function_lines = codeview_subsection_begin(&symbols, DEBUG_S_LINES);
             result.relocations[result.relocation_count++] = (CodeviewRelocation){

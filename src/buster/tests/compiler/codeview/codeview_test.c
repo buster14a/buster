@@ -195,6 +195,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_scope_growth(UnitTestArguments*
     return result;
 }
 
+
+// Linkers form one module-symbol stream from the C13 signature and the
+// concatenated DEBUG_S_SYMBOLS payloads. Parse that view independently of the
+// producer and follow every scope link before pdb.c can normalize bad input.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_scope_links(UnitTestArguments* arguments, CodeviewResult built,
+                                                             u32 expected_subsections, u32 expected_procedures,
+                                                             u32 expected_blocks, u32 expected_inlines)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        TEST_S_END = 0x0006,
+        TEST_S_BLOCK32 = 0x1103,
+        TEST_S_GPROC32 = 0x1110,
+        TEST_S_INLINESITE = 0x114d,
+        TEST_S_INLINESITE_END = 0x114e,
+    };
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u64 symbol_size = 4;
+    u32 subsection_count = 0;
+    u64 input_offset = 4;
+    while (valid && input_offset < built.symbols.length)
+    {
+        valid = input_offset + 8 <= built.symbols.length;
+        if (valid)
+        {
+            u32 kind = codeview_test_u32(built.symbols.pointer + input_offset);
+            u32 length = codeview_test_u32(built.symbols.pointer + input_offset + 4);
+            u64 payload = input_offset + 8;
+            valid = length <= built.symbols.length - payload;
+            if (valid)
+            {
+                if (kind == CODEVIEW_TEST_SYMBOLS)
+                {
+                    valid = length <= UINT32_MAX - symbol_size;
+                    symbol_size += length;
+                    subsection_count += 1;
+                }
+                input_offset = payload + (((u64)length + 3) & ~(u64)3);
+            }
+        }
+    }
+    valid = valid && input_offset == built.symbols.length && symbol_size <= UINT32_MAX;
+    BUSTER_TEST(arguments, valid);
+    BUSTER_TEST(arguments, subsection_count == expected_subsections);
+
+    u32 procedures = 0;
+    u32 blocks = 0;
+    u32 inlines = 0;
+    if (valid)
+    {
+        u8* stream = arena_allocate(arguments->arena, u8, symbol_size);
+        memcpy(stream, built.symbols.pointer, 4);
+        u64 output_offset = 4;
+        input_offset = 4;
+        while (input_offset < built.symbols.length)
+        {
+            u32 kind = codeview_test_u32(built.symbols.pointer + input_offset);
+            u32 length = codeview_test_u32(built.symbols.pointer + input_offset + 4);
+            u64 payload = input_offset + 8;
+            if (kind == CODEVIEW_TEST_SYMBOLS)
+            {
+                memcpy(stream + output_offset, built.symbols.pointer + payload, length);
+                output_offset += length;
+            }
+            input_offset = payload + (((u64)length + 3) & ~(u64)3);
+        }
+        BUSTER_TEST(arguments, output_offset == symbol_size);
+
+        u32 stack_capacity = (u32)(symbol_size / 4) + 1;
+        u32* stack = arena_allocate(arguments->arena, u32, stack_capacity);
+        u32* ends = arena_allocate(arguments->arena, u32, stack_capacity);
+        u16* closing_kinds = arena_allocate(arguments->arena, u16, stack_capacity);
+        u32 depth = 0;
+        u64 cursor = 4;
+        while (cursor < symbol_size)
+        {
+            if (!BUSTER_REQUIRE(arguments, cursor + 4 <= symbol_size))
+            {
+                break;
+            }
+            u16 length = codeview_test_u16(stream + cursor);
+            u16 kind = codeview_test_u16(stream + cursor + 2);
+            u64 record_size = (u64)length + 2;
+            if (!BUSTER_REQUIRE(arguments, length >= 2 && !(record_size & 3) && record_size <= symbol_size - cursor))
+            {
+                break;
+            }
+            bool opening = kind == TEST_S_GPROC32 || kind == TEST_S_BLOCK32 || kind == TEST_S_INLINESITE;
+            if (opening)
+            {
+                u32 minimum_size = kind == TEST_S_GPROC32 ? 40 : kind == TEST_S_BLOCK32 ? 24 : 16;
+                if (!BUSTER_REQUIRE(arguments, record_size >= minimum_size && depth < stack_capacity))
+                {
+                    break;
+                }
+                u32 parent = codeview_test_u32(stream + cursor + 4);
+                u32 end = codeview_test_u32(stream + cursor + 8);
+                BUSTER_TEST(arguments, parent == (depth ? stack[depth - 1] : 0));
+                if (!BUSTER_REQUIRE(arguments, end > cursor && (u64)end + 4 <= symbol_size))
+                {
+                    break;
+                }
+                u16 closing_kind = kind == TEST_S_INLINESITE ? TEST_S_INLINESITE_END : TEST_S_END;
+                BUSTER_TEST(arguments, codeview_test_u16(stream + end + 2) == closing_kind);
+                stack[depth] = (u32)cursor;
+                ends[depth] = end;
+                closing_kinds[depth] = closing_kind;
+                depth += 1;
+                procedures += kind == TEST_S_GPROC32;
+                blocks += kind == TEST_S_BLOCK32;
+                inlines += kind == TEST_S_INLINESITE;
+            }
+            else if (kind == TEST_S_END || kind == TEST_S_INLINESITE_END)
+            {
+                if (!BUSTER_REQUIRE(arguments, depth && ends[depth - 1] == cursor && closing_kinds[depth - 1] == kind))
+                {
+                    break;
+                }
+                depth -= 1;
+            }
+            cursor += record_size;
+        }
+        BUSTER_TEST(arguments, cursor == symbol_size && !depth);
+    }
+    BUSTER_TEST(arguments, procedures == expected_procedures);
+    BUSTER_TEST(arguments, blocks == expected_blocks);
+    BUSTER_TEST(arguments, inlines == expected_inlines);
+    return result;
+}
+
 UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codeview_test_large_types(arguments);
@@ -242,6 +373,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, built.types.length == 4);
     BUSTER_TEST(arguments, built.symbols.length > 16);
     BUSTER_TEST(arguments, built.relocation_count == 4 * BUSTER_ARRAY_LENGTH(functions));
+    UnitTestResult basic_scope_links = codeview_test_scope_links(arguments, built, 3, 2, 0, 0);
+    result.test_count += basic_scope_links.test_count;
+    result.succeeded_test_count += basic_scope_links.succeeded_test_count;
     // A failed build leaves nothing walkable, and a subsection that overruns the
     // buffer stops the walk; both cases skip the structural tallies below rather
     // than leaving the function early.
@@ -367,9 +501,24 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     };
     DebugScope model_scopes[] = {
         {
+            .parent = DEBUG_SCOPE_INVALID,
             .kind = DEBUG_SCOPE_FUNCTION,
             .start = 0,
             .end = 32,
+        },
+        {
+            .parent = 0,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 4,
+            .end = 28,
+        },
+        {
+            .parent = 1,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 8,
+            .end = 24,
+            // Promotion-like location transitions sit inside both lexical
+            // scopes, so their pEnd links must skip every defrange record.
             .variables = model_variable_ids,
             .variable_count = BUSTER_ARRAY_LENGTH(model_variable_ids),
         },
@@ -428,6 +577,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                      .machine = CODEVIEW_MACHINE_X64,
                                                                  });
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
+    UnitTestResult model_scope_links = codeview_test_scope_links(arguments, model_built, 3, 1, 2, 1);
+    result.test_count += model_scope_links.test_count;
+    result.succeeded_test_count += model_scope_links.succeeded_test_count;
     bool found_local = false;
     bool found_procedure_type = false;
     bool found_register = false;

@@ -1,0 +1,140 @@
+name: Issue 203 targeted Windows ABI validation
+
+on:
+  push:
+    branches:
+      - validation/203-pr796-windows-abi
+
+permissions:
+  contents: read
+
+jobs:
+  abi:
+    name: Windows x86-64 ABI p2 regression
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact validation revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build candidate and run the focused ABI matrix
+        id: abi
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $ClangVersion = (& clang.exe --version) -join "`n"
+          Write-Output $ClangVersion
+          if ($ClangVersion -notmatch 'Target:\s*x86_64-') { throw 'clang does not default to an x86_64 target' }
+
+          $Driver = Join-Path $env:RUNNER_TEMP 'issue-203-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver test_differential --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          New-Item -ItemType Directory -Force -Path 'evidence\binary' | Out-Null
+          Copy-Item 'build\Release\ide.exe' 'evidence\binary\ide.exe'
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(
+            Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse |
+              Sort-Object FullName
+          )
+          if ($RuntimeDlls.Count -ne 1) {
+            throw "Expected exactly one x86-64 ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)"
+          }
+          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
+          $env:PATH = "$RuntimeDir;$env:PATH"
+
+          $DifferentialArgs = @(
+            'test_differential'
+            '--ide', "$PWD\evidence\binary\ide.exe"
+            '--cc', 'clang.exe'
+            '--source', "$PWD\tests\differential\abi.c"
+            '--host', "$PWD\tests\differential\abi_host.c"
+            '--strict-mir'
+            '--sanitize-oracle'
+            '--minimize', '0'
+            '--jobs', '4'
+            '--out', 'evidence\abi-targeted'
+          )
+          foreach ($LibraryPath in $LibraryPaths) {
+            $DifferentialArgs += @('--library-path', $LibraryPath)
+          }
+          & $Driver @DifferentialArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $SummaryPath = 'evidence\abi-targeted\summary.txt'
+          if (-not (Test-Path $SummaryPath)) { throw 'Focused differential did not write summary.txt' }
+          $Summary = (Get-Content $SummaryPath -Raw).Trim()
+          Write-Output "ISSUE203_ABI_SUMMARY $Summary"
+          if ($Summary -ne 'version=1 failures=0 io_failed=0 configurations=432') {
+            throw "Unexpected focused differential summary: $Summary"
+          }
+          $CaseLog = 'evidence\abi-targeted\custom\case.log'
+          if (-not (Test-Path $CaseLog)) { throw 'Focused differential did not write custom/case.log' }
+          $FailureLines = @(Select-String -Path $CaseLog -Pattern 'DIFFERENTIAL_FAIL')
+          Write-Output "ISSUE203_ABI_FAILURE_LINES=$($FailureLines.Count)"
+          if ($FailureLines.Count -ne 0) { throw 'Focused ABI matrix contains differential failures' }
+
+      - name: Show focused evidence
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          Write-Output "abi_outcome=${{ steps.abi.outcome }}"
+          $Files = @(
+            'evidence\abi-targeted\summary.txt',
+            'evidence\abi-targeted\manifest.txt',
+            'evidence\abi-targeted\custom\case.log',
+            'evidence\abi-targeted\custom\processes.tsv'
+          )
+          foreach ($File in $Files) {
+            if (Test-Path $File) {
+              Write-Output "=== $File ==="
+              if ((Get-Item $File).Length -le 4194304) { Get-Content $File }
+              else { Write-Output "bytes=$((Get-Item $File).Length)" }
+            }
+          }
+          if (Test-Path 'evidence\abi-targeted') {
+            Get-ChildItem 'evidence\abi-targeted' -Filter 'failure.txt' -File -Recurse |
+              Sort-Object FullName |
+              ForEach-Object {
+                Write-Output "=== $($_.FullName) ==="
+                Get-Content $_.FullName
+              }
+          }
+
+      - name: Retain compact focused evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-203-windows-abi-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/abi-targeted/summary.txt
+            evidence/abi-targeted/manifest.txt
+            evidence/abi-targeted/custom/case.log
+            evidence/abi-targeted/custom/processes.tsv
+            evidence/abi-targeted/**/failure.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Require focused ABI success
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          if ('${{ steps.abi.outcome }}' -ne 'success') { throw 'Focused Windows x86-64 ABI differential failed' }
