@@ -162,11 +162,141 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_outer_lane_gang(void* argument)
     state->outer_counts[outer_index] = lane_count();
 }
 
+#if (BUSTER_LINUX || BUSTER_MACOS || (BUSTER_WINDOWS && !defined(__TINYC__))) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool os_test_thread_name_get(Arena* arena, String8* name)
+{
+    bool result = false;
+    *name = (String8){0};
+#if BUSTER_LINUX || BUSTER_MACOS
+    char8 buffer[128] = {0};
+    int status = pthread_getname_np(pthread_self(), buffer, sizeof(buffer));
+    if (status == 0)
+    {
+        u64 length = 0;
+        while (length < sizeof(buffer) && buffer[length])
+        {
+            length += 1;
+        }
+        result = length < sizeof(buffer);
+        if (result)
+        {
+            *name = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = length}, false);
+        }
+    }
+#elif BUSTER_WINDOWS
+    PWSTR description = 0;
+    HRESULT status = GetThreadDescription(GetCurrentThread(), &description);
+    result = SUCCEEDED(status);
+    if (result)
+    {
+        u64 length = 0;
+        while (description && description[length])
+        {
+            length += 1;
+        }
+        *name = string8_from_string16(arena, (String16){.pointer = (char16*)description, .length = length}, false);
+    }
+    if (description)
+    {
+        LocalFree(description);
+    }
+#endif
+    return result;
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
 
     UnitTestResult result = {0};
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Symbol lookup accepts bounded String8 names. A readable suffix
+    // and an exact-sized buffer must not become part of the C string.
+    {
+#if BUSTER_WINDOWS
+        OsModuleHandle* module = (OsModuleHandle*)LoadLibraryW(L"kernel32.dll");
+        String8 symbol = S8("GetCurrentProcessId");
+        char8 exact_storage[] = {'G', 'e', 't', 'C', 'u', 'r', 'r', 'e', 'n', 't',
+                                 'P', 'r', 'o', 'c', 'e', 's', 's', 'I', 'd'};
+        OsSymbol* expected = module ? (OsSymbol*)GetProcAddress((HMODULE)module, symbol.pointer) : 0;
+#else
+        OsModuleHandle* module = (OsModuleHandle*)dlopen(0, RTLD_NOW | RTLD_LOCAL);
+        String8 symbol = S8("getpid");
+        char8 exact_storage[] = {'g', 'e', 't', 'p', 'i', 'd'};
+        OsSymbol* expected = module ? (OsSymbol*)dlsym((void*)module, symbol.pointer) : 0;
+#endif
+        if (BUSTER_REQUIRE(arguments, module != 0 && expected != 0))
+        {
+            char8 suffix_storage[64] = {0};
+            BUSTER_CHECK(symbol.length + sizeof("_suffix") <= sizeof(suffix_storage));
+            memcpy(suffix_storage, symbol.pointer, symbol.length);
+            memcpy(suffix_storage + symbol.length, "_suffix", sizeof("_suffix"));
+
+            BUSTER_TEST(arguments, os_dynamic_library_function_load(module, symbol) == expected);
+            BUSTER_TEST(arguments,
+                        os_dynamic_library_function_load(module, (String8){.pointer = suffix_storage, .length = symbol.length}) == expected);
+            BUSTER_TEST(arguments,
+                        os_dynamic_library_function_load(module,
+                                                         (String8){.pointer = exact_storage, .length = sizeof(exact_storage)}) == expected);
+            BUSTER_TEST(arguments, os_dynamic_library_function_load(module, (String8){0}) == 0);
+            BUSTER_TEST(arguments,
+                        os_dynamic_library_function_load(module, S8("buster_os_test_missing_symbol_661")) == 0);
+        }
+        os_dynamic_library_unload(module);
+    }
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS || (BUSTER_WINDOWS && !defined(__TINYC__))) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Thread names use the same bounded contract, including empty and
+    // exact-sized inputs. Restore the runner's original name afterward.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+        String8 original_name = {0};
+        if (BUSTER_REQUIRE(arguments, os_test_thread_name_get(arena, &original_name)))
+        {
+#if BUSTER_LINUX
+            enum { OS_TEST_THREAD_NAME_BOUNDARY = 15 };
+#else
+            enum { OS_TEST_THREAD_NAME_BOUNDARY = 63 };
+#endif
+            char8 suffix_storage[] = "worker-suffix";
+            char8 exact_storage[] = {'e', 'x', 'a', 'c', 't', '6', '6', '2'};
+            char8 boundary_storage[OS_TEST_THREAD_NAME_BOUNDARY];
+            for (u64 index = 0; index < sizeof(boundary_storage); index += 1)
+            {
+                boundary_storage[index] = (char8)('a' + index % 26);
+            }
+            String8 names[] = {
+                S8("os-662"),
+                {.pointer = suffix_storage, .length = 6},
+                {0},
+                {.pointer = exact_storage, .length = sizeof(exact_storage)},
+                {.pointer = boundary_storage, .length = sizeof(boundary_storage)},
+            };
+
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+            {
+                os_thread_set_name(names[index]);
+                String8 observed = {0};
+                if (BUSTER_REQUIRE(arguments, os_test_thread_name_get(arena, &observed)))
+                {
+                    BUSTER_STRING_TEST(arguments, observed, names[index]);
+                }
+            }
+
+            os_thread_set_name(original_name);
+            String8 restored = {0};
+            if (BUSTER_REQUIRE(arguments, os_test_thread_name_get(arena, &restored)))
+            {
+                BUSTER_STRING_TEST(arguments, restored, original_name);
+            }
+        }
+        arena_set_position(arena, position);
+    }
+#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
