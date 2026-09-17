@@ -1695,7 +1695,14 @@ BUSTER_GLOBAL_LOCAL u32 d_sanitizer_runtime_self_test(Arena* arena, DSettings* p
     String8 compiler = configured.length ? d_reference_compiler(arena, configured) : (String8){0};
     if (!compiler.length) { compiler = d_reference_compiler(arena, S8("clang")); }
     if (!compiler.length) { compiler = d_reference_compiler(arena, S8("cc")); }
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64
+    // The hosted Windows Arm64 LLVM toolchain currently has no linkable
+    // compiler-rt UBSan runtime. Report the real runtime control as
+    // unavailable; never replace it with sanitizer-looking program text.
+    bool available = false;
+#else
     bool available = compiler.length > 0;
+#endif
     bool recover_built = false, fatal_built = false, recover_ok = false, fatal_ok = false;
     u32 errors = 0;
     DSettings settings = *parent;

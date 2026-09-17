@@ -169,6 +169,12 @@ closed. Ordinary program output containing `AddressSanitizer`, `runtime error:`,
 or any other sanitizer spelling remains ordinary byte-exact output and may be a
 valid oracle observation.
 
+The real recovering/fatal UBSan self-test controls execute only where the
+host toolchain supplies a linkable compiler-rt runtime. The hosted Windows
+AArch64 LLVM toolchain currently reports this control as unavailable; it is
+never replaced by simulated sanitizer text, and the ordinary-output,
+crash, timeout, launch, wait, and worker controls still execute.
+
 Compiler diagnostics are compared across Buster configurations, not against
 Clang's wording. Rejection fixtures require ordinary nonzero compiler exits,
 never a crash or timeout. Successful-warning, syntax-error, and type-error
