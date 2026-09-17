@@ -1,0 +1,108 @@
+name: Diagnose PR 767 Windows ABI link
+
+on:
+  push:
+    branches:
+      - diagnose/767-windows-link
+    paths:
+      - .github/workflows/diagnose-767-windows-link.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact diagnostic revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Reproduce and print retained ABI linker evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+
+          $Driver = Join-Path $env:RUNNER_TEMP 'diagnostic-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(
+            Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse |
+              Sort-Object FullName
+          )
+          if ($RuntimeDlls.Count -ne 1) { throw "Expected one x86-64 ASan runtime; found $($RuntimeDlls.Count)" }
+          $env:PATH = "$(Split-Path -Parent $RuntimeDlls[0].FullName);$env:PATH"
+
+          $Arguments = @(
+            'test_differential'
+            '--ide', "$PWD\build\Release\ide.exe"
+            '--cc', 'clang.exe'
+            '--strict-mir'
+            '--sanitize-oracle'
+            '--jobs', '1'
+            '--generated', '0'
+            '--source', "$PWD\tests\differential\abi.c"
+            '--host', "$PWD\tests\differential\abi_host.c"
+            '--out', 'evidence\diagnostic'
+          )
+          foreach ($LibraryPath in $LibraryPaths) {
+            $Arguments += @('--library-path', $LibraryPath)
+          }
+          & $Driver @Arguments
+          $DifferentialExit = $LASTEXITCODE
+
+          $FailureFiles = @(
+            Get-ChildItem -Path 'evidence\diagnostic\custom' -Filter 'failure.txt' -File -Recurse |
+              Where-Object { $_.Directory.Name -match '_p2$' } |
+              Sort-Object FullName
+          )
+          Write-Output "DIAGNOSTIC_FAILURE_COUNT=$($FailureFiles.Count)"
+          foreach ($Failure in ($FailureFiles | Select-Object -First 6)) {
+            $Directory = $Failure.Directory.FullName
+            Write-Output "===== FAILURE $Directory ====="
+            Get-Content -Raw $Failure.FullName
+            $Argv = Join-Path $Directory 'link.argv'
+            if (Test-Path $Argv) {
+              $ArgumentBytes = [System.IO.File]::ReadAllBytes($Argv)
+              $ArgumentText = [System.Text.Encoding]::UTF8.GetString($ArgumentBytes).Replace([char]0, "`n")
+              Write-Output '----- link argv -----'
+              Write-Output $ArgumentText
+            }
+            $Stdout = Join-Path $Directory 'link.stdout'
+            if (Test-Path $Stdout) {
+              Write-Output '----- link stdout -----'
+              Get-Content -Raw $Stdout
+            }
+            $Stderr = Join-Path $Directory 'link.stderr'
+            if (Test-Path $Stderr) {
+              Write-Output '----- link stderr -----'
+              Get-Content -Raw $Stderr
+            }
+            $Object = Join-Path $Directory 'subject.o'
+            if (Test-Path $Object) {
+              Write-Output '----- object headers, symbols, relocations, unwind -----'
+              & llvm-readobj.exe --file-headers --sections --symbols --relocations --unwind $Object
+              Write-Output '----- undefined symbols -----'
+              & llvm-nm.exe --undefined-only $Object
+            }
+          }
+          if ($DifferentialExit -ne 0 -and $FailureFiles.Count -eq 0) {
+            throw "Differential failed with exit $DifferentialExit but retained no p2 failure records"
+          }
+          exit $DifferentialExit
