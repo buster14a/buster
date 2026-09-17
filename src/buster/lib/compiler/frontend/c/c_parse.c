@@ -9944,6 +9944,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                      : string_equal(aggregate_spelling, S8("union")) ? C_TYPE_UNION
                                                                      : C_TYPE_ENUM;
     u32 index = c_parse_skip_attributes(preprocess, aggregate_index + 1, end);
+    u32 tag_index = index;
     String8 tag = {0};
     if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
     {
@@ -10079,6 +10080,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     {
         if (result->types[type.value].tag_scope.value == frame->scope.value)
         {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
+                               string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
             return C_TYPE_ID_INVALID;
         }
         type = C_TYPE_ID_INVALID;
@@ -11022,6 +11025,12 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 }
                 return;
             }
+            if (declarator_start != name_index)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[name_index]),
+                                   C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("unexpected token after declarator"));
+                return;
+            }
             if (declarator_start == name_index)
             {
                 bool function_declarator =
@@ -11044,8 +11053,14 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);
                     base = c_parse_array_suffixes(result, preprocess, base, &suffix_index, suffix_end);
                     suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);
-                    if (suffix_index != suffix_end || base.value == C_ID_UNDERLYING_INVALID)
+                    if (base.value == C_ID_UNDERLYING_INVALID)
                     {
+                        return;
+                    }
+                    if (suffix_index != suffix_end)
+                    {
+                        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[suffix_index]),
+                                           C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("unexpected token after declarator"));
                         return;
                     }
                     declaration->type = base;
@@ -13682,8 +13697,14 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                   .is_const = true,
                                               });
         }
-        if (type.value == C_ID_UNDERLYING_INVALID || index != suffix_end)
+        if (type.value == C_ID_UNDERLYING_INVALID)
         {
+            return false;
+        }
+        if (index != suffix_end)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]),
+                               C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("unexpected token after declarator"));
             return false;
         }
         if (!is_typedef)

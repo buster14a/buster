@@ -4797,6 +4797,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_declarator_trailing_tokens(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    } invalid[] = {
+        {S8("int x y;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("int x 3;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("float f g;\nint take(void) { return 1; }\n"), 1, 9},
+        {S8("int x, y z;\nint take(void) { return 1; }\n"), 1, 10},
+        {S8("typedef int T; unsigned T v;\nint take(void) { return 1; }\n"), 1, 27},
+        {S8("typedef int T; T U v;\nint take(void) { return 1; }\n"), 1, 20},
+        {S8("int take(void) { int x y; return 1; }\n"), 1, 24},
+    };
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 sentinel = S8("existing output must survive a stray declarator token");
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-declarator-token-{u32}-{u32}"), case_index, frontend);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid[case_index].source))) &&
+                BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+            {
+                String8 syntax_arguments[] = {S8("-fsyntax-only"), S8("-std=c17"), S8("-target"), S8("x86_64-linux"),
+                    frontends[frontend], input};
+                CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_arguments)));
+                bool coded = false;
+                for (u32 diagnostic_index = 0; diagnostic_index < syntax.diagnostic_count; diagnostic_index += 1)
+                {
+                    coded |= string_equal(syntax.diagnostics[diagnostic_index].code, S8("c.expected-declaration")) &&
+                             syntax.diagnostics[diagnostic_index].primary.position.line == invalid[case_index].line &&
+                             syntax.diagnostics[diagnostic_index].primary.position.column == invalid[case_index].column;
+                }
+                BUSTER_TEST_RAW(arguments, syntax.error != COMPILER_DRIVER_ERROR_NONE && !syntax.has_object, invalid[case_index].source);
+                BUSTER_TEST_RAW(arguments, coded, invalid[case_index].source);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, S8("unexpected token after declarator")) != BUSTER_STRING_NO_MATCH,
+                                invalid[case_index].source);
+
+                String8 compile_arguments[] = {S8("-c"), S8("-std=c17"), S8("-target"), S8("x86_64-linux"),
+                    frontends[frontend], S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments)));
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object, invalid[case_index].source);
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+                BUSTER_TEST(arguments, os_file_delete(input));
+                BUSTER_TEST(arguments, os_file_delete(output));
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 valid = S8("int a, b;\nint (*callback)(int);\nint (*(*nested)(void))(int);\n"
+                       "typedef int T; T value; int take(void) { T local = value; return local; }\n");
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 name = string_format(arena, S8("buster-declarator-token-valid-{u32}"), frontend);
+        String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+        String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(valid))))
+        {
+            String8 compile_arguments[] = {S8("-c"), S8("-std=c17"), S8("-target"), S8("x86_64-linux"),
+                frontends[frontend], S8("-o"), output, input};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+            BUSTER_TEST(arguments, os_file_delete(input));
+            BUSTER_TEST(arguments, os_file_delete(output));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5189,6 +5274,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);

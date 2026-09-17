@@ -290,8 +290,14 @@ payload's elapsed time and remaining headroom. Separate
 batch and final-CI records distinguish a failed Debug payload followed by a
 passing Release from required emulator cleanup failing after successful tests.
 A terminal `BUSTER_ANDROID_TEST_RESULT:0` describes one payload, not the entire
-Debug/Release job. Monitor reader status 10 denotes the success marker; the
-producer can then exit 143 because the wrapper deliberately stops logcat.
+Debug/Release job. Monitor reader status 10 denotes the success marker. The
+wrapper then sends `SIGTERM` to the GNU `timeout`/`adb logcat` process group and
+records the raw status returned by waiting for the `timeout` group leader. The
+real emulator lane's `adb logcat` exits normally with status 15 after that stop,
+so `timeout` propagates 15. The offline shell fake is instead terminated by
+signal 15, so `timeout` re-raises `SIGTERM` and Bash reports `128 + 15 = 143`.
+Both 15 and 143 are normal signal-derived producer statuses after reader status
+10; the reader result remains authoritative.
 
 A `Payload deadline:` line names either outcome the table alone leaves implicit.
 Reader status 0 with producer status 124/137 is an exhausted payload deadline —

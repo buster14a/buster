@@ -263,6 +263,80 @@ print_simulator_diagnostics() {
     run_with_timeout "$monitor_command_timeout_seconds" xcrun simctl list runtimes >&2 || true
 }
 
+verify_shutdown_postcondition() {
+    local probe_log="${console_log_base}.shutdown-postcondition.log"
+    local result_log="${console_log_base}.shutdown-postcondition.result.log"
+    local parsed_state=
+    local summary
+
+    shutdown_postcondition_probe_status=not-run
+    shutdown_postcondition_parser_status=not-run
+    shutdown_postcondition_state=unavailable
+    shutdown_disposition=unresolved-failure
+    if run_lifecycle_phase shutdown-postcondition batch "$console_log_base" \
+        "$monitor_command_timeout_seconds" xcrun simctl list devices -j; then
+        shutdown_postcondition_probe_status=0
+    else
+        shutdown_postcondition_probe_status=$?
+    fi
+    if [[ $shutdown_postcondition_probe_status -eq 0 ]]; then
+        if parsed_state=$(run_with_timeout "$monitor_command_timeout_seconds" \
+            python3 - "$udid" "$probe_log" <<'PY_STATE'
+import json
+import sys
+
+target, path = sys.argv[1:]
+try:
+    with open(path, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit(2)
+devices = data.get("devices") if isinstance(data, dict) else None
+if not isinstance(devices, dict):
+    sys.exit(2)
+matches = []
+for runtime_devices in devices.values():
+    if not isinstance(runtime_devices, list):
+        sys.exit(2)
+    for device in runtime_devices:
+        if not isinstance(device, dict):
+            sys.exit(2)
+        if device.get("udid") == target:
+            matches.append(device)
+if len(matches) != 1:
+    sys.exit(3)
+state = matches[0].get("state")
+if not isinstance(state, str):
+    sys.exit(2)
+if state == "Shutdown":
+    print("Shutdown")
+    sys.exit(0)
+print("non-shutdown")
+sys.exit(4)
+PY_STATE
+        ); then
+            shutdown_postcondition_parser_status=0
+        else
+            shutdown_postcondition_parser_status=$?
+        fi
+        if [[ -n $parsed_state ]]; then
+            shutdown_postcondition_state=$parsed_state
+        fi
+        if [[ $shutdown_postcondition_parser_status -eq 0 \
+            && $shutdown_postcondition_state == Shutdown ]]; then
+            shutdown_disposition=verified-shutdown-after-timeout
+        fi
+    fi
+    summary="BUSTER_IOS_SHUTDOWN_POSTCONDITION simulator_udid=$udid eligibility=$shutdown_postcondition_eligible probe_status=$shutdown_postcondition_probe_status parser_status=$shutdown_postcondition_parser_status state=$shutdown_postcondition_state disposition=$shutdown_disposition"
+    if ! printf '%s\n' "$summary" >"$result_log"; then
+        shutdown_disposition=unresolved-evidence-failure
+        summary="BUSTER_IOS_SHUTDOWN_POSTCONDITION simulator_udid=$udid eligibility=$shutdown_postcondition_eligible probe_status=$shutdown_postcondition_probe_status parser_status=$shutdown_postcondition_parser_status state=$shutdown_postcondition_state disposition=$shutdown_disposition"
+        echo "error: could not retain iOS shutdown postcondition result at $result_log" >&2
+    fi
+    printf '%s\n' "$summary" >&2
+    [[ $shutdown_disposition == verified-shutdown-after-timeout ]]
+}
+
 collect_launch_diagnostics() {
     local label=$1
     local console_log=$2
@@ -439,6 +513,11 @@ simulator_owned=0
 runtime=
 device_type=
 boot_recovery_eligible=0
+shutdown_postcondition_eligible=0
+shutdown_postcondition_probe_status=not-run
+shutdown_postcondition_parser_status=not-run
+shutdown_postcondition_state=unavailable
+shutdown_disposition=not-attempted
 boot_disposition=unresolved
 last_lifecycle_outcome=unavailable
 pending_create_log=
@@ -451,6 +530,7 @@ cleanup() {
     local status=$?
     local prior_status=$status
     local shutdown_status
+    local shutdown_outcome=unavailable
     local cleanup_summary
     trap - EXIT INT TERM
     if [[ -n ${active_launch_stream_pid:-}${active_launch_reader_pid:-}${active_launch_pipe_dir:-} ]]; then
@@ -467,14 +547,29 @@ cleanup() {
         echo "Shutting down iOS simulator $udid"
         if run_lifecycle_phase shutdown batch "$console_log_base" "$shutdown_timeout_seconds" xcrun simctl shutdown "$udid"; then
             shutdown_status=0
+            shutdown_outcome=$last_lifecycle_outcome
+            shutdown_disposition=direct-success
         else
             shutdown_status=$?
-            echo "warning: failed to shut down iOS simulator $udid" >&2
-            if [[ $status -eq 0 ]]; then
-                status=1
+            shutdown_outcome=$last_lifecycle_outcome
+            if [[ $shutdown_outcome == timeout && $shutdown_postcondition_eligible -eq 1 ]]; then
+                if verify_shutdown_postcondition; then
+                    echo "warning: iOS simulator shutdown command timed out, but the exact invocation-owned device reached Shutdown" >&2
+                else
+                    echo "warning: failed to verify the exact iOS simulator shutdown postcondition after timeout" >&2
+                    if [[ $status -eq 0 ]]; then
+                        status=1
+                    fi
+                fi
+            else
+                shutdown_disposition=unresolved-failure
+                echo "warning: failed to shut down iOS simulator $udid" >&2
+                if [[ $status -eq 0 ]]; then
+                    status=1
+                fi
             fi
         fi
-        cleanup_summary="BUSTER_IOS_CLEANUP simulator_udid=$udid prior_status=$prior_status shutdown_status=$shutdown_status result_status=$status"
+        cleanup_summary="BUSTER_IOS_CLEANUP simulator_udid=$udid prior_status=$prior_status shutdown_status=$shutdown_status shutdown_outcome=$shutdown_outcome postcondition_eligibility=$shutdown_postcondition_eligible postcondition_probe_status=$shutdown_postcondition_probe_status postcondition_parser_status=$shutdown_postcondition_parser_status postcondition_state=$shutdown_postcondition_state shutdown_disposition=$shutdown_disposition result_status=$status"
         printf '%s\n' "$cleanup_summary" >>"${console_log_base}.shutdown.status.log" || true
         printf '%s\n' "$cleanup_summary" >&2
     fi
@@ -694,6 +789,7 @@ if [[ $simulator_owned -eq 1 && $explicit_simulator_udid -eq 0 \
     && ${RUNNER_OS:-} == macOS \
     && ${RUNNER_ARCH:-} == ARM64 && ${BUSTER_IOS_ARCH:-arm64} == arm64 ]]; then
     boot_recovery_eligible=1
+    shutdown_postcondition_eligible=1
 fi
 printf 'BUSTER_IOS_BOOT_RECOVERY eligibility=%s owned=%s explicit_udid=%s github_actions=%s runner_environment=%s runner_os=%s runner_arch=%s ios_arch=%s\n' \
     "$boot_recovery_eligible" "$simulator_owned" "$explicit_simulator_udid" \
