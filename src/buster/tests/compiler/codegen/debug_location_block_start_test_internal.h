@@ -25,11 +25,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_block_start(UnitTe
     UnitTestResult result = {0};
     enum { EXPECTATION_ASSERTION_COUNT = 10 };
 
-    MachineInstruction instructions[4] = {0};
-    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(instructions); row += 1)
-    {
-        instructions[row].opcode = MACHINE_X64_MOV_RI;
-    }
+    MachineInstruction instructions[4] = {
+        {.opcode = MACHINE_X64_MOV_RI},
+        {.opcode = MACHINE_X64_NOP},
+        {.opcode = MACHINE_X64_NOP},
+        {.opcode = MACHINE_X64_NOP},
+    };
     instructions[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
     instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
 
