@@ -1431,6 +1431,49 @@ class TimingTests(unittest.TestCase):
         self.assertFalse(report["cohorts"])
         self.assertEqual(sum(report["excluded"].values()), 2)
 
+@unittest.skipUnless(shutil.which("cmake"), "CMake is required")
+class ZigCompilerIdTests(unittest.TestCase):
+    def test_compile_only_identification_is_scoped_to_zig_cc(self):
+        cmake_lists = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        include = 'include("${CMAKE_CURRENT_LIST_DIR}/cmake/ZigCompilerId.cmake")'
+        self.assertEqual(cmake_lists.count(include), 1)
+        self.assertLess(cmake_lists.index(include), cmake_lists.index("project(buster C)"))
+
+        helper = (ROOT / "cmake/ZigCompilerId.cmake").as_posix()
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "verify-zig-compiler-id.cmake"
+            script.write_text(textwrap.dedent(f'''\
+                set(CMAKE_C_COMPILER "zig;cc")
+                include("{helper}")
+                if (NOT CMAKE_C_COMPILER_ID_FLAGS_ALWAYS STREQUAL "-c")
+                    message(FATAL_ERROR "zig cc did not select compile-only compiler identification")
+                endif()
+
+                unset(CMAKE_C_COMPILER_ID_FLAGS_ALWAYS)
+                set(CMAKE_C_COMPILER "C:/tools/zig.exe")
+                set(CMAKE_C_COMPILER_ARG1 "cc")
+                include("{helper}")
+                if (NOT CMAKE_C_COMPILER_ID_FLAGS_ALWAYS STREQUAL "-c")
+                    message(FATAL_ERROR "zig.exe plus CMAKE_C_COMPILER_ARG1 did not select -c")
+                endif()
+
+                set(CMAKE_C_COMPILER_ID_FLAGS_ALWAYS "sentinel")
+                unset(CMAKE_C_COMPILER_ARG1)
+                set(CMAKE_C_COMPILER "clang")
+                include("{helper}")
+                if (NOT CMAKE_C_COMPILER_ID_FLAGS_ALWAYS STREQUAL "sentinel")
+                    message(FATAL_ERROR "non-Zig compiler state was mutated")
+                endif()
+
+                unset(CMAKE_C_COMPILER_ID_FLAGS_ALWAYS)
+                set(CMAKE_C_COMPILER "zig")
+                include("{helper}")
+                if (DEFINED CMAKE_C_COMPILER_ID_FLAGS_ALWAYS)
+                    message(FATAL_ERROR "plain zig without the cc subcommand inherited C flags")
+                endif()
+            '''), encoding="utf-8", newline="\n")
+            subprocess.run([shutil.which("cmake"), "-P", str(script)], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()
