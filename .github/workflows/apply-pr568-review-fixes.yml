@@ -30,6 +30,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = e91a92ee5d14b03160342413e97902ab25eeab59
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
           git fetch --no-tags origin f5ed0ec53b06b62ea457d4cc77173c77f96c064c
           git merge --no-commit --no-ff f5ed0ec53b06b62ea457d4cc77173c77f96c064c
 
@@ -52,8 +54,6 @@ jobs:
 
           git add tools/native_retirement_performance_binding.py docs/native-retirement-support-v1.tsv
           git diff --cached --check
-          git config user.name 'David'
-          git config user.email 'davidgmbb@gmail.com'
           git commit -m 'Merge current main into PR #568 and repin support census' \
             -m 'Integrate main f5ed0ec53b06b62ea457d4cc77173c77f96c064c, retain every additive support row, and bind the validator to the exact merged declaration SHA-256. Do not change thresholds, eligibility policy, dispatch, service qualification, or performance claims.'
       - name: Validate the reconciled clean merge commit
