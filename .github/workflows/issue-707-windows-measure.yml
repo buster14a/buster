@@ -16,7 +16,7 @@ permissions:
 jobs:
   measure:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && github.event.pull_request.number == 749 }}
-    name: Issue 707 Windows ${{ matrix.arm }} run ${{ matrix.run }}
+    name: Issue 707 Windows run ${{ matrix.run }}
     runs-on: windows-2025
     timeout-minutes: 300
     strategy:
@@ -100,7 +100,7 @@ jobs:
           cmake --version | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
           ninja --version | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
           clang --version | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
-          cl 2>&1 | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
+          cmd /c "cl 2>&1" | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
           gcc --version | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
           zig version | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
           zig env | Add-Content -Encoding utf8 (Join-Path $Evidence 'identity.txt')
