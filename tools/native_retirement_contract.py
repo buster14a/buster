@@ -30,7 +30,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "aa883c302a326143ff5e2f670bdb5e66dd85162e45033246c40df5f5a3411c21"
+FULL_SUPPORT_CONTRACT_SHA256 = "1986484b53f92221b684463f25fd0a9c1145f8d344ae907cc3134f5a26fa118e"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -46,10 +46,10 @@ FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add270575
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 374
 FULL_APPLICABILITY_LEDGER_SHA256 = "00cf09f1a58eb0fe8e44fbc1bd9e462a91df4449233c2b0c788442ec7a192a0c"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "7e27cce44651a4adaea2707fe2eaefd0f2a0a29564bb40a5262a18685ff91daa"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "d4ffce559c12a3201420c75347e4ff3ce48832a0e4987c95b5539346033433ab"
 FULL_DEPENDENCY_RECEIPT_SHA256 = "50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad"
 FULL_DEPENDENCY_PROJECT_SHA256 = "9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03"
-FULL_DEPENDENCY_LEDGER_SHA256 = "eb69112f4c38a2298dddfa6d132c594c0349b5b31ee5cf309bf42820c3475944"
+FULL_DEPENDENCY_LEDGER_SHA256 = "0c0f0ec8768957d93573a04f8712e37df2fadbc9647113bf6578b7dfdc300bcd"
 FULL_EXTERNAL_CHECKOUTS = (
     {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
     {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
