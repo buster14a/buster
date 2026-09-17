@@ -1,0 +1,66 @@
+name: Apply issue 708 candidate v3
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/issue-708-apply-v3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.head_ref == 'fix/708-native-frame-link-cache' && github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - name: Apply and commit candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tools/issue_708_patch.py')
+          text = path.read_text()
+          old_start = '''                                (observer == UINT32_MAX || host_compiled[observer]))
+          {'''
+          new_start = '''                                (observer == UINT32_MAX || host_compiled[observer]))
+          {'''.replace('          {', '                            {')
+          if text.count(old_start) != 1:
+              raise SystemExit('patch start indentation anchor changed')
+          text = text.replace(old_start, new_start, 1)
+          old_tail = '''block_tail = \'\'\'                        BUSTER_TEST(arguments, link_ok);
+          if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+          }\'\'\''''
+          old_tail = old_tail.replace('\n          if', '\n                        if').replace('\n          }', '\n                    }')
+          new_tail = '''block_tail = \'\'\'                                BUSTER_TEST(arguments, link_ok);
+          if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+          }\'\'\''''
+          new_tail = new_tail.replace('\n          if', '\n                                if').replace('\n          }', '\n                            }')
+          if text.count(old_tail) != 1:
+              raise SystemExit('patch tail indentation anchor changed')
+          text = text.replace(old_tail, new_tail, 1)
+          insertion_anchor = 'function = function[:block_start] + replacement + function[block_end:]'
+          insertion = '''replacement_lines = replacement.splitlines()
+          replacement = "\\n".join(replacement_lines[:2] + [("        " + line if line else line) for line in replacement_lines[2:]])
+          function = function[:block_start] + replacement + function[block_end:]'''
+          insertion = insertion.replace('\n          replacement', '\nreplacement').replace('\n          function', '\nfunction')
+          if text.count(insertion_anchor) != 1:
+              raise SystemExit('replacement insertion anchor changed')
+          text = text.replace(insertion_anchor, insertion, 1)
+          path.write_text(text)
+          PY
+          python tools/issue_708_patch.py
+          git diff --check
+          if git diff --quiet -- src/buster/tests/compiler/driver/driver_test.c; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/tests/compiler/driver/driver_test.c
+          git commit -m 'test: reuse byte-identical native frame links'
+          git push origin "HEAD:${GITHUB_HEAD_REF}"
