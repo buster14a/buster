@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 - <<'PYTHON_PATCH'
           from pathlib import Path
 
           path = Path(".github/issue-67-measure.sh")
@@ -64,7 +64,7 @@ jobs:
           if count != 1:
               raise SystemExit(f"harness insertion point: expected one match, found {count}")
           path.write_text(source.replace(old, new, 1))
-          PY
+          PYTHON_PATCH
 
       - name: Measure baseline and candidate
         shell: bash
