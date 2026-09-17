@@ -1,0 +1,116 @@
+name: Issue 67 metadata memory measurement
+
+on:
+  push:
+    branches: [fix/67-x86-metadata-memory]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Clang Release non-unity A/B
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Measure metadata object and optimized tests
+        shell: bash
+        env:
+          BASE_SHA: e68315eae6d737167acbc9be36ddd27b7334affd
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/issue-67"
+          driver="$RUNNER_TEMP/issue-67-build"
+          header=src/buster/tests/compiler/assembly/x86_64_metadata_test.h
+          mkdir -p "$evidence"
+
+          {
+            printf 'base_sha=%s\n' "$BASE_SHA"
+            printf 'candidate_sha=%s\n' "$GITHUB_SHA"
+            uname -a
+            clang --version
+            cmake --version
+            ninja --version
+            lscpu
+          } > "$evidence/environment.txt"
+
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT -- \
+            -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          "$driver" build --config Release -t dependencies -- -j1
+
+          ninja_file=build-Release.ninja
+          ninja -C build -f "$ninja_file" -t targets all > "$evidence/targets.txt"
+          mapfile -t object_targets < <(
+            sed -n 's/^\([^:]*x86_64_metadata_test\.c\.o\):.*/\1/p' "$evidence/targets.txt"
+          )
+          if [[ "${#object_targets[@]}" -ne 1 ]]; then
+            printf 'expected one metadata object target, found %s\n' "${#object_targets[@]}" >&2
+            printf '%s\n' "${object_targets[@]}" >&2
+            exit 1
+          fi
+          object_target=${object_targets[0]}
+          object_path="build/$object_target"
+          printf '%s\n' "$object_target" > "$evidence/object-target.txt"
+          ninja -C build -f "$ninja_file" -t commands "$object_target" > "$evidence/compile-command.txt"
+
+          cp "$header" "$evidence/candidate-header.h"
+          git show "$BASE_SHA:$header" > "$header"
+          rm -f "$object_path"
+          set +e
+          /usr/bin/time -v -o "$evidence/baseline.time.txt" \
+            ninja -C build -f "$ninja_file" -j1 "$object_target" \
+            > "$evidence/baseline.stdout.txt" 2> "$evidence/baseline.stderr.txt"
+          baseline_status=$?
+          set -e
+          printf '%s\n' "$baseline_status" > "$evidence/baseline.status.txt"
+          if [[ "$baseline_status" -eq 0 ]]; then
+            stat --printf='%s\n' "$object_path" > "$evidence/baseline.object-size.txt"
+            sha256sum "$object_path" > "$evidence/baseline.object-sha256.txt"
+          fi
+
+          cp "$evidence/candidate-header.h" "$header"
+          git diff --exit-code -- "$header"
+          rm -f "$object_path"
+          /usr/bin/time -v -o "$evidence/candidate.time.txt" \
+            ninja -C build -f "$ninja_file" -j1 "$object_target" \
+            > "$evidence/candidate.stdout.txt" 2> "$evidence/candidate.stderr.txt"
+          stat --printf='%s\n' "$object_path" > "$evidence/candidate.object-size.txt"
+          sha256sum "$object_path" > "$evidence/candidate.object-sha256.txt"
+
+          CMAKE_BUILD_PARALLEL_LEVEL=1 BUSTER_TEST_JOBS=1 \
+            /usr/bin/time -v -o "$evidence/test-all.time.txt" \
+            "$driver" build --config Release -t test_all -- -j1 \
+            > "$evidence/test-all.stdout.txt" 2> "$evidence/test-all.stderr.txt"
+
+          {
+            printf '# Issue 67 measurement\n\n'
+            printf 'Base: `%s`  \nCandidate: `%s`\n\n' "$BASE_SHA" "$GITHUB_SHA"
+            printf '## Baseline object\n\n```text\n'
+            cat "$evidence/baseline.time.txt"
+            printf '```\n\nstatus: `%s`\n\n' "$baseline_status"
+            if [[ -f "$evidence/baseline.object-size.txt" ]]; then
+              printf 'object bytes: `%s`\n\n' "$(cat "$evidence/baseline.object-size.txt")"
+            fi
+            printf '## Candidate object\n\n```text\n'
+            cat "$evidence/candidate.time.txt"
+            printf '```\n\nobject bytes: `%s`\n\n' "$(cat "$evidence/candidate.object-size.txt")"
+            printf '## Candidate optimized full suite\n\n```text\n'
+            cat "$evidence/test-all.time.txt"
+            printf '```\n'
+          } | tee "$evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain measurement evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-67-measurement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-67
+          if-no-files-found: error
+          retention-days: 14
