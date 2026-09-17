@@ -6,68 +6,40 @@ on:
       - fix/issue-63-resource-failures
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
     if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    env:
+      BUSTER_MATRIX_SHARD: all
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: fix/issue-63-resource-failures
           fetch-depth: 1
-      - name: Repair invariant macro classification
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/buster/lib/os.h")
-          text = path.read_text()
-          old = '''#if BUSTER_OPTIMIZE
-          #define BUSTER_DEBUG_CHECK(ok) ((void)0)
-          #define BUSTER_ASSUME(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
-          #else
-          #define BUSTER_DEBUG_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
-          #define BUSTER_ASSUME(ok) BUSTER_DEBUG_CHECK(ok)
-          #endif
-          #define BUSTER_CHECK(ok) BUSTER_ASSUME(ok)'''
-          new = '''#if BUSTER_OPTIMIZE
-          #define BUSTER_DEBUG_CHECK(ok) ((void)0)
-          #define BUSTER_INVARIANT(ok) BUSTER_ASSUME(ok)
-          #else
-          #define BUSTER_DEBUG_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
-          #define BUSTER_INVARIANT(ok) BUSTER_DEBUG_CHECK(ok)
-          #endif
-          #define BUSTER_CHECK(ok) BUSTER_INVARIANT(ok)'''
-          if text.count(old) != 1:
-              raise SystemExit(f"expected one invariant macro block, found {text.count(old)}")
-          path.write_text(text.replace(old, new, 1))
-          PY
-          git diff --check -- src/buster/lib/os.h
-          git add src/buster/lib/os.h
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'runtime: reuse the optimizer assumption primitive'
-          git push origin HEAD:fix/issue-63-resource-failures
-      - name: Install bootstrap tools
+          persist-credentials: false
+      - name: Install hosted toolchains
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes tcc mold
+          sudo apt-get install --no-install-recommends --yes mold
           python3 tools/ci_zig.py \
             --target x86_64-linux \
             --cache-directory "$RUNNER_TEMP/zig-archive" \
             --install-directory "$RUNNER_TEMP/zig"
-          tcc -v
-          clang --version
-          gcc --version
-          "$RUNNER_TEMP/zig/zig" version
+      - name: Bootstrap build driver with Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
       - name: Full configuration matrix
-        run: ./build.sh test_all_combinations_ci
+        shell: bash
+        run: ./build/build test_all_combinations_ci --verbose=1
       - name: Release self-host
-        run: ./build.sh test_self_host --config Release
+        shell: bash
+        run: ./build/build test_self_host --config Release
