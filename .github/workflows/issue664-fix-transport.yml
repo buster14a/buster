@@ -1,0 +1,32 @@
+name: Issue 664 checked fix transport
+on:
+  push:
+    branches: [codex/664-fix-transport-20260917a]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - name: Apply checked fixes to the issue branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --mixed 636282c3feb696ed8f3b7f1363b230e5c34caa23
+          python3 .github/issue664-fix.py
+          git diff --check
+          git add src/buster/tests/compiler/llvm/bitcode_test.c \
+            tests/basic_c_aarch64_abi_contract.c \
+            docs/uefi-aarch64-abi.md \
+            docs/native-retirement-support-v1.tsv
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'test: isolate UEFI rejection output and refresh inventory'
+          git diff --exit-code
+          git push origin HEAD:refs/heads/codex/664-uefi-abi-contract
+          git push origin --delete codex/664-fix-transport-20260917a
