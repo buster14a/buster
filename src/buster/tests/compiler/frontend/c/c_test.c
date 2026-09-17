@@ -2077,6 +2077,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_positions(UnitTestArgume
     return result;
 }
 
+// #666: independent target expectations, followed by guarded noreturn
+// lowering. Binding/initializer object and runtime witnesses live in the
+// registered driver fixture basic_c_attribute_queries.c.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct { String8 triple; bool weak; bool alias; bool lifecycle; } targets[] = {
+        {S8("x86_64-unknown-linux-gnu"), true, true, true},
+        {S8("aarch64-unknown-linux-gnu"), true, true, true},
+        {S8("x86_64-apple-macos"), true, true, true},
+        {S8("aarch64-apple-macos"), true, true, true},
+        {S8("x86_64-pc-windows-msvc"), false, true, true},
+        {S8("aarch64-pc-windows-msvc"), false, true, true},
+        {S8("aarch64-linux-android"), true, true, true},
+        {S8("aarch64-apple-ios"), true, true, true},
+        {S8("x86_64-unknown-freestanding"), true, true, true},
+        {S8("x86_64-unknown-uefi"), false, true, false},
+        {S8("aarch64-unknown-uefi"), false, true, false},
+        {S8("wasm64-unknown-freestanding"), false, false, false},
+        {S8("bpfel-unknown-linux"), false, false, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        TargetParseResult target = target_parse_triple(targets[index].triple);
+        if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
+        {
+            String8 source = string_format(temporary.arena,
+                S8("#define EXPECT_WEAK {u32}\n#define EXPECT_ALIAS {u32}\n#define EXPECT_LIFECYCLE {u32}\n{S8}"),
+                (u32)targets[index].weak, (u32)targets[index].alias, (u32)targets[index].lifecycle,
+                S8("#if !__has_attribute(noreturn) || !__has_attribute(__noreturn__)\n"
+                   "#error noreturn query\n#endif\n"
+                   "#if __has_attribute(weak) != EXPECT_WEAK || __has_attribute(__weak__) != EXPECT_WEAK\n"
+                   "#error weak target query\n#endif\n"
+                   "#if __has_attribute(alias) != EXPECT_ALIAS || __has_attribute(__alias__) != EXPECT_ALIAS\n"
+                   "#error alias target query\n#endif\n"
+                   "#if __has_attribute(constructor) != EXPECT_LIFECYCLE || __has_attribute(__constructor__) != EXPECT_LIFECYCLE\n"
+                   "#error constructor target query\n#endif\n"
+                   "#if __has_attribute(destructor) != EXPECT_LIFECYCLE || __has_attribute(__destructor__) != EXPECT_LIFECYCLE\n"
+                   "#error destructor target query\n#endif\n"
+                   "#if !__has_attribute(packed) || !__has_attribute(__aligned__) || !__has_attribute(vector_size)\n"
+                   "#error layout control\n#endif\n"
+                   "#if __has_attribute(returns_twice) || __has_attribute(weakref) || __has_attribute(unused) || __has_attribute(buster_unknown)\n"
+                   "#error ignored attribute control\n#endif\n"
+                   "#if __has_attribute(_Noreturn) || __has_attribute(__noreturn) || __has_attribute(__weak) || __has_attribute(__alias)\n"
+                   "#error unimplemented spelling control\n#endif\n"
+                   "#if __has_attribute(__constructor) || __has_attribute(__destructor)\n"
+                   "#error unimplemented lifecycle spelling\n#endif\n"
+                   "#if __has_c_attribute(weak) || __has_c_attribute(alias) || __has_c_attribute(noreturn) || __has_c_attribute(gnu::weak)\n"
+                   "#error GNU query leaked into C query\n#endif\n"
+                   "#if __has_attribute(noreturn)\n#define PLAIN __attribute__((noreturn))\n#else\n#define PLAIN\n#endif\n"
+                   "#if __has_attribute(__noreturn__)\n#define RESERVED __attribute__((__noreturn__))\n#else\n#define RESERVED\n#endif\n"
+                   "PLAIN void die_marked(int status); RESERVED void die_reserved(int status); void die_plain(int status);\n"
+                   "int through_marked(int status) { die_marked(status); }\n"
+                   "int through_reserved(int status) { die_reserved(status); }\n"
+                   "int through_plain(int status) { die_plain(status); return 0; }\n"));
+            CPreprocessResult tokens = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lower = c_test_lower_source(temporary.arena, source, S8("attribute-query-noreturn.c"), target.target, &tokens, &parse);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lower.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lower.program && lower.program->module_count == 1))
+            {
+                IrModule* module = lower.program->modules;
+                u32 checked = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    bool marked = string_equal(function->name, S8("through_marked")) || string_equal(function->name, S8("through_reserved"));
+                    bool plain = string_equal(function->name, S8("through_plain"));
+                    if (marked || plain)
+                    {
+                        bool unreachable = false;
+                        bool returns = false;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            unreachable |= function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                            returns |= function->instructions[instruction_index].opcode == IR_OPCODE_RETURN;
+                        }
+                        BUSTER_TEST(arguments, marked ? (unreachable && !returns) : (returns && !unreachable));
+                        checked += 1;
+                    }
+                }
+                BUSTER_TEST(arguments, checked == 3);
+            }
+            // On core Wasm/eBPF the unguarded syntax is rejected rather than
+            // silently discarded; a negative query must let source avoid it.
+            if (!targets[index].alias)
+            {
+                CPreprocessResult lifecycle_tokens = {0};
+                CParseResult lifecycle_parse = {0};
+                CIRLowerResult lifecycle = c_test_lower_source(temporary.arena,
+                    S8("__attribute__((constructor)) void init(void) {}\n"
+                       "__attribute__((__destructor__)) void fini(void) {}\n"),
+                    S8("attribute-query-unsupported-lifecycle.c"), target.target, &lifecycle_tokens, &lifecycle_parse);
+                BUSTER_TEST(arguments, lifecycle_tokens.diagnostic_count == 0 && lifecycle_parse.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lifecycle.diagnostic_count == 2);
+                for (u32 diagnostic = 0; diagnostic < lifecycle.diagnostic_count; diagnostic += 1)
+                {
+                    BUSTER_TEST(arguments, lifecycle.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // [[noreturn]] is the one C23 attribute buster acts on, and the reason the
 // syntax had to be parsed rather than only tolerated: c_ir_noreturn_marker_in_range
 // has always had a [[ branch, but nothing could reach it.  A call to a
@@ -18212,6 +18321,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
+    BUSTER_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
 
