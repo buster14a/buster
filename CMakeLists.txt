@@ -298,20 +298,17 @@ if (NOT "${BUSTER_PGO_USE}" STREQUAL "")
         RESULT_VARIABLE BUSTER_PGO_CURRENT_SOURCE_TREE_RESULT
     )
     execute_process(
-        COMMAND "${BUSTER_PGO_GIT_EXECUTABLE}" diff --quiet --
+        COMMAND "${BUSTER_PGO_GIT_EXECUTABLE}" status --porcelain=v1 --untracked-files=all -- . ":(exclude)build" ":(exclude)build/**"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        RESULT_VARIABLE BUSTER_PGO_WORKTREE_RESULT
-    )
-    execute_process(
-        COMMAND "${BUSTER_PGO_GIT_EXECUTABLE}" diff --cached --quiet --
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        RESULT_VARIABLE BUSTER_PGO_INDEX_RESULT
+        OUTPUT_VARIABLE BUSTER_PGO_SOURCE_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_PGO_SOURCE_STATUS_RESULT
     )
     if (NOT BUSTER_PGO_CURRENT_SOURCE_REVISION_RESULT EQUAL 0 OR
         NOT BUSTER_PGO_CURRENT_SOURCE_TREE_RESULT EQUAL 0 OR
-        NOT BUSTER_PGO_WORKTREE_RESULT EQUAL 0 OR
-        NOT BUSTER_PGO_INDEX_RESULT EQUAL 0)
-        message(FATAL_ERROR "PGO use requires a clean Git checkout with a readable HEAD and tree")
+        NOT BUSTER_PGO_SOURCE_STATUS_RESULT EQUAL 0 OR
+        NOT BUSTER_PGO_SOURCE_STATUS STREQUAL "")
+        message(FATAL_ERROR "PGO use requires a clean Git checkout outside build/ with a readable HEAD and tree")
     endif()
     if (NOT BUSTER_PGO_MANIFEST_SOURCE_REVISION STREQUAL BUSTER_PGO_CURRENT_SOURCE_REVISION)
         message(FATAL_ERROR "PGO source revision mismatch")

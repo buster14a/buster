@@ -711,17 +711,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 diff[] = {git, S8("diff"), S8("--quiet"), S8("--")};
-    String8 cached[] = {git, S8("diff"), S8("--cached"), S8("--quiet"), S8("--")};
-    if (!production_profile_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(diff), (SliceString8){0}, (SliceString8){0},
-                                    (String8){0}, (String8){0}, 120, false).success ||
-        !production_profile_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cached), (SliceString8){0}, (SliceString8){0},
-                                    (String8){0}, (String8){0}, 120, false).success)
+    String8 status_command[] = {
+        git, S8("status"), S8("--porcelain=v1"), S8("--untracked-files=all"), S8("--"), S8("."),
+        S8(":(exclude)build"), S8(":(exclude)build/**"),
+    };
+    ProductionProfileCommandResult status = production_profile_capture(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_command));
+    if (!status.success || production_profile_trim(status.output).length)
     {
-        string_print(S8("error: production_profile requires a clean tracked source tree\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        string_print(S8("error: production_profile requires a clean source tree outside build/\n"));
         return PROCESS_RESULT_FAILED;
     }
-
     String8 revision_command[] = {git, S8("rev-parse"), S8("--verify"), S8("HEAD")};
     String8 tree_command[] = {git, S8("rev-parse"), S8("--verify"), S8("HEAD^{tree}")};
     ProductionProfileCommandResult revision = production_profile_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(revision_command));
