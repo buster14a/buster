@@ -82,6 +82,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
+    BUILD_COMMAND_PRODUCTION_PROFILE,
+    BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST,
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
@@ -38110,6 +38112,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
     return result;
 }
 
+#include "tools/production_profile.c"
+
 ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -38128,6 +38132,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
+        [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
+        [BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST] = S8_INITIALIZER("production_profile_self_test"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
@@ -38247,7 +38253,20 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
 
-    if (command == BUILD_COMMAND_CLANG_ANALYZE)
+    if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
+    {
+        result = production_profile_main(
+            arena,
+            (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i},
+            arguments.pointer[0]);
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST)
+    {
+        result = production_profile_self_test(arena);
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_CLANG_ANALYZE)
     {
         result = clang_analyze_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
         argument_i = arguments.length;
@@ -39133,7 +39152,12 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     // Every parse-failure path above leaves argument_i on the offending
     // argument; report it here so no failure exits silently with code 1.
     // Differential execution has already emitted its own usage or result.
-    if (result != PROCESS_RESULT_SUCCESS && command != BUILD_COMMAND_TEST_DIFFERENTIAL && command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS && command != BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
+    if (result != PROCESS_RESULT_SUCCESS &&
+        command != BUILD_COMMAND_PRODUCTION_PROFILE &&
+        command != BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST &&
+        command != BUILD_COMMAND_TEST_DIFFERENTIAL &&
+        command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS &&
+        command != BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
     {
         if (argument_i < arguments.length)
         {
@@ -39242,6 +39266,12 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BUILD:
         {
             build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
+        }
+        break;
+        case BUILD_COMMAND_PRODUCTION_PROFILE:
+        case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
+        {
+            // Already executed by the production-profile-specific argument parser.
         }
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
