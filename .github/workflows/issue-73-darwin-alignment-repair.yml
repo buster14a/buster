@@ -32,43 +32,38 @@ jobs:
 
           source = Path('src/buster/lib/compiler/frontend/c/c_parse.c')
           text = source.read_text()
-          old = '''        u32 alignment = (u32)storage_size;
-          bool padded = storage_size != logical_byte_size;
-          bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
-          // Keep the established power-of-two vector layout unchanged. For the
-          // newly admitted padded GNU shape, Clang caps natural alignment at
-          // sixteen on AArch64 and Darwin while ELF x86-64, Windows, wasm,
-          // RISC-V, and BPF retain the rounded storage alignment.
-          if (padded && (target.cpu_arch == CPU_ARCH_AARCH64 || apple))
-          '''
-          new = '''        u32 alignment = (u32)storage_size;
-          bool padded = storage_size != logical_byte_size;
-          // Keep the established power-of-two vector layout unchanged. For the
-          // newly admitted padded GNU shape, Clang caps natural alignment at
-          // sixteen on AArch64. x86-64 Darwin, ELF, Windows, wasm, RISC-V, and
-          // BPF retain the rounded storage alignment.
-          if (padded && target.cpu_arch == CPU_ARCH_AARCH64)
-          '''
-          if text.count(old) == 1:
-              source.write_text(text.replace(old, new, 1))
-          elif old not in text and new in text:
-              print('Alignment fix is already present.')
-          else:
-              raise SystemExit('Expected padded-vector alignment block was not found exactly once.')
+
+          replacements = (
+              (
+                  '        bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;\n',
+                  '',
+              ),
+              (
+                  'sixteen on AArch64 and Darwin while ELF x86-64, Windows, wasm,\n'
+                  '        // RISC-V, and BPF retain the rounded storage alignment.',
+                  'sixteen on AArch64. x86-64 Darwin, ELF, Windows, wasm, RISC-V, and\n'
+                  '        // BPF retain the rounded storage alignment.',
+              ),
+              (
+                  'if (padded && (target.cpu_arch == CPU_ARCH_AARCH64 || apple))',
+                  'if (padded && target.cpu_arch == CPU_ARCH_AARCH64)',
+              ),
+          )
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected repair fragment exactly once, found {count}: {old!r}')
+              text = text.replace(old, new, 1)
+          source.write_text(text)
 
           workflow = Path('.github/workflows/issue-73-darwin-alignment-repair.yml')
-          if workflow.exists():
-              workflow.unlink()
+          workflow.unlink()
           PY
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git diff --cached --check
-          if git diff --cached --quiet; then
-            echo 'No repository changes remain to commit.'
-            exit 0
-          fi
           git commit -m 'frontend: preserve x86-64 Darwin vector alignment'
 
           branch='codex/issue-73-nonpow-vector-abi'
