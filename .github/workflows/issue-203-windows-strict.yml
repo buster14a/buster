@@ -1,0 +1,110 @@
+name: Issue 203 Windows strict validation
+
+on:
+  push:
+    branches:
+      - validation/203-pr796-windows-strict
+
+permissions:
+  contents: read
+
+jobs:
+  strict:
+    name: Windows x86-64 strict differential
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Check out exact validation revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build and execute all strict Windows configurations
+        id: strict
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $ClangVersion = (& clang.exe --version) -join "`n"
+          Write-Output $ClangVersion
+          if ($ClangVersion -notmatch 'Target:\s*x86_64-') { throw 'clang does not default to an x86_64 target' }
+
+          $Driver = Join-Path $env:RUNNER_TEMP 'strict-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver test_differential --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          New-Item -ItemType Directory -Force -Path 'evidence\strict-binary' | Out-Null
+          Copy-Item 'build\Release\ide.exe' 'evidence\strict-binary\ide.exe'
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+          $DifferentialArgs = @(
+            'test_differential'
+            '--ide', "$PWD\evidence\strict-binary\ide.exe"
+            '--cc', 'clang.exe'
+            '--strict-mir'
+            '--out', 'evidence\strict-differential'
+          )
+          foreach ($LibraryPath in $LibraryPaths) {
+            $DifferentialArgs += @('--library-path', $LibraryPath)
+          }
+
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(
+            Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse |
+              Sort-Object FullName
+          )
+          if ($RuntimeDlls.Count -ne 1) {
+            throw "Expected exactly one x86-64 ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)"
+          }
+          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
+          $env:PATH = "$RuntimeDir;$env:PATH"
+          $DifferentialArgs += '--sanitize-oracle'
+
+          & $Driver @DifferentialArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Show strict evidence
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          Write-Output "strict_outcome=${{ steps.strict.outcome }}"
+          if (Test-Path 'evidence\strict-differential') {
+            Get-ChildItem 'evidence\strict-differential' -File -Recurse |
+              Sort-Object FullName |
+              ForEach-Object {
+                Write-Output "=== $($_.FullName) ==="
+                if ($_.Length -le 1048576 -and $_.Extension -in @('.txt', '.json', '.md', '.tsv', '.log')) {
+                  Get-Content $_.FullName
+                } else {
+                  Write-Output "bytes=$($_.Length)"
+                }
+              }
+          }
+
+      - name: Retain strict evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-203-windows-strict-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Require strict differential success
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          if ('${{ steps.strict.outcome }}' -ne 'success') { throw 'Windows x86-64 strict differential failed' }
