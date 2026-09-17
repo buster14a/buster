@@ -53,7 +53,8 @@ anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`, while
-`-fno-register-allocator` selects the canonical stack emitter. Advanced and
+`-fno-register-allocator` selects the `none` compatibility spelling, which is
+remapped to MIR_STACK. Advanced and
 diagnostic callers may select `none`, `mir-stack`, `fast`, or `quality` with
 `-fregister-allocator=<mode>`; when several allocator-affecting options are
 present, the last one wins.
@@ -75,21 +76,15 @@ Win64 indirect aggregate arguments use private caller copies with up to
 sixteen-byte alignment, as described in the [machine guide](machine.md).
 Win64 128-bit integer signatures pass arguments indirectly and return in XMM0.
 Shapes the Win64 subset does not build yet — split wide vector signatures and
-aggregate arguments aligned above sixteen bytes — fall back per function,
-which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
-`CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
-stable reason name for every fallback. Its disjoint counts sum to
-`fallback_functions`: `target-excluded`, `signature`, `opcode`,
-`selection-other`, `verification`, `placement`, `encoding`, `output-capacity`,
-and `unwind`. `signature` means the target's function ABI gate rejected the
-signature; `opcode` retains the first rejected canonical opcode in the legacy
-`CODEGEN_FALLBACK` census. `selection-other` is deliberately unclassified,
-while `verification` identifies an implementation failure. The allocator,
-stage, opcode and reason counters all survive multi-input compilation.
+aggregate arguments aligned above sixteen bytes — fail the translation unit
+with a structured `codegen.unsupported-abi` result. No allocator spelling or
+fallback flag restores the direct emitter, and no partial object or replacement
+output is published. `-v` may still print the retained fallback-census fields;
+native production generation leaves those compatibility counters empty.
 
-The signature-reason negative control uses the currently direct-only 32-byte
-Win64 vector ABI. Narrow vectors and argument count have strict-success regressions and
-must not be constrained to keep a telemetry test failing.
+The signature-reason negative control uses the currently unsupported 32-byte
+Win64 vector ABI. Narrow vectors and argument count have success regressions
+and must not be constrained to keep a refusal test passing.
 
 For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
 names the source tuple, not the destination register width. A broadcast
@@ -142,39 +137,42 @@ volatile aggregate construction defect is tracked in #398.
 actual visits, separately from removed rows. The [middle-end pass map](../middle-end-pass-map.md)
 defines their scope, invalidation rules and separate diagnostic replay protocol.
 
-`-fno-machine-fallback` makes native C coverage strict: after code generation
-succeeds, any fallback fails the translation unit before object writing and
-reports its first function, source, target, allocator, opcode and reason.
-`-fmachine-fallback` restores the normal differential-oracle behavior; the last
-of these two flags wins. Strict mode requires a native target and a machine
-allocator (`mir-stack`, `fast` or `quality`); NONE, direct non-native emission,
-preprocessing and syntax-only checks cannot satisfy the gate. Assembly inputs
+`-fno-machine-fallback` and `-fmachine-fallback` remain accepted compatibility
+spellings. Native C generation is always MIR-only, so neither flag changes
+behavior or can restore direct emission. A MIR selection, verification,
+placement, encoding, unwind, or output-capacity failure is diagnosed before
+object writing and leaves any existing output untouched. The flags remain
+invalid for non-native, preprocessing, and syntax-only actions. Assembly inputs
 and linked prebuilt objects have no canonical C functions to gate.
 For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
-`compiler_driver_test_machine_fallback` runs the same eleven-fixture arithmetic,
-control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
-Linux, macOS and Windows, under all three machine allocators and both explicit
-frontend forms in `test_all`, including CI. Its 396 object-compilation rows
-require 396 non-empty strict successes, including the two variadic fixtures on
-Windows/Darwin AArch64. Any future explicit refusals require exact fallback-function, reason and opcode counts, preserve an
-existing output, and still compile through the direct fallback. They are not
-skips; implementing a gap must replace its refusal expectation with strict
-success. Every target/allocator/frontend cohort emits a `MIR_COVERAGE` row
-with actual strict successes, validated expected rejections and failures.
+`compiler_driver_test_machine_fallback` runs its arithmetic, control-flow,
+call-ABI, aggregate and frame corpus for x86-64 and AArch64 on Linux, macOS and
+Windows, under all three machine allocators and both explicit frontend forms in
+`test_all`, including CI. The current matrix is 18 fixtures × six targets ×
+three allocators × two frontend forms; the test's generated coverage rows are
+the count authority rather than a hard-coded floor. Every object-compilation
+row requires a non-empty MIR success, including the variadic fixtures on
+Windows/Darwin AArch64. Any future explicit refusal requires its structured
+function, opcode, and reason fields, preserves an existing output, and emits
+no object. It is not a direct fallback or a skip; implementing a gap must
+replace its refusal expectation with MIR success. Every target/allocator/
+frontend cohort emits a `MIR_COVERAGE` row with actual successes and validated
+expected rejections.
 Object compilation is not target execution. Separate AArch64 vector,
 integer-pair and sixteen-byte atomic load/store tests, unsupported signature
 controls, Windows/UEFI large-frame tests, and native Windows ARM64
 unwind-boundary execution remain registered. The atomic lane is strict across
 all AArch64 desktop targets, allocators and frontend forms; its broader
-aggregate and i128 censuses both require zero fallback, including exchange,
+aggregate and i128 censuses both require zero MIR refusal, including exchange,
 arithmetic/bitwise updates and compare-exchange. The separate nine-function
 atomic-update fixture covers all three AArch64 desktop targets, four allocator
-modes and both frontend forms; MIR legs reject fallback, and only the matching
-native desktop executes the result. This adds 24 object-compilation cases
-outside the eleven-fixture floor above. The direct backend remains its
-semantic reference, with failed wide CAS requiring a validated pair read.
+modes and both frontend forms; a refusal is a structured failure, and only the
+matching native desktop executes the result. This adds 24 object-compilation
+cases outside the 18-fixture matrix above. The external direct backend remains
+a semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
-or permission to retire the canonical oracle.
+or permission to remove shared ABI, encoding, relocation, debug or unwind
+services.
 
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
@@ -232,8 +230,8 @@ undefinition arrays retain the historical compatibility order (all definitions,
 then all undefinitions), but a nonempty ordered stream is authoritative.
 
 C, assembly and backend failures publish the shared
-[diagnostic contract](../diagnostics.md). Strict fallback uses symbolic opcode
-names and `not-applicable` for signature/target exclusions, while tooling retains
+[diagnostic contract](../diagnostics.md). Structured MIR refusal uses symbolic
+opcode names and `not-applicable` for signature/target exclusions, while tooling retains
 internal IDs in the optional backend context. Source locations name the resolved
 file, including remapped or included source, rather than always the top-level input.
 
@@ -373,8 +371,9 @@ and run the result. They also check the compressed-section driver diagnostic.
 
 `-fverify-codegen` validates canonical IR even when the frontend certified it,
 then checks selected and changed scheduled MIR and placement validity. Invalid
-verified states fail compilation before fallback can hide them. It applies to
-native x86-64/AArch64 code generation, including the `none` canonical path;
+verified states fail compilation as structured errors. It applies to native
+x86-64/AArch64 code generation, including the `none` MIR_STACK compatibility
+path;
 preprocessing, syntax-only and direct non-native output reject the flag.
 Successful compilation prints a versioned `CODEGEN_VERIFY` line with module,
 selected-function and scheduled-function counts and the effective allocator.
@@ -382,10 +381,10 @@ Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
 
-With `-v`, aggregate `CODEGEN` and fallback reason/opcode/stage counters are also
-printed after codegen errors, including strict fallback rejection. The optional
-`-fcodegen-fallback-census` retains and reports every observed fallback's function
-ID/name, source coordinates, reason/stage and opcode; normal compilation allocates
-no record array. The first strict diagnostic remains unchanged. The
+With `-v`, aggregate `CODEGEN` and retained fallback reason/opcode/stage
+compatibility counters are also printed after codegen errors. The optional
+`-fcodegen-fallback-census` remains an ABI-compatible request; native MIR
+generation publishes no fallback records and normal compilation allocates no
+record array. The first structured diagnostic remains unchanged. The
 [retirement object census](../native-retirement-census.md) validates and retains
 both aggregate and function records, including records before a fatal stop.

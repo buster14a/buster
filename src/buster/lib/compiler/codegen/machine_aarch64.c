@@ -788,7 +788,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_place_address_offset(MachineA64Selec
     {
         // A promoted local has no address. The promotability scan proved
         // no use needs one, so a request here is a selector hole — refuse
-        // to the canonical fallback rather than hand a register's value
+        // structurally rather than hand a register's value
         // out as an address. An over-aligned local's register is the
         // aligned pointer itself and falls through to the pointer path.
         return false;
@@ -2480,8 +2480,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_scalar_binary(MachineA64Selector* se
         // (size <= 8) is what keeps 128-bit operands off this table:
         // i128 values are slot-backed with no operand register, so any
         // i128 binary outside the constant-shift path above refuses here
-        // and the function falls back whole to the canonical emitter,
-        // which owns the remaining 128-bit pair lowerings.
+        // and the function refuses this scalar row; the explicit pair
+        // lowerings below own the remaining 128-bit operations.
         bool wide = machine_a64_type_is_64_bit(program, operand_type_id);
         u16 arithmetic = 0;
         switch (operation)
@@ -7221,7 +7221,7 @@ struct MachineA64Encoder
     u32 capacity;
     bool overflow;
     // An operand or offset outside what the subset can encode; the caller
-    // reports an encode fallback rather than emitting wrong bytes.
+    // reports a structured encoder error rather than emitting wrong bytes.
     bool error;
     // Test-only sparse-layout mode: the planner mutates virtual offsets and
     // metadata without touching a giant byte buffer. Production encoders
@@ -7239,7 +7239,7 @@ struct MachineA64BranchFixup
     A64Opcode opcode;
     // A conditional fixup keeps its original condition here because a long
     // transfer inverts the condition and skips the scratch transfer.  The
-    // direct path still patches the exact word emitted by the MC encoder.
+    // final patch path still patches the exact word emitted by the encoder.
     u8 condition;
     u8 expanded;
     bool label_address;
@@ -7698,8 +7698,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_unsigned_memory(MachineA64En
     return true;
 }
 
-// Frame-relative sized memory operation off the X28 frame base, mirroring
-// the canonical codegen_canonical_a64_memory_operation_base: scaled
+// Frame-relative sized memory operation off the X28 frame base: scaled
 // unsigned offsets directly, larger offsets through the X16 scratch.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encoder, u32 register_number, u32 offset, u32 size, bool store)
 {
@@ -7718,9 +7717,9 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encode
         // member at offset two. Misalignment therefore takes the same X16
         // materialize-and-add path an out-of-range offset does -- which is
         // exactly what the vector sibling below already does, for the same
-        // reason. Failing closed here put the whole enclosing function back on
-        // the canonical emitter through an encode-stage fallback (#813); the
-        // access itself is legal, since AArch64 permits an unaligned normal-
+        // reason. Failing closed here used to turn the whole enclosing
+        // function into an encode-stage fallback (#813); the access itself is
+        // legal, since AArch64 permits an unaligned normal-
         // memory load or store and only the immediate form is scaled. X16 is
         // reserved from the allocator, so it can never be the register the
         // access itself names.
@@ -9554,7 +9553,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_ATOMIC_STORE:
             {
                 // One ldar/stlr-family word, the canonical
-                // a64_emit_atomic_pointer encoding; the low payload byte
+                // atomic-pointer payload encoding; the low payload byte
                 // carries the access size.
                 u32 atomic_size = instruction->payload & 0xffu;
                 u32 atomic_size_bits = atomic_size == 2 ? 0x40000000u : atomic_size == 4 ? 0x80000000u : atomic_size == 8 ? 0xc0000000u : 0;

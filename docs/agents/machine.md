@@ -102,8 +102,9 @@
   consumed type/value/address facts, row layout, and the unvalidated entry's shape
   check. The canonical IR verifier remains the pipeline validation authority.
   Unsupported machine selections return `supported = false` and
-  `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and
-  `fallback_verify_count` expose the actual canonical fallback. There is no
+  `failed_opcode`; native dispatch turns that result into a structured
+  CodegenError. The retained `CodegenStatistics` fallback fields stay empty
+  in production and cannot route to a retired direct emitter. There is no
   declarative pattern-miss category because there is no declarative matcher.
 - Shared canonical-IR facts and the generated FAST/QUALITY rule decision tree
   live in `machine_select.{c,h}`, `machine_select_rules.h`, and
@@ -112,10 +113,10 @@
   third permanent graph IR.
 - `MachineSelectResult.signature_rejected` is set only inside target function
   signature gates; other unclassified selection failures remain distinct.
-  Native dispatch records exactly one `CodegenFallbackReason` per discarded
-  machine function, retaining separate selection-opcode and post-selection
-  counters. The driver can require zero fallback with `-fno-machine-fallback`;
-  see the [driver guide](driver.md) for the curated CI corpus and reason names.
+  Native dispatch returns exactly one structured failure for a discarded
+  machine function, retaining the stable reason string and source identity.
+  The accepted fallback flags are compatibility no-ops; see the [driver
+  guide](driver.md) for the curated MIR-only corpus.
 - Native signature and call storage is sized from canonical IR counts. Incoming
   shapes, placements, argument values and normalization rows use arena arrays;
   the existing value-fact walk sizes one reusable call workspace per function.
@@ -250,7 +251,7 @@
 - Short x86-64 vector values use exact frame images for construction, loads,
   stores and ABI transport. One-, two-, four-, eight- and sixteen-byte
   signatures follow the shared classifier on SysV and Win64; incoming and
-  outgoing XMM transfers preserve the complete sixteen-byte part. Canonical
+  outgoing XMM transfers preserve the complete sixteen-byte part. MIR
   joins use the existing pair mapping, allocated only when a vector participates
   in an edge. Baseline wider local vector images can also use frame copies;
   this does not admit missing vector arithmetic or split wide signatures.
@@ -263,8 +264,8 @@
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
   narrow signature, vector-load and 32-byte Win64 baseline split-reference
-  refusals are strict successes. Fallback telemetry uses a valid canonical-only
-  inline-assembly transaction, while a malformed literal-register fixture owns
+  refusals are strict successes. The failure fixture now exercises a structured
+  MIR transaction, while a malformed literal-register fixture owns
   the artifact-preservation failure control; ABI retirement no longer doubles
   as a negative test.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
@@ -350,13 +351,14 @@
   A store stages both halves, clears any promoted aggregate padding in the high
   half, arms the monitor with LDXP or LDAXP, and retries STXP/STLXP until the
   replacement lands whole. The rows
-  preserve the direct emitter's memory-order strengths on every desktop ABI.
+  preserve the MIR machine path's memory-order strengths on every desktop ABI.
   Sixteen-byte exchange, arithmetic/bitwise RMW and compare-exchange use
   constrained update rows with full-width integer input/result frame slots.
   RMW reloads its unchanged operand on each retry and propagates carry/borrow
   across both limbs. CAS compares both halves, selects the observed pair on
   mismatch, and still completes STXP/STLXP before returning: an unvalidated
-  LDXP may be a torn read. The direct oracle follows the same corrected rule.
+  LDXP may be a torn read. The independent ABI/reference oracle follows the
+  same corrected rule.
   Every frame load precedes LDXP on each retry; only register operations
   occur before STXP, preserving the exclusive-loop progress guarantee.
   Both rows declare X9/X11-X14 clobbers and flag definitions; CAS additionally
@@ -430,11 +432,11 @@
   `win64_vector.c` crosses Clang/MIR boundaries in both directions on capable
   hosts, checks every result lane, caller preservation, raw variadic pointer
   alignment, and live dynamic allocations. The fixed subset also executes
-  through NONE. Smaller vectors and model-dependent register splitting retain
-  the direct fallback; this change does not replace their representation.
-- Windows/UEFI x86-64 MIR frames larger than one page reuse
-  `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
-  R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
+  through NONE/MIR_STACK. Smaller vectors and model-dependent register
+  splitting either use MIR or return a structured unsupported-ABI failure; no
+  direct fallback remains.
+- Windows/UEFI x86-64 MIR frames larger than one page use the machine encoder's
+  bounded R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
   large frame requires one allocation unwind action and a bounded prologue.
   `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
   to unwind construction without widening the result on 64-bit hosts.
@@ -516,12 +518,12 @@
   The registered finite-input fixture decodes IEEE images with integer
   operations and requires strict compilation across all desktop AArch64
   targets, all MIR allocators, and both frontend forms; native hosts execute
-  the same cases, retaining NONE as the direct reference.
+  the same cases, retaining NONE as the MIR_STACK compatibility spelling.
 - AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
   forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
   slot-backed limbs, selecting the primary limb's count or 64 plus the other
   count with ordinary scalar MIR. Publish a zero high result limb, including
-  the direct oracle's all-zero-pair result of 128. Never truncate the operand
+  the independent reference's all-zero-pair result of 128. Never truncate the operand
   to a single limb or leave stale high result bytes. Preserve existing replay
   opcode numbers by appending new rows. The registered zero-count fixture
   covers every one-bit position and both frontend forms, with strict MIR
@@ -584,7 +586,7 @@
   Both platforms use public eight-byte pointer lists. `va_copy` copies eight
   bytes; `va_arg` selects ordinary MIR loads, alignment, cursor stores and
   exact aggregate copies for the supported values through sixteen bytes.
-  `compiler_driver_test_aarch64_platform_variadic` requires zero fallback
+  `compiler_driver_test_aarch64_platform_variadic` requires zero MIR refusal
   for every MIR allocator and frontend form, then executes native standalone
   and mixed-compiler callers, callees and public-list consumers on matching
   desktop hosts. ELF wrapper execution of target object code is useful ABI
@@ -601,7 +603,7 @@
   following arguments. `va_copy` copies all 32 bytes; `va_end` emits no write.
   Lists passed by value use the existing AAPCS64 indirect aggregate argument
   plan and a private callee copy, not the original producer's cursor.
-  The direct oracle and MIR also reconstruct three/four-double HFAs,
+  The external oracle and MIR also reconstruct three/four-double HFAs,
   64/128-bit short vectors and up to four-vector HVAs from independent V
   slots. An ordinary composite above sixteen bytes consumes one GP pointer
   and copies exactly the object size, including a short tail. Its pointed-to
@@ -624,7 +626,7 @@
   after it, preserving simultaneous numeric/named ties, read/write operands,
   multiple outputs and early-clobber separation. The encoder alone transfers
   those images to and from the selected physical GPR, vector or x87 registers;
-  it never calls the canonical emitter. General rows are conservative allocator
+  it never calls a retired direct emitter. General rows are conservative allocator
   barriers, while their side records retain the exact clobber facts checked by
   the verifier and consumed by emission.
 - Empty operand-free assembly and literal `nop`, x86 `pause`, or AArch64
@@ -666,13 +668,13 @@
   in parallel. Each row snapshots zero-extended results to a private frame
   object before ordinary stores publish output places. XGETBV requires XSAVE
   on the compile target. Partial-width, read/write, partial-output and other
-  assembly shapes retain their existing fallback; these rows do not implement
-  unrestricted inline assembly.
+  assembly shapes fail with a structured unsupported-instruction result; these
+  rows do not implement unrestricted inline assembly.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
   their sign-extension constraints. High-bit unsigned switch constants must
-  encode without canonical fallback.
+  encode without a structured refusal.
 - The f32/f64-to-u64 biased conversions compare against **2^63 in the source
   format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
@@ -695,7 +697,7 @@
   procedure linkage entry. Internal and hidden symbols keep the rip-relative
   form, and a thread-local address is the thread-local model's to pick --
   `codegen_thread_local_model` reads the same flag and answers general-dynamic
-  under it. The canonical emitter and the machine path make
+  under it. The selector and module relocation path make
   the same decision from the same predicate: the selector writes a
   `MachineSymbolReference` beside each call-target row and the module
   relocation is derived from it, so the four allocators cannot disagree. One

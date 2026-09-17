@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
@@ -205,6 +206,182 @@ BUSTER_GLOBAL_LOCAL CodegenModuleGlobal* codegen_test_c_global_find(CodegenModul
         if (!result && symbol && string_equal(symbol->name, name))
         {
             result = module->globals + index;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrGlobal* codegen_test_c_ir_global_find(IrModule* module, IrProgram* program, String8 name)
+{
+    IrGlobal* result = 0;
+    for (u32 index = 0; index < module->global_count; index += 1)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->globals[index].symbol);
+        if (!result && symbol && string_equal(symbol->name, name))
+        {
+            result = module->globals + index;
+        }
+    }
+    return result;
+}
+
+// Keep the source-level retirement boundary executable.  This is deliberately
+// a test-owned inventory rather than a comment or a grep script: adding one of
+// these direct-only roots back to the ordinary codegen translation unit makes
+// the cutover test fail before a compiler mode can accidentally reach it.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_mir_source_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice codegen_bytes = file_read(arguments->arena, S8("src/buster/lib/compiler/codegen/codegen.c"), (FileReadOptions){0});
+    ByteSlice internal_bytes = file_read(arguments->arena, S8("src/buster/lib/compiler/codegen/codegen_internal.h"), (FileReadOptions){0});
+    String8 codegen_source = {.pointer = codegen_bytes.pointer, .length = codegen_bytes.length};
+    String8 internal_source = {.pointer = internal_bytes.pointer, .length = internal_bytes.length};
+    // Packaged runtimes can omit repository sources.  The inventory is strict
+    // when this source tree is present, but it is inapplicable when the files
+    // are not shipped with the test binary.
+    bool source_available = codegen_source.length != 0 && internal_source.length != 0;
+    if (source_available)
+    {
+        String8 required_codegen_roots[] = {
+            S8("codegen_generate_canonical_module_attempt"),
+            S8("codegen_emit_global_assembly"),
+            S8("codegen_canonical_x64_metadata_emit"),
+            S8("codegen_x64_emit_windows_stack_allocate"),
+            S8("machine_select_validated_canonical_function"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(required_codegen_roots); index += 1)
+        {
+            BUSTER_TEST(arguments, string_first_sequence(codegen_source, required_codegen_roots[index]) != BUSTER_STRING_NO_MATCH);
+        }
+        String8 retired_direct_roots[] = {
+            S8("codegen_canonical_x64_function_shape"), S8("codegen_canonical_direct_call_uses"),
+            S8("codegen_canonical_a64_base_address"),
+            S8("codegen_canonical_x64_thread_local_general_dynamic"),
+            S8("codegen_canonical_x64_emit_return"), S8("codegen_canonical_x64_simd_operation"),
+            S8("codegen_canonical_x64_vector_operation"), S8("codegen_canonical_x64_copy_frame_to_rsp"),
+            S8("codegen_canonical_x64_copy_rsp_to_frame"), S8("codegen_canonical_a64_vector_operation"),
+            S8("codegen_canonical_a64_i128_divide"), S8("x64_emit_load_memory"), S8("x64_emit_store_memory"),
+            S8("x64_emit_load_float_bits"), S8("x64_emit_store_float_bits"), S8("x64_emit_population_count"),
+            S8("x64_emit_vector_native_binary_operation_kind"), S8("a64_emit_store_offset"),
+            S8("a64_emit_store_value_component"), S8("a64_emit_stack_address"), S8("a64_emit_load_pointer"),
+            S8("a64_emit_store_pointer"), S8("a64_emit_atomic_pointer"), S8("a64_emit_atomic_exclusive_load"),
+            S8("a64_emit_atomic_exclusive_store"), S8("a64_emit_atomic_load_pair"), S8("a64_emit_atomic_store_pair"),
+            S8("a64_emit_exclusive_retry"), S8("a64_emit_copy_memory_registers"),
+            S8("a64_emit_initialize_aggregate_result"), S8("a64_emit_load_pointer_offset"),
+            S8("a64_emit_store_pointer_offset"), S8("codegen_canonical_a64_frame_memory_operation"),
+            S8("codegen_canonical_a64_remainder_divide_instruction"), S8("canonical_prep"), S8("canonical_emit"),
+            S8("CCanonicalEmitter"), S8("X64Builder"), S8("CodegenRelocation"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(retired_direct_roots); index += 1)
+        {
+            BUSTER_TEST(arguments, string_first_sequence(codegen_source, retired_direct_roots[index]) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(internal_source, retired_direct_roots[index]) == BUSTER_STRING_NO_MATCH);
+        }
+    }
+    return result;
+}
+
+// A malformed later label relocation must roll back the bytes and every side
+// table publication made for that function.  The first label is valid and the
+// second is deliberately out of range, so the test reaches the post-encoding
+// fixup transaction after bytes, lines, unwind, debug rows, and relocations
+// have all been staged.  A two-pass fixup must leave both global records
+// untouched when the second validation fails.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_transaction_rollback(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    CodegenModuleOptions options = {
+        .debug_info = true,
+        .assume_validated = true,
+        .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+    };
+    String8 first_source = S8("void *rollback_storage[2];\n"
+                              "int rollback_first(int input) { int local = input + 7; return local; }\n");
+    CPreprocessResult first_tokens = c_preprocess(arguments->arena, first_source, (CPreprocessOptions){0});
+    CParseResult first_parsed = c_parse(arguments->arena, first_tokens);
+    CIRLowerResult first_lowered = c_lower_to_ir(arguments->arena, S8("transaction-prefix.c"), first_tokens, first_parsed, target);
+    BUSTER_TEST(arguments, first_tokens.error_count == 0 && first_parsed.diagnostic_count == 0 && first_lowered.diagnostic_count == 0 && first_lowered.program);
+    CodegenModule prefix = {0};
+    if (first_lowered.program)
+    {
+        prefix = codegen_generate_canonical_module(arguments->arena, first_lowered.program, first_lowered.program->modules, target, options);
+        BUSTER_TEST(arguments, prefix.error == CODEGEN_ERROR_NONE && prefix.code.length != 0);
+        BUSTER_TEST(arguments, prefix.entry_count == 1 && prefix.function_count == 1);
+    }
+
+    String8 malformed_source = S8("void *rollback_storage[2];\n"
+                                  "int rollback_first(int input) { int local = input + 7; return local; }\n"
+                                  "int rollback_second(int input) { int local = input + 9; return local; }\n");
+    CPreprocessResult malformed_tokens = c_preprocess(arguments->arena, malformed_source, (CPreprocessOptions){0});
+    CParseResult malformed_parsed = c_parse(arguments->arena, malformed_tokens);
+    CIRLowerResult malformed_lowered = c_lower_to_ir(arguments->arena, S8("transaction-malformed.c"), malformed_tokens, malformed_parsed, target);
+    BUSTER_TEST(arguments, malformed_tokens.error_count == 0 && malformed_parsed.diagnostic_count == 0 && malformed_lowered.diagnostic_count == 0 && malformed_lowered.program);
+    if (malformed_lowered.program)
+    {
+        IrModule* module = malformed_lowered.program->modules;
+        IrFunction* bad = codegen_test_c_function_find(module, S8("rollback_second"));
+        IrGlobal* storage = codegen_test_c_ir_global_find(module, malformed_lowered.program, S8("rollback_storage"));
+        BUSTER_TEST(arguments, bad != 0 && storage != 0);
+        if (bad && storage)
+        {
+            IrType* storage_type = ir_type_from_id(&malformed_lowered.program->types, storage->type);
+            u64 pointer_size = malformed_lowered.program->data_layout.pointer.size;
+            BUSTER_TEST(arguments, storage_type && storage_type->layout.resolved && pointer_size != 0 &&
+                                        storage_type->layout.size >= pointer_size * 2);
+            if (storage_type && storage_type->layout.resolved && pointer_size != 0 && storage_type->layout.size >= pointer_size * 2)
+            {
+                storage->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+                storage->bytes.length = storage_type->layout.size;
+                storage->bytes.pointer = arena_allocate(arguments->arena, u8, storage->bytes.length);
+                memset(storage->bytes.pointer, 0, storage->bytes.length);
+                storage->relocations = arena_allocate(arguments->arena, IrGlobalRelocation, 2);
+                storage->relocation_count = 2;
+                storage->relocations[0] = (IrGlobalRelocation){
+                    .symbol = bad->symbol,
+                    .label_block = (IrBlockId){.value = 0},
+                    .offset = 0,
+                    .is_label_address = true,
+                };
+                storage->relocations[1] = (IrGlobalRelocation){
+                    .symbol = bad->symbol,
+                    .label_block = (IrBlockId){.value = 0},
+                    .offset = pointer_size,
+                    .is_label_address = true,
+                };
+                IrValidationResult prepared = ir_prepare_canonical_module(malformed_lowered.program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                storage->relocations[1].label_block = (IrBlockId){.value = bad->block_count};
+
+                bool exhausted = false;
+                CodegenModule refused = codegen_test_generate_canonical_module_attempt(arguments->arena, malformed_lowered.program, module,
+                                                                                        target, options, 4, &exhausted);
+                BUSTER_TEST(arguments, !exhausted);
+                BUSTER_TEST(arguments, refused.error == CODEGEN_ERROR_INVALID_IR);
+                BUSTER_TEST(arguments, refused.failure_reason.length != 0 && string_equal(refused.failure_reason, S8("verification")));
+                BUSTER_TEST(arguments, refused.code.length == 0);
+                BUSTER_TEST(arguments, refused.ir_module && refused.failed_function.value < refused.ir_module->function_count &&
+                                            string_equal(refused.ir_module->functions[refused.failed_function.value].name, S8("rollback_second")));
+                BUSTER_TEST(arguments, refused.entry_count == prefix.entry_count && refused.function_count == prefix.function_count &&
+                                            refused.relocation_count == prefix.relocation_count + 2 && refused.line_entry_count == prefix.line_entry_count &&
+                                            refused.debug_location_count == prefix.debug_location_count);
+                BUSTER_TEST(arguments, refused.statistics.function_count == prefix.statistics.function_count &&
+                                            refused.statistics.instruction_count == prefix.statistics.instruction_count &&
+                                            refused.statistics.value_count == prefix.statistics.value_count &&
+                                            refused.statistics.stack_frame_bytes == prefix.statistics.stack_frame_bytes &&
+                                            refused.statistics.allocator_reload_count == prefix.statistics.allocator_reload_count &&
+                                            refused.statistics.allocator_spill_count == prefix.statistics.allocator_spill_count);
+                BUSTER_TEST(arguments, refused.relocation_count >= 2 && refused.relocations[0].label_address && refused.relocations[1].label_address &&
+                                            refused.relocations[0].addend == 0 && refused.relocations[1].addend == 0);
+                if (refused.function_count == prefix.function_count && refused.function_count != 0)
+                {
+                    CodegenFunctionDescriptor* expected = prefix.functions;
+                    CodegenFunctionDescriptor* actual = refused.functions;
+                    BUSTER_TEST(arguments, actual->code_offset == expected->code_offset && actual->code_size == expected->code_size &&
+                                                actual->prolog_size == expected->prolog_size &&
+                                                actual->unwind_action_count == expected->unwind_action_count && actual->epilog_count == expected->epilog_count);
+                }
+            }
         }
     }
     return result;
@@ -1915,7 +2092,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
                 BUSTER_TEST(arguments, ordinary.error == CODEGEN_ERROR_NONE && checked.error == CODEGEN_ERROR_NONE);
                 BUSTER_TEST(arguments, ordinary.statistics.verified_ir_module_count == 0 && ordinary.statistics.verified_mir_function_count == 0);
                 BUSTER_TEST(arguments, checked.statistics.verified_ir_module_count == 1);
-                BUSTER_TEST(arguments, checked.statistics.verified_mir_function_count == (allocator == CODEGEN_REGISTER_ALLOCATOR_NONE ? 0u : 1u));
+                BUSTER_TEST(arguments, checked.statistics.verified_mir_function_count == 1u);
                 BUSTER_TEST(arguments, checked.code.length == ordinary.code.length);
                 if (checked.code.length == ordinary.code.length)
                 {
@@ -2024,6 +2201,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    UnitTestResult source_authority = codegen_test_mir_source_authority(arguments);
+    result.succeeded_test_count += source_authority.succeeded_test_count;
+    result.test_count += source_authority.test_count;
+    UnitTestResult transaction_rollback = codegen_test_machine_transaction_rollback(arguments);
+    result.succeeded_test_count += transaction_rollback.succeeded_test_count;
+    result.test_count += transaction_rollback.test_count;
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
@@ -2120,33 +2303,19 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, line_row_count == 2);
     BUSTER_TEST(arguments, line_rows[2].line == 0 && line_rows[2].code_offset == 0);
-    u8 large_frame_operation_bytes[256] = {0};
-    CodegenBuffer large_frame_operation = {
-        .bytes = large_frame_operation_bytes,
-        .capacity = sizeof(large_frame_operation_bytes),
+    u8 large_stack_probe_bytes[256] = {0};
+    CodegenUnwindAction large_stack_probe_actions[32] = {0};
+    CodegenFunctionDescriptor large_stack_probe_descriptor = {
+        .unwind_actions = large_stack_probe_actions,
     };
-    BUSTER_TEST(arguments, codegen_canonical_a64_frame_memory_operation(&large_frame_operation, 9, 40000, 1, false, false));
-    BUSTER_TEST(arguments, codegen_canonical_a64_frame_memory_operation(&large_frame_operation, 9, 40001, 1, true, false));
-    a64_emit_load_pointer_offset(&large_frame_operation, 9, 28, 40004, 4);
-    a64_emit_store_pointer_offset(&large_frame_operation, 9, 28, 40008, 4);
-    BUSTER_TEST(arguments, large_frame_operation.error == CODEGEN_ERROR_NONE);
-    BUSTER_TEST(arguments, large_frame_operation.count > 8);
-    u32 large_stack_address_words[6] = {0};
-    CodegenBuffer large_stack_address = {
-        .bytes = (u8*)large_stack_address_words,
-        .capacity = sizeof(large_stack_address_words),
+    CodegenBuffer large_stack_probe = {
+        .bytes = large_stack_probe_bytes,
+        .capacity = sizeof(large_stack_probe_bytes),
     };
-    codegen_canonical_a64_base_address(&large_stack_address, 16, 31, 40000);
-    u32 expected_large_stack_address[] = {
-        0xd2800000 | (40000u << 5) | 16, 0xf2a00010, 0xf2c00010, 0xf2e00010, 0x910003f1, 0x8b100230,
-    };
-    BUSTER_TEST(arguments, large_stack_address.error == CODEGEN_ERROR_NONE);
-    BUSTER_TEST(arguments, large_stack_address.count == sizeof(expected_large_stack_address));
-    BUSTER_TEST(arguments, !memcmp(large_stack_address_words, expected_large_stack_address, sizeof(expected_large_stack_address)));
-    u32 unsigned_remainder_divide = codegen_canonical_a64_remainder_divide_instruction(false, false);
-    BUSTER_TEST(arguments, ((unsigned_remainder_divide >> 5) & 31) == 9);
-    BUSTER_TEST(arguments, ((unsigned_remainder_divide >> 16) & 31) == 10);
-    BUSTER_TEST(arguments, (unsigned_remainder_divide & 31) == 11);
+    BUSTER_TEST(arguments, codegen_a64_windows_large_stack_adjust(&large_stack_probe, 40000, true, &large_stack_probe_descriptor,
+                                                                    BUSTER_ARRAY_LENGTH(large_stack_probe_actions)));
+    BUSTER_TEST(arguments, large_stack_probe.error == CODEGEN_ERROR_NONE && large_stack_probe.count > 8);
+    BUSTER_TEST(arguments, large_stack_probe_descriptor.unwind_action_count != 0);
     Target target = target_native;
     target.cpu_arch = CPU_ARCH_X86_64;
     // This target drives the System V stack-argument test below. Keep its ABI

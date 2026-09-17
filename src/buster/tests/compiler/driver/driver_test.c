@@ -2432,7 +2432,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_large_frame(Unit
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 // Large x64 MIR frames used to exceed the one-byte prologue
                 // limit; ARM64 PE previously excluded every MIR function.
-                // NONE remains the independent direct path on both targets.
+                // NONE is the MIR_STACK compatibility spelling on both targets.
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
                 BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
                 BUSTER_TEST(arguments, compiled.codegen_statistics.maximum_stack_frame_bytes >= 131088);
@@ -3185,11 +3185,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                             compiled.codegen_statistics.fallback_function_count == 0, description);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
                         bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
-                        // NONE remains an object/control observation. Its frozen
-                        // native reference fails the new split-composite and
-                        // packed-Darwin boundaries; retained independent runs
-                        // must not be mistaken for a semantic oracle. This
-                        // regression gates all three MIR allocators against Clang.
+                        // NONE is the MIR_STACK compatibility spelling. This
+                        // regression gates the supported MIR allocators against
+                        // the independent host oracle.
                         if (native_target && mode != 0 && !fixture && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                         {
                             String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call-run"), S8(".exe"));
@@ -3335,6 +3333,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                          S8("aarch64-apple-macos"), S8("x86_64-unknown-windows"), S8("aarch64-unknown-windows")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    // NONE is a documented compatibility spelling for MIR_STACK. Keep one
+    // positive, debug-free object comparison here so a future dispatch edit
+    // cannot quietly restore an independent direct oracle or change side
+    // tables while preserving only the success bit.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 aliases[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack")};
+        CompilerDriverResult alias_results[2] = {0};
+        for (u32 alias = 0; alias < BUSTER_ARRAY_LENGTH(aliases); alias += 1)
+        {
+            String8 output = buster_test_temporary_path(temporary.arena, alias ? S8("buster-mir-alias-stack") : S8("buster-mir-alias-none"), S8(".o"));
+            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux"), aliases[alias], S8("-fverify-codegen"),
+                                 S8("-o"), output, S8("tests/basic_c_operations.c")};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            alias_results[alias] = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, alias_results[alias].error == COMPILER_DRIVER_ERROR_NONE && alias_results[alias].has_object,
+                            alias_results[alias].diagnostic);
+            BUSTER_TEST(arguments, alias_results[alias].codegen_statistics.verified_mir_function_count != 0);
+            BUSTER_TEST(arguments, alias_results[alias].codegen_statistics.fallback_function_count == 0);
+        }
+        if (alias_results[0].error == COMPILER_DRIVER_ERROR_NONE && alias_results[1].error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ObjectFile* none = &alias_results[0].object;
+            ObjectFile* mir_stack = &alias_results[1].object;
+            BUSTER_TEST(arguments, none->section_count == mir_stack->section_count && none->symbol_count == mir_stack->symbol_count &&
+                                        none->relocation_count == mir_stack->relocation_count);
+            if (none->section_count == mir_stack->section_count)
+            {
+                for (u32 section = 0; section < none->section_count; section += 1)
+                {
+                    BUSTER_TEST(arguments, none->sections[section].kind == mir_stack->sections[section].kind &&
+                                                none->sections[section].alignment == mir_stack->sections[section].alignment &&
+                                                none->sections[section].virtual_size == mir_stack->sections[section].virtual_size &&
+                                                none->sections[section].data.length == mir_stack->sections[section].data.length &&
+                                                (!none->sections[section].data.length ||
+                                                 !memcmp(none->sections[section].data.pointer, mir_stack->sections[section].data.pointer,
+                                                         none->sections[section].data.length)));
+                }
+            }
+            if (none->symbol_count == mir_stack->symbol_count)
+            {
+                for (u32 symbol = 0; symbol < none->symbol_count; symbol += 1)
+                {
+                    ObjectSymbol* left = none->symbols + symbol;
+                    ObjectSymbol* right = mir_stack->symbols + symbol;
+                    BUSTER_TEST(arguments, string_equal(left->name, right->name) && left->value == right->value && left->size == right->size &&
+                                                left->section == right->section && left->kind == right->kind && left->global == right->global &&
+                                                left->weak == right->weak && left->hidden == right->hidden);
+                }
+            }
+            if (none->relocation_count == mir_stack->relocation_count)
+            {
+                for (u32 relocation = 0; relocation < none->relocation_count; relocation += 1)
+                {
+                    ObjectRelocation* left = none->relocations + relocation;
+                    ObjectRelocation* right = mir_stack->relocations + relocation;
+                    BUSTER_TEST(arguments, left->addend == right->addend && left->offset == right->offset && left->section == right->section &&
+                                                left->symbol == right->symbol && left->kind == right->kind);
+                }
+            }
+            BUSTER_TEST(arguments, none->sections[OBJECT_SECTION_TEXT].data.length == mir_stack->sections[OBJECT_SECTION_TEXT].data.length);
+        }
+        scratch_end(temporary);
+    }
     struct
     {
         String8 path;
@@ -3408,14 +3470,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                         ByteSlice retained = file_read(temporary.arena, output, (FileReadOptions){0});
                         BUSTER_TEST_RAW(arguments, retained.length == sentinel.length &&
                             memcmp(retained.pointer, sentinel.pointer, sentinel.length) == 0, description);
-                        // The direct oracle still supports each refused MIR row.
-                        // A frontend or object-writer failure is not an accepted
-                        // fallback and must not manufacture a green coverage row.
-                        invocation.reject_machine_fallback = false;
-                        CompilerDriverResult reference = compiler_driver_execute_invocation(temporary.arena, invocation);
-                        BUSTER_TEST_RAW(arguments, reference.error == COMPILER_DRIVER_ERROR_NONE && reference.has_object, reference.diagnostic);
-                        BUSTER_TEST_RAW(arguments, reference.codegen_statistics.function_count == compiled.codegen_statistics.function_count &&
-                            reference.codegen_statistics.fallback_function_count == fallbacks, description);
+                        // A refused MIR row is a structural failure. There is
+                        // no direct oracle path and no fallback census row.
                         expected_rejections += (u32)(case_failures_before == result.test_count - result.succeeded_test_count);
                     }
                     else
@@ -3531,8 +3587,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             }
         }
     }
-    // New updates and the direct reference share one source. Strict object
-    // coverage is cross-target; only the matching native desktop executes it.
+    // New updates share one source. Strict object coverage is cross-target;
+    // only the matching native desktop executes it.
     String8 atomic_update_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(atomic_pair_targets); target += 1)
@@ -3578,7 +3634,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         }
     }
     // Count primitives are shared by every desktop AArch64 target. Keep both
-    // frontend forms and the direct reference, and execute only on the actual
+    // frontend forms and execute only on the actual
     // target host: successful foreign object emission is not a runtime pass.
     String8 count_targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
     String8 count_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
@@ -3623,7 +3679,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             }
         }
     }
-    // Keep the direct reference honest while it is the differential oracle:
+    // Keep the independent host oracle honest while it checks MIR output:
     // narrow signed shifts, division and comparisons need sign extension.
     String8 vector_reference_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                                        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
@@ -3651,187 +3707,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
 #endif
         scratch_end(temporary);
     }
-    // Keep this valid canonical-only source outside the frozen native support
-    // inventory. Seventeen operands exceed the MIR selector's sixteen-operand
-    // limit. The direct System V emitter can allocate nine GPR inputs and
-    // eight SSE inputs for an empty template; Win64 has only seven GPRs.
-    // Scalar CMPXCHG is MIR-supported and cannot serve as a fallback control.
-    String8 fallback_source = buster_test_temporary_path(arguments->arena, S8("buster-machine-fallback-inline-asm"), S8(".c"));
-    String8 fallback_source_text = S8("int machine_fallback_inline_asm(int value, double floating)\n{\n"
-        "    __asm__ __volatile__(\"\" : : "
-        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
-        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
-        "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating), "
-        "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating) : \"memory\");\n"
-        "    return value;\n}\n");
-    BUSTER_TEST(arguments, file_write(fallback_source, BUSTER_SLICE_TO_BYTE_SLICE(fallback_source_text)));
-    String8 fallback_targets[] = {S8("x86_64-unknown-linux-gnu")};
-    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
-    {
-        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
-        {
-            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            CodegenFallbackReason reason = CODEGEN_FALLBACK_OPCODE;
-            String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-fallback"), S8(".o"));
-            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), fallback_targets[target], modes[mode], S8("-o"), output, fallback_source};
-            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
-            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-            BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 1);
-            BUSTER_TEST(arguments, compiled.fallback_records == 0 && compiled.fallback_record_count == 0);
-            BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_reason_counts[reason] == 1);
-            BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_INLINE_ASSEMBLY] == 1);
-            u32 census = 0;
-            for (u32 index = 0; index < CODEGEN_FALLBACK_REASON_COUNT; index += 1)
-            {
-                census += compiled.codegen_statistics.fallback_reason_counts[index];
-            }
-            BUSTER_TEST(arguments, census == compiled.codegen_statistics.fallback_function_count);
-            // Strict mode must diagnose this exact source/function/reason and
-            // leave even a pre-existing output file untouched.
-            ByteSlice sentinel = {.pointer = (u8*)"existing-output", .length = 15};
-            BUSTER_TEST(arguments, file_write(output, sentinel));
-            invocation.reject_machine_fallback = true;
-            invocation.record_codegen_fallbacks = true;
-            CompilerDriverResult strict = compiler_driver_execute_invocation(temporary.arena, invocation);
-            BUSTER_TEST(arguments, strict.error == COMPILER_DRIVER_ERROR_CODEGEN && !strict.has_object);
-            BUSTER_TEST(arguments, strict.codegen_statistics.fallback_function_count == 1);
-            BUSTER_TEST(arguments, strict.fallback_record_count == strict.codegen_statistics.fallback_function_count);
-            if (strict.fallback_record_count == 1)
-            {
-                CompilerDriverFallbackRecord record = strict.fallback_records[0];
-                BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_inline_asm")));
-                BUSTER_TEST(arguments, string_equal(record.source, fallback_source));
-                BUSTER_TEST(arguments, record.line != 0 && record.column != 0);
-                BUSTER_TEST(arguments, record.codegen.reason == reason && record.codegen.opcode == IR_OPCODE_INLINE_ASSEMBLY);
-            }
-            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("opcode=inline-assembly")) != BUSTER_STRING_NO_MATCH);
-            BUSTER_TEST(arguments, strict.diagnostic_count == 1);
-            if (strict.diagnostic_count == 1)
-            {
-                CompilerDiagnostic diagnostic = strict.diagnostics[0];
-                BUSTER_TEST(arguments, string_equal(diagnostic.code, S8("codegen.machine-fallback")));
-                BUSTER_TEST(arguments, diagnostic.backend != 0 && diagnostic.primary.has_range);
-                if (diagnostic.backend)
-                {
-                    BUSTER_TEST(arguments, diagnostic.backend->opcode_id == IR_OPCODE_INLINE_ASSEMBLY);
-                    BUSTER_TEST(arguments, string_equal(diagnostic.backend->reason, codegen_fallback_reason_string(reason)));
-                    BUSTER_TEST(arguments, string_equal(diagnostic.backend->allocator, codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator)));
-                }
-            }
-            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, codegen_fallback_reason_string(reason)) < strict.diagnostic.length);
-            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("function='machine_fallback_inline_asm'")) < strict.diagnostic.length);
-            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, fallback_source) < strict.diagnostic.length);
-            ByteSlice after = file_read(temporary.arena, output, (FileReadOptions){0});
-            BUSTER_TEST(arguments, after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
-            scratch_end(temporary);
-        }
-    }
-    // Multiple input compilation used to discard all fallback and allocator
-    // traffic. Compare its census against each input compiled independently.
-    // Include an opcode fallback and retained machine functions together.
-    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    // The legacy fallback controls remain accepted spellings, but no longer
+    // make an unsupported function succeed or publish fallback census rows.
+    // This inline-assembly fixture is deliberately refused by the MIR emitter;
+    // the former wide-signature fixture is now a supported MIR ABI case.
+    String8 failure_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                               S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(failure_modes); mode += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        String8 inputs[] = {fallback_source, S8("tests/basic_c_multi_main.c"), S8("tests/basic_c_multi_add.c")};
-        CodegenStatistics units[3] = {0};
-        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-census-unit"), S8(".o"));
-        for (u32 unit = 0; unit < BUSTER_ARRAY_LENGTH(inputs); unit += 1)
-        {
-            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), modes[mode], S8("-o"), output, inputs[unit]};
-            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
-                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-            units[unit] = compiled.codegen_statistics;
-        }
-        output = buster_test_temporary_path(temporary.arena, S8("buster-mir-census-multiple"), S8(".exe"));
-        String8 command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), modes[mode], S8("-o"), output,
-                             inputs[0], inputs[1], inputs[2], S8("-fcodegen-fallback-census")};
-        CompilerDriverResult multiple = compiler_driver_execute_invocation(temporary.arena,
-            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-        BUSTER_TEST_RAW(arguments, multiple.error == COMPILER_DRIVER_ERROR_NONE && multiple.has_object, multiple.diagnostic);
-        BUSTER_TEST(arguments, multiple.codegen_statistics.fallback_function_count == 1);
-        BUSTER_TEST(arguments, multiple.fallback_record_count == multiple.codegen_statistics.fallback_function_count);
-        if (multiple.fallback_record_count == 1)
-        {
-            // The producer's unit arena has already been destroyed here.
-            CompilerDriverFallbackRecord record = multiple.fallback_records[0];
-            BUSTER_TEST(arguments, string_equal(record.function, S8("machine_fallback_inline_asm")));
-            BUSTER_TEST(arguments, string_equal(record.source, inputs[0]) && record.line != 0);
-        }
-#define BUSTER_DRIVER_TEST_STATISTIC_SUM(field) \
-        BUSTER_TEST(arguments, multiple.codegen_statistics.field == units[0].field + units[1].field + units[2].field)
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(instruction_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(value_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(stack_value_bytes);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(stack_frame_bytes);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(code_bytes);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(native_vector_operation_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(split_vector_operation_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(vzeroupper_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(forwarded_wide_vector_load_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(simd_operation_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(function_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(fallback_function_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(fallback_verify_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(fallback_placement_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(fallback_encode_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_reload_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_spill_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_copy_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_boundary_spill_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_boundary_reload_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_boundary_copy_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_rematerialize_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_pinned_register_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_split_register_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_scheduled_function_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(allocator_schedule_kept_count);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(exact_attempts);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(exact_successes);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(exact_failures);
-        BUSTER_DRIVER_TEST_STATISTIC_SUM(mutable_virtual_register_count);
-#undef BUSTER_DRIVER_TEST_STATISTIC_SUM
-        BUSTER_TEST(arguments, multiple.codegen_statistics.maximum_stack_frame_bytes ==
-                    BUSTER_MAX(units[0].maximum_stack_frame_bytes, BUSTER_MAX(units[1].maximum_stack_frame_bytes, units[2].maximum_stack_frame_bytes)));
-        for (u32 opcode = 0; opcode <= IR_OPCODE_COUNT; opcode += 1)
-        {
-            BUSTER_TEST(arguments, multiple.codegen_statistics.fallback_opcode_counts[opcode] == units[0].fallback_opcode_counts[opcode] +
-                                  units[1].fallback_opcode_counts[opcode] + units[2].fallback_opcode_counts[opcode]);
-        }
-        for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
-        {
-            BUSTER_TEST(arguments, multiple.codegen_statistics.fallback_reason_counts[reason] == units[0].fallback_reason_counts[reason] +
-                                  units[1].fallback_reason_counts[reason] + units[2].fallback_reason_counts[reason]);
-        }
-        // A strict failure in a later unit must retain prior-unit statistics
-        // and copy its diagnostic out of the destroyed translation-unit arena.
-        String8 strict_command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), modes[mode], S8("-fno-machine-fallback"),
-                                    S8("-o"), output, inputs[1], inputs[0]};
-        CompilerDriverResult strict = compiler_driver_execute_invocation(temporary.arena,
-            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(strict_command)));
-        BUSTER_TEST(arguments, strict.error == COMPILER_DRIVER_ERROR_CODEGEN);
-        BUSTER_TEST(arguments, strict.codegen_statistics.function_count == units[1].function_count + units[0].function_count);
-        BUSTER_TEST(arguments, strict.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1);
-        BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("reason=opcode")) < strict.diagnostic.length);
-        scratch_end(temporary);
-    }
-    // Artifact preservation must not depend on a native-coverage gap. This
-    // source is rejected by the frontend because its literal %eax can alias
-    // an allocated operand; the failed compile must leave an existing output
-    // untouched in every MIR mode.
-    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
-    {
-        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-invalid-asm-output"), S8(".o"));
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-failure"), S8(".o"));
         ByteSlice sentinel = {.pointer = (u8*)"existing-output", .length = 15};
         BUSTER_TEST(arguments, file_write(output, sentinel));
-        String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode],
-                             S8("-fno-machine-fallback"), S8("-o"), output, S8("tests/basic_c_asm_literal_register.c")};
-        CompilerDriverResult invalid = compiler_driver_execute_invocation(temporary.arena,
+        String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), failure_modes[mode],
+                             S8("-fmachine-fallback"), S8("-fcodegen-fallback-census"), S8("-o"), output,
+                             S8("tests/basic_c_asm_literal_register.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+        String8 description = string_format(arguments->arena, S8("MIR-only failure {S8}: {S8}"), failure_modes[mode], compiled.diagnostic);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_CODEGEN && !compiled.has_object, description);
+        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0 && compiled.fallback_record_count == 0, description);
+        BUSTER_TEST_RAW(arguments, compiled.diagnostic_count == 1, description);
+        if (compiled.diagnostic_count == 1)
+        {
+            CompilerDiagnostic diagnostic = compiled.diagnostics[0];
+            BUSTER_TEST(arguments, string_equal(diagnostic.code, S8("codegen.unsupported-instruction")));
+            BUSTER_TEST(arguments, diagnostic.backend != 0 && diagnostic.primary.has_range);
+            if (diagnostic.backend)
+            {
+                BUSTER_TEST(arguments, string_equal(diagnostic.backend->reason, S8("opcode")));
+                BUSTER_TEST(arguments, string_equal(diagnostic.backend->function, S8("main")));
+                BUSTER_TEST(arguments, string_equal(diagnostic.backend->allocator,
+                                                     codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator)));
+            }
+        }
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("kind=codegen.unsupported-instruction")) < compiled.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("reason=opcode")) < compiled.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("function='main'")) < compiled.diagnostic.length);
+        ByteSlice after = file_read(temporary.arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-default-mir-failure"), S8(".o"));
+        String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), S8("-fno-machine-fallback"),
+                             S8("-o"), output, S8("tests/basic_c_asm_literal_register.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.reject_machine_fallback);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_CODEGEN && !compiled.has_object, compiled.diagnostic);
+        BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0 && compiled.fallback_record_count == 0);
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("allocator=fast")) < compiled.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("kind=codegen.unsupported-instruction")) < compiled.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("reason=opcode")) < compiled.diagnostic.length);
+        scratch_end(temporary);
+    }
+    // A later failing translation unit must stop a multi-input invocation,
+    // retain its structured diagnostic, and leave existing output untouched.
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-multiple-failure"), S8(".exe"));
+        ByteSlice sentinel = {.pointer = (u8*)"existing-output", .length = 15};
+        BUSTER_TEST(arguments, file_write(output, sentinel));
+        String8 command[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode], S8("-o"), output,
+                             S8("tests/basic_c_multi_add.c"), S8("tests/basic_c_asm_literal_register.c"),
+                             S8("-fcodegen-fallback-census")};
+        CompilerDriverResult multiple = compiler_driver_execute_invocation(temporary.arena,
             compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-        BUSTER_TEST(arguments, invalid.error != COMPILER_DRIVER_ERROR_NONE && !invalid.has_object);
-        BUSTER_TEST(arguments, string_first_sequence(invalid.diagnostic, S8("literal register")) < invalid.diagnostic.length);
+        BUSTER_TEST_RAW(arguments, multiple.error == COMPILER_DRIVER_ERROR_CODEGEN && !multiple.has_object, multiple.diagnostic);
+        BUSTER_TEST(arguments, multiple.codegen_statistics.function_count != 0 && multiple.codegen_statistics.fallback_function_count == 0);
+        BUSTER_TEST(arguments, multiple.fallback_record_count == 0);
+        BUSTER_TEST(arguments, string_first_sequence(multiple.diagnostic, S8("kind=codegen.unsupported-instruction")) < multiple.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(multiple.diagnostic, S8("reason=opcode")) < multiple.diagnostic.length);
         ByteSlice after = file_read(temporary.arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
         scratch_end(temporary);
@@ -6562,7 +6511,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, strict_disabled.error == COMPILER_DRIVER_ERROR_NONE && !strict_disabled.reject_machine_fallback);
     String8 strict_none_command[] = {S8("-fno-machine-fallback"), S8("-fregister-allocator=none"), S8("source.c")};
     CompilerDriverInvocation strict_none = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(strict_none_command));
-    BUSTER_TEST(arguments, strict_none.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, strict_none.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, strict_none.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE);
+    BUSTER_TEST(arguments, strict_none.register_allocator_explicit && strict_none.reject_machine_fallback);
     String8 strict_llvm_command[] = {S8("-fno-machine-fallback"), S8("-emit-llvm"), S8("source.c")};
     CompilerDriverInvocation strict_llvm = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(strict_llvm_command));
     BUSTER_TEST(arguments, strict_llvm.error == COMPILER_DRIVER_ERROR_ARGUMENT);
@@ -7614,9 +7565,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
     // The AArch64 i128 fixture keeps results in caller-provided storage so
     // both halves are observable without depending on the still-evolving
-    // direct i128 return ABI. Compile it through every allocator mode: the
-    // canonical emitter owns these operations while machine modes may elect
-    // their documented per-function fallback.
+    // direct i128 return ABI. Compile it through every allocator mode: every
+    // supported native mode now uses the MIR machine path.
     {
         String8 i128_allocator_flags[] = {
             S8("-fregister-allocator=none"),
@@ -8528,9 +8478,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_sizeof_anonymous_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    // 256-bit vector arguments, once through the default pipeline and once
-    // through the canonical emitter, whose VMOVDQU move is the shape the
-    // default pipeline only reaches through per-function fallback.
+    // 256-bit vector arguments through the default and MIR_STACK-compatible
+    // allocator spellings. Both lanes exercise the same MIR machine path.
     for (u32 ymm_mode = 0; ymm_mode < 2; ymm_mode += 1)
     {
         String8 c_ymm_vector_path = buster_test_temporary_path(
@@ -8564,11 +8513,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
     // Vector arguments narrower than a vector register, and a vector spilled
     // to the stack ahead of a register argument. Both shapes were silently
-    // wrong on AArch64 and no fixture executed them: the canonical emitter had
-    // no sized transfer for one- and two-byte parts and left the parameter
-    // slot zero, and the machine callee's stack read-backs could land on an
-    // argument register whose own capture had not run yet. Run through both
-    // pipelines, like the ymm fixture above.
+    // wrong on AArch64 and no fixture executed them: the MIR transfer had no
+    // sized transfer for one- and two-byte parts and left the parameter slot
+    // zero, and the machine callee's stack read-backs could land on an
+    // argument register whose own capture had not run yet. Run both allocator
+    // spellings through the same MIR path.
     for (u32 short_vector_mode = 0; short_vector_mode < 2; short_vector_mode += 1)
     {
         String8 c_short_vector_path = buster_test_temporary_path(
@@ -8607,7 +8556,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // and the same ymm move on a model that also owns zmm (znver5). SysV
     // returns the part in YMM0 directly; Win64 classifies the same result
     // direct since the widening in ir_classify_abi_value, so both targets
-    // must reach an object at both models through both pipelines.
+    // must reach an object at both models through both allocator spellings.
     {
         String8 c_ymm_model_targets[] = {S8("x86_64-linux"), S8("x86_64-pc-windows-msvc")};
         String8 c_ymm_model_names[] = {S8("haswell"), S8("znver5")};
@@ -8646,7 +8595,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // answer for a wide result both follow the model -- a 128-byte vector is
     // eight references and a hidden-pointer result on nehalem, four and
     // ymm0-3 on haswell, two and zmm0-1 on znver5 -- so each model must
-    // reach an object through both pipelines. The wine block below runs the
+    // reach an object through both allocator spellings. The wine block below runs the
     // same fixture at the pinned models.
     {
         String8 c_wide_model_flags[] = {S8("-march=nehalem"), S8("-march=haswell"), S8("-march=znver5")};
@@ -10545,9 +10494,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         bool machine_matches = executable.length >= 20 && executable.pointer[18] == 183 && executable.pointer[19] == 0;
         // A resolved local-exec sequence is the TPREL_HI12 add (shifted
         // form, usually #0) followed by the TPREL_LO12 add with a nonzero
-        // resolved immediate, both on one register; the register is the
-        // canonical emitter's x9 or whatever the machine path allocated,
-        // so the probe matches the pair's form rather than one fixed word.
+        // resolved immediate, both on one register; the register is whatever
+        // the MIR machine path allocated, so the probe matches the pair's
+        // form rather than one fixed word.
         bool found_thread_pointer_add = false;
         for (u64 byte_index = 0; byte_index + 8 <= executable.length; byte_index += 4)
         {
@@ -10710,7 +10659,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // reaches the stack rounds NSAA to an even eightbyte.  Build the same
     // freestanding fixture through every allocator; when qemu-aarch64 is
     // installed, execute each static image so the result also checks the
-    // machine/canonical fallback boundary against the actual AArch64 ABI.
+    // machine ABI boundary against the actual AArch64 ABI.
     String8 aarch64_i128_allocators[] = {
         S8("none"),
         S8("mir-stack"),
@@ -10776,9 +10725,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // function of its own in the fixture so the AArch64 lane can still pin
     // everything else at zero -- see the per-target expectation below.
     //
-    // The fallback count is pinned because running alone proves nothing: the
-    // canonical emitter answers identically, and a selector that stopped
-    // firing would silently retire the coverage.
+    // The native success and zero-fallback counters are pinned so a selector
+    // that stopped firing cannot silently retire the coverage.
     String8 i128_binary_allocators[] = {
         S8("none"),
         S8("mir-stack"),
@@ -10836,9 +10784,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // the *place* of `z` as the INDEX's index operand where the normal spelling
     // records the value loaded out of it -- the swap that puts the pointer back
     // in the base position moved a place into a position that wants an rvalue.
-    // Both machine selectors refused it and the canonical emitter loaded
+    // Older machine selectors refused it and a separate lowering loaded
     // through it, so the program was right and the census was not; the bitcode
-    // writer emitted an invalid getelementptr for the same shape.
+    // writer emitted an invalid getelementptr for the same shape. The current
+    // machine path now owns this row and pins a native result.
     //
     // `basic_c_lowered_alignment_frame.c`: a member whose type's alignment was
     // lowered sits at an offset its own size does not divide, and the AArch64
@@ -10847,10 +10796,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // an out-of-range offset, so a row that had selected came back as an
     // encode-stage fallback.
     //
-    // Both pin the fallback count, because both produced correct answers
-    // through the canonical emitter the whole time: only the count says the
-    // machine path carries them now. Both build for both targets and run
-    // wherever there is something to run them on.
+    // Both pin the zero-fallback count so the machine path remains the
+    // producer. Both build for both targets and run wherever there is
+    // something to run them on.
     String8 census_tail_paths[] = {
         S8("tests/basic_c_reversed_subscript.c"),
         S8("tests/basic_c_lowered_alignment_frame.c"),
@@ -10904,13 +10852,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
     // The System V x86-64 side of the same stack boundary: a sixteen-aligned
     // argument's stack home is rounded up to a sixteen-aligned offset, and
-    // the machine placement must count the same padding eightbytes the
-    // canonical emitter and clang do — its callee used to read a stacked
+    // the machine placement must count the same padding eightbytes as the
+    // ABI model and clang — its callee used to read a stacked
     // __int128 one eightbyte early. The fixture's callees stay inside the
     // machine subset by forwarding their halves to the one checker that owns
     // the __int128 shifts, and the census pin below fails if lowering changes
-    // ever push them to the canonical fallback, which would silently retire
-    // this coverage. On an x86-64 Linux host each image also runs.
+    // ever turn into a refusal, which would silently retire this coverage.
+    // On an x86-64 Linux host each image also runs.
     String8 x64_i128_stack_allocators[] = {
         S8("none"),
         S8("mir-stack"),
@@ -11087,8 +11035,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #else
                                                        S8(""));
 #endif
-    // These counters describe the frozen direct emitter's packing/forwarding
-    // choices. Keep that reference explicit; the strict MIR execution matrix
+    // These counters describe MIR packing/forwarding choices. Keep this
+    // independent object observer explicit; the strict MIR execution matrix
     // above checks the same whole fixture in every machine allocator.
     String8 c_vector_command_line[] = {
         S8("-fregister-allocator=none"),
@@ -13079,10 +13027,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // 80-bit x87 `long double` arithmetic: the conversions, the comparisons,
     // the four operators, and the variadic `%.2Lf` call LZ4IO_toHuman needs.
     // Every check inside the fixture is one a 53-bit significand would fail,
-    // so a lowering that quietly computed in double does not pass it.  Run it
-    // under every allocator. Unsigned-eightbyte conversions still
-    // exercise the canonical fallback, while the common scalar transactions
-    // select into MIR.
+    // so a lowering that quietly computed in double does not pass it. Run it
+    // under every allocator. Supported operations select into MIR; an
+    // unsupported ABI or opcode must be a structured refusal with no output.
     // The fixture compiles to an empty program wherever `long double` is not
     // the x87 format, so it stays registered on every host.
     String8 c_long_double_allocators[] = {
@@ -13237,7 +13184,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // object of incomplete type, which is how musl's src/include/stdio.h
     // reaches `stderr`.  Every allocator runs it for the same reason the
     // arithmetic fixture above does: what the other three are checked for is
-    // that a function carrying an f80 falls back to the canonical emitter.
+    // that a function carrying an f80 either succeeds through MIR or reports
+    // its structured unsupported ABI/opcode reason.
     // The fixture compiles to an empty program wherever `long double` is not
     // the x87 format, so it stays registered on every host.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
@@ -13275,8 +13223,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // constants a 53-bit significand cannot produce, so a wrong answer fails
     // the exit status rather than looking plausible.  Every allocator runs it
     // for the same reason the fixtures above do: what the other three are
-    // checked for is that a function carrying an f80 falls back to the
-    // canonical emitter.  The fixture compiles to an empty program wherever
+    // checked for is that a function carrying an f80 either succeeds through
+    // MIR or reports a structured unsupported ABI/opcode reason. The fixture
+    // compiles to an empty program wherever
     // `long double` is not the x87 format, so it stays registered on every
     // host.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
@@ -14353,10 +14302,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // form from the 0x87 / 0x0F 0xB1 sibling each shares a recipe with, not an
     // operand-size variant of it -- so a width-1 atomic store or
     // compare-exchange selected on the machine path and then failed to encode.
-    // The fallback count is the assertion that says the byte rows are reached:
-    // running alone would pass on the canonical emitter too. It is pinned at
-    // zero under every allocator, NONE included, because nothing in this
-    // fixture has any other reason to refuse.
+    // The zero-fallback count is the assertion that says the byte rows are
+    // reached. It is pinned under every allocator, including NONE's MIR_STACK
+    // compatibility spelling, because nothing in this fixture has any other
+    // reason to refuse.
     String8 c_atomic_byte_allocators[] = {
         S8("none"),
         S8("mir-stack"),
@@ -14564,8 +14513,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverResult c_asm_literal_register = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_literal_register_command_line)));
     BUSTER_TEST(arguments, c_asm_literal_register.error == COMPILER_DRIVER_ERROR_CODEGEN);
-    BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("names the literal register '%eax'")) != BUSTER_STRING_NO_MATCH);
-    BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("opcode")) == BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("kind=codegen.unsupported-instruction")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("reason=opcode")) != BUSTER_STRING_NO_MATCH);
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.
@@ -14994,7 +14943,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_call_abi.error == COMPILER_DRIVER_ERROR_NONE);
     if (c_call_abi.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        BUSTER_TEST(arguments, c_call_abi.codegen_statistics.fallback_function_count < c_call_abi.codegen_statistics.function_count);
+        BUSTER_TEST(arguments, c_call_abi.codegen_statistics.fallback_function_count == 0);
         String8 c_call_abi_arguments[] = {
             c_call_abi_path,
         };
@@ -15095,7 +15044,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // and no stack adjustment anywhere in the body. The machine path pushes
     // its outgoing arguments instead — sound under the frame register its
     // unwind data establishes, but a different shape — so this block names
-    // the canonical emitter explicitly and the machine modes are covered by
+    // the MIR machine path explicitly; all allocator modes are covered by
     // their own block below.
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_float_abi_windows_path"), false);
@@ -15404,7 +15353,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 BUSTER_TEST(arguments, windows_machine.has_object);
                 BUSTER_TEST(arguments, windows_machine.codegen_statistics.function_count != 0);
-                BUSTER_TEST(arguments, windows_machine.codegen_statistics.fallback_function_count < windows_machine.codegen_statistics.function_count);
+                BUSTER_TEST(arguments, windows_machine.codegen_statistics.fallback_function_count == 0);
                 if (windows_machine.has_object)
                 {
                     // A frame register is not asserted: Win64 can only record one
@@ -16800,9 +16749,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
 #endif
         // Driver options follow last-option-wins: an allocator named AFTER
-        // the -O flag decides the emitter. A retained machine function makes
-        // the two objects differ; an architecture that routes the FAST
-        // request through canonical emission records those fallbacks instead.
+        // the -O flag selects the MIR allocator. NONE remains an alias for
+        // MIR_STACK, and no mode records a direct-emitter fallback.
         // (The reverse order deliberately restores the default -- the
         // parse-level contract earlier in this file pins that -- which is
         // why the CPython harness carries its allocator in CFLAGS, after
@@ -16827,8 +16775,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ByteSlice fast_bytes = file_read(asm_unit_arena, sticky_fast_path, (FileReadOptions){0});
                 bool identical = none_bytes.length == fast_bytes.length && none_bytes.length &&
                                  memcmp(none_bytes.pointer, fast_bytes.pointer, none_bytes.length) == 0;
-                bool fast_request_observable = !identical || sticky_fast.codegen_statistics.fallback_function_count != 0;
+                bool fast_request_observable = !identical;
                 BUSTER_TEST(arguments, sticky_none.codegen_statistics.fallback_function_count == 0);
+                BUSTER_TEST(arguments, sticky_fast.codegen_statistics.fallback_function_count == 0);
                 BUSTER_TEST(arguments, sticky_fast.codegen_statistics.function_count != 0 && fast_request_observable);
                 BUSTER_TEST(arguments, none_bytes.length && fast_bytes.length);
             }

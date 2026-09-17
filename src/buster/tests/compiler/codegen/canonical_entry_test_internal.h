@@ -82,7 +82,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
             u8 original_code[4096] = {0};
             u64 original_code_length = 0;
             u32 original_location_count = 0;
-            for (u32 permutation = 0; permutation < 3; permutation += 1)
+            // The historical direct emitter walked mutable instruction chains
+            // in arbitrary block order. MIR selection consumes the published
+            // dense row order, so the native cutover keeps the canonical entry
+            // order here; eBPF still exercises all three CFG permutations.
+            u32 permutation_count = target.cpu_arch == CPU_ARCH_BPFEL ? 3 : 1;
+            for (u32 permutation = 0; permutation < permutation_count; permutation += 1)
             {
                 TemporalArena temporary = arena_begin_temporal(arguments->arena);
                 CPreprocessResult tokens = c_preprocess(arguments->arena, sources[fixture],
@@ -103,7 +108,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                         u32 rotation = permutation == 2 ? function->block_count - 1 : permutation;
                         codegen_test_rotate_blocks(arguments->arena, function, rotation);
                         BUSTER_TEST(arguments, function->entry.value == rotation);
-                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        // MIR selection consumes the published CFG. Re-prepare
+                        // after the BPF-only permutation above invalidates it.
+                        IrValidationResult rotated_prepared = ir_prepare_canonical_module(program, module, false);
+                        BUSTER_TEST(arguments, rotated_prepared.error == IR_VALIDATION_NONE);
                         if (target.cpu_arch == CPU_ARCH_BPFEL)
                         {
                             EbpfArtifact artifact = ebpf_emit_program(arguments->arena, program);

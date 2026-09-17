@@ -11,7 +11,8 @@
 // after construction, integer-ID based. This header owns only the record
 // shapes, static opcode metadata interface, chunked builder, verifier, and
 // test-only replay; instruction selection and allocation build on top of it
-// in later stages. The canonical direct emitter (`NONE`) never touches it.
+// in later stages. Every supported native allocator reaches this model;
+// `NONE` is the MIR_STACK compatibility spelling.
 
 // A packed operand reference: kind in the top three bits, payload in the low
 // twenty-nine. Payload meaning depends on the kind (virtual/physical register
@@ -1516,8 +1517,8 @@ typedef enum MachineEditKind
 } MachineEditKind;
 
 // Result of selecting one canonical typed-IR function into machine IR.
-// `supported` false is an explicit per-function fallback: `failed_opcode`
-// names the first construct outside the selected subset.
+// `supported` false is a structured refusal: `failed_opcode` names the first
+// construct outside the selected subset.
 // How the relocation at a call-target site resolves. DIRECT uses the target's
 // default form (rip-relative on x86-64). GOT
 // names the linker-owned slot holding the symbol's address, PLT its procedure
