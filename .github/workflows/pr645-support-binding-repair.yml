@@ -1,0 +1,65 @@
+name: PR 645 support binding repair
+
+on:
+  push:
+    branches:
+      - codex/pr645-bind-support-declaration-20260917
+    paths:
+      - .github/workflows/pr645-support-binding-repair.yml
+
+concurrency:
+  group: pr645-support-binding-repair
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact repair branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Rebind the reviewed support declaration and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          binding_path = Path("tools/native_retirement_performance_binding.py")
+          support_path = Path("docs/native-retirement-support-v1.tsv")
+          old = "4dc9203fca4672a2cb51910f7ab340b8ad3060bc6793af28e6fd25c3ed444ab6"
+          new = "de31038ba09300a7d734dda5a9e3441ae12114ee42d966778912937c2776fd18"
+
+          support_digest = sha256(support_path.read_bytes()).hexdigest()
+          if support_digest != new:
+              raise SystemExit(f"unexpected support declaration digest: {support_digest}")
+
+          text = binding_path.read_text(encoding="utf-8")
+          needle = f'SUPPORT_DECLARATION_SHA256 = "{old}"'
+          replacement = f'SUPPORT_DECLARATION_SHA256 = "{new}"'
+          if text.count(needle) != 1:
+              raise SystemExit("stale support declaration pin was not found exactly once")
+          binding_path.write_text(text.replace(needle, replacement), encoding="utf-8")
+          PY
+
+          git rm .github/workflows/pr645-support-binding-repair.yml
+          git diff --check
+          python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tests/ci_tools_test.py -v
+
+          git config user.name "ChatGPT Codex Connector"
+          git config user.email "1144995+chatgpt-codex-connector[bot]@users.noreply.github.com"
+          git add tools/native_retirement_performance_binding.py
+          git commit -s -m "test(native-retirement): bind current support declaration"
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
