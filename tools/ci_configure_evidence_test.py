@@ -62,6 +62,22 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertFalse(result["profile_requested"])
         self.assertFalse(any(path.name == "subject.o" for path in self.output.rglob("*")))
 
+    def test_sharded_tree_names_and_superbuild_exclusion(self):
+        release = "build-release-ci_on-cc_clang-sanitize_off-fuzz_available_off-configs_Release"
+        checks = "build-checks-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug"
+        for tree in (release, checks):
+            self.write(f"{tree}/CMakeCache.txt", tree.encode("ascii"))
+            self.write(f"{tree}/CMakeFiles/CMakeConfigureLog.yaml")
+        self.write("build-checks-superbuild-ci_on/CMakeCache.txt", b"not a compiler tree")
+        result = self.collect()
+        paths = [item["path"] for item in result["files"]]
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["tree_count"], 2)
+        self.assertEqual(result["configure_logs_captured"], 2)
+        self.assertTrue(any(path.startswith(f"{release}/") for path in paths))
+        self.assertTrue(any(path.startswith(f"{checks}/") for path in paths))
+        self.assertFalse(any("superbuild" in path for path in paths))
+
     def test_failed_configure_missing_files_remain_missing(self):
         self.write(f"{self.tree}/CMakeFiles/CMakeConfigureLog.yaml", b"failed probe")
         result = self.collect(profile_requested=True)

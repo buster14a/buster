@@ -12,10 +12,12 @@ No compiler-works result is preseeded and no Zig compilation cache is restored.
 ## Retained evidence
 
 Each `release` or `checks` desktop shard copies a fixed allowlist from the
-native driver's `build/build-ci_on-cc_*` trees after its combination step into
-that shard's existing
+native driver's `build/build-<release|checks>-ci_on-cc_*` trees after its
+combination step into that shard's existing
 `desktop-<os>-<arch>-<release|checks>-<run>-<attempt>` artifact, under
-`configure/`:
+`configure/`. The unsharded local `BUSTER_MATRIX_SHARD=all` path retains the
+legacy `build/build-ci_on-cc_*` names; the collector recognizes those names too
+without admitting either shard's separate superbuild directory.
 
 - `CMakeCache.txt` and `CMakeFiles/CMakeConfigureLog.yaml`;
 - legacy `CMakeFiles/CMakeOutput.log` and `CMakeFiles/CMakeError.log`, when present;
@@ -93,7 +95,7 @@ summarized with the native driver:
 
 ```sh
 ./build/build cmake_profile_summary \
-    build/build-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug/cmake-profile.json \
+    build/build-checks-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug/cmake-profile.json \
     --limit 30
 ```
 

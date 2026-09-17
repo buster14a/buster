@@ -16,6 +16,11 @@ FILES = (
     "CMakeFiles/CMakeError.log",
     "cmake-profile.json",
 )
+TREE_PREFIXES = (
+    "build-ci_on-cc_",
+    "build-release-ci_on-cc_",
+    "build-checks-ci_on-cc_",
+)
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024
 MAX_TREES = 32
@@ -24,6 +29,11 @@ IDENTITY_KEYS = (
     "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
     "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion",
 )
+
+
+def matrix_tree_name(name):
+    """Recognize only native matrix configure trees, never superbuild trees."""
+    return any(name.startswith(prefix) for prefix in TREE_PREFIXES)
 
 
 def regular_path(root, relative):
@@ -75,7 +85,7 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
             for count, entry in enumerate(entries, 1):
                 if count > MAX_ROOT_ENTRIES:
                     raise ValueError("build-root entry limit exceeded")
-                if entry.name.startswith("build-ci_on-cc_"):
+                if matrix_tree_name(entry.name):
                     trees.append(entry.name)
                     if len(trees) > MAX_TREES:
                         raise ValueError("configure tree limit exceeded")
