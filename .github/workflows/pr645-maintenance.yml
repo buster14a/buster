@@ -1,0 +1,59 @@
+name: PR 645 maintenance
+
+on:
+  push:
+    branches:
+      - maintenance/pr645-ci-repair-20260916
+    paths:
+      - .github/workflows/pr645-maintenance.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-rebase:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out PR head with full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/569-canonical-landing-20260914
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Attempt exact rebase and capture state
+        id: rebase
+        shell: bash
+        run: |
+          set -uo pipefail
+          git config user.name 'OpenAI PR 645 maintenance'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p "$RUNNER_TEMP/pr645-diagnostics"
+          git rev-parse HEAD > "$RUNNER_TEMP/pr645-diagnostics/original-head.txt"
+          git fetch --no-tags origin main
+          git rev-parse origin/main > "$RUNNER_TEMP/pr645-diagnostics/main-head.txt"
+          git log --reverse --format='%H%x09%s' origin/main..HEAD > "$RUNNER_TEMP/pr645-diagnostics/topic-commits.tsv"
+          set +e
+          git rebase origin/main > "$RUNNER_TEMP/pr645-diagnostics/rebase.log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$RUNNER_TEMP/pr645-diagnostics/rebase-status.txt"
+          git status --porcelain=v1 > "$RUNNER_TEMP/pr645-diagnostics/status.txt"
+          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/pr645-diagnostics/conflicts.txt"
+          git diff > "$RUNNER_TEMP/pr645-diagnostics/worktree.diff"
+          git diff --cached > "$RUNNER_TEMP/pr645-diagnostics/index.diff"
+          git rebase --show-current-patch > "$RUNNER_TEMP/pr645-diagnostics/current.patch" 2>/dev/null || true
+          git log -20 --oneline --decorate > "$RUNNER_TEMP/pr645-diagnostics/log.txt"
+          tar -czf "$RUNNER_TEMP/pr645-diagnostics/rebase-worktree.tar.gz" \
+            --exclude=.git --exclude=build --exclude=external .
+          exit 0
+
+      - name: Upload exact rebase diagnostics
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr645-rebase-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr645-diagnostics
+          if-no-files-found: error
+          retention-days: 2
