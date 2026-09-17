@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C target rev-parse HEAD)" = 787d7a15bad51055a12b207077aa98714d235320
+          test "$(git -C target rev-parse HEAD)" = d70fd4b46a3537e844403f0015caf20e275f891b
           cp helper/.github/pr568-review-fix/patch-v2.gz "$RUNNER_TEMP/pr568-review.patch.gz"
           echo '0bca71190ea22116956d476454e947ab2ca82ed66b46538b43ba3040207049c4  '"$RUNNER_TEMP/pr568-review.patch.gz" | sha256sum --check
           gzip -dc "$RUNNER_TEMP/pr568-review.patch.gz" > "$RUNNER_TEMP/pr568-review.patch"
@@ -66,7 +66,9 @@ jobs:
               raise SystemExit("primary benchmarking trust-boundary text changed unexpectedly")
           path.write_text(text.replace(anchor, addition))
           PY
-          git -C target add docs/agents/benchmarking.md
+          rm -rf target/.github/pr568-patch
+          git -C target rm .github/workflows/pr568-apply-review-fixes.yml
+          git -C target add -A
           git -C target diff --cached --check
       - name: Validate the repaired binding
         shell: bash
@@ -86,7 +88,7 @@ jobs:
         working-directory: target
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 787d7a15bad51055a12b207077aa98714d235320
+          test "$(git rev-parse HEAD)" = d70fd4b46a3537e844403f0015caf20e275f891b
           git config user.name 'David'
           git config user.email 'davidgmbb@gmail.com'
           git commit -m 'bench: resolve native-retirement binding review findings (#568)' \
