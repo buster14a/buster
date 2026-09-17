@@ -1,0 +1,52 @@
+name: Metamorphic evidence retention
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/metamorphic-evidence-tests.yml
+      - tools/ci_metamorphic_evidence.py
+      - tools/ci_metamorphic_evidence_test.py
+      - tools/ci_summary.py
+      - tools/ci_summary_core.py
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/metamorphic-evidence-tests.yml
+      - tools/ci_metamorphic_evidence.py
+      - tools/ci_metamorphic_evidence_test.py
+      - tools/ci_summary.py
+      - tools/ci_summary_core.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Collector tests (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-26.04
+          - windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Exercise retention and failure controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python tools/ci_metamorphic_evidence_test.py -v
+          else
+            python3 tools/ci_metamorphic_evidence_test.py -v
+          fi
