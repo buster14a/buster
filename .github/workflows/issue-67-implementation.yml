@@ -32,6 +32,40 @@ jobs:
           cmake --version
           ninja --version
 
+      - name: Amend candidate linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(".github/issue-67-measure.sh")
+          source = path.read_text()
+          old = """test_path.write_text(test_source)
+          PY
+          """
+          new = """test_path.write_text(test_source)
+
+          metadata_header_path = Path(
+              "src/buster/tests/compiler/assembly/x86_64_metadata_test.h"
+          )
+          metadata_header = metadata_header_path.read_text()
+          metadata_header = replace_once(
+              metadata_header,
+              "BUSTER_F_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);\\n",
+              "// This implementation remains a standalone object in every build mode.\\n"
+              "extern UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);\\n",
+              "standalone metadata test declaration",
+          )
+          metadata_header_path.write_text(metadata_header)
+          PY
+          """
+          count = source.count(old)
+          if count != 1:
+              raise SystemExit(f"harness insertion point: expected one match, found {count}")
+          path.write_text(source.replace(old, new, 1))
+          PY
+
       - name: Measure baseline and candidate
         shell: bash
         run: bash .github/issue-67-measure.sh
@@ -45,6 +79,7 @@ jobs:
           git add \
               CMakeLists.txt \
               src/buster/tests/test.c \
+              src/buster/tests/compiler/assembly/x86_64_metadata_test.h \
               docs/performance-audits/2026-09-17-x86-metadata-test-memory.md \
               docs/performance-audits/evidence/2026-09-17-issue-67
           git commit -m 'build: bound x86 metadata test compiler memory'
