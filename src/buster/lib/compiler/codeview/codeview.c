@@ -202,6 +202,64 @@ BUSTER_GLOBAL_LOCAL u32 codeview_model_register_target(u16 machine)
     return machine == CODEVIEW_MACHINE_ARM64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
 }
 
+enum
+{
+    // MSVC link.exe rejects otherwise valid CodeView defranges whose
+    // envelope is shorter than five bytes. Preserve the exact live
+    // interval by extending the envelope and excluding only the
+    // extension through a LocalVariableAddrGap.
+    CODEVIEW_MIN_DEFRANGE_LENGTH = 5,
+};
+
+typedef struct CodeviewDefrange CodeviewDefrange;
+struct CodeviewDefrange
+{
+    u32 start;
+    u16 length;
+    u16 gap_start;
+    u16 gap_length;
+};
+
+BUSTER_GLOBAL_LOCAL CodeviewDefrange codeview_defrange_make(u32 start, u32 length)
+{
+    CodeviewDefrange result = {
+        .start = start,
+        .length = (u16)BUSTER_MIN(length, UINT16_MAX),
+    };
+    if (result.length && result.length < CODEVIEW_MIN_DEFRANGE_LENGTH)
+    {
+        u16 extension = CODEVIEW_MIN_DEFRANGE_LENGTH - result.length;
+        if (start >= extension)
+        {
+            // Prefer a leading gap so the encoded envelope retains the
+            // original end and cannot run past the function boundary.
+            result.start -= extension;
+            result.gap_length = extension;
+        }
+        else
+        {
+            // A range beginning at offset zero cannot move backwards.
+            result.gap_start = result.length;
+            result.gap_length = extension;
+        }
+        result.length = CODEVIEW_MIN_DEFRANGE_LENGTH;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_defrange(ByteWriter* symbols, u32 start, u32 length)
+{
+    CodeviewDefrange range = codeview_defrange_make(start, length);
+    byte_writer_emit_u32_le(symbols, range.start);
+    byte_writer_emit_u16_le(symbols, 1);
+    byte_writer_emit_u16_le(symbols, range.length);
+    if (range.gap_length)
+    {
+        byte_writer_emit_u16_le(symbols, range.gap_start);
+        byte_writer_emit_u16_le(symbols, range.gap_length);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine)
 {
     if (!range || range->end <= range->start || range->location.kind == DEBUG_LOCATION_UNAVAILABLE)
@@ -216,18 +274,14 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
         u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, range->location.reg);
         byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
         byte_writer_emit_u16_le(symbols, 0);
-        byte_writer_emit_u32_le(symbols, start);
-        byte_writer_emit_u16_le(symbols, 1);
-        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
+        codeview_emit_defrange(symbols, start, length);
         codeview_record_end(symbols, record);
     }
     else if (range->location.kind == DEBUG_LOCATION_FRAME)
     {
         u64 record = codeview_record_begin(symbols, S_DEFRANGE_FRAMEPOINTER_REL);
         byte_writer_emit_u32_le(symbols, (u32)range->location.frame_offset);
-        byte_writer_emit_u32_le(symbols, start);
-        byte_writer_emit_u16_le(symbols, 1);
-        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
+        codeview_emit_defrange(symbols, start, length);
         codeview_record_end(symbols, record);
     }
     else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
@@ -244,9 +298,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
                 byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
                 byte_writer_emit_u16_le(symbols, 0);
                 byte_writer_emit_u32_le(symbols, piece->value_offset);
-                byte_writer_emit_u32_le(symbols, piece_start);
-                byte_writer_emit_u16_le(symbols, 1);
-                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
+                codeview_emit_defrange(symbols, piece_start, piece_length);
                 codeview_record_end(symbols, record);
             }
             else if (piece->kind == DEBUG_LOCATION_FRAME)
@@ -254,9 +306,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
                 u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
                 byte_writer_emit_u32_le(symbols, 0);
                 byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece->value_offset, UINT16_MAX));
-                byte_writer_emit_u32_le(symbols, piece_start);
-                byte_writer_emit_u16_le(symbols, 1);
-                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
+                codeview_emit_defrange(symbols, piece_start, piece_length);
                 codeview_record_end(symbols, record);
             }
         }

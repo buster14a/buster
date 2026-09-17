@@ -323,9 +323,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     invalid.line_count = 1;
     BUSTER_TEST(arguments, !codeview_build(arguments->arena, invalid).valid);
 
-    // The format backend also accepts the neutral model directly.  Keep a
-    // register-to-frame transition, a parameter, and a synthetic inline site
-    // here so the C13 records cannot silently regress to line-only output.
+    // The format backend also accepts the neutral model directly. Keep
+    // short register/frame intervals, a piecewise transition, a parameter,
+    // and a synthetic inline site so C13 records cannot regress silently.
     DebugTypeId model_parameter_types[] = {0};
     DebugType model_types[] = {
         {
@@ -349,9 +349,12 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX, .value_offset = 4, .size = 4},
     };
     DebugLocationRange model_locations[] = {
-        {.start = 0, .end = 12, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
+        // The four-byte intervals exercise both exact-preserving forms:
+        // a trailing gap at function offset zero and a leading gap at
+        // the end of the function.
+        {.start = 0, .end = 4, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
         {.start = 12, .end = 24, .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = model_pieces, .piece_count = BUSTER_ARRAY_LENGTH(model_pieces)}},
-        {.start = 24, .end = 32, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+        {.start = 28, .end = 32, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
     };
     DebugVariableId model_variable_ids[] = {0};
     DebugVariable model_variables[] = {
@@ -432,6 +435,8 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     bool found_procedure_type = false;
     bool found_register = false;
     bool found_frame = false;
+    bool found_short_register = false;
+    bool found_short_frame = false;
     bool found_subfield = false;
     bool found_inline = false;
     u64 model_symbol_offset = 4;
@@ -469,6 +474,25 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                 found_local |= record_kind == CODEVIEW_TEST_S_LOCAL;
                 found_register |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER;
                 found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                if ((record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER ||
+                     record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL) &&
+                    record_length >= 18)
+                {
+                    u32 range_start = 0;
+                    u16 section = 0;
+                    u16 range_length = 0;
+                    u16 gap_start = 0;
+                    u16 gap_length = 0;
+                    memcpy(&range_start, model_built.symbols.pointer + record_offset + 8, sizeof(range_start));
+                    memcpy(&section, model_built.symbols.pointer + record_offset + 12, sizeof(section));
+                    memcpy(&range_length, model_built.symbols.pointer + record_offset + 14, sizeof(range_length));
+                    memcpy(&gap_start, model_built.symbols.pointer + record_offset + 16, sizeof(gap_start));
+                    memcpy(&gap_length, model_built.symbols.pointer + record_offset + 18, sizeof(gap_length));
+                    found_short_register |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER && section == 1 &&
+                                            range_start == 0 && range_length == 5 && gap_start == 4 && gap_length == 1;
+                    found_short_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL && section == 1 &&
+                                         range_start == 27 && range_length == 5 && gap_start == 0 && gap_length == 1;
+                }
                 found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD || record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
                 found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
                 record_offset += 2 + record_length;
@@ -476,7 +500,8 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         }
         model_symbol_offset = payload + ((subsection_length + 3) & ~3u);
     }
-    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
+    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame &&
+                               found_short_register && found_short_frame && found_subfield && found_inline);
 
     DebugVariable global_variable = {
         .name = S8("global_value"),
