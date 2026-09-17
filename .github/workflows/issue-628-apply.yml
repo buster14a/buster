@@ -5,6 +5,7 @@ on:
     branches: [fix/628-sanitizer-provenance]
     paths:
       - tools/issue_628_patch.py
+      - .github/workflows/issue-628-apply.yml
 
 permissions:
   contents: write
