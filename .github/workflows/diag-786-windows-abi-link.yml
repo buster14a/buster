@@ -26,14 +26,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
-          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) {
-            throw 'Visual Studio x86/x64 tools were not found'
-          }
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
           & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-
           New-Item -ItemType Directory -Force -Path diag | Out-Null
-          clang --version
+
           $Driver = Join-Path $env:RUNNER_TEMP 'diag-build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -43,20 +40,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $ResourceDir = (& clang.exe -print-resource-dir).Trim()
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $RuntimeDlls = @(Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse | Sort-Object FullName)
-          if ($RuntimeDlls.Count -ne 1) {
-            throw "Expected one x86-64 ASan runtime below $ResourceDir; found $($RuntimeDlls.Count)"
-          }
-          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
-          $env:PATH = "$RuntimeDir;$env:PATH"
+          if ($RuntimeDlls.Count -ne 1) { throw "Expected one x86-64 ASan runtime; found $($RuntimeDlls.Count)" }
+          $env:PATH = "$(Split-Path -Parent $RuntimeDlls[0].FullName);$env:PATH"
 
           function Invoke-Captured {
-            param(
-              [Parameter(Mandatory=$true)][string]$Label,
-              [Parameter(Mandatory=$true)][string]$Executable,
-              [Parameter(Mandatory=$true)][string[]]$Arguments
-            )
+            param([string]$Label, [string]$Executable, [string[]]$Arguments)
             Write-Host "COMMAND[$Label]: $Executable $($Arguments -join ' ')"
             & $Executable @Arguments 2>&1 |
               Tee-Object -FilePath (Join-Path 'diag' "$Label.log") |
@@ -75,11 +64,10 @@ jobs:
 
           $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char') +
             $Sanitizer + @("-I$Include", 'tests\differential\abi_host.c', '-c', '-o', 'diag\caller.o')
-          if ((Invoke-Captured 'caller-compile' 'clang.exe' $CallerArgs) -ne 0) {
-            throw 'fixed caller failed to compile'
-          }
+          if ((Invoke-Captured 'caller-compile' 'clang.exe' $CallerArgs) -ne 0) { throw 'fixed caller failed to compile' }
 
           $Common = @(
+            'cc',
             '-fwrapv',
             '-fno-strict-aliasing',
             '-funsigned-char',
@@ -88,28 +76,31 @@ jobs:
             '-c'
           )
           $FastP2 = @(
+            'cc',
             '-fregister-allocator=fast',
             '-fno-machine-fallback',
             '-fno-canonical-local-promotion',
             '-ftarget-local-promotion',
             '-fno-frontend-ssa',
             '-fverify-codegen'
-          ) + $Common + @('-o', 'diag\subject-fast-p2.o')
+          ) + $Common[1..($Common.Length - 1)] + @('-o', 'diag\subject-fast-p2.o')
           $FastP0 = @(
+            'cc',
             '-fregister-allocator=fast',
             '-fno-machine-fallback',
             '-fno-canonical-local-promotion',
             '-fno-target-local-promotion',
             '-fno-frontend-ssa',
             '-fverify-codegen'
-          ) + $Common + @('-o', 'diag\subject-fast-p0.o')
+          ) + $Common[1..($Common.Length - 1)] + @('-o', 'diag\subject-fast-p0.o')
           $NoneP2 = @(
+            'cc',
             '-fregister-allocator=none',
             '-fno-canonical-local-promotion',
             '-ftarget-local-promotion',
             '-fno-frontend-ssa',
             '-fverify-codegen'
-          ) + $Common + @('-o', 'diag\subject-none-p2.o')
+          ) + $Common[1..($Common.Length - 1)] + @('-o', 'diag\subject-none-p2.o')
 
           $Ide = (Resolve-Path 'build\Release\ide.exe').Path
           if ((Invoke-Captured 'subject-fast-p2-compile' $Ide $FastP2) -ne 0) { throw 'FAST p2 subject compile failed' }
@@ -123,9 +114,6 @@ jobs:
               ForEach-Object { Write-Host $_ }
             & llvm-readobj.exe --file-headers --symbols $Object 2>&1 |
               Out-File -Encoding utf8 ($Object + '.readobj.txt')
-            $Info = Get-Item $Object
-            $Hash = (Get-FileHash -Algorithm SHA256 $Object).Hash.ToLowerInvariant()
-            Write-Host "OBJECT $Object bytes=$($Info.Length) sha256=$Hash"
           }
 
           function Link-Case {
@@ -137,7 +125,6 @@ jobs:
           $FastP2Link = Link-Case 'link-fast-p2' 'diag\subject-fast-p2.o' 'diag\fast-p2.exe'
           $FastP0Link = Link-Case 'link-fast-p0' 'diag\subject-fast-p0.o' 'diag\fast-p0.exe'
           $NoneP2Link = Link-Case 'link-none-p2' 'diag\subject-none-p2.o' 'diag\none-p2.exe'
-
           @(
             "fast_p2_link=$FastP2Link",
             "fast_p0_link=$FastP0Link",
@@ -147,9 +134,7 @@ jobs:
           if ($FastP0Link -ne 0 -or $NoneP2Link -ne 0) {
             throw "Control link failed: fast-p0=$FastP0Link none-p2=$NoneP2Link"
           }
-          if ($FastP2Link -eq 0) {
-            throw 'Expected FAST p2 link failure did not reproduce'
-          }
+          if ($FastP2Link -eq 0) { throw 'Expected FAST p2 link failure did not reproduce' }
 
       - name: Retain compact diagnostic evidence
         if: ${{ !cancelled() }}
