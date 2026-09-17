@@ -24,6 +24,12 @@ jobs:
         run: |
           set -euo pipefail
           python tools/issue_708_patch_v4.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/buster/tests/compiler/driver/driver_test.c')
+          text = path.read_text()
+          path.write_text(text.replace('\n' + ' ' * 28 + '\n', '\n\n'))
+          PY
           git diff --check
           if git diff --quiet -- src/buster/tests/compiler/driver/driver_test.c; then
             exit 0
