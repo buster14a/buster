@@ -89,6 +89,23 @@ bool file_write(String8 path, ByteSlice content)
     return !file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1}).error.v;
 }
 
+BUSTER_GLOBAL_LOCAL FileIdentity file_identity_from_stats(FileStats stats)
+{
+    FileIdentity result = {
+        .device = stats.device,
+        .index = stats.index,
+        .valid = stats.valid,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void file_map_read_fallback(Arena* arena, String8 path, FileReadOptions options, FileMapRead* result)
+{
+    FileReadResult read = file_read_checked(arena, path, options);
+    result->bytes = read.bytes;
+    result->identity = read.identity;
+}
+
 FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
 {
     FileMapRead result = {0};
@@ -98,7 +115,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     // only way to satisfy a caller that did not demand a mapping.
     if (!options.map_required)
     {
-        result.bytes = file_read(arena, path, options);
+        file_map_read_fallback(arena, path, options, &result);
     }
 #else
     // Padding and alignment requests cannot be served by a raw mapping.
@@ -110,7 +127,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     {
         if (!options.map_required)
         {
-            result.bytes = file_read(arena, path, options);
+            file_map_read_fallback(arena, path, options, &result);
         }
     }
     else
@@ -120,8 +137,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
         OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
         if (file)
         {
-            u64 file_size = os_file_get_size(file);
-            if (file_size && file_size != UINT64_MAX)
+            FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
+            u64 file_size = stats.size;
+            if (stats.valid && file_size)
             {
                 HANDLE mapping = CreateFileMappingW((HANDLE)file, 0, PAGE_READONLY, (DWORD)(file_size >> 32), (DWORD)file_size, 0);
                 if (mapping)
@@ -133,6 +151,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                         result.mapped_pointer = mapped;
                         result.mapped_size = file_size;
                         result.mapped_handle = mapping;
+                        result.identity = file_identity_from_stats(stats);
                     }
                     else
                     {
@@ -163,6 +182,11 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                     result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
                     result.mapped_pointer = mapped;
                     result.mapped_size = (u64)file_stats.st_size;
+                    result.identity = (FileIdentity){
+                        .device = (u64)file_stats.st_dev,
+                        .index = (u64)file_stats.st_ino,
+                        .valid = true,
+                    };
                 }
             }
             close(file_descriptor);
@@ -172,7 +196,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
 
         if (!result.bytes.pointer && !options.map_required)
         {
-            result.bytes = file_read(arena, path, options);
+            file_map_read_fallback(arena, path, options, &result);
         }
     }
 #endif
@@ -277,10 +301,11 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
         result.error = opened.error;
         if (opened.file)
         {
-            FileStats stats = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1});
+            FileStats stats = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1, .identity = 1});
             result.error = stats.error;
             if (stats.valid)
             {
+                result.identity = file_identity_from_stats(stats);
                 u64 reported_size = stats.size;
                 u64 allocation_alignment = options.start_alignment;
                 u64 file_size;
@@ -348,6 +373,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     if (result.status != OS_FILE_READ_OK)
     {
         result.bytes = (ByteSlice){0};
+        result.identity = (FileIdentity){0};
         arena_set_position(arena, read_mark);
     }
     return result;
