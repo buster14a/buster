@@ -17,7 +17,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
+          git config user.name 'github-actions[bot]]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main recovery/6aa84ae5/522-514-cutover-review
           git checkout -B codex/513-reconciled-candidate origin/main
@@ -60,15 +60,9 @@ jobs:
                   raise RuntimeError(f'{path}: resolved {conflict}, expected {len(choices)}')
               source.write_text(''.join(result))
 
-          # Delete post-cutover direct-emitter additions, retain current MIR
-          # debug infrastructure, and keep the recovered coherent scheduler.
           resolve('src/buster/lib/compiler/codegen/codegen.c',
                   ['theirs', 'ours', 'ours', 'theirs', 'theirs', 'theirs', 'theirs'])
-          # Both the current sparse-debug test hooks and the recovered cutover
-          # attempt hook are still referenced by their respective tests.
           resolve('src/buster/lib/compiler/codegen/codegen_internal.h', ['both'])
-          # Retain current correctness regressions; replace only the successful
-          # direct-fallback census with the MIR-only structured-failure test.
           resolve('src/buster/tests/compiler/driver/driver_test.c',
                   ['ours', 'theirs', 'ours', 'ours'])
 
@@ -82,9 +76,9 @@ jobs:
               '    // allocator spellings. Both lanes exercise the same MIR machine path.\n')
           driver.write_text(text)
           PY
-          test -z "$(git diff --name-only --diff-filter=U)"
           ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- '*.c' '*.h' '*.md' '*.py'
           git add -A
+          test -z "$(git diff --name-only --diff-filter=U)"
           git diff --cached --check
           git commit -m 'compiler: retire the direct native canonical backend'
           git push --force origin HEAD:codex/513-reconciled-candidate
