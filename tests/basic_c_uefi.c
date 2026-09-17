@@ -6,6 +6,8 @@
 #error "UEFI must be a freestanding C environment"
 #endif
 
+#include "uefi_abi_contract.h"
+
 _Static_assert(__WCHAR_WIDTH__ == 16, "UEFI wchar_t must be 16 bits");
 _Static_assert(sizeof(void *) == 8, "UEFI target must use PE32+");
 
@@ -29,5 +31,5 @@ EFI_STATUS (*firmware_entry_address)(EFI_HANDLE, EFI_SYSTEM_TABLE *) = &UefiMain
 
 EFI_STATUS UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 {
-    return image_handle == (EFI_HANDLE)system_table;
+    return !uefi_abi_contract_test() || image_handle == (EFI_HANDLE)system_table;
 }
