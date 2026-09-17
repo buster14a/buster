@@ -2030,7 +2030,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
             // A loaded CI host can delay even an immediately fatal child past
             // the one-second timeout control. Keep the real crash path, but do
             // not let scheduling latency misclassify it as the timeout case.
-            if (index == 3) { observation_settings.timeout_seconds = 5; }
+            if (string_equal(modes[index], S8("crash"))) { observation_settings.timeout_seconds = 5; }
             DObservation child = d_observe(&observation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
                                            path_join(arena, directory, modes[index]));
             if (index == 0) { errors += child.kind != D_EXIT || child.status != 7 || !string_equal(child.output, S8("a\0b")) || !string_equal(child.error, S8("child stderr\n")); }
