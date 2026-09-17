@@ -6,7 +6,7 @@
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool codegen_test_debug_block_start_seed_matches(CodegenModule const* module, DebugLocationSeed const* seeds,
                                                                       u32 index, u32 start, u32 end,
-                                                                      DebugLocationKind kind, u32 reg)
+                                                                      DebugLocationKind kind, DebugRegister reg)
 {
     return module->debug_location_count > index && seeds[index].function_symbol.value == 7 &&
            seeds[index].local.value == 0 && seeds[index].start == start && seeds[index].end == end &&
@@ -84,11 +84,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_block_start(UnitTe
     BUSTER_TEST(arguments, indexed_ok && indexed.error == CODEGEN_ERROR_NONE);
     BUSTER_TEST(arguments, indexed.debug_location_count == 3);
     BUSTER_TEST(arguments, codegen_test_debug_block_start_seed_matches(&indexed, indexed_seeds, 0, 100, 110,
-                                                                       DEBUG_LOCATION_UNAVAILABLE, 0));
+                                                                       DEBUG_LOCATION_UNAVAILABLE, DEBUG_REGISTER_NONE));
     BUSTER_TEST(arguments, codegen_test_debug_block_start_seed_matches(&indexed, indexed_seeds, 1, 110, 120,
                                                                        DEBUG_LOCATION_REGISTER, DEBUG_REGISTER_X86_RAX));
     BUSTER_TEST(arguments, codegen_test_debug_block_start_seed_matches(&indexed, indexed_seeds, 2, 120, 140,
-                                                                       DEBUG_LOCATION_UNAVAILABLE, 0));
+                                                                       DEBUG_LOCATION_UNAVAILABLE, DEBUG_REGISTER_NONE));
 
     bool dense_ok = codegen_test_record_machine_locations_dense(arguments->arena, &dense,
                                                                  BUSTER_ARRAY_LENGTH(dense_seeds), &ir_function,
@@ -96,11 +96,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_block_start(UnitTe
     BUSTER_TEST(arguments, dense_ok && dense.error == CODEGEN_ERROR_NONE);
     BUSTER_TEST(arguments, dense.debug_location_count == 3);
     BUSTER_TEST(arguments, codegen_test_debug_block_start_seed_matches(&dense, dense_seeds, 0, 100, 110,
-                                                                       DEBUG_LOCATION_UNAVAILABLE, 0));
+                                                                       DEBUG_LOCATION_UNAVAILABLE, DEBUG_REGISTER_NONE));
     BUSTER_TEST(arguments, codegen_test_debug_block_start_seed_matches(&dense, dense_seeds, 1, 110, 120,
                                                                        DEBUG_LOCATION_REGISTER, DEBUG_REGISTER_X86_RAX));
     BUSTER_TEST(arguments, codegen_test_debug_block_start_seed_matches(&dense, dense_seeds, 2, 120, 140,
-                                                                       DEBUG_LOCATION_UNAVAILABLE, 0));
+                                                                       DEBUG_LOCATION_UNAVAILABLE, DEBUG_REGISTER_NONE));
 
     // Keep mutation failures from changing the number of executed assertions:
     // every expectation above is unconditional and count-safe.
