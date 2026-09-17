@@ -1,0 +1,24 @@
+name: issue72-source-export
+
+on:
+  push:
+    branches:
+      - codex/issue-72-aarch64-binary128
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Export source tree
+        run: git archive --format=tar.gz --output=issue72-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue72-source
+          path: issue72-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
