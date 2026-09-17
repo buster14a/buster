@@ -1,4 +1,4 @@
-name: Issue 651 publish verified fix
+name: Issue 651 rebase and Android CI repair
 
 on:
   push:
@@ -11,31 +11,68 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
+          ref: main
+          fetch-depth: 0
           persist-credentials: true
-      - name: Verify and publish the exact locally tested source tree
+      - name: Rebase verified fix and repair Android fixture path
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 3ab1ccdccb9b6c898f4d9229a5d0e9722583f671
-          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          target_branch='codex/fix-651-sysv-va-list-extent'
+          git fetch --no-tags origin main "$target_branch" "$GITHUB_SHA"
+          git checkout --detach origin/main
+          rebased_base="$(git rev-parse HEAD)"
+          expected_head="$(git rev-parse "origin/$target_branch")"
+
           git show "$GITHUB_SHA:.github/issue-651.patch.xz" > "$RUNNER_TEMP/issue-651.patch.xz"
           python3 - <<'PY'
-          import hashlib, lzma, os, pathlib
-          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          import hashlib
+          import lzma
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP'])
           patch = lzma.decompress((root / 'issue-651.patch.xz').read_bytes())
-          assert hashlib.sha256(patch).hexdigest() == '30a1c3b432f7d702e83408cd69172722f489a0ea397ae835a73b5f28bc3c1e96'
+          expected = '30a1c3b432f7d702e83408cd69172722f489a0ea397ae835a73b5f28bc3c1e96'
+          assert hashlib.sha256(patch).hexdigest() == expected
           (root / 'issue-651.patch').write_bytes(patch)
           PY
-          git apply --index "$RUNNER_TEMP/issue-651.patch"
+
+          if ! git apply --3way --index "$RUNNER_TEMP/issue-651.patch"; then
+            git status --short
+            git diff --cc
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/buster/tests/compiler/driver/driver_test.c')
+          text = path.read_text(encoding='utf-8')
+          old = 'S8("tests/differential/sysv_va_list.c")'
+          new = 'S8("-DSYSV_VA_LIST_NO_MAIN=1"), S8("tests/basic_c_sysv_va_list.c")'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected one SysV va_list driver source, found {count}')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+
+          git add src/buster/tests/compiler/driver/driver_test.c
           git diff --cached --check
-          test "$(git write-tree)" = 36f4ef2967fbabc4b83fd70aaea5f87df98e4e7a
+          grep --fixed-strings --quiet 'S8("-DSYSV_VA_LIST_NO_MAIN=1"), S8("tests/basic_c_sysv_va_list.c")' \
+            src/buster/tests/compiler/driver/driver_test.c
+          test "$(git grep --fixed-strings -c 'S8("tests/differential/sysv_va_list.c")' -- \
+            src/buster/tests/compiler/driver/driver_test.c || true)" = ''
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: use the public 24-byte System V va_list extent'
-          git push origin HEAD:refs/heads/codex/fix-651-sysv-va-list-extent
-          printf 'Published commit %s\nVerified source tree %s\nPublication-only job; validation evidence is recorded in the audit.\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
+          git commit -m 'fix: enforce the public 24-byte System V va_list extent'
+          published="$(git rev-parse HEAD)"
+          git push --force-with-lease="refs/heads/$target_branch:$expected_head" \
+            origin "HEAD:refs/heads/$target_branch"
+          printf 'Rebased #651 onto `%s`.\n\nPublished `%s` with the Android asset-safe fixture invocation.\n' \
+            "$rebased_base" "$published" >> "$GITHUB_STEP_SUMMARY"
