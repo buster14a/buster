@@ -152,6 +152,20 @@
   on assignment and read only after the pin-map membership check. Instruction
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
+- Shared FAST/QUALITY placement colors frame storage by lifetime instead of
+  giving every spilled value and every stack slot its own bytes. Spill homes
+  take their rows from the allocator's memory edits; selector slots take theirs
+  from a block-level liveness fixed point over covering writes and reads, so a
+  slot written and read inside one iteration does not widen to its loop. Both
+  are assigned by one linear scan in start order with a free-color stack; no
+  interference graph is built. Scalar (8-byte) and vector (64-byte, 16-byte
+  aligned) homes keep separate pools. Reuse requires a linear block/row tiling
+  and `MachineFunction.returns_twice_absence_certified`, which the selectors
+  publish when no call in the function returns twice: a `longjmp` can re-enter
+  the frame at a row no machine edge reaches. Address-taken, volatile-tainted,
+  inline-assembly, variadic, outgoing-argument and unproven-form objects, homes
+  crossing their defining block, and escaping values all keep storage of their
+  own. Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
@@ -713,18 +727,15 @@
   already produce. `-fno-pic` clears the model; `-fno-pie` clears nothing
   because nothing was set.
 - The built-in linker resolves both forms for the image it writes, which binds
-  every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT
-  reference is relaxed into the direct instruction the psABI table names for
-  its shape (`link_x86_relax_got_reference`), the same relaxation `ld`
-  performs for a `GOTPCRELX` it can resolve -- an address computation, an
-  absolute immediate, or a direct branch. The ELF reader keeps
-  `R_X86_64_GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` as three kinds, because
-  the relaxable spellings also say how many bytes of the instruction precede
-  the field and rewriting the wrong ones is silent; see the
-  [GOT-reference encoding authority](../x86-64-got-authority.md). An
-  instruction shape the relaxation does not recognize fails the link by name
-  rather than being rewritten. It relaxes the two indirect thread-local models
-  back to local-exec for the same reason (`link_elf_relax_thread_local`).
+  every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT load
+  is relaxed back into the `lea` it would have been (`link_x86_relax_got_load`),
+  the same relaxation `ld` performs for a `GOTPCRELX` it can resolve. The ELF
+  reader takes `R_X86_64_GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` as one
+  kind for that reason, so a `-fPIC` object -- this compiler's or clang's --
+  links here. An instruction shape the relaxation does not recognize fails the
+  link by name rather than being rewritten. It relaxes the two indirect
+  thread-local models back to local-exec for the same reason
+  (`link_elf_relax_thread_local`).
 
 ## Wide integer conversion rounding
 
