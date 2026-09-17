@@ -106,14 +106,19 @@ jobs:
       BUSTER_CMAKE_PROFILE: ${{ matrix.profile }}
       BUSTER_MATRIX_THREADS: '4'
       BUSTER_CI_PYTHON: ${{ matrix.python }}
-      BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/issue707/coverage.json
-      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/issue707-zig-global-${{ matrix.case }}
     steps:
       - name: Checkout exact head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+
+      - name: Set measurement paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'BUSTER_CI_COVERAGE_OUTPUT=%s/issue707/coverage.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'ZIG_GLOBAL_CACHE_DIR=%s/issue707-zig-global-%s\n' "$RUNNER_TEMP" '${{ matrix.case }}' >> "$GITHUB_ENV"
 
       - name: Restore verified Zig archive
         id: zig_cache
