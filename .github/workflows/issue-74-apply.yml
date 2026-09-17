@@ -18,6 +18,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Reconcile current source wording
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("tools/issue_74_apply.py")
+          text = path.read_text()
+          old = "the C11 name spells in\\n"
+          new = "the C11 name spells;\\n"
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one stale comment anchor, found {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          PY
       - name: Apply guarded source transformation
         run: python3 tools/issue_74_apply.py
       - name: Validate and publish implementation commit
