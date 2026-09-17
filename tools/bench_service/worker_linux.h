@@ -136,17 +136,18 @@ typedef struct BqWorkerConfig
     /* Absolute service-owned queue directory. Production services make it
      * inaccessible to the recipe; private test backends may leave it empty. */
     String8 queue_root;
-    /* Set for the installed fixed recipe even when a deterministic injected
-     * backend supplies the manager seam. The backend must still satisfy every
-     * observed security property; it only replaces process control in tests. */
+    /* Set for an installed admitted service recipe even when a deterministic
+     * injected backend supplies the manager seam. The backend must still
+     * satisfy every observed security property; it only replaces process
+     * control in tests. */
     bool production_path;
 } BqWorkerConfig;
 
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);
 BUSTER_F_DECL BqError bq_worker_result_binding_validate(BqJob const* job);
 BUSTER_F_DECL BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token,
-                                     String8 workspace_root, String8 base_revision, String8 candidate_revision,
-                                     String8 result_root);
+                                     String8 recipe, String8 workspace_root, String8 base_revision,
+                                     String8 candidate_revision, String8 result_root);
 BUSTER_F_DECL void bq_worker_backend_systemd(BqWorkerBackend* backend);
 
 #endif

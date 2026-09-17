@@ -1666,13 +1666,25 @@ struct BqWorkerFinalization
     char result_digest[SHA256_HEX_CAPACITY];
     char bundle_digest[SHA256_HEX_CAPACITY];
     char full_digest[SHA256_HEX_CAPACITY];
+    BqRecipeFiles recipe;
 };
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_finalization_recipe(BqJob const* job, BqWorkerFinalization* finalization)
+{
+    BqRecipeFiles expected;
+    BqRecipe selected = job ? bq_request_recipe(&job->request) : BQ_RECIPE_UNKNOWN;
+    bool ok = finalization && bq_recipe_service(selected) && bq_recipe_files(selected, &expected);
+    if (ok && finalization->recipe.name[0]) ok = !strcmp(finalization->recipe.name, expected.name);
+    if (ok && !finalization->recipe.name[0]) finalization->recipe = expected;
+    return ok;
+}
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_open(BqWorkerConfig const* config, BqJob const* job,
                                                    BqWorkerFinalization* finalization, bool create)
 {
     char result_root[BQ_PATH_CAP + 1], name[64];
-    BqError error = config && job && finalization && bq_worker_result_path(config->workspace_root, job->id, job->token, result_root) &&
+    BqError error = config && job && finalization && bq_worker_finalization_recipe(job, finalization) &&
+                    bq_worker_result_path(config->workspace_root, job->id, job->token, result_root) &&
                     bq_workspace_name(name, job->id, job->token) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int workspace = error == BQ_OK ? bq_worker_open_trusted_directory(config->workspace_root, false, false) : -1;
     int results = workspace >= 0 ? openat(workspace, "results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -1909,14 +1921,13 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_path_valid(char const* path)
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_reserved(char const* path)
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_reserved(BqRecipeFiles const* recipe, char const* path)
 {
-    char const* names[] = {
-        "validate-buster-v1.manifest", "validate-buster-v1.bundle", "validate-buster-v1.outcome",
-    };
+    char const* names[] = {recipe ? recipe->manifest : NULL, recipe ? recipe->bundle : NULL,
+                           recipe ? recipe->outcome : NULL};
     bool reserved = false;
-    for (u32 index = 0; !reserved && index < BUSTER_ARRAY_LENGTH(names); index += 1)
-        reserved = !strcmp(path, names[index]);
+    for (u32 index = 0; recipe && path && !reserved && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        reserved = names[index][0] && !strcmp(path, names[index]);
     return reserved;
 }
 
@@ -2067,15 +2078,16 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_file_digest(int root, char const* path
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_full(int result_directory,
-                                                            char const expected_digest[SHA256_HEX_CAPACITY],
-                                                            char full_digest[SHA256_HEX_CAPACITY])
+BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_directory,
+                                                              BqRecipeFiles const* recipe,
+                                                              char const expected_digest[SHA256_HEX_CAPACITY],
+                                                              char full_digest[SHA256_HEX_CAPACITY])
 {
     if (full_digest) full_digest[0] = 0;
-    int descriptor = result_directory >= 0 ? openat(result_directory, "validate-buster-v1.bundle",
+    int descriptor = recipe && result_directory >= 0 ? openat(result_directory, recipe->bundle,
                                                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info = {0}, expected_info = {0}, after = {0};
-    bool opened = expected_digest && descriptor >= 0 && fstatat(result_directory, "validate-buster-v1.bundle",
+    bool opened = recipe && expected_digest && descriptor >= 0 && fstatat(result_directory, recipe->bundle,
                                                                  &expected_info, AT_SYMLINK_NOFOLLOW) == 0 &&
                   fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) &&
                   expected_info.st_dev == info.st_dev && expected_info.st_ino == info.st_ino && info.st_nlink == 1 &&
@@ -2239,7 +2251,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_full(int result_directory,
                 }
                 else if (valid && S_ISREG(child_info.st_mode))
                 {
-                    if (!bq_worker_bundle_reserved(relative))
+                    if (!bq_worker_bundle_reserved(recipe, relative))
                     {
                         u64 actual_size = 0;
                         char actual_digest[SHA256_HEX_CAPACITY];
@@ -2298,6 +2310,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_full(int result_directory,
 }
 
 #ifdef BUSTER_BENCH_SERVICE_TEST
+BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_full(int result_directory,
+                                                            char const expected_digest[SHA256_HEX_CAPACITY],
+                                                            char full_digest[SHA256_HEX_CAPACITY])
+{
+    BqRecipeFiles recipe;
+    BqError error = bq_recipe_files(BQ_RECIPE_VALIDATE_BUSTER, &recipe) ?
+                    bq_worker_bundle_validate_recipe(result_directory, &recipe, expected_digest, full_digest) :
+                    BQ_CONFIGURATION_MISMATCH;
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate(int result_directory,
                                                        char const expected_digest[SHA256_HEX_CAPACITY])
 {
@@ -2388,7 +2411,10 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
 BqError bq_worker_result_binding_validate(BqJob const* job)
 {
     char path[BQ_PATH_CAP + 1];
-    BqError error = job && job->result_bound && bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
+    BqRecipeFiles recipe;
+    BqRecipe selected = job ? bq_request_recipe(&job->request) : BQ_RECIPE_UNKNOWN;
+    BqError error = job && job->result_bound && bq_recipe_service(selected) && bq_recipe_files(selected, &recipe) &&
+                    bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
                     path[0] == '/' ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int result_directory = error == BQ_OK ? bq_worker_open_trusted_directory(string_from_pointer(path), true, false) : -1;
     struct stat directory_info = {0};
@@ -2399,7 +2425,7 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
                 (directory_info.st_mode & 077) == 0 ?
                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
-    int manifest = error == BQ_OK ? openat(result_directory, "validate-buster-v1.manifest",
+    int manifest = error == BQ_OK ? openat(result_directory, recipe.manifest,
                                             O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     char bytes[BQ_WORKER_RESULT_CAP + 1];
     u32 used = 0;
@@ -2407,7 +2433,7 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
     if (error == BQ_OK)
     {
         struct stat expected_manifest = {0};
-        error = manifest >= 0 && fstatat(result_directory, "validate-buster-v1.manifest", &expected_manifest,
+        error = manifest >= 0 && fstatat(result_directory, recipe.manifest, &expected_manifest,
                                          AT_SYMLINK_NOFOLLOW) == 0 && fstat(manifest, &manifest_info) == 0 &&
                 expected_manifest.st_dev == manifest_info.st_dev && expected_manifest.st_ino == manifest_info.st_ino &&
                 S_ISREG(manifest_info.st_mode) &&
@@ -2434,7 +2460,9 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
     char recursive_digest[SHA256_HEX_CAPACITY] = {0};
     char actual_full[SHA256_HEX_CAPACITY] = {0};
     char result_line[BQ_PATH_CAP + 16] = {0};
+    char recipe_line[BQ_RECIPE_NAME_CAP + 8] = {0};
     u32 result_line_length = 12 + (u32)strlen(path);
+    int recipe_line_length = snprintf(recipe_line, sizeof(recipe_line), "recipe=%s", recipe.name);
     if (result_line_length < sizeof(result_line))
     {
         memcpy(result_line, "result-root=", 12);
@@ -2447,8 +2475,10 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
         sha256_init(&digest);
         sha256_add(&digest, bytes, used);
         sha256_finish_hex(&digest, (char8*)actual_manifest);
-        bool lines = result_line_length < sizeof(result_line) && bq_worker_result_line((char const*)bytes, "schema=1") &&
-                     bq_worker_result_line((char const*)bytes, "recipe=validate-buster-v1") &&
+        bool lines = result_line_length < sizeof(result_line) && recipe_line_length > 0 &&
+                     (u32)recipe_line_length < sizeof(recipe_line) &&
+                     bq_worker_result_line((char const*)bytes, "schema=1") &&
+                     bq_worker_result_line((char const*)bytes, recipe_line) &&
                      bq_worker_result_line((char const*)bytes, result_line);
         if (lines)
         {
@@ -2458,7 +2488,7 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
                 BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
     if (error == BQ_OK)
-        error = bq_worker_bundle_validate_full(result_directory, expected_bundle, recursive_digest);
+        error = bq_worker_bundle_validate_recipe(result_directory, &recipe, expected_bundle, recursive_digest);
     if (error == BQ_OK)
     {
         Sha256 full;
@@ -2484,7 +2514,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
     char result_digest[SHA256_HEX_CAPACITY], recursive_digest[SHA256_HEX_CAPACITY];
     char full_digest[SHA256_HEX_CAPACITY];
     char workspace_text[BQ_PATH_CAP + 1], workspace_name[64], base_text[65], candidate_text[65];
-    BqError error = job && config && finalization && finalization->result_directory >= 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    BqError error = job && config && finalization && finalization->result_directory >= 0 &&
+                    bq_worker_finalization_recipe(job, finalization) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int job_length = 0, token_length = 0, workspace_length = 0, result_length = 0, base_length = 0, candidate_length = 0;
     int base_binary_length = 0, candidate_binary_length = 0;
     if (error == BQ_OK && !bq_worker_result_sync_tree(finalization->result_directory)) error = BQ_IO;
@@ -2520,14 +2551,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
             (size_t)candidate_binary_length >= sizeof(candidate_binary_line))
             error = BQ_CONFIGURATION_MISMATCH;
     }
-    int descriptor = error == BQ_OK ? openat(finalization->result_directory, "validate-buster-v1.manifest",
+    int descriptor = error == BQ_OK ? openat(finalization->result_directory, finalization->recipe.manifest,
                                               O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat directory_info = {0}, file_info = {0}, expected_file_info = {0};
     if (error == BQ_OK)
     {
         error = fstat(finalization->result_directory, &directory_info) == 0 && directory_info.st_dev == finalization->result_device &&
                 directory_info.st_ino == finalization->result_inode && descriptor >= 0 &&
-                fstatat(finalization->result_directory, "validate-buster-v1.manifest", &expected_file_info,
+                fstatat(finalization->result_directory, finalization->recipe.manifest, &expected_file_info,
                         AT_SYMLINK_NOFOLLOW) == 0 && fstat(descriptor, &file_info) == 0 &&
                 expected_file_info.st_dev == file_info.st_dev && expected_file_info.st_ino == file_info.st_ino &&
                 S_ISREG(file_info.st_mode) && file_info.st_nlink == 1 && (file_info.st_uid == 0 || file_info.st_uid == geteuid()) &&
@@ -2552,8 +2583,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
     if (error == BQ_OK)
     {
         bytes[used] = 0;
-        char const* prefix = "schema=1\nrecipe=validate-buster-v1\nstatus=succeeded\nstage=throughput\nprocess-result=success\n";
-        bool lines = used >= strlen(prefix) && !memcmp(bytes, prefix, strlen(prefix)) &&
+        char prefix[BQ_RECIPE_NAME_CAP + 96];
+        int prefix_length = snprintf(prefix, sizeof(prefix),
+                                     "schema=1\nrecipe=%s\nstatus=succeeded\nstage=throughput\nprocess-result=success\n",
+                                     finalization->recipe.name);
+        bool lines = prefix_length > 0 && (u32)prefix_length < sizeof(prefix) && used >= (u32)prefix_length &&
+                     !memcmp(bytes, prefix, (u32)prefix_length) &&
                      bq_worker_result_line((char const*)bytes, job_line) && bq_worker_result_line((char const*)bytes, token_line) &&
                      bq_worker_result_line((char const*)bytes, workspace_line) && bq_worker_result_line((char const*)bytes, result_line) &&
                      bq_worker_result_line((char const*)bytes, base_line) && bq_worker_result_line((char const*)bytes, candidate_line) &&
@@ -2571,7 +2606,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
     if (error == BQ_OK && memchr(bytes, 0, used) != NULL) error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK)
     {
-        error = bq_worker_bundle_validate_full(finalization->result_directory, bundle_digest, recursive_digest);
+        error = bq_worker_bundle_validate_recipe(finalization->result_directory, &finalization->recipe,
+                                                  bundle_digest, recursive_digest);
         if (error == BQ_OK)
         {
             Sha256 full;
@@ -2700,7 +2736,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_control_publish(BqWorkerFinalizatio
     struct stat temporary_info = {0};
     bool temporary_ready = false;
     bool published = false;
-    u64 capacity = name && !strcmp(name, "validate-buster-v1.bundle") ? BQ_WORKER_BUNDLE_CAP : BQ_WORKER_RESULT_CAP;
+    u64 capacity = finalization && name && finalization->recipe.bundle[0] &&
+                   !strcmp(name, finalization->recipe.bundle) ? BQ_WORKER_BUNDLE_CAP : BQ_WORKER_RESULT_CAP;
     bool ok = finalization && name && body && length < capacity && finalization->result_directory >= 0;
     if (ok)
     {
@@ -2772,7 +2809,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_control_publish(BqWorkerFinalizatio
 BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalization* finalization,
     char digest[SHA256_HEX_CAPACITY], char recursive_digest[SHA256_HEX_CAPACITY])
 {
-    BqError error = finalization && finalization->result_directory >= 0 ? BQ_OK : BQ_IO;
+    BqError error = finalization && finalization->result_directory >= 0 && finalization->recipe.name[0] ?
+                    BQ_OK : BQ_IO;
     BqWorkerBundleEntry* entries = NULL;
     BqWorkerBundleFrame* frames = NULL;
     char* body = NULL;
@@ -2829,7 +2867,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
             ok = length > 0 && (u32)length <= BQ_WORKER_BUNDLE_PATH_CAP &&
                  bq_worker_bundle_path_valid(relative) && parent >= 0 &&
                  fstatat(parent, item->d_name, &child_info, AT_SYMLINK_NOFOLLOW) == 0;
-            bool control = ok && bq_worker_bundle_reserved(relative);
+            bool control = ok && bq_worker_bundle_reserved(&finalization->recipe, relative);
             if (ok && control)
             {
                 ok = S_ISREG(child_info.st_mode) && child_info.st_nlink == 1 &&
@@ -2936,11 +2974,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
         if (ok) used += (u64)length;
     }
     if (ok)
-        error = bq_worker_result_control_publish(finalization, "validate-buster-v1.bundle", body, used, 0400);
+        error = bq_worker_result_control_publish(finalization, finalization->recipe.bundle, body, used, 0400);
     if (ok && error == BQ_OK)
     {
         bq_digest(body, (u32)used, digest);
-        error = bq_worker_bundle_validate_full(finalization->result_directory, digest, recursive_digest);
+        error = bq_worker_bundle_validate_recipe(finalization->result_directory, &finalization->recipe,
+                                                  digest, recursive_digest);
     }
     if (entries && entries != MAP_FAILED)
         munmap(entries, sizeof(*entries) * BQ_WORKER_BUNDLE_ENTRY_CAP);
@@ -2955,13 +2994,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcom
                                                        BqWorkerFinalization* finalization)
 {
     char body[BQ_WORKER_EVIDENCE_CAP];
-    int body_length = job ? snprintf(body, sizeof(body),
-                                     "schema=1\nrecipe=validate-buster-v1\nstatus=%s\nerror=%s\n"
+    bool recipe = bq_worker_finalization_recipe(job, finalization);
+    int body_length = recipe ? snprintf(body, sizeof(body),
+                                     "schema=1\nrecipe=%s\nstatus=%s\nerror=%s\n"
                                      "job-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\n",
-                                     bq_worker_outcome_name(outcome), bq_error_name(reason),
+                                     finalization->recipe.name, bq_worker_outcome_name(outcome), bq_error_name(reason),
                                      (uint64_t)job->id, (uint64_t)job->token) : -1;
-    bool ok = job && finalization && body_length > 0 && (u32)body_length < sizeof(body) &&
-              bq_worker_result_control_publish(finalization, "validate-buster-v1.outcome", body,
+    bool ok = recipe && body_length > 0 && (u32)body_length < sizeof(body) &&
+              bq_worker_result_control_publish(finalization, finalization->recipe.outcome, body,
                                                 (u64)body_length, 0400) == BQ_OK;
     return ok ? BQ_OK : BQ_IO;
 }
@@ -2974,7 +3014,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
     char recursive_digest[SHA256_HEX_CAPACITY] = {0};
     char manifest_digest[SHA256_HEX_CAPACITY] = {0};
     char full_digest[SHA256_HEX_CAPACITY] = {0};
-    bool ok = job && finalization && finalization->result_directory >= 0;
+    bool ok = job && finalization && finalization->result_directory >= 0 &&
+              bq_worker_finalization_recipe(job, finalization);
     bool existing = false;
     int manifest_lookup = -1, bundle_lookup = -1;
     int manifest_errno = 0, bundle_errno = 0;
@@ -2983,10 +3024,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
     bool existing_success = false;
     if (ok)
     {
-        manifest_lookup = fstatat(finalization->result_directory, "validate-buster-v1.manifest", &manifest_entry,
+        manifest_lookup = fstatat(finalization->result_directory, finalization->recipe.manifest, &manifest_entry,
                                   AT_SYMLINK_NOFOLLOW);
         manifest_errno = errno;
-        bundle_lookup = fstatat(finalization->result_directory, "validate-buster-v1.bundle", &bundle_entry,
+        bundle_lookup = fstatat(finalization->result_directory, finalization->recipe.bundle, &bundle_entry,
                                 AT_SYMLINK_NOFOLLOW);
         bundle_errno = errno;
         bool manifest_missing = manifest_lookup != 0 && manifest_errno == ENOENT;
@@ -2998,14 +3039,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
     if (ok && existing)
     {
         char job_line[64], token_line[64], result_line[BQ_PATH_CAP + 16];
+        char recipe_line[BQ_RECIPE_NAME_CAP + 16];
         int job_length = snprintf(job_line, sizeof(job_line), "job-id=%" PRIu64, (uint64_t)job->id);
         int token_length = snprintf(token_line, sizeof(token_line), "attempt-token=%" PRIu64, (uint64_t)job->token);
         int result_length = snprintf(result_line, sizeof(result_line), "result-root=%s", finalization->result_root);
-        ok = bq_worker_result_control_read(finalization->result_directory, "validate-buster-v1.manifest",
+        int recipe_length = snprintf(recipe_line, sizeof(recipe_line), "recipe=%s", finalization->recipe.name);
+        ok = bq_worker_result_control_read(finalization->result_directory, finalization->recipe.manifest,
                                             manifest_body, BQ_WORKER_RESULT_CAP, &manifest_length) &&
              job_length > 0 && (u32)job_length < sizeof(job_line) && token_length > 0 &&
              (u32)token_length < sizeof(token_line) && result_length > 0 &&
-             (u32)result_length < sizeof(result_line);
+             (u32)result_length < sizeof(result_line) && recipe_length > 0 &&
+             (u32)recipe_length < sizeof(recipe_line);
         if (ok)
         {
             manifest_body[manifest_length] = 0;
@@ -3028,14 +3072,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
             bool process = bq_worker_result_nonterminal_line(manifest_body, "process-result=");
             ok = ok && (existing_success || (memchr(manifest_body, 0, manifest_length) == NULL &&
                  bq_worker_result_line(manifest_body, "schema=1") &&
-                 bq_worker_result_line(manifest_body, "recipe=validate-buster-v1") &&
+                 bq_worker_result_line(manifest_body, recipe_line) &&
                  status && stage && process &&
                  bq_worker_result_line(manifest_body, job_line) && bq_worker_result_line(manifest_body, token_line) &&
                  bq_worker_result_line(manifest_body, result_line) &&
                  bq_worker_result_digest_line(manifest_body, "bundle-sha256=", bundle_digest)));
         }
         if (ok && !existing_success)
-            ok = bq_worker_bundle_validate_full(finalization->result_directory, bundle_digest, recursive_digest) == BQ_OK;
+            ok = bq_worker_bundle_validate_recipe(finalization->result_directory, &finalization->recipe,
+                                                   bundle_digest, recursive_digest) == BQ_OK;
         if (ok && !existing_success)
         {
             bq_digest(manifest_body, manifest_length, manifest_digest);
@@ -3067,15 +3112,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
         {
             generated_manifest_length = snprintf(
                 manifest_body, sizeof(manifest_body),
-                "schema=1\nrecipe=validate-buster-v1\nstatus=%s\nstage=worker\nprocess-result=%s\n"
+                "schema=1\nrecipe=%s\nstatus=%s\nstage=worker\nprocess-result=%s\n"
                 "error=%s\njob-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\nresult-root=%s\n"
                 "bundle-sha256=%s\n",
-                bq_worker_outcome_name(outcome), bq_error_name(reason), bq_error_name(reason),
+                finalization->recipe.name, bq_worker_outcome_name(outcome), bq_error_name(reason),
+                bq_error_name(reason),
                 (uint64_t)job->id, (uint64_t)job->token, finalization->result_root, bundle_digest);
             ok = generated_manifest_length > 0 && (u32)generated_manifest_length < sizeof(manifest_body);
             if (ok) manifest_length = (u32)generated_manifest_length;
         }
-        if (ok) ok = bq_worker_result_control_publish(finalization, "validate-buster-v1.manifest", manifest_body,
+        if (ok) ok = bq_worker_result_control_publish(finalization, finalization->recipe.manifest, manifest_body,
                                                        manifest_length, 0400) == BQ_OK;
         if (ok)
         {
@@ -3599,7 +3645,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     char personality_property[64], write_execute_property[64], ipc_property[64], keyring_property[64];
     char families_property[64], namespaces_property[64], realtime_property[64], architecture_property[64];
     char syscall_property[64], syscall_error_property[64], network_property[64];
-    char job_id[32], attempt_token[32], workspace_root[BQ_PATH_CAP + 1], result_root[BQ_PATH_CAP + 1];
+    char job_id[32], attempt_token[32], recipe_text[BQ_RECIPE_NAME_CAP + 1];
+    char workspace_root[BQ_PATH_CAP + 1], result_root[BQ_PATH_CAP + 1];
     char base_revision_text[65], candidate_revision_text[65];
     String8 base_revision = {0}, candidate_revision = {0};
     if (error == BQ_OK && !recovering)
@@ -3609,11 +3656,14 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         int result_length = finalization.result_root[0] ? snprintf(result_root, sizeof(result_root), "%s", finalization.result_root) : -1;
         int job_length = snprintf(job_id, sizeof(job_id), "%" PRIu64, (uint64_t)job->id);
         int token_length = snprintf(attempt_token, sizeof(attempt_token), "%" PRIu64, (uint64_t)job->token);
+        int recipe_length = snprintf(recipe_text, sizeof(recipe_text), "%s", finalization.recipe.name);
         base_revision = bq_field(&job->request, 3);
         candidate_revision = bq_field(&job->request, 4);
         if (workspace_length <= 0 || (size_t)workspace_length >= sizeof(workspace_root) || result_length <= 0 ||
             (size_t)result_length >= sizeof(result_root) || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
-            token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) || !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
+            token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) || recipe_length <= 0 ||
+            (size_t)recipe_length >= sizeof(recipe_text) ||
+            !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
         {
             error = BQ_WORKSPACE_MISMATCH;
@@ -3671,7 +3721,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
             kernel_logs_property, clock_property, hostname_property, proc_property, personality_property,
             write_execute_property, ipc_property, keyring_property, families_property, namespaces_property,
             realtime_property, architecture_property, syscall_property, syscall_error_property, network_property,
-            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, job_id, attempt_token, workspace_root,
+            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, job_id, attempt_token, recipe_text, workspace_root,
             base_revision_text, candidate_revision_text, result_root, NULL};
         error = queue_length > 0 && (u32)queue_length < sizeof(queue_property) && installed_length > 0 &&
                 (u32)installed_length < sizeof(installed_property) && workspace_property_length > 0 &&
@@ -3849,14 +3899,21 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     return error;
 }
 
-BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 workspace_root,
-                       String8 base_revision, String8 candidate_revision, String8 result_root)
+BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 recipe_name,
+                       String8 workspace_root, String8 base_revision, String8 candidate_revision,
+                       String8 result_root)
 {
     char path[BQ_PATH_CAP + 1];
-    char job_id_text[32], attempt_token_text[32], workspace_text[BQ_PATH_CAP + 1], base_text[65], candidate_text[65], result_text[BQ_PATH_CAP + 1];
+    char job_id_text[32], attempt_token_text[32], recipe_text[BQ_RECIPE_NAME_CAP + 1];
+    char workspace_text[BQ_PATH_CAP + 1], base_text[65], candidate_text[65], result_text[BQ_PATH_CAP + 1];
+    BqRecipe recipe = bq_recipe_from_name(recipe_name);
+    BqRecipeFiles files = {0};
     BqWorkerLease lease = {.descriptor = -1};
     BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' ||
                     !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
+                    !bq_worker_text(recipe_name, recipe_text, sizeof(recipe_text)) ||
+                    !bq_recipe_admitted(recipe) || !bq_recipe_service(recipe) ||
+                    !bq_recipe_files(recipe, &files) || !files.command[0] || strcmp(recipe_text, files.name) ||
                     !bq_worker_text(workspace_root, workspace_text, sizeof(workspace_text)) || workspace_text[0] != '/' ||
                     !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||
                     !bq_worker_text(result_root, result_text, sizeof(result_text)) || result_text[0] != '/' ? BQ_BAD_REQUEST : BQ_OK;
@@ -3873,7 +3930,7 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     if (error == BQ_OK)
     {
         raise(SIGSTOP);
-        char const* arguments[] = {BQ_RECIPE_EXECUTABLE, "bench_service_recipe", job_id_text, attempt_token_text,
+        char const* arguments[] = {BQ_RECIPE_EXECUTABLE, files.command, job_id_text, attempt_token_text,
                                    workspace_text, base_text, candidate_text, result_text, NULL};
         execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
         error = BQ_CONFIGURATION_MISMATCH;
@@ -3903,12 +3960,14 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     return BQ_UNSUPPORTED;
 }
 
-BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 workspace_root,
-                       String8 base_revision, String8 candidate_revision, String8 result_root)
+BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token, String8 recipe,
+                       String8 workspace_root, String8 base_revision, String8 candidate_revision,
+                       String8 result_root)
 {
     (void)lease_file;
     (void)job_id;
     (void)attempt_token;
+    (void)recipe;
     (void)workspace_root;
     (void)base_revision;
     (void)candidate_revision;
