@@ -1331,16 +1331,38 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
             return false;
         }
     }
-    // Win64 signatures carry a bare vector at any power-of-two width: past
-    // the widest register the backend legalizes it into one indirect
-    // reference per register-sized piece (results come back direct in up to
-    // four registers, through the hidden pointer past that), which is the
-    // contract clang and MSVC compile. Non-power-of-two lane counts scalarize
-    // in clang and stay refused, as does every other convention past 64
-    // bytes, where the piece story has not been brought up.
-    bool vector_supported = type->kind != IR_TYPE_VECTOR || type->layout.size <= 64 ||
-                            (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type->layout.size <= (u64)UINT32_MAX &&
-                             !(type->layout.size & (type->layout.size - 1)));
+    // Power-of-two vectors retain their established ABI support. A GNU
+    // non-power-of-two vector has fewer logical lane bytes than its rounded
+    // object image; the x86-64 canonical emitter carries that shape under the
+    // measured SysV and Win64 contracts, while other architectures keep the
+    // old clean signature rejection until their distinct contracts are
+    // implemented.
+    bool vector_supported = true;
+    if (type->kind == IR_TYPE_VECTOR)
+    {
+        IrType* element = ir_type_from_id(&program->types, type->element_type);
+        u64 logical_size = element && element->layout.resolved && element->layout.size &&
+                                   type->element_count <= UINT64_MAX / element->layout.size
+                               ? type->element_count * element->layout.size
+                               : 0;
+        bool padded = logical_size && logical_size < type->layout.size;
+        if (padded)
+        {
+            bool scalar_lane = element && (element->kind == IR_TYPE_INTEGER || element->kind == IR_TYPE_FLOAT) &&
+                               element->layout.size <= 8 &&
+                               (element->kind != IR_TYPE_FLOAT || element->layout.size == 2 || element->layout.size == 4 ||
+                                element->layout.size == 8);
+            vector_supported = target.cpu_arch == CPU_ARCH_X86_64 && scalar_lane && type->layout.size <= UINT32_MAX &&
+                               type->layout.size == next_power_of_two(logical_size);
+        }
+        else
+        {
+            vector_supported = logical_size == type->layout.size &&
+                               (type->layout.size <= 64 ||
+                                (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type->layout.size <= (u64)UINT32_MAX &&
+                                 !(type->layout.size & (type->layout.size - 1))));
+        }
+    }
     return type->kind != IR_TYPE_FUNCTION && vector_supported && (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
 }
 
@@ -47952,13 +47974,12 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             else if (c_type->kind == C_TYPE_VECTOR)
             {
                 IrType* element_type = ir_type_from_id(&program->types, element);
-                if (!element_type || !element_type->layout.resolved || !element_type->layout.size || !c_type->vector_byte_size ||
-                    c_type->vector_byte_size % element_type->layout.size)
-                {
-                    continue;
-                }
-                u64 element_count = c_type->vector_byte_size / element_type->layout.size;
-                if (!element_count || (element_count & (element_count - 1)))
+                u64 element_count = 0;
+                u64 storage_size = 0;
+                u32 vector_alignment = 0;
+                if (!element_type || !element_type->layout.resolved ||
+                    !c_vector_type_layout(target, element_type->layout.size, c_type->vector_byte_size, &element_count, &storage_size,
+                                          &vector_alignment))
                 {
                     continue;
                 }
@@ -47968,13 +47989,13 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                                                              .return_type = IR_TYPE_ID_INVALID,
                                                                              .layout =
                                                                                  {
-                                                                                     .size = c_type->vector_byte_size,
-                                                                                     .alignment = c_type->vector_byte_size,
+                                                                                     .size = storage_size,
+                                                                                     .alignment = vector_alignment,
                                                                                      .resolved = true,
                                                                                  },
                                                                              .kind = IR_TYPE_VECTOR,
                                                                              .element_count = element_count,
-                                                                             .bit_width = c_type->vector_byte_size * 8,
+                                                                             .bit_width = (u32)storage_size * 8,
                                                                          });
             }
             else
