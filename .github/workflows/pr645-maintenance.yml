@@ -9,48 +9,93 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose-rebase:
+  rebase-candidate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Check out PR head with full history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: codex/569-canonical-landing-20260914
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
 
-      - name: Attempt exact rebase and capture state
+      - name: Rebase exactly and publish isolated candidate
         id: rebase
         shell: bash
         run: |
           set -uo pipefail
+          diagnostics="$RUNNER_TEMP/pr645-diagnostics"
+          mkdir -p "$diagnostics"
           git config user.name 'OpenAI PR 645 maintenance'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          mkdir -p "$RUNNER_TEMP/pr645-diagnostics"
-          git rev-parse HEAD > "$RUNNER_TEMP/pr645-diagnostics/original-head.txt"
+          git rev-parse HEAD > "$diagnostics/original-head.txt"
           git fetch --no-tags origin main
-          git rev-parse origin/main > "$RUNNER_TEMP/pr645-diagnostics/main-head.txt"
-          git log --reverse --format='%H%x09%s' origin/main..HEAD > "$RUNNER_TEMP/pr645-diagnostics/topic-commits.tsv"
+          git rev-parse origin/main > "$diagnostics/main-head.txt"
+          git log --reverse --format='%H%x09%s' origin/main..HEAD > "$diagnostics/topic-commits.tsv"
+
           set +e
-          git rebase origin/main > "$RUNNER_TEMP/pr645-diagnostics/rebase.log" 2>&1
+          git rebase origin/main > "$diagnostics/rebase.log" 2>&1
           status=$?
           set -e
-          printf '%s\n' "$status" > "$RUNNER_TEMP/pr645-diagnostics/rebase-status.txt"
-          git status --porcelain=v1 > "$RUNNER_TEMP/pr645-diagnostics/status.txt"
-          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/pr645-diagnostics/conflicts.txt"
-          git diff > "$RUNNER_TEMP/pr645-diagnostics/worktree.diff"
-          git diff --cached > "$RUNNER_TEMP/pr645-diagnostics/index.diff"
-          git rebase --show-current-patch > "$RUNNER_TEMP/pr645-diagnostics/current.patch" 2>/dev/null || true
-          git log -20 --oneline --decorate > "$RUNNER_TEMP/pr645-diagnostics/log.txt"
-          tar -czf "$RUNNER_TEMP/pr645-diagnostics/rebase-worktree.tar.gz" \
+          while (( status != 0 )) && { test -d .git/rebase-merge || test -d .git/rebase-apply; }; do
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            printf '\nCONFLICTS\n%s\n' "$conflicts" >> "$diagnostics/rebase.log"
+            if [[ "$conflicts" == 'docs/native-retirement-support-v1.tsv' ]]; then
+              # This ledger row authenticates the current file bytes. During a
+              # rebase the historical topic-side hash is stale by definition;
+              # retain the integrated file and regenerate its one receipt row.
+              git checkout --ours -- docs/native-retirement-support-v1.tsv
+              python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          ledger = Path('docs/native-retirement-support-v1.tsv')
+          subject = Path('tests/ci_tools_test.py')
+          data = subject.read_bytes()
+          replacement = f"tests/ci_tools_test.py\tsupport-file\tdependency-only\t{len(data)}\t{sha256(data).hexdigest()}"
+          lines = ledger.read_text(encoding='utf-8').splitlines()
+          matches = [index for index, line in enumerate(lines) if line.startswith('tests/ci_tools_test.py\t')]
+          if len(matches) != 1:
+              raise SystemExit(f'expected one ci_tools support row, found {len(matches)}')
+          lines[matches[0]] = replacement
+          ledger.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+              git add docs/native-retirement-support-v1.tsv
+              set +e
+              GIT_EDITOR=true git rebase --continue >> "$diagnostics/rebase.log" 2>&1
+              status=$?
+              set -e
+            else
+              break
+            fi
+          done
+
+          printf '%s\n' "$status" > "$diagnostics/rebase-status.txt"
+          git status --porcelain=v1 > "$diagnostics/status.txt"
+          git diff --name-only --diff-filter=U > "$diagnostics/conflicts.txt"
+          git diff > "$diagnostics/worktree.diff"
+          git diff --cached > "$diagnostics/index.diff"
+          git rebase --show-current-patch > "$diagnostics/current.patch" 2>/dev/null || true
+          git log -50 --oneline --decorate > "$diagnostics/log.txt"
+
+          if (( status == 0 )); then
+            git rev-parse HEAD > "$diagnostics/rebased-head.txt"
+            git rev-parse 'HEAD^{tree}' > "$diagnostics/rebased-tree.txt"
+            git diff --binary origin/main...HEAD > "$diagnostics/rebased-topic.patch"
+            git push --force origin HEAD:refs/heads/maintenance/pr645-rebased-candidate \
+              > "$diagnostics/push.log" 2>&1
+          fi
+
+          tar -czf "$diagnostics/rebase-worktree.tar.gz" \
             --exclude=.git --exclude=build --exclude=external .
-          exit 0
+          exit "$status"
 
       - name: Upload exact rebase diagnostics
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pr645-rebase-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
