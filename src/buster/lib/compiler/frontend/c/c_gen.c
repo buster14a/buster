@@ -18784,7 +18784,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     frame->as.prepared_call.state->first = expected;
                     return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, starts[2], ends[2], false);
                 }
-                desired = c_ir_emit_cast(builder, desired, value_type_id, source);
+                if (!selected->builtin_atomic_generic)
+                {
+                    desired = c_ir_emit_cast(builder, desired, value_type_id, source);
+                }
                 if (desired.value == IR_ID_UNDERLYING_INVALID)
                 {
                     return false;
@@ -19075,7 +19078,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 if (pointer_arithmetic)
                 {
                     // Canonical pointer RMW takes an integer byte offset,
-          // including GNU's unscaled offset, never a pointer value.
+                    // including GNU's unscaled offset, never a pointer value.
                     value = c_ir_emit_cast(builder, value, builder->ptrdiff_type, source);
                     if (value.value == IR_ID_UNDERLYING_INVALID)
                     {
