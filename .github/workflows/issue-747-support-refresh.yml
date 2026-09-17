@@ -1,0 +1,90 @@
+name: Validate issue 747 support identities
+
+on:
+  push:
+    branches:
+      - automation/issue-747-support-refresh
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out helper branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: automation/issue-747-support-refresh
+          fetch-depth: 0
+
+      - name: Refresh frozen support identities and commit candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          manifest = Path("docs/native-retirement-support-v1.tsv")
+          targets = {
+              "tests/action_pins_test.py",
+              "tests/ci_tools_test.py",
+          }
+          found = set()
+          output = []
+          for line in manifest.read_text().splitlines(keepends=True):
+              newline = "\n" if line.endswith("\n") else ""
+              fields = line.removesuffix("\n").split("\t")
+              if fields and fields[0] in targets:
+                  path = Path(fields[0])
+                  data = path.read_bytes()
+                  if len(fields) != 5:
+                      raise SystemExit(f"malformed support row for {path}")
+                  fields[3] = str(len(data))
+                  fields[4] = hashlib.sha256(data).hexdigest()
+                  line = "\t".join(fields) + newline
+                  found.add(path.as_posix())
+                  print(f"SUPPORT_IDENTITY path={path} bytes={len(data)} sha256={fields[4]}")
+              output.append(line)
+          if found != targets:
+              raise SystemExit(f"support rows mismatch: found={sorted(found)} expected={sorted(targets)}")
+          manifest.write_text("".join(output))
+          PY
+
+          rm .github/workflows/issue-747-support-refresh.yml
+          git diff --check
+          python3 tools/check_action_pins.py
+          python3 tests/action_pins_test.py
+          python3 tests/ci_tools_test.py -v
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml
+
+          git config user.name "ChatGPT"
+          git config user.email "chatgpt@users.noreply.github.com"
+          git add docs/native-retirement-support-v1.tsv .github/workflows/issue-747-support-refresh.yml
+          git commit -m "ci: refresh native retirement support identities"
+          printf 'VALIDATED_COMMIT=%s\n' "$(git rev-parse HEAD)"
+
+      - name: Validate clean native-retirement contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_evidence_upload_test.py -v
+          rm -rf "$RUNNER_TEMP/issue-747-contract"
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out "$RUNNER_TEMP/issue-747-contract"
+          grep -F 'io_failed=0' "$RUNNER_TEMP/issue-747-contract/summary.txt"
+          test -z "$(git status --porcelain)"
+
+      - name: Publish validated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'PUBLISHING_COMMIT=%s\n' "$(git rev-parse HEAD)"
+          git push origin HEAD:automation/issue-747-support-refresh
