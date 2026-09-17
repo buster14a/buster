@@ -1,0 +1,33 @@
+name: Issue 729 source snapshot
+
+on:
+  push:
+    branches:
+      - codex/issue-729-workbench
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: cc75dd0e3eaea56e67dccbe0a812b0796d4e458d
+          persist-credentials: false
+      - name: Archive pinned tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = cc75dd0e3eaea56e67dccbe0a812b0796d4e458d
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
+          sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-729-source
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
