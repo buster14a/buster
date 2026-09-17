@@ -1,0 +1,31 @@
+name: Issue 73 refresh workspace
+
+on:
+  push:
+    branches: [codex/issue-73-refresh]
+    paths:
+      - '.github/workflows/issue-73-refresh.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Archive source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git --exclude=.github/workflows/issue-73-refresh.yml -czf "$RUNNER_TEMP/issue-73-refresh.tar.gz" .
+      - name: Upload workspace
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-73-refresh-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-73-refresh.tar.gz
+          if-no-files-found: error
+          retention-days: 1
