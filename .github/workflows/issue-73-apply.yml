@@ -1,0 +1,57 @@
+name: Publish issue 73 implementation
+
+on:
+  push:
+    branches: [codex/issue-73-refresh]
+    paths:
+      - '.github/workflows/issue-73-apply.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Apply tested patch and publish branch
+        shell: bash
+        env:
+          BASE_SHA: e68315eae6d737167acbc9be36ddd27b7334affd
+          TARGET_BRANCH: codex/issue-73-nonpow-vector-abi
+          PATCH_SHA256: f04e2a05ebae703d59423bafdfdd76d14c5abee9b5722c890bd30870afcc2997
+        run: |
+          set -euo pipefail
+          base64 --decode < .github/issue-73.patch.gz.b64 | gzip --decompress > "$RUNNER_TEMP/issue-73.patch"
+          printf '%s  %s\n' "$PATCH_SHA256" "$RUNNER_TEMP/issue-73.patch" | sha256sum --check --strict
+
+          git reset --hard "$BASE_SHA"
+          git apply --check "$RUNNER_TEMP/issue-73.patch"
+          git apply "$RUNNER_TEMP/issue-73.patch"
+          git diff --check
+
+          expected_files=$(cat <<'EOF'
+          src/buster/lib/compiler/codegen/codegen.c
+          src/buster/lib/compiler/codegen/codegen_internal.h
+          src/buster/lib/compiler/codegen/machine.c
+          src/buster/lib/compiler/frontend/c/c_gen.c
+          src/buster/lib/compiler/frontend/c/c_internal.h
+          src/buster/lib/compiler/frontend/c/c_parse.c
+          src/buster/tests/compiler/driver/driver_test.c
+          tests/basic_c_non_power_vector_abi.c
+          tests/c_abi.h
+          EOF
+          )
+          actual_files=$(git status --short | sed -E 's/^.. //' | sort)
+          test "$actual_files" = "$(printf '%s\n' "$expected_files" | sort)"
+
+          git add --all
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'frontend: support non-power-of-two vector signatures'
+          git push --force-with-lease="refs/heads/$TARGET_BRANCH:$BASE_SHA" \
+              origin HEAD:"refs/heads/$TARGET_BRANCH"
