@@ -1,0 +1,94 @@
+name: Apply PR 568 review fixes
+
+on:
+  push:
+    branches:
+      - automation/pr568-review-fix-20260917-001
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-pr568-review-fixes
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out immutable helper payload
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: helper
+          persist-credentials: false
+      - name: Check out the exact PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: docs/511-retirement-performance-contract
+          path: target
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reconstruct and apply the reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C target rev-parse HEAD)" = 787d7a15bad51055a12b207077aa98714d235320
+          cat helper/.github/pr568-review-fix/patch.gz.part-* > "$RUNNER_TEMP/pr568-review.patch.gz"
+          echo '895b7341ff7cfa437810ec49863c85483910f3191c64bc7b334775a5a0f93243  '"$RUNNER_TEMP/pr568-review.patch.gz" | sha256sum --check
+          gzip -dc "$RUNNER_TEMP/pr568-review.patch.gz" > "$RUNNER_TEMP/pr568-review.patch"
+          echo 'cfaec81885ca3fe6ec4fb0bdd2c49ce6d26a9dd6e82de643570f2117c6e44a24  '"$RUNNER_TEMP/pr568-review.patch" | sha256sum --check
+          git -C target apply --check "$RUNNER_TEMP/pr568-review.patch"
+          git -C target apply --index "$RUNNER_TEMP/pr568-review.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("target/docs/agents/benchmarking.md")
+          text = path.read_text()
+          old = """  `python3 tools/native_retirement_performance_binding.py <record.json>
+            --evidence-root <bundle> --repository-root <immutable-checkout>`; the
+          """
+          new = """  `python3 tools/native_retirement_performance_binding.py <record.json>
+            --evidence-root <bundle> --repository-root <immutable-checkout>
+            --trusted-execution-receipt-sha256 <independently-obtained-sha256>`; the
+          """
+          if text.count(old) != 1:
+              raise SystemExit("primary benchmarking command changed unexpectedly")
+          text = text.replace(old, new)
+          anchor = """  relations. This validation does not itself accept a performance result.
+          """
+          addition = """  relations. The trusted execution-receipt digest must come out of band
+            from the authenticated admitted control service for the exact job and attempt;
+            never derive it from the result bundle being validated. This validation does
+            not itself accept a performance result.
+          """
+          if text.count(anchor) != 1:
+              raise SystemExit("primary benchmarking trust-boundary text changed unexpectedly")
+          path.write_text(text.replace(anchor, addition))
+          PY
+          git -C target add docs/agents/benchmarking.md
+          git -C target diff --cached --check
+      - name: Validate the repaired binding
+        shell: bash
+        working-directory: target
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            tools/native_retirement_performance_binding.py \
+            tools/native_retirement_performance_binding_test.py \
+            tools/native_retirement_performance_identity_test.py
+          python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+          git diff --cached --check
+      - name: Commit and push the fast-forward repair
+        shell: bash
+        working-directory: target
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 787d7a15bad51055a12b207077aa98714d235320
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'bench: resolve native-retirement binding review findings (#568)' \
+            -m 'Authenticate the exact receipt bytes before parsing, require one supervisor-observed process instance per invocation, bind the schedule CPU and native target to admitted receipts, and derive runtime applicability from frozen row obligations. Update both performance-contract entry points and retain adversarial regressions.'
+          git push origin HEAD:refs/heads/docs/511-retirement-performance-contract
