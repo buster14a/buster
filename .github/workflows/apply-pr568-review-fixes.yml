@@ -75,7 +75,7 @@ jobs:
           new = """        row = copy.deepcopy(rows_record[\"rows\"][0])
                   row[\"row\"] = 0
                   row[\"identity\"].update({
-                      \"target\": binding.NATIVE_RUNTIME_TARGET,
+                      \"target\": \"x86_64-unknown-linux-gnu\",
                       \"target_abi\": \"systemv-x86_64\",
                       \"artifact_stage\": \"link\",
                       \"execution_obligation\": \"semantic-gate-509\",
