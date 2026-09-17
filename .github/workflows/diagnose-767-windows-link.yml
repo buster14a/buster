@@ -13,17 +13,49 @@ permissions:
 jobs:
   diagnose:
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Check out exact diagnostic revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      - name: Compare baseline and target-promotion CodeView
+      - name: Patch, test, and reproduce target-promotion ABI link
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          @'
+          from pathlib import Path
+
+          path = Path("src/buster/lib/compiler/codeview/codeview.c")
+          text = path.read_text()
+          old = '''            else if (piece->kind == DEBUG_LOCATION_FRAME)
+                      {
+                          u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
+                          byte_writer_emit_u32_le(symbols, 0);
+                          byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece->value_offset, UINT16_MAX));
+                          byte_writer_emit_u32_le(symbols, piece_start);
+                          byte_writer_emit_u16_le(symbols, 1);
+                          byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
+                          codeview_record_end(symbols, record);
+                      }
+          '''
+          new = '''            else if (piece->kind == DEBUG_LOCATION_FRAME)
+                      {
+                          // S_DEFRANGE_SUBFIELD describes its source through a DIA
+                          // location program. DebugLocationPiece carries an abstract
+                          // frame offset but no program or concrete frame-base register,
+                          // so the old zero program lost frame_offset and link.exe
+                          // rejected the resulting symbol stream. Leave this fragment
+                          // unavailable until that representation exists; emitting the
+                          // register-backed fragments still preserves the valid pieces.
+                      }
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one CodeView frame-subfield block, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
+          '@ | python -
+
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
@@ -35,7 +67,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Driver generate --cc clang --ci --linker DEFAULT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $Driver build --config Release -t ide
+          & $Driver build --config Release -t test_all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
@@ -43,63 +75,35 @@ jobs:
           New-Item -ItemType Directory -Force -Path evidence | Out-Null
           $Include = "$PWD\tests\differential"
           $Caller = "$PWD\evidence\caller.o"
-          $CommonHost = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include")
-          & clang.exe @CommonHost tests\differential\abi_host.c -c -o $Caller
+          $Subject = "$PWD\evidence\subject.o"
+          $Program = "$PWD\evidence\program.exe"
+          & clang.exe -O0 -fwrapv -fno-strict-aliasing -funsigned-char "-I$Include" tests\differential\abi_host.c -c -o $Caller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          function Build-Subject([string]$Name, [string]$TargetPromotion) {
-            $Subject = "$PWD\evidence\$Name.o"
-            $Candidate = @(
-              'cc'
-              '-fregister-allocator=fast'
-              '-fno-machine-fallback'
-              '-fno-canonical-local-promotion'
-              $TargetPromotion
-              '-fno-frontend-ssa'
-              '-fverify-codegen'
-              '-fwrapv'
-              '-fno-strict-aliasing'
-              '-funsigned-char'
-              "-I$Include"
-            )
-            foreach ($LibraryPath in $LibraryPaths) { $Candidate += "-L$LibraryPath" }
-            $Candidate += @('tests\differential\abi.c', '-c', '-o', $Subject)
-            & build\Release\ide.exe @Candidate
-            if ($LASTEXITCODE -ne 0) { throw "$Name candidate compile failed: $LASTEXITCODE" }
-            return $Subject
-          }
+          $Candidate = @(
+            'cc'
+            '-fregister-allocator=fast'
+            '-fno-machine-fallback'
+            '-fno-canonical-local-promotion'
+            '-ftarget-local-promotion'
+            '-fno-frontend-ssa'
+            '-fverify-codegen'
+            '-fwrapv'
+            '-fno-strict-aliasing'
+            '-funsigned-char'
+            "-I$Include"
+          )
+          foreach ($LibraryPath in $LibraryPaths) { $Candidate += "-L$LibraryPath" }
+          $Candidate += @('tests\differential\abi.c', '-c', '-o', $Subject)
+          & build\Release\ide.exe @Candidate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $P0 = Build-Subject 'p0' '-fno-target-local-promotion'
-          $P2 = Build-Subject 'p2' '-ftarget-local-promotion'
-
-          foreach ($Pair in @(@('p0', $P0), @('p2', $P2))) {
-            $Name = $Pair[0]
-            $Subject = $Pair[1]
-            Write-Output "===== $Name CodeView ====="
-            & llvm-readobj.exe --codeview $Subject 2>&1
-            Write-Output "LLVM_READOBJ_EXIT=$LASTEXITCODE"
-            Write-Output "===== $Name section hex ====="
-            & llvm-objdump.exe -s -j '.debug$S' $Subject 2>&1
-            Write-Output "LLVM_OBJDUMP_EXIT=$LASTEXITCODE"
-            $Program = "$PWD\evidence\$Name.exe"
-            $Link = @()
-            foreach ($LibraryPath in $LibraryPaths) { $Link += "-L$LibraryPath" }
-            $Link += @($Caller, $Subject, '-o', $Program)
-            Write-Output "===== $Name MSVC link ====="
-            & clang.exe @Link 2>&1
-            Write-Output "MSVC_LINK_EXIT=$LASTEXITCODE"
-            Write-Output "===== $Name LLD link ====="
-            & clang.exe -fuse-ld=lld @Link -o "$PWD\evidence\$Name-lld.exe" 2>&1
-            Write-Output "LLD_LINK_EXIT=$LASTEXITCODE"
-          }
-
-          $P2Stripped = "$PWD\evidence\p2-stripped.o"
-          & llvm-objcopy.exe --remove-section='.debug$S' --remove-section='.debug$T' $P2 $P2Stripped
-          Write-Output "OBJCOPY_EXIT=$LASTEXITCODE"
-          $StrippedLink = @()
-          foreach ($LibraryPath in $LibraryPaths) { $StrippedLink += "-L$LibraryPath" }
-          $StrippedLink += @($Caller, $P2Stripped, '-o', "$PWD\evidence\p2-stripped.exe")
-          Write-Output '===== p2 stripped MSVC link ====='
-          & clang.exe @StrippedLink 2>&1
-          Write-Output "P2_STRIPPED_LINK_EXIT=$LASTEXITCODE"
-          exit 0
+          & llvm-readobj.exe --codeview $Subject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Link = @()
+          foreach ($LibraryPath in $LibraryPaths) { $Link += "-L$LibraryPath" }
+          $Link += @($Caller, $Subject, '-o', $Program)
+          & clang.exe @Link
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Program
+          exit $LASTEXITCODE
