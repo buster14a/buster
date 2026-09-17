@@ -18101,6 +18101,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_same_scope_tag_redefinition_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 refused_sources[] = {
+        S8("struct S { int a; };\nstruct S { int b; };\nint following;\n"),
+        S8("union U { int a; };\nunion U { int b; };\nint following;\n"),
+        S8("enum E { A };\nenum E { B };\nint following;\n"),
+        S8("struct T { int a; };\nstruct T { int a; };\nint following;\n"),
+    };
+    String8 refused_tags[] = {S8("S"), S8("U"), S8("E"), S8("T")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(refused_sources); source_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, refused_sources[source_index],
+                (CPreprocessOptions){.source_path = S8("same-scope-tag-redefinition.c"),
+                                     .target = target_native, .data_layout = target_data_layout(target_native)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("same-scope-tag-redefinition.c"), preprocess, syntax,
+                target_native, (CIRLowerOptions){.disable_direct_ssa = frontend == 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, refused_sources[source_index]);
+            u32 redefinition_count = 0;
+            bool attributed = false;
+            bool blamed_following = false;
+            for (u32 diagnostic = 0; diagnostic < analyzed.diagnostic_count; diagnostic += 1)
+            {
+                CDiagnostic row = analyzed.diagnostics[diagnostic];
+                if (row.kind == C_DIAGNOSTIC_REDEFINITION)
+                {
+                    redefinition_count += 1;
+                    attributed |= row.location.line == 2 &&
+                                  string_first_sequence(row.message, refused_tags[source_index]) != BUSTER_STRING_NO_MATCH;
+                }
+                blamed_following |= row.location.line > 2;
+            }
+            BUSTER_TEST_RAW(arguments, redefinition_count == 1 && attributed && !blamed_following, refused_sources[source_index]);
+            scratch_end(temporary);
+        }
+    }
+
+    String8 accepted_sources[] = {
+        S8("struct S;\nstruct S { int a; };\nint take(void) { struct S s = {0}; return s.a; }\n"),
+        S8("struct S { int outer; };\nint take(void) { struct S { int inner; }; struct S s = {0}; return s.inner; }\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(accepted_sources); source_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, accepted_sources[source_index],
+                (CPreprocessOptions){.source_path = S8("valid-tag-definition.c"),
+                                     .target = target_native, .data_layout = target_data_layout(target_native)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("valid-tag-definition.c"), preprocess, syntax,
+                target_native, (CIRLowerOptions){.disable_direct_ssa = frontend == 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+                                       analyzed.diagnostic_count == 0 && analyzed.program != 0,
+                            accepted_sources[source_index]);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18190,6 +18256,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
