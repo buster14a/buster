@@ -1807,7 +1807,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_start(MachineX64Selector* selecto
         });
         selected = true;
     }
-    else if (result_slot != UINT32_MAX && !windows && selector->va_register_save_slot != UINT32_MAX)
+    else if (result_slot != UINT32_MAX && !windows && selector->va_register_save_slot != UINT32_MAX &&
+             list_type && list_type->kind == IR_TYPE_VA_LIST && list_type->layout.size == TARGET_X86_64_SYSV_VA_LIST_SIZE)
     {
         u32 integer_count;
         u32 float_count;
@@ -1852,19 +1853,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_start(MachineX64Selector* selecto
                                              .payload = 16,
                                              .opcode = MACHINE_X64_STORE_FRAME64,
                                          });
-        u32 zero_register = machine_x64_synthesize_register(selector);
-        u32 zero_immediate = machine_x64_append_immediate(selector, 0);
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register),
-                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, zero_immediate)},
-                                             .opcode = MACHINE_X64_MOV_RI,
-                                         });
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register)},
-                                             .payload = 24,
-                                             .opcode = MACHINE_X64_STORE_FRAME64,
-                                         });
         selected = true;
     }
     return selected;
@@ -1878,7 +1866,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_copy(MachineX64Selector* selector
     u32 source_register;
     bool selected = false;
     IrType* list_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
-    u32 bytes = machine_x64_target_is_windows(selector->target) ? 8u : 32u;
+    u32 bytes = machine_x64_target_is_windows(selector->target) ? 8u : TARGET_X86_64_SYSV_VA_LIST_SIZE;
     if (result_slot != UINT32_MAX && list_type && list_type->kind == IR_TYPE_VA_LIST && list_type->layout.size == bytes &&
         instruction->operand_count >= 1 && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
     {
@@ -1895,28 +1883,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_copy(MachineX64Selector* selector
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_end(MachineX64Selector* selector, IrInstruction* instruction)
 {
+    // Both x86-64 ABIs use a lifetime marker, not a destructive write.
+    // The former private fourth word lies outside the public SysV object.
+    // Its operand has already been evaluated; keep validating its address.
     u32 source_register;
-    bool selected = false;
-    if (instruction->operand_count >= 1 && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
-    {
-        if (!machine_x64_target_is_windows(selector->target))
-        {
-            u32 value_register = machine_x64_synthesize_register(selector);
-            u32 value_immediate = machine_x64_append_immediate(selector, 1);
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register),
-                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, value_immediate)},
-                                                 .opcode = MACHINE_X64_MOV_RI,
-                                             });
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .payload = 24,
-                                                 .opcode = MACHINE_X64_STORE_PTR64,
-                                             });
-        }
-        selected = true;
-    }
+    bool selected = instruction->operand_count >= 1 &&
+                    machine_x64_operand_register(selector, instruction->operands[0], &source_register);
     return selected;
 }
 
@@ -7640,7 +7612,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             if ((instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY) && value_class.kind == IR_TYPE_VA_LIST &&
                 (value_class.flags & MACHINE_TYPE_CLASS_RESOLVED))
             {
-                // va_list is a four-word aggregate on SysV.  Keep the
+                // va_list is a three-word aggregate on SysV. Keep the
                 // temporary in a regular frame slot so STORE/LOAD and
                 // VA_COPY can reuse the existing aggregate copy rows.
                 IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);

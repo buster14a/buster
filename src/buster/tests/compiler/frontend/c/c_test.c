@@ -11560,13 +11560,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
 {
     UnitTestResult result = {0};
     String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows"),
-                         S8("aarch64-unknown-linux-gnu"), S8("aarch64-apple-macos"), S8("aarch64-pc-windows")};
+                         S8("aarch64-unknown-linux-gnu"), S8("aarch64-apple-macos"), S8("aarch64-pc-windows"),
+                         S8("x86_64-macos"), S8("x86_64-android"), S8("x86_64-ios"), S8("x86_64-uefi"),
+                         S8("aarch64-android"), S8("aarch64-ios"), S8("aarch64-uefi")};
+    u32 sizes[] = {24, 8, 32, 8, 8, 24, 24, 24, 8, 32, 8, 32};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(targets) == BUSTER_ARRAY_LENGTH(sizes));
     String8 source = S8("typedef __builtin_va_list custom_list; typedef custom_list nested_list;"
-        "typedef void *va_list; struct State { nested_list ap; };"
+        "typedef void *va_list; struct State { nested_list ap; unsigned long long guard; };"
         "int test(int n, ...) { struct State state; nested_list copies[2]; nested_list *p = copies + 1; int i = 0;"
         " __builtin_va_start(state.ap, n); __builtin_va_copy(copies[i++], state.ap); __builtin_va_copy(*p, state.ap);"
         " int value = __builtin_va_arg(state.ap, int) + __builtin_va_arg(copies[0], int) + __builtin_va_arg(*p, int);"
-        " __builtin_va_end(state.ap); __builtin_va_end(copies[0]); __builtin_va_end(*p); return value + i; }");
+        " __builtin_va_end(state.ap); __builtin_va_end(copies[0]); __builtin_va_end(*p); return value + i; }"
+        "void decay(nested_list ap) { (void)ap; }");
     String8 invalid[] = {
         S8("typedef void *va_list; void test(int n, ...) { va_list ap; __builtin_va_start(ap, n); }"),
         S8("void test(int n, ...) { const __builtin_va_list ap; __builtin_va_start(ap, n); }"),
@@ -11584,7 +11589,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
         {
             TemporalArena temporary = scratch_begin(0, 0);
             CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target)};
-            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            String8 checked_source = string_format(temporary.arena, S8("{S8}"
+                "_Static_assert(sizeof(nested_list) == {u32}, \"list extent\");"
+                "_Static_assert(_Alignof(nested_list) == 8, \"list alignment\");"
+                "_Static_assert(sizeof(nested_list[2]) == {u32}, \"array extent\");"
+                "_Static_assert(__builtin_offsetof(struct State, guard) == {u32}, \"member offset\");"
+                "_Static_assert(sizeof(struct State) == {u32}, \"record extent\");"),
+                source, sizes[target_index], 2 * sizes[target_index], sizes[target_index], sizes[target_index] + 8);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, checked_source, options);
             CParseResult parse = c_parse(temporary.arena, tokens);
             BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
             BUSTER_TEST(arguments, parse.declaration_count >= 3);
@@ -11607,6 +11619,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                 IrFunction* function = c_test_find_ir_function(module, S8("test"));
                 BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
                 BUSTER_TEST(arguments, function != 0);
+                IrFunction* decay = c_test_find_ir_function(module, S8("decay"));
+                BUSTER_TEST(arguments, decay != 0);
+                IrType* signature = decay ? ir_type_from_id(&lowered.program->types, decay->canonical_type) : 0;
+                BUSTER_TEST(arguments, signature && signature->parameter_count == 1);
+                if (signature && signature->parameter_count == 1)
+                {
+                    IrType* parameter = ir_type_from_id(&lowered.program->types, signature->parameter_types[0]);
+                    bool pointer = target.target.cpu_arch == CPU_ARCH_X86_64 && target.target.os != OPERATING_SYSTEM_UEFI;
+                    BUSTER_TEST(arguments, parameter && parameter->kind == (pointer ? IR_TYPE_POINTER : IR_TYPE_VA_LIST));
+                }
                 u32 starts = 0;
                 u32 copies = 0;
                 u32 reads = 0;
@@ -11618,13 +11640,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                     copies += instruction->opcode == IR_OPCODE_VA_COPY;
                     reads += instruction->opcode == IR_OPCODE_VA_ARG;
                     ends += instruction->opcode == IR_OPCODE_VA_END;
-                    if (instruction->opcode == IR_OPCODE_VA_START && target_index < 2)
+                    if (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY)
                     {
                         IrType* list = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
                         BUSTER_TEST(arguments, list && list->kind == IR_TYPE_VA_LIST && list->layout.resolved);
-                        // Preserve the existing padded SysV cursor and the
-                        // pointer-sized Windows cursor; this is no ABI rewrite.
-                        BUSTER_TEST(arguments, list && list->layout.size == (target_index == 0 ? 32u : 8u));
+                        // Public SysV cursors occupy exactly three words;
+                        // the Windows cursor remains pointer-sized.
+                        BUSTER_TEST(arguments, list && list->layout.size == sizes[target_index] && list->layout.alignment == 8);
                     }
                 }
                 BUSTER_TEST(arguments, starts == 1 && copies == 2 && reads == 3 && ends == 3);

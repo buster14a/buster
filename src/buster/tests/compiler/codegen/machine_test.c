@@ -3770,6 +3770,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_block_relocation
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sysv_va_list_extent(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef __builtin_va_list List;"
+        "int extent(int n, ...) { List ap; List copy; __builtin_va_start(ap, n);"
+        " __builtin_va_copy(copy, ap); int v = __builtin_va_arg(copy, int);"
+        " __builtin_va_end(copy); __builtin_va_end(ap); return v; }"
+        "void finish(List* ap) { __builtin_va_end(*ap); }");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS,
+        OPERATING_SYSTEM_ANDROID, OPERATING_SYSTEM_IOS, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_UEFI};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = systems[system]};
+        u32 bytes = system < 4 ? 24u : 8u;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("va-list-extent.c"), source, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                BUSTER_TEST(arguments, module->function_count == 2);
+                for (u32 index = 0; index < module->function_count; index += 1)
+                {
+                    IrFunction* function = module->functions + index;
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    BUSTER_TEST_RAW(arguments, selected.supported, function->name);
+                    if (selected.supported)
+                    {
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        bool copied = false;
+                        for (u32 row_index = 0; row_index < selected.function.instruction_count; row_index += 1)
+                        {
+                            MachineInstruction* row = selected.function.instructions + row_index;
+                            // Windows va_arg legitimately updates its cursor;
+                            // a function containing only va_end must not do so.
+                            if (string_equal(function->name, S8("finish")))
+                            {
+                                BUSTER_TEST(arguments, row->opcode != MACHINE_X64_STORE_PTR64);
+                            }
+                            if (row->opcode == MACHINE_X64_COPY_FRAME_FROM_PTR)
+                            {
+                                BUSTER_TEST(arguments, row->payload == bytes);
+                                copied = true;
+                            }
+                            if (row->opcode == MACHINE_X64_STORE_FRAME64)
+                            {
+                                u32 slot = machine_ref_payload(row->operands[0]);
+                                BUSTER_TEST(arguments, slot < selected.function.stack_slot_count);
+                                if (slot < selected.function.stack_slot_count && selected.function.stack_slot_sizes[slot] == bytes)
+                                {
+                                    BUSTER_TEST(arguments, row->payload <= bytes - 8);
+                                }
+                            }
+                        }
+                        if (string_equal(function->name, S8("extent"))) { BUSTER_TEST(arguments, copied); }
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                }
+                if (system < 4)
+                {
+                    // A synthetic private four-word result is no longer an
+                    // admissible SysV VA_START/VA_COPY selection.
+                    for (u32 type = 0; type < program->types.count; type += 1)
+                    {
+                        IrType* list = program->types.types + type;
+                        if (list->kind == IR_TYPE_VA_LIST)
+                        {
+                            BUSTER_TEST(arguments, list->layout.size == 24);
+                            list->layout.size = 32;
+                        }
+                    }
+                    IrFunction* function = machine_test_ir_function_find(module, S8("extent"));
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        MachineSelectResult rejected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST(arguments, !rejected.supported);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5569,6 +5664,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_native_aggregate);
     BUSTER_TEST_FIXTURE(arguments, machine_test_f80);
     BUSTER_TEST_FIXTURE(arguments, machine_test_native_variadic);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_sysv_va_list_extent);
     BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);

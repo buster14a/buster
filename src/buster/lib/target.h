@@ -208,6 +208,9 @@ typedef enum TargetEndianness
     TARGET_ENDIAN_COUNT,
 } TargetEndianness;
 
+// System V exposes two 32-bit offsets and two pointers, not a fourth word.
+#define TARGET_X86_64_SYSV_VA_LIST_SIZE 24u
+
 typedef struct TargetTypeLayout TargetTypeLayout;
 struct TargetTypeLayout
 {

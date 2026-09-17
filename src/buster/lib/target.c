@@ -228,7 +228,8 @@ TargetDataLayout target_data_layout(Target target)
     u32 long_double_size = double_long_double ? 8 : 16;
     u32 long_double_bits = double_long_double ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
     bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 : 32;
+    u32 va_list_size = llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
+                       target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
