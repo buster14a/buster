@@ -276,7 +276,8 @@ BUSTER_GLOBAL_LOCAL u32 gpu_tools_self_test(Arena* arena)
         String8 report = string_duplicate_arena(arena, path_join(arena, directory, S8("commands.tsv")), true);
         settings.evidence.report = fopen((char*)report.pointer, "wb");
         failures += settings.evidence.report == 0;
-        String8 modes[] = {S8("exit"), S8("sanitizer"), S8("timeout"), S8("signal")};
+        String8 modes[] = {S8("exit"), S8("sanitizer-name-stderr"), S8("timeout"), S8("signal")};
+        String8 sanitizer_names = d_sanitizer_name_text();
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
         {
             DObservation child;
@@ -292,7 +293,7 @@ BUSTER_GLOBAL_LOCAL u32 gpu_tools_self_test(Arena* arena)
             }
             bool ok;
             if (index == 0) { ok = child.kind == D_EXIT && child.status == 7 && string_equal(child.output, S8("a\0b")) && string_equal(child.error, S8("child stderr\n")); }
-            else if (index == 1) { ok = child.kind == D_EXIT && child.status == 0 && child.sanitizer && !d_success(child); }
+            else if (index == 1) { ok = d_success(child) && !child.sanitizer && !child.output.length && string_equal(child.error, sanitizer_names); }
             else if (index == 2) { ok = child.kind == D_TIMEOUT; }
             else { ok = child.kind == D_SIGNAL; }
             failures += !ok;
