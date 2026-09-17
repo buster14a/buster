@@ -1,4 +1,4 @@
-name: Bisect issue 786 many_ints records
+name: Isolate issue 786 parameter e ranges
 
 on:
   push:
@@ -11,9 +11,9 @@ permissions:
   contents: read
 
 jobs:
-  bisect:
+  isolate:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - name: Download retained failing object
         shell: pwsh
@@ -21,7 +21,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh run download 35282867175 --repo buster14a/buster --name issue-786-windows-abi-link-35282867175 --dir diag
 
-      - name: Build many_ints record variants
+      - name: Build parameter-e variants
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -55,7 +55,7 @@ jobs:
           section_offset, section_size = section(original, '.debug$S')
           section_end = section_offset + section_size
           cursor = section_offset + 4
-          records = []
+          ranges = []
           while cursor + 8 <= section_end:
               cursor = (cursor + 3) & ~3
               kind, length = struct.unpack_from('<LL', original, cursor)
@@ -71,56 +71,68 @@ jobs:
                           procedure = original[record + 39:record + total].split(b'\0', 1)[0].decode('utf-8')
                       elif record_type == 0x113E:
                           local = original[record + 10:record + total].split(b'\0', 1)[0].decode('utf-8')
-                      elif procedure == 'many_ints' and record_type in (0x1141, 0x1142):
-                          records.append({'offset': record, 'type': record_type, 'local': local})
+                      elif procedure == 'many_ints' and local == 'e' and record_type in (0x1141, 0x1142):
+                          start = struct.unpack_from('<I', original, record + 8)[0]
+                          extent = struct.unpack_from('<H', original, record + 14)[0]
+                          ranges.append({'offset': record, 'type': record_type, 'start': start, 'extent': extent})
                       record += total
               cursor = (payload + length + 3) & ~3
 
-          print([(item['local'], hex(item['type'])) for item in records])
+          if len(ranges) != 4:
+              raise RuntimeError(ranges)
+          print([(hex(item['type']), item['start'], item['extent']) for item in ranges])
 
-          def dummy_local(data, offset):
+          def dummy(data, index):
+              offset = ranges[index]['offset']
               struct.pack_into('<H', data, offset + 2, 0x113E)
               struct.pack_into('<I', data, offset + 4, 0x74)
               struct.pack_into('<H', data, offset + 8, 0)
               data[offset + 10:offset + 16] = b'x\0\0\0\0\0'
 
-          def write(name, predicate):
+          def write(name, remove=(), mutate=None):
               data = bytearray(original)
-              changed = 0
-              for item in records:
-                  if predicate(item):
-                      dummy_local(data, item['offset'])
-                      changed += 1
+              for index in remove:
+                  dummy(data, index)
+              if mutate:
+                  mutate(data)
               pathlib.Path(f'diag/{name}.o').write_bytes(data)
-              print(name, changed)
 
           pathlib.Path('diag/original.o').write_bytes(original)
-          write('drop-all-defranges', lambda item: True)
-          write('drop-register-defranges', lambda item: item['type'] == 0x1141)
-          write('drop-frame-defranges', lambda item: item['type'] == 0x1142)
-          write('drop-extra-defranges', lambda item: False)
+          for index in range(4):
+              write(f'drop-e-{index}', (index,))
+          write('keep-e-0', (1,2,3))
+          write('keep-e-01', (2,3))
+          write('keep-e-012', (3,))
+          write('drop-e-12', (1,2))
+          write('drop-e-13', (1,3))
+          write('drop-e-23', (2,3))
 
-          data = bytearray(original)
-          seen = set()
-          changed = 0
-          for item in records:
-              if item['local'] in seen:
-                  dummy_local(data, item['offset'])
-                  changed += 1
-              else:
-                  seen.add(item['local'])
-          pathlib.Path('diag/keep-first-defrange.o').write_bytes(data)
-          print('keep-first-defrange', changed)
+          def frames_to_register(data):
+              for index in (1,3):
+                  offset = ranges[index]['offset']
+                  struct.pack_into('<H', data, offset + 2, 0x1141)
+                  struct.pack_into('<HH', data, offset + 4, 328, 0)
+          write('e-frames-to-register', mutate=frames_to_register)
 
-          for local in ('a','b','c','d','e','f','g','h'):
-              write(f'drop-{local}-defranges', lambda item, wanted=local: item['local'] == wanted)
-          write('drop-ef-defranges', lambda item: item['local'] in ('e','f'))
-          write('drop-gh-defranges', lambda item: item['local'] in ('g','h'))
-          write('drop-abcd-defranges', lambda item: item['local'] in ('a','b','c','d'))
-          '@ | Set-Content -Encoding utf8 diag\records.py
-          python diag\records.py
+          def bridge_first_gap(data):
+              offset = ranges[1]['offset']
+              struct.pack_into('<I', data, offset + 8, 90)
+              struct.pack_into('<H', data, offset + 14, 71)
+          write('e-bridge-first-gap', mutate=bridge_first_gap)
 
-      - name: Link every many_ints variant
+          def bridge_last_gap(data):
+              offset = ranges[3]['offset']
+              struct.pack_into('<I', data, offset + 8, 192)
+              struct.pack_into('<H', data, offset + 14, 15)
+          write('e-bridge-last-gap', mutate=bridge_last_gap)
+
+          def extend_last(data):
+              struct.pack_into('<H', data, ranges[3]['offset'] + 14, 16)
+          write('e-extend-last', mutate=extend_last)
+          '@ | Set-Content -Encoding utf8 diag\parameter-e.py
+          python diag\parameter-e.py
+
+      - name: Link parameter-e variants
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -131,9 +143,7 @@ jobs:
           $Sanitizer = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
           $LibraryArgs = @()
           foreach ($LibraryPath in @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })) { $LibraryArgs += "-L$LibraryPath" }
-          $Names = @('original','drop-all-defranges','drop-register-defranges','drop-frame-defranges','keep-first-defrange')
-          foreach ($Local in @('a','b','c','d','e','f','g','h')) { $Names += "drop-$Local-defranges" }
-          $Names += @('drop-ef-defranges','drop-gh-defranges','drop-abcd-defranges')
+          $Names = @('original','drop-e-0','drop-e-1','drop-e-2','drop-e-3','keep-e-0','keep-e-01','keep-e-012','drop-e-12','drop-e-13','drop-e-23','e-frames-to-register','e-bridge-first-gap','e-bridge-last-gap','e-extend-last')
           $Results = @()
           foreach ($Name in $Names) {
             & clang.exe @Sanitizer @LibraryArgs diag\caller.o "diag\$Name.o" -o "diag\$Name.exe" 2>&1 |
@@ -143,19 +153,19 @@ jobs:
             $Results += "$Name=$Code"
             Write-Host "LINK_RESULT $Name=$Code"
           }
-          $Results | Set-Content -Encoding ascii diag\records-summary.txt
-          Get-Content diag\records-summary.txt
+          $Results | Set-Content -Encoding ascii diag\parameter-e-summary.txt
+          Get-Content diag\parameter-e-summary.txt
           exit 0
 
-      - name: Retain record bisection output
+      - name: Retain parameter-e isolation output
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-786-codeview-records-${{ github.run_id }}
+          name: issue-786-parameter-e-${{ github.run_id }}
           path: |
-            diag/records-summary.txt
+            diag/parameter-e-summary.txt
             diag/link-*.log
-            diag/records.py
+            diag/parameter-e.py
           retention-days: 3
           if-no-files-found: error
           compression-level: 6
