@@ -28,7 +28,7 @@ jobs:
       - name: Compile focused contexts
         shell: bash
         run: |
-          set -u
+          set +e
           mkdir -p /tmp/issue674
           cat > /tmp/issue674/static-assert.c <<'EOF'
           static int unselected(void) { return 99; }
