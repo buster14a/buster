@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 550
-explicit SHA-256 rows bind every tracked test byte at the approval point: 404
-supported object subjects, 12 registered rejection controls, 70 support files
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 553
+explicit SHA-256 rows bind every tracked test byte at the approval point: 406
+supported object subjects, 12 registered rejection controls, 71 support files
 and 64 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
 is therefore a reviewed support decision, not an automatic side effect of adding

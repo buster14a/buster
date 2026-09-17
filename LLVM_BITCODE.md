@@ -29,7 +29,13 @@ The module records the target triple and data layout selected by the driver.
 macOS metadata uses the `macosx` spelling. Target parsing accepts both `macos`
 and `macosx`, including deployment versions, so ABI planning can read it back.
 The emitter currently provides metadata for x86-64, AArch64, Wasm64, and
-eBPF targets across the operating-system combinations supported by `Target`.
+eBPF targets across the operating-system combinations supported by `Target`,
+except AArch64 UEFI. The driver rejects `-emit-llvm` for that target before
+reading source inputs or touching output files: its native LP64/AAPCS64 ABI
+must not be exported as the Windows AArch64 variadic convention. Native
+AArch64 UEFI compilation remains supported; x86-64 UEFI and the other
+AArch64 rows retain their existing bitcode behavior. See
+[the UEFI ABI contract](docs/uefi-aarch64-abi.md).
 Wasm64 bitcode uses 64-bit pointers and is distinct from the direct core
 Memory64 module documented in `WASM64.md`.
 
