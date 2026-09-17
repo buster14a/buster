@@ -21,18 +21,56 @@ jobs:
           ref: fix/722-post-tag-specifiers
           fetch-depth: 0
 
-      - name: Probe merge conflicts against pinned main
+      - name: Merge current main and resolve the fixture registration overlap
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git merge --no-commit --no-ff 66ebcc793bdf7cf3f8311e71861ac139c11570b8
-          status=$?
-          echo '--- unresolved paths ---'
-          git status --short
-          echo '--- combined conflict diff ---'
-          git diff --cc -- \
-            src/buster/lib/compiler/frontend/c/c_parse.c \
-            src/buster/tests/compiler/frontend/c/c_test.c
-          exit "$status"
+
+          set +e
+          git merge --no-commit --no-ff origin/main
+          merge_status=$?
+          set -e
+
+          if (( merge_status != 0 )); then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            if (( ${#conflicts[@]} != 1 )) || [[ "${conflicts[0]:-}" != 'src/buster/tests/compiler/frontend/c/c_test.c' ]]; then
+              printf 'Unexpected merge conflicts:\n'
+              printf '  %s\n' "${conflicts[@]}"
+              exit 1
+            fi
+
+            python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          path = Path('src/buster/tests/compiler/frontend/c/c_test.c')
+          text = path.read_text()
+          pattern = re.compile(
+              r'^<<<<<<< HEAD\n'
+              r'    BUSTER_TEST_FIXTURE\(arguments, c_test_post_tag_declaration_specifiers\);\n'
+              r'^=======\n'
+              r'    BUSTER_TEST_FIXTURE\(arguments, c_test_same_scope_tag_redefinition_diagnostics\);\n'
+              r'^>>>>>>> .+\n',
+              re.MULTILINE,
+          )
+          replacement = (
+              '    BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);\n'
+              '    BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);\n'
+          )
+          text, count = pattern.subn(replacement, text)
+          if count != 1:
+              raise SystemExit(f'expected one known fixture-registration conflict, found {count}')
+          path.write_text(text)
+          PY
+            git add src/buster/tests/compiler/frontend/c/c_test.c
+          fi
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+          git diff --check --cached
+          git commit -m 'Merge main into fix/722-post-tag-specifiers'
+          git push origin HEAD:fix/722-post-tag-specifiers
