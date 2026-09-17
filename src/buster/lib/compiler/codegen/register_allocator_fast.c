@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/machine_schedule_internal.h>
 #include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/os.h>
 
@@ -13,7 +14,11 @@
 // edit stream. Liveness is derived from the complete textual use/definition
 // stream rather than MachineVirtualRegister.definition_point, so explicit
 // mutable virtual registers are handled conservatively without an SSA
-// assumption.
+// assumption. `machine_fast_placement_build_pinned` then lays the frame out
+// for both scan modes: `machine_fast_close_live_ranges` widens the selector's
+// stack slots to the rows a write of them may still be read at, and
+// `machine_fast_color_homes` and `machine_fast_color_slots` give one storage
+// per simultaneously live object instead of one per object.
 
 // A physical register index is a bit lane, and every per-register predicate
 // the pass carries is a mask: the scan's occupancy and dirtiness, the
@@ -1182,9 +1187,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_inline_assembly_successors(MachineFunction
 // disqualifications, and the backward-edge tally — and the second, once
 // defining blocks and predecessor offsets are complete, fills the adjacency
 // list, marks cold entries, decides escapes, and records the backward-edge
-// spans. QUALITY reads the intervals and spans for its global layer and
-// hands the same prepass to both of its scan runs; FAST asks for neither,
-// and `wants_quality_facts` keeps their per-operand updates off its walk.
+// spans, which it leaves sorted by start and merged into disjoint regions.
+// QUALITY reads the intervals and the spans for its global layer and hands
+// the same prepass to both of its scan runs; FAST asks for neither, and
+// `wants_quality_facts` keeps their per-operand updates off its walk.
 MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function, bool wants_quality_facts)
 {
     MachineFastPrepass prepass = {0};
@@ -1542,6 +1548,53 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 }
             }
         }
+        if (wants_quality_facts)
+        {
+            // Backward-edge spans, sorted by start and merged into disjoint
+            // regions. Closure asks only which rows a loop can re-execute
+            // around a range and never which loop, so nested and overlapping
+            // spans fuse and the table stays small. Touching spans merge too,
+            // since a range ending exactly where the next one starts meets
+            // both.
+            u64* span_scratch = arena_allocate(arena, u64, prepass.loop_span_count ? prepass.loop_span_count : 1);
+            for (u32 width = 1; width < prepass.loop_span_count; width *= 2)
+            {
+                for (u32 sort_start = 0; sort_start < prepass.loop_span_count; sort_start += 2 * width)
+                {
+                    u32 middle = BUSTER_MIN(sort_start + width, prepass.loop_span_count);
+                    u32 limit = BUSTER_MIN(sort_start + 2 * width, prepass.loop_span_count);
+                    u32 left = sort_start;
+                    u32 right = middle;
+                    u32 out = sort_start;
+                    while (left < middle && right < limit)
+                    {
+                        span_scratch[out++] = prepass.loop_spans[right] < prepass.loop_spans[left] ? prepass.loop_spans[right++] : prepass.loop_spans[left++];
+                    }
+                    while (left < middle)
+                    {
+                        span_scratch[out++] = prepass.loop_spans[left++];
+                    }
+                    while (right < limit)
+                    {
+                        span_scratch[out++] = prepass.loop_spans[right++];
+                    }
+                }
+                memcpy(prepass.loop_spans, span_scratch, (u64)prepass.loop_span_count * sizeof(*prepass.loop_spans));
+            }
+            u32 merged_span_count = 0;
+            for (u32 span_index = 0; span_index < prepass.loop_span_count; span_index += 1)
+            {
+                u32 span_start = (u32)(prepass.loop_spans[span_index] >> 32);
+                u32 span_end = (u32)prepass.loop_spans[span_index];
+                bool merges = merged_span_count && span_start <= (u32)prepass.loop_spans[merged_span_count - 1];
+                u32 merged_end = merges ? BUSTER_MAX((u32)prepass.loop_spans[merged_span_count - 1], span_end) : span_end;
+                u32 slot = merges ? merged_span_count - 1u : merged_span_count;
+                u32 merged_start = merges ? (u32)(prepass.loop_spans[slot] >> 32) : span_start;
+                prepass.loop_spans[slot] = ((u64)merged_start << 32) | merged_end;
+                merged_span_count += !merges;
+            }
+            prepass.loop_span_count = merged_span_count;
+        }
         // Every row above published a classification word and a valid
         // descriptor — the walk returns early otherwise — so the backward
         // next-call pass reads the call bit out of that word instead of
@@ -1586,6 +1639,299 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     }
 
     return prepass;
+}
+
+// Loop closure asks only whether a range meets a backward edge, so in a
+// function that is one enormous loop — an interpreter dispatch loop, say —
+// every range inside it widens to the whole loop and nothing shares anything.
+// What a frame object actually occupies are the rows where a write of it may
+// still be read, and that is a liveness question the block graph answers: a
+// write covering the object ends the previous contents, every other touch
+// reads them, and an object live out of a block is live through it. One
+// carried around a loop is live in every block of that loop and closes over
+// it exactly as before; one written and read inside a single iteration is not
+// live at the header and keeps its own rows. Live-in and live-out are the
+// usual backward fixed point over object bitsets, and the range handed to the
+// color scan is the row span of the blocks holding the object live, which
+// covers every row of every path between them.
+//
+// Callers build the per-block read and covering-write sets — the frame
+// objects the selector named and the homes the allocator's own memory edits
+// name are found in different places — and own the row ranges of the touches
+// themselves; this only widens them.
+BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass, u64 const* reads,
+                                                        u64 const* writes, u32 words, u32* starts, u32* ends)
+{
+    u32 block_count = function->block_count;
+    u64 plane = (u64)block_count * words;
+    u64* live_in = arena_allocate(arena, u64, plane ? plane : 1);
+    u64* live_out = arena_allocate(arena, u64, plane ? plane : 1);
+    memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
+    memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (u32 index = block_count; index; index -= 1)
+        {
+            u32 block_index = index - 1u;
+            u64 const* block_reads = reads + (u64)block_index * words;
+            u64 const* block_writes = writes + (u64)block_index * words;
+            u64* block_in = live_in + (u64)block_index * words;
+            u64 const* block_out = live_out + (u64)block_index * words;
+            for (u32 word = 0; word < words; word += 1)
+            {
+                block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
+            }
+            u32 first = prepass->predecessor_offsets[block_index];
+            u32 limit = prepass->predecessor_offsets[block_index + 1u];
+            for (u32 entry = first; entry < limit; entry += 1)
+            {
+                u64* predecessor_out = live_out + (u64)prepass->predecessor_list[entry] * words;
+                for (u32 word = 0; word < words; word += 1)
+                {
+                    u64 merged = predecessor_out[word] | block_in[word];
+                    changed = changed || merged != predecessor_out[word];
+                    predecessor_out[word] = merged;
+                }
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock const* block = function->blocks + block_index;
+        u64 const* block_in = live_in + (u64)block_index * words;
+        u64 const* block_out = live_out + (u64)block_index * words;
+        u32 last = block->instruction_count ? block->first_instruction + block->instruction_count - 1u : block->first_instruction;
+        // An object arriving live occupies the block from its first row, and
+        // one leaving live occupies it through its last; an object born and
+        // consumed inside the block keeps only the rows its touches gave it.
+        for (u32 word = 0; word < words; word += 1)
+        {
+            u64 entering = block_in[word];
+            while (entering)
+            {
+                u32 object = 64u * word + trailing_zeroes_u64(entering);
+                entering &= entering - 1u;
+                starts[object] = BUSTER_MIN(starts[object], block->first_instruction);
+            }
+            u64 leaving = block_out[word];
+            while (leaving)
+            {
+                u32 object = 64u * word + trailing_zeroes_u64(leaving);
+                leaving &= leaving - 1u;
+                ends[object] = BUSTER_MAX(ends[object], last);
+            }
+        }
+    }
+}
+
+// One frame slot per simultaneously live home instead of one per spilled
+// value. The caller hands each home the rows over which it may hold anything
+// a later row reads, and two homes whose ranges miss each other never hold a
+// live value at once. The assignment is a
+// linear scan in start order over the homes of one pool: a binary heap of live
+// homes keyed by end row retires the ones that ended, their colors return to a
+// free stack, and the next home takes a returned color or opens a new one. No
+// interference graph is built and no pair of homes is ever compared.
+// `colors` receives a pool index per selected value and UINT32_MAX elsewhere;
+// the return value is the pool's width.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_color_homes(Arena* arena, MachineFunction const* function, u8 const* slot_needed, u32 const* home_starts,
+                                                 u32 const* home_ends, bool vector_pool, u32* colors)
+{
+    u32 value_count = function->virtual_register_count;
+    u32 row_count = function->instruction_count + 2u;
+    u32* row_offsets = arena_allocate(arena, u32, (u64)row_count + 1u);
+    u32 selected_count = 0;
+    memset(row_offsets, 0, ((u64)row_count + 1u) * sizeof(*row_offsets));
+    for (u32 register_index = 0; register_index < value_count; register_index += 1)
+    {
+        bool is_vector = function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        bool selected = slot_needed[register_index] && home_starts[register_index] != UINT32_MAX && is_vector == vector_pool;
+        u32 start_row = selected ? home_starts[register_index] : 0;
+        row_offsets[start_row + 1u] += selected;
+        selected_count += selected;
+    }
+    // Counting sort by start row: the scan needs ascending starts and the
+    // rows are already a dense index, so no comparison sort is needed.
+    for (u32 row = 0; row < row_count; row += 1)
+    {
+        row_offsets[row + 1u] += row_offsets[row];
+    }
+    u32* order = arena_allocate(arena, u32, selected_count ? selected_count : 1);
+    u64* active = arena_allocate(arena, u64, selected_count ? selected_count : 1);
+    u32* free_colors = arena_allocate(arena, u32, selected_count ? selected_count : 1);
+    u32 active_count = 0;
+    u32 free_count = 0;
+    u32 color_count = 0;
+    for (u32 register_index = 0; register_index < value_count; register_index += 1)
+    {
+        bool is_vector = function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        if (slot_needed[register_index] && home_starts[register_index] != UINT32_MAX && is_vector == vector_pool)
+        {
+            order[row_offsets[home_starts[register_index]]++] = register_index;
+        }
+    }
+    for (u32 index = 0; index < selected_count; index += 1)
+    {
+        u32 register_index = order[index];
+        u32 start = home_starts[register_index];
+        u32 color;
+        while (active_count && (u32)(active[0] >> 32) < start)
+        {
+            u32 parent = 0;
+            free_colors[free_count] = (u32)active[0];
+            free_count += 1;
+            active_count -= 1;
+            active[0] = active[active_count];
+            while (true)
+            {
+                u32 left = 2 * parent + 1;
+                u32 smallest = left < active_count && active[left] < active[parent] ? left : parent;
+                smallest = left + 1 < active_count && active[left + 1] < active[smallest] ? left + 1 : smallest;
+                if (smallest == parent)
+                {
+                    break;
+                }
+                u64 swapped = active[parent];
+                active[parent] = active[smallest];
+                active[smallest] = swapped;
+                parent = smallest;
+            }
+        }
+        if (free_count)
+        {
+            free_count -= 1;
+            color = free_colors[free_count];
+        }
+        else
+        {
+            color = color_count;
+            color_count += 1;
+        }
+        colors[register_index] = color;
+        active[active_count] = ((u64)home_ends[register_index] << 32) | color;
+        u32 child = active_count;
+        active_count += 1;
+        while (child && active[(child - 1u) / 2u] > active[child])
+        {
+            u64 swapped = active[(child - 1u) / 2u];
+            active[(child - 1u) / 2u] = active[child];
+            active[child] = swapped;
+            child = (child - 1u) / 2u;
+        }
+    }
+    return color_count;
+}
+
+// The same linear scan for the selector's frame objects, whose widths differ:
+// a group's storage is its widest member and its start alignment the strictest
+// one, so reusing a group that already fits costs nothing and reusing a
+// narrower one costs only the difference. Which free group to take is
+// therefore a fit question, and the newest free groups are the ones a scan in
+// start order keeps finding sized for the slots around them, so the search
+// stays inside a fixed window of the free stack rather than walking all of it.
+#define MACHINE_FAST_SLOT_FIT_WINDOW 16u
+
+// `colors` receives a group per coalesced slot and UINT32_MAX elsewhere;
+// `group_sizes` and `group_alignments` receive the storage each group needs.
+// The return value is the group count.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_color_slots(Arena* arena, MachineFunction const* function, u8 const* slot_fixed, u32 const* slot_starts,
+                                                 u32 const* slot_ends, u32* colors, u32* group_sizes, u32* group_alignments)
+{
+    u32 slot_count = function->stack_slot_count;
+    u32 row_count = function->instruction_count + 2u;
+    u32* row_offsets = arena_allocate(arena, u32, (u64)row_count + 1u);
+    u32 selected_count = 0;
+    memset(row_offsets, 0, ((u64)row_count + 1u) * sizeof(*row_offsets));
+    for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
+    {
+        bool selected = !slot_fixed[slot_index] && slot_starts[slot_index] != UINT32_MAX;
+        row_offsets[(selected ? slot_starts[slot_index] : 0) + 1u] += selected;
+        selected_count += selected;
+    }
+    for (u32 row = 0; row < row_count; row += 1)
+    {
+        row_offsets[row + 1u] += row_offsets[row];
+    }
+    u32* order = arena_allocate(arena, u32, selected_count ? selected_count : 1);
+    u64* active = arena_allocate(arena, u64, selected_count ? selected_count : 1);
+    u32* free_groups = arena_allocate(arena, u32, selected_count ? selected_count : 1);
+    u32 active_count = 0;
+    u32 free_count = 0;
+    u32 group_count = 0;
+    for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
+    {
+        if (!slot_fixed[slot_index] && slot_starts[slot_index] != UINT32_MAX)
+        {
+            order[row_offsets[slot_starts[slot_index]]++] = slot_index;
+        }
+    }
+    for (u32 index = 0; index < selected_count; index += 1)
+    {
+        u32 slot_index = order[index];
+        u32 start = slot_starts[slot_index];
+        u32 size = function->stack_slot_sizes[slot_index];
+        u32 alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8u;
+        while (active_count && (u32)(active[0] >> 32) < start)
+        {
+            u32 parent = 0;
+            free_groups[free_count] = (u32)active[0];
+            free_count += 1;
+            active_count -= 1;
+            active[0] = active[active_count];
+            while (true)
+            {
+                u32 left = 2 * parent + 1;
+                u32 smallest = left < active_count && active[left] < active[parent] ? left : parent;
+                smallest = left + 1 < active_count && active[left + 1] < active[smallest] ? left + 1 : smallest;
+                if (smallest == parent)
+                {
+                    break;
+                }
+                u64 swapped = active[parent];
+                active[parent] = active[smallest];
+                active[smallest] = swapped;
+                parent = smallest;
+            }
+        }
+        u32 window = BUSTER_MIN(free_count, MACHINE_FAST_SLOT_FIT_WINDOW);
+        u32 position = UINT32_MAX;
+        for (u32 probe = free_count - window; probe < free_count; probe += 1)
+        {
+            u32 candidate = group_sizes[free_groups[probe]];
+            u32 incumbent = position == UINT32_MAX ? 0 : group_sizes[free_groups[position]];
+            bool fits = candidate >= size;
+            bool incumbent_fits = position != UINT32_MAX && incumbent >= size;
+            // A group that already holds the slot wins over one that has to
+            // grow; between two of a kind the tighter fit and the smaller
+            // growth are the same preference read from opposite ends.
+            bool better = position == UINT32_MAX || (fits && !incumbent_fits) ||
+                          (fits == incumbent_fits && (fits ? candidate < incumbent : candidate > incumbent));
+            position = better ? probe : position;
+        }
+        u32 group = position == UINT32_MAX ? group_count : free_groups[position];
+        group_sizes[group] = position == UINT32_MAX ? size : BUSTER_MAX(group_sizes[group], size);
+        group_alignments[group] = position == UINT32_MAX ? alignment : BUSTER_MAX(group_alignments[group], alignment);
+        group_count += position == UINT32_MAX;
+        if (position != UINT32_MAX)
+        {
+            free_count -= 1;
+            free_groups[position] = free_groups[free_count];
+        }
+        colors[slot_index] = group;
+        active[active_count] = ((u64)slot_ends[slot_index] << 32) | group;
+        u32 child = active_count;
+        active_count += 1;
+        while (child && active[(child - 1u) / 2u] > active[child])
+        {
+            u64 swapped = active[(child - 1u) / 2u];
+            active[(child - 1u) / 2u] = active[child];
+            active[child] = swapped;
+            child = (child - 1u) / 2u;
+        }
+    }
+    return group_count;
 }
 
 // `pinned_registers` holds a physical register per virtual register that
@@ -1665,7 +2011,6 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         u32 const* predecessor_offsets = prepass->predecessor_offsets;
         u32 const* predecessor_list = prepass->predecessor_list;
         u8 const* cold_blocks = prepass->cold_blocks;
-        u32 const* definition_blocks = prepass->definition_blocks;
         // Contracts and per-edge snapshots, one register file per block. A
         // block's out state is recorded at its terminator after any inline
         // conforms, which is exactly what every one of its edges delivers; a
@@ -2427,8 +2772,44 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // Frame layout runs after the scan: every touch of a vreg slot flows
         // through the edit stream, so only edit subjects get backing slots.
         // Values that never left their registers cost no frame bytes.
+        u32 value_count = function->virtual_register_count ? function->virtual_register_count : 1u;
         u8* slot_needed = arena_allocate(arena, u8, function->virtual_register_count);
+        u32* home_starts = arena_allocate(arena, u32, value_count);
+        u32* home_ends = arena_allocate(arena, u32, value_count);
+        // A spill fills a home and a reload reads it, which is all the
+        // liveness walk below needs; an edit whose point lies outside the
+        // rows the blocks tile belongs to no block, and the home it names
+        // keeps storage of its own.
+        u8* home_opaque = arena_allocate(arena, u8, value_count);
+        // A home read before anything in the stream fills it holds a value
+        // that crossed into these rows from somewhere the stream does not
+        // order, so its range is not the rows between its edits.
+        u8* home_read_first = arena_allocate(arena, u8, value_count);
+        u32* row_blocks = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1u);
         memset(slot_needed, 0, function->virtual_register_count);
+        memset(home_starts, 0xff, (u64)value_count * sizeof(*home_starts));
+        memset(home_ends, 0, (u64)value_count * sizeof(*home_ends));
+        memset(home_opaque, 0, value_count);
+        memset(home_read_first, 0, value_count);
+        // Sharing storage is an argument in row space: a range between two
+        // rows must cover every row that can execute between them, and the
+        // block a row belongs to has to be the one whose index the graph
+        // names. Both hold exactly when the blocks tile the rows in index
+        // order, which the selector's output does; anything else keeps one
+        // object per storage.
+        bool layout_linear = true;
+        u32 tiled_rows = 0;
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            MachineBlock const* block = function->blocks + block_index;
+            layout_linear = layout_linear && block->first_instruction == tiled_rows &&
+                            block->instruction_count <= function->instruction_count - tiled_rows;
+            tiled_rows = layout_linear ? tiled_rows + block->instruction_count : tiled_rows;
+            for (u32 offset = 0; layout_linear && offset < block->instruction_count; offset += 1)
+            {
+                row_blocks[block->first_instruction + offset] = block_index;
+            }
+        }
         for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
         {
             // Only the memory edits name a virtual register: a copy's subject
@@ -2437,38 +2818,153 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             MachineEdit* edit = placement.edits + edit_index;
             if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
             {
+                u32 row = machine_point_instruction(edit->point);
+                u32 block_index = row < function->instruction_count ? row_blocks[row] : UINT32_MAX;
+                home_read_first[edit->subject] |= (u8)(!slot_needed[edit->subject] && edit->kind == MACHINE_EDIT_RELOAD);
                 slot_needed[edit->subject] = 1;
+                home_opaque[edit->subject] |= (u8)(block_index == UINT32_MAX || !layout_linear);
+                home_starts[edit->subject] = BUSTER_MIN(home_starts[edit->subject], row);
+                home_ends[edit->subject] = BUSTER_MAX(home_ends[edit->subject], row);
             }
         }
-        // Slot reuse by defining block: a non-escaping value's every edit sits
-        // inside the block that defines it, so two such values from different
-        // blocks never hold their slots at the same time and draw from one
-        // shared pool. Escaping values keep dedicated slots — proving their
-        // ranges disjoint needs the cross-block liveness the global stage
-        // brings. The pool is as wide as the busiest single block.
-        u32* pool_indices = arena_allocate(arena, u32, function->virtual_register_count);
-        u32* block_pool_cursors = arena_allocate(arena, u32, function->block_count);
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            block_pool_cursors[block_index] = 0;
-        }
-        u32 pool_size = 0;
+        // Storage may only be handed to a second object when the rows a range
+        // covers are the only rows that can read it. A `longjmp` back into
+        // this frame resumes at a row no machine edge reaches, past whatever
+        // the second object wrote, so a function that is not certified free of
+        // returns-twice calls keeps one object per storage.
+        bool reuse_frame_storage = layout_linear && function->returns_twice_absence_certified;
+        // A withdrawn home is one the colorer never selects, so each of them
+        // gets storage of its own below.
         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
         {
-            pool_indices[register_index] = UINT32_MAX;
-            // Vector values keep dedicated slots below: the shared pool is
-            // eight bytes per entry and a sixty-four-byte member would widen
-            // every slot for a class that rarely spills.
-            if (!slot_needed[register_index] || state.escapes[register_index] || definition_blocks[register_index] == UINT32_MAX ||
-                function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
-            {
-                continue;
-            }
-            u32 definition_block = definition_blocks[register_index];
-            pool_indices[register_index] = block_pool_cursors[definition_block];
-            block_pool_cursors[definition_block] += 1;
-            pool_size = BUSTER_MAX(pool_size, block_pool_cursors[definition_block]);
+            // A home the edit rows bound is one this function both fills and
+            // empties: its value stays inside its defining block, the stream
+            // fills the home before it reads it, and every edit that names it
+            // sits in that block's rows. Then a read of the home is an edit
+            // between those rows, an iteration of a loop around the block
+            // refills it before reading it, and the range needs no closure
+            // over the loops around it.
+            //
+            // A value that leaves its block fails that: the boundary repairs
+            // that fill its home for one successor share the predecessor's
+            // terminator point with the repairs of its siblings, so the edit
+            // stream does not order them and the rows between two of its edits
+            // do not cover every row that can read the home. Those keep
+            // storage of their own, as do the homes a repair reads before this
+            // function's stream fills them.
+            u32 definition_block = prepass->definition_blocks[register_index];
+            MachineBlock const* home_block = definition_block < function->block_count ? function->blocks + definition_block : 0;
+            bool inside_block = home_block && home_starts[register_index] >= home_block->first_instruction &&
+                                home_ends[register_index] < home_block->first_instruction + home_block->instruction_count;
+            bool colorable = reuse_frame_storage && slot_needed[register_index] && !home_opaque[register_index] &&
+                             !home_read_first[register_index] && !prepass->escapes[register_index] && inside_block;
+            home_starts[register_index] = colorable ? home_starts[register_index] : UINT32_MAX;
         }
+        // The selector's frame objects share the homes' argument, over wider
+        // ranges: a slot's storage has to hold from its first touched row
+        // through every row where what was written to it may still be read,
+        // and two slots whose ranges miss each other never hold a live object
+        // at once. What the rows cannot see keeps its own storage: a slot
+        // whose address the frame address row hands to a register, one an
+        // inline-assembly transaction or a variadic fetch owns, a
+        // volatile-tainted one, and the fixed outgoing argument area. Debug
+        // records name slots too, but what they name may not decide layout:
+        // the code a build emits with debug information has to be the code it
+        // emits without.
+        u32 slot_axis = function->stack_slot_count ? function->stack_slot_count : 1u;
+        u32* slot_starts = arena_allocate(arena, u32, slot_axis);
+        u32* slot_ends = arena_allocate(arena, u32, slot_axis);
+        u8* slot_fixed = arena_allocate(arena, u8, slot_axis);
+        u32* slot_groups = arena_allocate(arena, u32, slot_axis);
+        u32* group_sizes = arena_allocate(arena, u32, slot_axis);
+        u32* group_alignments = arena_allocate(arena, u32, slot_axis);
+        u32* group_offsets = arena_allocate(arena, u32, slot_axis);
+        bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0;
+        memset(slot_starts, 0xff, (u64)slot_axis * sizeof(*slot_starts));
+        memset(slot_ends, 0, (u64)slot_axis * sizeof(*slot_ends));
+        memset(slot_fixed, coalesce_slots ? 0 : 1, slot_axis);
+        memset(slot_groups, 0xff, (u64)slot_axis * sizeof(*slot_groups));
+        for (u32 row = 0; coalesce_slots && row < function->instruction_count; row += 1)
+        {
+            MachineInstruction const* instruction = function->instructions + row;
+            bool addresses = instruction->opcode == description->frame_address_opcode;
+            MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
+            for (u32 operand_index = 0; operand_index < MACHINE_INSTRUCTION_OPERAND_COUNT; operand_index += 1)
+            {
+                MachineRef operand = instruction->operands[operand_index];
+                u32 named = machine_ref_payload(operand);
+                if (machine_ref_kind(operand) == MACHINE_REF_STACK_SLOT && named < function->stack_slot_count)
+                {
+                    // Liveness reads the frame forms whose slot, extent and
+                    // direction are proven. A row naming a slot any other way
+                    // is a touch it cannot account for, so that slot keeps its
+                    // own storage.
+                    bool proven = access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE && access.stack_slot == named;
+                    slot_starts[named] = BUSTER_MIN(slot_starts[named], row);
+                    slot_ends[named] = BUSTER_MAX(slot_ends[named], row);
+                    slot_fixed[named] |= (u8)(addresses || !proven);
+                }
+            }
+        }
+        for (u32 operand_index = 0; coalesce_slots && operand_index < function->inline_assembly_operand_count; operand_index += 1)
+        {
+            u32 named = function->inline_assembly_operands[operand_index].stack_slot;
+            bool inside = named < function->stack_slot_count;
+            slot_fixed[inside ? named : 0] |= (u8)inside;
+        }
+        for (u32 va_index = 0; coalesce_slots && va_index < function->va_arg_count; va_index += 1)
+        {
+            MachineVaArg const* va_arg = function->va_args + va_index;
+            bool inside = va_arg->result_is_frame && va_arg->result_slot < function->stack_slot_count;
+            slot_fixed[inside ? va_arg->result_slot : 0] |= (u8)inside;
+        }
+        for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
+        {
+            slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != 0);
+            slot_fixed[slot_index] |= (u8)(function->outgoing_bytes && slot_index == function->outgoing_slot);
+        }
+        if (coalesce_slots)
+        {
+            u32 words = (function->stack_slot_count + 63u) / 64u;
+            u64 plane = (u64)function->block_count * words;
+            u64* reads = arena_allocate(arena, u64, plane ? plane : 1);
+            u64* writes = arena_allocate(arena, u64, plane ? plane : 1);
+            memset(reads, 0, (plane ? plane : 1) * sizeof(*reads));
+            memset(writes, 0, (plane ? plane : 1) * sizeof(*writes));
+            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+            {
+                MachineBlock const* block = function->blocks + block_index;
+                u64* block_reads = reads + (u64)block_index * words;
+                u64* block_writes = writes + (u64)block_index * words;
+                // Backward through the block: the last touch of a slot
+                // decides, and a read below a covering store is what keeps
+                // the slot live into the block.
+                for (u32 offset = block->instruction_count; offset; offset -= 1)
+                {
+                    MachineInstruction const* instruction = function->instructions + block->first_instruction + offset - 1u;
+                    MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
+                    bool bounded = access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE;
+                    u32 slot_index = bounded ? access.stack_slot : 0;
+                    bool stores = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_STACK_SLOT;
+                    bool covers = bounded && stores && access.offset == 0 && access.size >= function->stack_slot_sizes[slot_index];
+                    u64 bit = (u64)bounded << (slot_index & 63u);
+                    u64 covering = covers ? bit : 0;
+                    u64 reading = bit & ~covering;
+                    block_reads[slot_index / 64u] = (block_reads[slot_index / 64u] | reading) & ~covering;
+                    block_writes[slot_index / 64u] = (block_writes[slot_index / 64u] | covering) & ~reading;
+                }
+            }
+            machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, slot_starts, slot_ends);
+        }
+        u32 group_count =
+            machine_fast_color_slots(arena, function, slot_fixed, slot_starts, slot_ends, slot_groups, group_sizes, group_alignments);
+        // Two pools, one per home width: the eight-byte scalar homes and the
+        // sixty-four-byte vector ones, so a rarely spilled vector never widens
+        // the slots the scalar homes share.
+        u32* pool_indices = arena_allocate(arena, u32, value_count);
+        memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
+        u32 pool_size = machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, false, pool_indices);
+        u32 vector_pool_size = machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, true, pool_indices);
         // The pushed callee-saved registers sit between the frame base and the
         // slots, so every offset starts past them, and the stack allocation
         // keeps sixteen-alignment across an odd push count.
@@ -2484,8 +2980,14 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // short and buries the deepest slots under the stack pointer.
         u32 pool_base = description->saves_precede_frame_pointer ? 0u : 8 * push_count;
         u32 running = pool_base + 8 * pool_size;
+        // Sixty-four-byte vector homes on a sixteen-byte offset boundary,
+        // mirroring the canonical frame layout's vector clamp; every access is
+        // the unaligned vmovdqu8 either way.
+        u32 vector_base = (running + 15u) & ~15u;
+        running = vector_pool_size ? vector_base + 64u * vector_pool_size : running;
         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
         {
+            bool is_vector = function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
             placement.virtual_register_offsets[register_index] = 0;
             if (!slot_needed[register_index])
             {
@@ -2493,21 +2995,19 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             }
             if (pool_indices[register_index] != UINT32_MAX)
             {
-                placement.virtual_register_offsets[register_index] = pool_base + 8 * (pool_indices[register_index] + 1);
+                placement.virtual_register_offsets[register_index] = is_vector ? vector_base + 64u * (pool_indices[register_index] + 1u)
+                                                                               : pool_base + 8u * (pool_indices[register_index] + 1u);
                 continue;
             }
-            if (function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
-            {
-                // Sixty-four-byte home at a sixteen-byte offset boundary,
-                // mirroring the canonical frame layout's vector clamp; every
-                // access is the unaligned vmovdqu8 either way.
-                running = ((running + 15u) & ~15u) + 64u;
-            }
-            else
-            {
-                running += 8;
-            }
+            // A home the colorer never saw — no memory edit gave it a range —
+            // still gets a slot of its own so the layout stays sound.
+            running = is_vector ? ((running + 15u) & ~15u) + 64u : running + 8u;
             placement.virtual_register_offsets[register_index] = running;
+        }
+        for (u32 group = 0; group < group_count; group += 1)
+        {
+            running = (running + group_sizes[group] + group_alignments[group] - 1) & ~(group_alignments[group] - 1);
+            group_offsets[group] = running;
         }
         for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
         {
@@ -2515,6 +3015,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // below, where a call's stack pointer lands on its base.
             if (function->outgoing_bytes && slot_index == function->outgoing_slot)
             {
+                continue;
+            }
+            // A coalesced slot's storage is its group's, which is already
+            // placed and wide and aligned enough for every member.
+            if (slot_groups[slot_index] != UINT32_MAX)
+            {
+                placement.stack_slot_offsets[slot_index] = group_offsets[slot_groups[slot_index]];
                 continue;
             }
             u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;

@@ -328,6 +328,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     .constant_opcode = MACHINE_X64_MOV_RI,
     .indirect_call_opcode = MACHINE_X64_CALL_INDIRECT,
     .unconditional_branch_opcode = MACHINE_X64_JMP,
+    .frame_address_opcode = MACHINE_X64_LEA_FRAME,
     .switch_opcode = MACHINE_X64_SWITCH,
     .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
     .indirect_call_register = MACHINE_X64_R10,
@@ -384,6 +385,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_windows_descri
     .constant_opcode = MACHINE_X64_MOV_RI,
     .indirect_call_opcode = MACHINE_X64_CALL_INDIRECT,
     .unconditional_branch_opcode = MACHINE_X64_JMP,
+    .frame_address_opcode = MACHINE_X64_LEA_FRAME,
     .switch_opcode = MACHINE_X64_SWITCH,
     .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
     .indirect_call_register = MACHINE_X64_R10,
@@ -7264,6 +7266,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         arena_allocate(arena, MachineX64CandidateRow, function->instruction_count ? function->instruction_count : 1);
     u32 candidate_count = 0;
     bool nonvolatile_memory = true;
+    bool returns_twice_free = true;
     u32 walk_ordinal = 0;
     u32 expanded_blocks = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -7283,6 +7286,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         {
             IrInstruction* instruction = function->instructions + id.value;
             nonvolatile_memory &= !instruction->volatile_access;
+            returns_twice_free &= !(instruction->opcode == IR_OPCODE_CALL && ir_call_returns_twice(program, instruction));
             if (machine_x64_instruction_is_i128_divide(program, instruction))
             {
                 if (!selector.block_entries)
@@ -8593,6 +8597,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slots.total_count);
     result.function.stack_slot_count = selector.stack_slots.total_count;
     result.function.nonvolatile_memory_certified = nonvolatile_memory;
+    result.function.returns_twice_absence_certified = returns_twice_free;
     u32 split_slot = 0;
     for (MachineBuilderChunk* chunk = selector.stack_slots.first; chunk; chunk = chunk->next)
     {

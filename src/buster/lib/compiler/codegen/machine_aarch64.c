@@ -66,6 +66,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_aarch64_description =
     .constant_opcode = MACHINE_A64_MOV_RI,
     .indirect_call_opcode = MACHINE_A64_CALL_INDIRECT,
     .unconditional_branch_opcode = MACHINE_A64_B,
+    .frame_address_opcode = MACHINE_A64_LEA_FRAME,
     .switch_opcode = MACHINE_A64_SWITCH,
     .float_bridge_opcode = MACHINE_A64_FMOV_TO_VEC,
     .indirect_call_register = MACHINE_A64_X16,
@@ -6100,6 +6101,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
         u32 candidate_count = 0;
         bool nonvolatile_memory = true;
+        bool returns_twice_free = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -6120,6 +6122,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 IrInstruction* instruction = function->instructions + id.value;
                 nonvolatile_memory &= !instruction->volatile_access;
+                returns_twice_free &= !(instruction->opcode == IR_OPCODE_CALL && ir_call_returns_twice(program, instruction));
                 if (instruction->opcode == IR_OPCODE_CALL && instruction->operand_count)
                 {
                     selector.call_argument_capacity = BUSTER_MAX(selector.call_argument_capacity, instruction->operand_count - 1u);
@@ -7127,6 +7130,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
         result.function.stack_slot_count = selector.stack_slots.total_count;
         result.function.nonvolatile_memory_certified = nonvolatile_memory;
+        result.function.returns_twice_absence_certified = returns_twice_free;
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);

@@ -1082,6 +1082,7 @@ BUSTER_F_DECL IrCfgEdge const* ir_function_cfg_edge(IrFunction const* function, 
 // Shared storage-normalization contract for canonical and frontend promotion.
 BUSTER_F_DECL bool ir_local_type_promotable(IrProgram* program, IrTypeId type);
 // The direct builder and reference pass share the conservative call-effect boundary.
+BUSTER_F_DECL bool ir_call_returns_twice(IrProgram* program, IrInstruction const* row);
 BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruction const* row);
 // The input certificate covers only the rows supplied to this call. Promotion
 // consumes that contract and may mutate arena-owned rows and side tables; it

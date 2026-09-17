@@ -1126,6 +1126,11 @@ struct MachineTargetDescription
     // Direct unconditional branch used by the shared CFG normalizer when a
     // parameterized critical edge needs an edge-local copy block.
     u16 unconditional_branch_opcode;
+    // Materializes a frame slot's address into a register — the one row that
+    // hands a slot out to code the frame layout cannot see. Frame-object
+    // lifetime reuse treats the slots it names as address-taken and gives
+    // them dedicated storage; zero disables that reuse entirely.
+    u16 frame_address_opcode;
     // Table dispatch, or MACHINE_OPCODE_INVALID for a target without one.
     // Its targets cannot host per-edge repairs, so the edge contracts
     // force them cold; every other terminator classifies structurally by
@@ -1369,7 +1374,14 @@ struct MachineFunction
     // Fresh selectors certify predicate-free functions so ordinary scalar
     // placement does not rescan them. A rewrite adding MASK refs clears it.
     bool predicate_absence_certified;
-    u8 reserved[4];
+    // Selector proof that no canonical row calls a returns-twice function.
+    // Without it a `longjmp` can re-enter this frame at a row the machine CFG
+    // has no edge to, so frame storage whose contents outlive their writer
+    // cannot be handed to a second object: the reuse the frame layout does
+    // over disjoint lifetimes is only sound while this holds. Unknown,
+    // manual, and structural-replay functions leave it false.
+    bool returns_twice_absence_certified;
+    u8 reserved[3];
     // One flag byte per stack slot, or null. Volatile canonical lowering
     // taints every frame object it touches. Object identities do not change
     // during CFG/SSA/scheduling rewrites, so this immutable table is shared.
@@ -1970,8 +1982,10 @@ struct MachineFastPrepass
     u32* interval_starts;
     u32* interval_ends;
     u8* disqualified;
-    // Backward-edge spans packed (start << 32) | end in block walk order,
-    // unsorted; QUALITY sorts and merges its own copy.
+    // Backward-edge spans packed (start << 32) | end, sorted by start and
+    // merged into disjoint regions: QUALITY closes value ranges over the
+    // loops those ranges meet and never asks which loop, so nesting and
+    // overlap fuse.
     u64* loop_spans;
     u32 loop_span_count;
     u32 active_register_count;

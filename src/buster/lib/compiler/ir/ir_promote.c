@@ -65,22 +65,31 @@ bool ir_local_type_promotable(IrProgram* program, IrTypeId id)
     return result;
 }
 
+// The known returns-twice spellings, by name: the canonical call contract
+// does not yet carry the effect. A call through a pointer is not one of
+// them — the standard gives `setjmp` no address to call through — so the
+// answer here is about direct calls, and callers that also have to refuse an
+// unknown callee ask for that separately.
+bool ir_call_returns_twice(IrProgram* program, IrInstruction const* row)
+{
+    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, row->symbol);
+    String8 names[] = {S8("setjmp"), S8("_setjmp"), S8("sigsetjmp"), S8("__sigsetjmp"), S8("__builtin_setjmp"), S8("longjmp"), S8("_longjmp"),
+                       S8("siglongjmp"), S8("__longjmp_chk"), S8("__builtin_longjmp"), S8("vfork"), S8("_vfork"), S8("getcontext"), S8("savectx")};
+    bool result = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names) && symbol && !result; index += 1)
+    {
+        result = string_equal(symbol->name, names[index]);
+    }
+    return result;
+}
+
 bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruction const* row)
 {
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, row->symbol);
-    // The canonical call contract does not yet carry returns_twice. Indirect
-    // calls cannot establish its absence; the known non-local-jump spellings
-    // likewise keep the entire function in memory until that effect is modeled.
-    bool result = !symbol;
-    if (symbol)
-    {
-        String8 names[] = {S8("setjmp"), S8("_setjmp"), S8("sigsetjmp"), S8("__sigsetjmp"), S8("__builtin_setjmp"),
-                           S8("longjmp"), S8("_longjmp"), S8("siglongjmp"), S8("__longjmp_chk"), S8("__builtin_longjmp")};
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names) && !result; index += 1)
-        {
-            result = string_equal(symbol->name, names[index]);
-        }
-    }
+    // Indirect calls cannot establish the absence of a returns-twice effect;
+    // the known spellings likewise keep the entire function in memory until
+    // that effect is modeled.
+    bool result = !symbol || ir_call_returns_twice(program, row);
     return result;
 }
 
