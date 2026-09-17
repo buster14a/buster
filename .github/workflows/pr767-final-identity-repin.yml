@@ -1,0 +1,116 @@
+name: PR 767 final dependency identity repin
+
+on:
+  push:
+    branches:
+      - claude/clever-cori-qh0b15
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr-767-final-identity-repin
+  cancel-in-progress: false
+
+jobs:
+  repin:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact repair revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Repin final reviewed dependency identities
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          old_receipt = '50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad'
+          new_receipt = '07f963f9a3fd13e4e2ed6c647140d21cbd9ca375b95a1385d991cbad8fbe1231'
+          old_project = '9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03'
+          new_project = '07c5fa6078ab424712c3c22cec4662da62e8e418ed7eed2df57060af57098f22'
+
+          replacements = {
+              Path('tools/native_retirement_contract.py'): (
+                  ('FULL_DEPENDENCY_RECEIPT_SHA256', old_receipt, new_receipt),
+                  ('FULL_DEPENDENCY_PROJECT_SHA256', old_project, new_project),
+              ),
+              Path('tools/native_retirement_census.c'): (
+                  ('nrc_dependency_receipt_sha256', old_receipt, new_receipt),
+                  ('nrc_dependency_project_sha256', old_project, new_project),
+              ),
+          }
+
+          for path, rows in replacements.items():
+              text = path.read_text(encoding='utf-8')
+              for name, old, new in rows:
+                  if text.count(old) != 1:
+                      raise SystemExit(f'refusing repin: expected one old {name} identity in {path}')
+                  if new in text:
+                      raise SystemExit(f'refusing repin: new {name} identity already present in {path}')
+                  text = text.replace(old, new)
+              path.write_text(text, encoding='utf-8')
+
+          helper = Path('.github/workflows/pr767-final-identity-repin.yml')
+          if not helper.is_file():
+              raise SystemExit('refusing cleanup: missing one-shot workflow')
+          helper.unlink()
+          PY
+          git add -A
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m 'Repin native retirement receipt and project identities'
+          test -z "$(git status --porcelain)"
+
+      - name: Validate repaired mirrors and contract
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --self-test
+          python3 - <<'PY'
+          from pathlib import Path
+
+          old_values = (
+              '50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad',
+              '9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03',
+          )
+          new_values = (
+              '07f963f9a3fd13e4e2ed6c647140d21cbd9ca375b95a1385d991cbad8fbe1231',
+              '07c5fa6078ab424712c3c22cec4662da62e8e418ed7eed2df57060af57098f22',
+          )
+          paths = (
+              Path('tools/native_retirement_contract.py'),
+              Path('tools/native_retirement_census.c'),
+          )
+          for path in paths:
+              text = path.read_text(encoding='utf-8')
+              for old in old_values:
+                  assert old not in text, (path, old)
+              for new in new_values:
+                  assert text.count(new) == 1, (path, new)
+          print('validated final dependency identity mirrors')
+          PY
+          git show --check --format=fuller --stat HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Push validated repair without overwriting concurrent work
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote_head=$(git ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | awk '{print $1}')
+          if [ "$remote_head" != "$GITHUB_SHA" ]; then
+            echo "branch advanced during validation: expected $GITHUB_SHA, found $remote_head" >&2
+            exit 1
+          fi
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
