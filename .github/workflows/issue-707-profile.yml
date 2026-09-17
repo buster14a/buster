@@ -1,0 +1,220 @@
+name: Issue 707 Zig configure profile
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/issue-707-profile.yml
+      - CMakeLists.txt
+      - cmake/**
+      - tools/ci_zig.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-707-profile-${{ github.event.pull_request.number }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ matrix.name }} / ${{ matrix.cache_mode }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86-64
+            runner: windows-2025
+            platform: windows
+            zig_target: x86_64-windows
+            cache_mode: default
+          - name: Windows x86-64
+            runner: windows-2025
+            platform: windows
+            zig_target: x86_64-windows
+            cache_mode: runner-temp
+          - name: macOS x86-64
+            runner: macos-26-intel
+            platform: macos
+            zig_target: x86_64-macos
+            cache_mode: default
+          - name: macOS x86-64
+            runner: macos-26-intel
+            platform: macos
+            zig_target: x86_64-macos
+            cache_mode: runner-temp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install verified Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_cmd=python3
+          if [[ "${{ matrix.platform }}" == windows ]]; then
+            python_cmd=python
+          fi
+          "$python_cmd" tools/ci_zig.py \
+            --target "${{ matrix.zig_target }}" \
+            --cache-directory "$RUNNER_TEMP/zig-archive" \
+            --install-directory "$RUNNER_TEMP/zig"
+
+      - name: Profile exact Zig configure (macOS)
+        if: ${{ matrix.platform == 'macos' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          evidence="$RUNNER_TEMP/buster-ci"
+          build_root="build/zig-profile-${{ matrix.cache_mode }}"
+          profile="$PWD/$build_root/cmake-profile.json"
+          mkdir -p "$evidence" "$build_root"
+          if [[ "${{ matrix.cache_mode }}" == runner-temp ]]; then
+            export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-global-cache"
+            mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+          else
+            unset ZIG_GLOBAL_CACHE_DIR || true
+          fi
+          zig env > "$evidence/zig-env-before.json"
+          start_ns="$(python3 -c 'import time; print(time.time_ns())')"
+          set +e
+          cmake \
+            --profiling-format=google-trace \
+            --profiling-output="$profile" \
+            --warn-uninitialized \
+            -Werror=dev \
+            -B "$build_root" \
+            -DBUSTER_CI=ON \
+            '-DCMAKE_C_COMPILER=zig;cc' \
+            -DBUSTER_FUZZ_AVAILABLE=OFF \
+            -DBUSTER_SANITIZE=OFF \
+            -DCMAKE_LINKER_TYPE=DEFAULT \
+            -DBUSTER_LTO=OFF \
+            -DBUSTER_TIME_TRACE=OFF \
+            -DBUSTER_INSTRUMENT=OFF \
+            -DBUSTER_INCLUDE_TESTS=ON \
+            -DBUSTER_LINK_LIBC=ON \
+            -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
+            -DBUSTER_DEVELOPER_TARGETS=OFF \
+            -DBUSTER_BUILD_DRIVER="$PWD/build/build" \
+            -DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE \
+            -DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE \
+            -G 'Ninja Multi-Config' \
+            -DCMAKE_DEFAULT_BUILD_TYPE=Debug \
+            -DCMAKE_CONFIGURATION_TYPES=Debug \
+            -DBUSTER_SINGLE_THREADED=OFF \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            2>&1 | tee "$evidence/configure.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          end_ns="$(python3 -c 'import time; print(time.time_ns())')"
+          zig env > "$evidence/zig-env-after.json"
+          cp "$profile" "$evidence/cmake-profile.json"
+          cache_dir="$(python3 - "$evidence/zig-env-after.json" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1]))["global_cache_dir"])
+          PY
+          )"
+          cache_bytes=0
+          if [[ -d "$cache_dir" ]]; then
+            cache_bytes="$(du -sk "$cache_dir" | awk '{print $1 * 1024}')"
+          fi
+          python3 - "$evidence/result.json" "$start_ns" "$end_ns" "$status" "$cache_bytes" "$cache_dir" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          output, start_ns, end_ns, status, cache_bytes, cache_dir = sys.argv[1:]
+          payload = {
+              "platform": "macos",
+              "cache_mode": "${{ matrix.cache_mode }}",
+              "elapsed_seconds": (int(end_ns) - int(start_ns)) / 1_000_000_000,
+              "exit_code": int(status),
+              "zig_global_cache_bytes": int(cache_bytes),
+              "zig_global_cache_dir": cache_dir,
+          }
+          pathlib.Path(output).write_text(json.dumps(payload, indent=2) + "\n")
+          PY
+          exit "$status"
+
+      - name: Profile exact Zig configure (Windows)
+        if: ${{ matrix.platform == 'windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $Evidence = Join-Path $env:RUNNER_TEMP 'buster-ci'
+          $BuildRoot = "build\zig-profile-${{ matrix.cache_mode }}"
+          New-Item -ItemType Directory -Force -Path $Evidence, $BuildRoot | Out-Null
+          if ('${{ matrix.cache_mode }}' -eq 'runner-temp') {
+            $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'zig-global-cache'
+            New-Item -ItemType Directory -Force -Path $env:ZIG_GLOBAL_CACHE_DIR | Out-Null
+          } else {
+            Remove-Item Env:ZIG_GLOBAL_CACHE_DIR -ErrorAction SilentlyContinue
+          }
+          zig env | Set-Content -Encoding utf8 (Join-Path $Evidence 'zig-env-before.json')
+          $Driver = Join-Path (Get-Location) 'build\build.exe'
+          $Profile = Join-Path (Get-Location) "$BuildRoot\cmake-profile.json"
+          $Arguments = @(
+            '--profiling-format=google-trace',
+            "--profiling-output=$Profile",
+            '--warn-uninitialized',
+            '-Werror=dev',
+            '-B', $BuildRoot,
+            '-DBUSTER_CI=ON',
+            '-DCMAKE_C_COMPILER=zig;cc',
+            '-DBUSTER_FUZZ_AVAILABLE=OFF',
+            '-DBUSTER_SANITIZE=OFF',
+            '-DCMAKE_LINKER_TYPE=DEFAULT',
+            '-DBUSTER_LTO=OFF',
+            '-DBUSTER_TIME_TRACE=OFF',
+            '-DBUSTER_INSTRUMENT=OFF',
+            '-DBUSTER_INCLUDE_TESTS=ON',
+            '-DBUSTER_LINK_LIBC=ON',
+            '-DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF',
+            '-DBUSTER_DEVELOPER_TARGETS=OFF',
+            "-DBUSTER_BUILD_DRIVER=$Driver",
+            '-G', 'Ninja Multi-Config',
+            '-DCMAKE_DEFAULT_BUILD_TYPE=Debug',
+            '-DCMAKE_CONFIGURATION_TYPES=Debug',
+            '-DCMAKE_CROSS_CONFIGS=all',
+            '-DBUSTER_SINGLE_THREADED=OFF',
+            '-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY'
+          )
+          $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+          & cmake @Arguments 2>&1 | Tee-Object -FilePath (Join-Path $Evidence 'configure.log')
+          $Status = $LASTEXITCODE
+          $Stopwatch.Stop()
+          zig env | Set-Content -Encoding utf8 (Join-Path $Evidence 'zig-env-after.json')
+          Copy-Item -LiteralPath $Profile -Destination (Join-Path $Evidence 'cmake-profile.json')
+          $ZigEnv = Get-Content -Raw -LiteralPath (Join-Path $Evidence 'zig-env-after.json') | ConvertFrom-Json
+          $CacheDir = [string]$ZigEnv.global_cache_dir
+          $CacheBytes = 0
+          if ($CacheDir -and (Test-Path -LiteralPath $CacheDir)) {
+            $CacheBytes = (Get-ChildItem -LiteralPath $CacheDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            if ($null -eq $CacheBytes) { $CacheBytes = 0 }
+          }
+          @{
+            platform = 'windows'
+            cache_mode = '${{ matrix.cache_mode }}'
+            elapsed_seconds = $Stopwatch.Elapsed.TotalSeconds
+            exit_code = $Status
+            zig_global_cache_bytes = [Int64]$CacheBytes
+            zig_global_cache_dir = $CacheDir
+          } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Evidence 'result.json')
+          if ($Status -ne 0) { exit $Status }
+
+      - name: Retain profiles
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-707-profile-${{ matrix.platform }}-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci
+          if-no-files-found: error
+          retention-days: 7
