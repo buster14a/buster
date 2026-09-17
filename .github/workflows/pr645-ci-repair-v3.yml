@@ -42,3 +42,5 @@ jobs:
                   docs/native-retirement-dependencies-v1.json
           git commit -m "ci: repair PR 645 rebased acceptance checks"
           git push origin HEAD:codex/569-canonical-landing-20260914
+
+# Re-triggered after rebased profile literals were reconciled.
