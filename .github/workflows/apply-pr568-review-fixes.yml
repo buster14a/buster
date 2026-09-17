@@ -34,10 +34,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C target rev-parse HEAD)" = 787d7a15bad51055a12b207077aa98714d235320
-          cat helper/.github/pr568-review-fix/patch.gz.part-* > "$RUNNER_TEMP/pr568-review.patch.gz"
-          echo '895b7341ff7cfa437810ec49863c85483910f3191c64bc7b334775a5a0f93243  '"$RUNNER_TEMP/pr568-review.patch.gz" | sha256sum --check
+          cp helper/.github/pr568-review-fix/patch-v2.gz "$RUNNER_TEMP/pr568-review.patch.gz"
+          echo '0bca71190ea22116956d476454e947ab2ca82ed66b46538b43ba3040207049c4  '"$RUNNER_TEMP/pr568-review.patch.gz" | sha256sum --check
           gzip -dc "$RUNNER_TEMP/pr568-review.patch.gz" > "$RUNNER_TEMP/pr568-review.patch"
-          echo 'cfaec81885ca3fe6ec4fb0bdd2c49ce6d26a9dd6e82de643570f2117c6e44a24  '"$RUNNER_TEMP/pr568-review.patch" | sha256sum --check
+          echo 'b9c421338b75ba825bdac88a8f9b9cdf0b8f467636e9c71e53713cb810a7d82e  '"$RUNNER_TEMP/pr568-review.patch" | sha256sum --check
           git -C target apply --check "$RUNNER_TEMP/pr568-review.patch"
           git -C target apply --index "$RUNNER_TEMP/pr568-review.patch"
           python3 - <<'PY'
