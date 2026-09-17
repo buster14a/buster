@@ -29,8 +29,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/pr767_repair.py
+          python3 tools/pr767_repair_followup.py
           git diff --check
           test ! -e tools/pr767_repair.py
+          test ! -e tools/pr767_repair_followup.py
           test ! -e .github/workflows/pr767-code4-fix.yml
 
       - name: Build and run the registered regression suite
