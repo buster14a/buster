@@ -5,8 +5,24 @@
 UnitTestResult integer_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+    u64 sum = UINT64_MAX;
+    bool valid = u64_add_checked(0, 0, &sum);
+    BUSTER_TEST(arguments, valid && sum == 0);
+
+    sum = 0;
+    valid = u64_add_checked(UINT64_MAX - 1, 1, &sum);
+    BUSTER_TEST(arguments, valid && sum == UINT64_MAX);
+
+    sum = 7;
+    valid = u64_add_checked(UINT64_MAX, 1, &sum);
+    BUSTER_TEST(arguments, !valid && sum == 7);
+
+    valid = u64_add_checked(1, 1, 0);
+    BUSTER_TEST(arguments, !valid);
+
     u64 aligned = UINT64_MAX;
-    bool valid = align_forward_checked(0, 0, &aligned);
+    valid = align_forward_checked(0, 0, &aligned);
     BUSTER_TEST(arguments, !valid && aligned == UINT64_MAX);
 
     aligned = UINT64_MAX;

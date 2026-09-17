@@ -117,6 +117,40 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
     Arena* arena = arguments->arena;
 
     {
+        SliceString8 empty = {0};
+        PosixStringList empty_list = posix_string_list_from_slice_string(arena, empty);
+        PosixStringList empty_environment = posix_environment_from_keys_and_values(arena, empty, empty);
+        BUSTER_TEST(arguments, empty_list[0] == 0);
+        BUSTER_TEST(arguments, empty_environment[0] == 0);
+
+        u64 large_count = 1024;
+        String8* parts = arena_allocate(arena, String8, large_count);
+        String8* keys = arena_allocate(arena, String8, large_count);
+        String8* values = arena_allocate(arena, String8, large_count);
+        for (u64 index = 0; index < large_count; index += 1)
+        {
+            parts[index] = S8("entry");
+            keys[index] = S8("KEY");
+            values[index] = S8("VALUE");
+        }
+
+        SliceString8 part_slice = {.pointer = parts, .length = large_count};
+        SliceString8 key_slice = {.pointer = keys, .length = large_count};
+        SliceString8 value_slice = {.pointer = values, .length = large_count};
+        PosixStringList large_list = posix_string_list_from_slice_string(arena, part_slice);
+        PosixStringList large_environment = posix_environment_from_keys_and_values(arena, key_slice, value_slice);
+        bool list_matches = large_list[large_count] == 0;
+        bool environment_matches = large_environment[large_count] == 0;
+        for (u64 index = 0; index < large_count; index += 1)
+        {
+            list_matches &= large_list[index] == parts[index].pointer;
+            environment_matches &= string_equal(string_from_pointer(large_environment[index]), S8("KEY=VALUE"));
+        }
+        BUSTER_TEST(arguments, list_matches);
+        BUSTER_TEST(arguments, environment_matches);
+    }
+
+    {
         String8 empty = {0};
         String8 invalid = {.length = 1};
         String8 x8 = S8("x");

@@ -486,6 +486,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_compress_store_byte_fallback
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_widen_byte_fallback(Simd512 value, u32 quarter)
 {
     Simd512 result = simd512_splat_fallback(0);
+    // vpmovzxbd selects a 128-bit quarter with the low two immediate bits.
+    // Keep malformed fallback calls inside `value` and match that decoding;
+    // valid quarter values 0 through 3 are unchanged.
+    quarter &= 3;
     for (u32 lane = 0; lane < 16; lane += 1)
     {
         BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4] = BUSTER_SIMD_FALLBACK_BYTES(value)[quarter * 16 + lane];

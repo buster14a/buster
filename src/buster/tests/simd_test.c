@@ -373,6 +373,22 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, lanes_match);
 
     lanes_match = true;
+    probe.vector = simd512_widen_byte(value, 1);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match &= probe.words[word] == word + 16;
+    }
+    BUSTER_TEST(arguments, lanes_match);
+
+    lanes_match = true;
+    probe.vector = simd512_widen_byte(value, 2);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match &= probe.words[word] == word + 32;
+    }
+    BUSTER_TEST(arguments, lanes_match);
+
+    lanes_match = true;
     probe.vector = simd512_widen_byte(value, 3);
     for (u32 word = 0; word < 16; word += 1)
     {
@@ -387,6 +403,18 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
         lanes_match &= probe.words[word] == (u32)high[48 + word];
     }
     BUSTER_TEST(arguments, lanes_match);
+
+#if !BUSTER_SIMD_512
+    // The fallback masks malformed selectors to the architectural low
+    // two bits, so 5 selects quarter 1 without reading beyond `value`.
+    lanes_match = true;
+    probe.vector = simd512_widen_byte(value, 5);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match &= probe.words[word] == word + 16;
+    }
+    BUSTER_TEST(arguments, lanes_match);
+#endif
 
     lanes_match = true;
     probe.vector = simd512_shift_left_word(simd512_widen_byte(value, 1), 8);
