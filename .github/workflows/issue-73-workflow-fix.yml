@@ -27,13 +27,8 @@ jobs:
 
           path = Path('.github/workflows/native-retirement-contract.yml')
           text = path.read_text(encoding='utf-8')
-          old = '''          python3 tools/native_retirement_sdks_test.py -v
-          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
-'''
-          new = '''          python3 tools/native_retirement_sdks_test.py -v
-          mkdir -p evidence
-          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
-'''
+          old = '          python3 tools/native_retirement_sdks_test.py -v\n          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract\n'
+          new = '          python3 tools/native_retirement_sdks_test.py -v\n          mkdir -p evidence\n          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract\n'
           if text.count(old) != 1:
               raise SystemExit(f'expected one manifest producer command, found {text.count(old)}')
           path.write_text(text.replace(old, new), encoding='utf-8')
