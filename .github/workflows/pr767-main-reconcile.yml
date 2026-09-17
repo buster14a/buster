@@ -24,11 +24,13 @@ jobs:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Merge current main and validate resolution
+      - name: Merge current main into a clean local commit
         env:
           EXPECTED_MAIN: a6613ef20125a4c537fc174db705ea43476e95bf
         run: |
           set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch --no-tags origin main
           actual_main=$(git rev-parse origin/main)
           if [ "$actual_main" != "$EXPECTED_MAIN" ]; then
@@ -102,25 +104,28 @@ jobs:
           print(f'merged support declaration SHA-256: {digest}')
           PY
 
-          git add docs/native-retirement-support-v1.tsv tools/native_retirement_performance_binding.py .github/workflows/pr767-main-reconcile.yml
+          git add -A
           remaining=$(git diff --name-only --diff-filter=U)
           if [ -n "$remaining" ]; then
             echo "unexpected merge conflicts remain:" >&2
             printf '%s\n' "$remaining" >&2
             exit 1
           fi
-
+          git diff --cached --check
+          git commit -m 'Merge current main into PR #767 and repin support census'
+          test -z "$(git status --porcelain)"
+      - name: Validate clean reconciled tree
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^2)" = 'a6613ef20125a4c537fc174db705ea43476e95bf'
           python3 tools/native_retirement_performance_identity_test.py
           python3 tools/native_retirement_performance_binding_test.py
-          git diff --check
-          git status --short
-      - name: Commit reconciled merge
+          git show --check --format=fuller --stat HEAD
+          test -z "$(git status --porcelain)"
+      - name: Push validated merge
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'Merge current main into PR #767 and repin support census'
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
