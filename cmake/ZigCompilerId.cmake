@@ -2,7 +2,8 @@
 # For `zig cc`, that cold link can construct Zig's libc/linker cache even
 # though CMake only needs the identification strings in the object file.
 # This file is included before project() and changes only explicit
-# `zig cc` C compiler commands; all other compiler state is untouched.
+# `zig cc` C compiler commands. It must not set CMAKE_TOOLCHAIN_FILE or alter
+# compiler discovery for Clang, GCC, or any other non-Zig configuration.
 set(BUSTER_ZIG_CC OFF)
 if (DEFINED CMAKE_C_COMPILER AND NOT CMAKE_C_COMPILER STREQUAL "")
     set(BUSTER_ZIG_COMPILER_COMMAND ${CMAKE_C_COMPILER})
