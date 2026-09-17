@@ -18020,6 +18020,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_trailing_token_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    } invalid[] = {
+        {S8("int x y;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("int x 3;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("float f g;\nint take(void) { return 1; }\n"), 1, 9},
+        {S8("int x, y z;\nint take(void) { return 1; }\n"), 1, 10},
+        {S8("typedef int T; unsigned T v;\nint take(void) { return 1; }\n"), 1, 27},
+        {S8("typedef int T; T U v;\nint take(void) { return 1; }\n"), 1, 20},
+        {S8("int take(void) { int x y; return 1; }\n"), 1, 24},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            diagnosed |= diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION &&
+                         string_equal(diagnostic.message, S8("unexpected token after declarator")) &&
+                         diagnostic.location.line == invalid[case_index].line &&
+                         diagnostic.location.column == invalid[case_index].column;
+        }
+        bool recovered = false;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            recovered |= string_equal(parse.declarations[declaration_index].name, S8("take"));
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, recovered, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+
+    String8 valid[] = {
+        S8("int a, b;\n"),
+        S8("int (*callback)(int);\n"),
+        S8("int (*(*nested)(void))(int);\n"),
+        S8("typedef int T; T value; int take(void) { T local = value; return local; }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18364,6 +18425,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
