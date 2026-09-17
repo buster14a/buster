@@ -1,4 +1,4 @@
-name: Probe issue 513 cutover replay
+name: Inspect issue 513 cutover conflicts
 on:
   push:
     branches: [codex/513-reconcile-probe]
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Replay the exact recovered cutover without publishing
+      - name: Replay and print conflict neighborhoods
         shell: bash
         run: |
           set -uo pipefail
@@ -21,14 +21,35 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main recovery/6aa84ae5/522-514-cutover-review
           git checkout --detach origin/main
-          set +e
-          git cherry-pick --no-commit 0f7676b27def833143727947fa0e20682007a73f >merge.log 2>&1
-          replay_status=$?
-          set -e
-          cat merge.log
-          printf '\nREPLAY_STATUS=%s\n' "$replay_status"
-          printf '\nUNMERGED_PATHS\n'
-          git diff --name-only --diff-filter=U || true
-          printf '\nSTATUS\n'
-          git status --short
-          exit 0
+          git cherry-pick --no-commit 0f7676b27def833143727947fa0e20682007a73f >/tmp/replay.log 2>&1 || true
+          cat /tmp/replay.log
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = [
+              'src/buster/lib/compiler/codegen/codegen.c',
+              'src/buster/lib/compiler/codegen/codegen_internal.h',
+              'src/buster/tests/compiler/driver/driver_test.c',
+          ]
+          for name in paths:
+              lines = Path(name).read_text(errors='replace').splitlines()
+              starts = [i for i, line in enumerate(lines) if line.startswith('<<<<<<<')]
+              print(f'\n===== {name}: {len(starts)} conflict(s), {len(lines)} lines =====')
+              for n, start in enumerate(starts, 1):
+                  lo = max(0, start - 50)
+                  end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('>>>>>>>')), start)
+                  hi = min(len(lines), end + 51)
+                  print(f'\n--- conflict {n}: lines {start + 1}-{end + 1} ---')
+                  for i in range(lo, hi):
+                      print(f'{i + 1:07d}: {lines[i]}')
+          PY
+          printf '\n===== stage statistics =====\n'
+          for path in \
+            src/buster/lib/compiler/codegen/codegen.c \
+            src/buster/lib/compiler/codegen/codegen_internal.h \
+            src/buster/tests/compiler/driver/driver_test.c; do
+            printf '\n%s\n' "$path"
+            for stage in 1 2 3; do
+              printf 'stage %s: ' "$stage"
+              git show ":$stage:$path" 2>/dev/null | wc -l || true
+            done
+          done
