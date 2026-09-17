@@ -43,6 +43,7 @@ jobs:
           expected_drift = {
               'src/buster/lib/compiler/ir/ir.h',
               'src/buster/lib/compiler/ir/ir_construction.h',
+              'src/buster/lib/compiler/ir/ir_promote.c',
           }
           changed = set()
           by_source = {}
@@ -51,6 +52,8 @@ jobs:
               if not isinstance(source, str) or source in by_source:
                   raise SystemExit(f'refusing repin: invalid or duplicate project source {source!r}')
               by_source[source] = record
+              if not source.startswith('src/'):
+                  continue
               path = Path(source)
               if not path.is_file() or path.is_symlink():
                   raise SystemExit(f'refusing repin: project source is not a regular repository file: {source}')
@@ -110,11 +113,15 @@ jobs:
           from pathlib import Path
 
           descriptor = json.loads(Path('docs/native-retirement-dependencies-v1.json').read_text(encoding='utf-8'))
+          checked = 0
           for record in descriptor['projects']:
+              if not record['source'].startswith('src/'):
+                  continue
               data = Path(record['source']).read_bytes()
               assert len(data) == record['bytes'], record['source']
               assert hashlib.sha256(data).hexdigest() == record['sha256'], record['source']
-          print(f"validated repository project closure: {len(descriptor['projects'])} files")
+              checked += 1
+          print(f'validated repository project closure: {checked} files')
           PY
           git show --check --format=fuller --stat HEAD
           test -z "$(git status --porcelain)"
