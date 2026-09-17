@@ -220,6 +220,71 @@ BUSTER_GLOBAL_LOCAL bool c_test_translate_source_paths_agree(Arena* arena, Strin
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_parenthesized_operand(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source =
+            S8("#define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))\n"
+               "static int const table[3];\n"
+               "enum { COUNT = BUSTER_ARRAY_LENGTH(table) };\n"
+               "int probe(void) { return COUNT; }\n");
+        CPreprocessResult preprocess =
+            c_preprocess(temporary.arena, source,
+                         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        bool found_count = false;
+        for (u32 member_index = 0; member_index < parsed.enum_member_count; member_index += 1)
+        {
+            CEnumMember member = parsed.enum_members[member_index];
+            if (string_equal(member.name, S8("COUNT")))
+            {
+                found_count = true;
+                BUSTER_TEST(arguments, !member.is_negative && member.value == 3);
+            }
+        }
+        BUSTER_TEST(arguments, found_count);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = S8("static int value;\n"
+                            "enum { BROKEN = value };\n"
+                            "int probe(void) { return BROKEN; }\n");
+        CPreprocessResult preprocess =
+            c_preprocess(temporary.arena, source,
+                         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        if (parsed.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, parsed.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CONSTEXPR);
+            BUSTER_STRING_TEST(arguments, parsed.diagnostics[0].message,
+                               S8("enumerator 'BROKEN' is not an integer constant expression"));
+            BUSTER_TEST(arguments, parsed.diagnostics[0].location.line == 2);
+            BUSTER_TEST(arguments, parsed.diagnostics[0].location.column == 8);
+        }
+        bool found_broken = false;
+        for (u32 member_index = 0; member_index < parsed.enum_member_count; member_index += 1)
+        {
+            CEnumMember member = parsed.enum_members[member_index];
+            if (string_equal(member.name, S8("BROKEN")))
+            {
+                found_broken = true;
+                BUSTER_TEST(arguments, !member.is_negative && member.value == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_broken);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A lexer differential helper reuses its arena. Its rewind must retain the
 // dirty prefix, or the following semantic parse can read non-bool bytes from
 // an aggregate lookup table allocated with arena_allocate_zeroed (#235).
@@ -18862,6 +18927,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_compound_literal);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
 
