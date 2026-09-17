@@ -18,10 +18,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Package exact checkout
         shell: bash
-        run: tar --exclude=.git -czf issue-674-source.tar.gz .
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/issue-674-source.tar.gz" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: issue-674-source
-          path: issue-674-source.tar.gz
+          path: ${{ runner.temp }}/issue-674-source.tar.gz
           compression-level: 0
           retention-days: 1
