@@ -367,6 +367,15 @@
   The machine tests independently check complete retry windows and invalid
   payload/frame contracts; the mnemonic oracle is
   `tests/aarch64_atomic_update_pair_oracle.s`.
+- System V x86-64 `va_list` is exactly 24 bytes, aligned to eight: packed
+  GP/FP offsets at zero and pointers at eight and sixteen. It has no private
+  fourth word or ended flag. MIR `VA_START` initializes those three words,
+  `VA_COPY` copies 24 bytes, and `VA_END` emits no destructive write. The
+  separate 176-byte register-save area is not part of the public object.
+  Target layout, parser/IR assertions, selected frame bounds and compiled
+  guarded arrays/member/pointer destinations must agree. The registered
+  `sysv-va-list` differential pair exchanges public lists in both directions
+  with a native compiler, including already-exhausted GP/FP pools.
 - Windows/UEFI x86-64 variadic definitions home RCX/RDX/R8/R9 before any
   argument capture can reuse those registers. The caller-owned homes adjoin
   the overflow arguments; both homing and `LEA_INCOMING` include placement's
