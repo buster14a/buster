@@ -24,7 +24,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Repin the reviewed repository-owned closure
+      - name: Repin reviewed dependency identities
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -33,9 +33,15 @@ jobs:
           import hashlib
           import json
           from pathlib import Path
+          import re
+          import sys
+
+          sys.path.insert(0, str(Path('tools').resolve()))
+          import native_retirement_materializer as materializer
 
           descriptor_path = Path('docs/native-retirement-dependencies-v1.json')
-          descriptor = json.loads(descriptor_path.read_text(encoding='utf-8'))
+          original = descriptor_path.read_text(encoding='utf-8')
+          descriptor = json.loads(original)
           projects = descriptor.get('projects')
           if not isinstance(projects, list):
               raise SystemExit('refusing repin: descriptor has no projects list')
@@ -45,6 +51,7 @@ jobs:
               'src/buster/lib/compiler/ir/ir_construction.h',
               'src/buster/lib/compiler/ir/ir_promote.c',
           }
+          actual_identities = {}
           changed = set()
           by_source = {}
           for record in projects:
@@ -58,16 +65,39 @@ jobs:
               if not path.is_file() or path.is_symlink():
                   raise SystemExit(f'refusing repin: project source is not a regular repository file: {source}')
               data = path.read_bytes()
-              size = len(data)
-              digest = hashlib.sha256(data).hexdigest()
-              if record.get('bytes') != size or record.get('sha256') != digest:
+              identity = (len(data), hashlib.sha256(data).hexdigest())
+              actual_identities[source] = identity
+              if record.get('bytes') != identity[0] or record.get('sha256') != identity[1]:
                   changed.add(source)
-                  record['bytes'] = size
-                  record['sha256'] = digest
-                  print(f'repinned {source}: bytes={size} sha256={digest}')
 
           if changed != expected_drift:
               raise SystemExit(f'refusing repin: expected drift {sorted(expected_drift)}, found {sorted(changed)}')
+
+          def block_bounds(text, source):
+              marker = f'      "source": "{source}",'
+              if text.count(marker) != 1:
+                  raise SystemExit(f'refusing repin: expected one descriptor record for {source}')
+              marker_at = text.index(marker)
+              start = text.rfind('    {', 0, marker_at)
+              end = text.find('\n    }', marker_at)
+              if start < 0 or end < 0:
+                  raise SystemExit(f'refusing repin: malformed descriptor record for {source}')
+              return start, end + len('\n    }')
+
+          def patch_identity(text, source, size, digest):
+              start, end = block_bounds(text, source)
+              block = text[start:end]
+              block, size_count = re.subn(r'(?m)^      "bytes": [0-9]+,$', f'      "bytes": {size},', block)
+              block, digest_count = re.subn(r'(?m)^      "sha256": "[0-9a-f]{64}"$', f'      "sha256": "{digest}"', block)
+              if size_count != 1 or digest_count != 1:
+                  raise SystemExit(f'refusing repin: identity fields are not canonical for {source}')
+              return text[:start] + block + text[end:]
+
+          text = original
+          for source in sorted(expected_drift):
+              size, digest = actual_identities[source]
+              text = patch_identity(text, source, size, digest)
+              print(f'repinned {source}: bytes={size} sha256={digest}')
 
           append_source = 'src/buster/lib/compiler/ir/ir_append.h'
           if append_source in by_source:
@@ -76,18 +106,58 @@ jobs:
           if not append_path.is_file() or append_path.is_symlink():
               raise SystemExit('refusing repin: merged main does not contain ir_append.h')
           append_data = append_path.read_bytes()
-          append_record = {
-              'source': append_source,
-              'provenance': f'repo:{append_source}',
-              'destination': 'dependencies/project-include/buster/lib/compiler/ir/ir_append.h',
-              'bytes': len(append_data),
-              'sha256': hashlib.sha256(append_data).hexdigest(),
-          }
-          projects.append(append_record)
-          projects.sort(key=lambda record: record['source'])
-          print(f"added {append_source}: bytes={append_record['bytes']} sha256={append_record['sha256']}")
+          append_size = len(append_data)
+          append_digest = hashlib.sha256(append_data).hexdigest()
+          _ir_h_start, ir_h_end = block_bounds(text, 'src/buster/lib/compiler/ir/ir.h')
+          if text[ir_h_end:ir_h_end + 1] != ',':
+              raise SystemExit('refusing repin: ir.h record is not followed by a canonical comma')
+          insert_at = ir_h_end + 1
+          append_record = (
+              '\n    {\n'
+              f'      "source": "{append_source}",\n'
+              f'      "provenance": "repo:{append_source}",\n'
+              '      "destination": "dependencies/project-include/buster/lib/compiler/ir/ir_append.h",\n'
+              f'      "bytes": {append_size},\n'
+              f'      "sha256": "{append_digest}"\n'
+              '    },'
+          )
+          text = text[:insert_at] + append_record + text[insert_at:]
+          print(f'added {append_source}: bytes={append_size} sha256={append_digest}')
 
-          descriptor_path.write_text(json.dumps(descriptor, indent=2) + '\n', encoding='utf-8')
+          parsed = json.loads(text)
+          records, _metadata = materializer.parse_manifest(parsed)
+          descriptor_sha = hashlib.sha256(text.encode('utf-8')).hexdigest()
+          ledger_sha = hashlib.sha256(materializer._ledger(records)).hexdigest()
+          descriptor_path.write_text(text, encoding='utf-8')
+          print(f'dependency descriptor sha256={descriptor_sha}')
+          print(f'dependency ledger sha256={ledger_sha}')
+
+          old_descriptor_sha = '7e27cce44651a4adaea2707fe2eaefd0f2a0a29564bb40a5262a18685ff91daa'
+          old_ledger_sha = 'eb69112f4c38a2298dddfa6d132c594c0349b5b31ee5cf309bf42820c3475944'
+
+          def replace_python_constant(path, name, expected, replacement):
+              source = path.read_text(encoding='utf-8')
+              pattern = re.compile(rf'(?m)^({re.escape(name)} = ")([0-9a-f]{{64}})(")$')
+              match = pattern.search(source)
+              if not match or match.group(2) != expected or len(pattern.findall(source)) != 1:
+                  raise SystemExit(f'refusing repin: unexpected {name} in {path}')
+              path.write_text(pattern.sub(rf'\g<1>{replacement}\g<3>', source), encoding='utf-8')
+
+          def replace_c_constant(path, name, expected, replacement):
+              source = path.read_text(encoding='utf-8')
+              pattern = re.compile(rf'(?m)^([^\n]*\b{re.escape(name)} = S8_INITIALIZER\(")([0-9a-f]{{64}})("\);)$')
+              matches = pattern.findall(source)
+              if len(matches) != 1 or matches[0][1] != expected:
+                  raise SystemExit(f'refusing repin: unexpected {name} in {path}')
+              path.write_text(pattern.sub(rf'\g<1>{replacement}\g<3>', source), encoding='utf-8')
+
+          contract_path = Path('tools/native_retirement_contract.py')
+          producer_path = Path('tools/native_retirement_census.c')
+          replace_python_constant(contract_path, 'FULL_DEPENDENCY_DESCRIPTOR_SHA256', old_descriptor_sha, descriptor_sha)
+          replace_python_constant(contract_path, 'FULL_DEPENDENCY_LEDGER_SHA256', old_ledger_sha, ledger_sha)
+          replace_c_constant(producer_path, 'nrc_dependency_descriptor_sha256', old_descriptor_sha, descriptor_sha)
+          replace_c_constant(producer_path, 'nrc_dependency_ledger_sha256', old_ledger_sha, ledger_sha)
+
           helper = Path('.github/workflows/pr767-external-closure-repin.yml')
           if not helper.is_file():
               raise SystemExit('refusing cleanup: missing one-shot workflow')
@@ -98,7 +168,7 @@ jobs:
           git diff --cached --stat
           git commit -m 'Repin native retirement project closure after main merge'
           test -z "$(git status --porcelain)"
-      - name: Validate the repaired descriptor and contract
+      - name: Validate repaired descriptor and contract
         run: |
           set -euo pipefail
           test -z "$(git status --porcelain)"
