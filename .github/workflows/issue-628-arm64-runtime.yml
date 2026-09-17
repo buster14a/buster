@@ -1,0 +1,74 @@
+name: Issue 628 Windows Arm64 runtime fix
+
+on:
+  push:
+    branches:
+      - fix/628-sanitizer-provenance
+    paths:
+      - .github/workflows/issue-628-arm64-runtime.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout issue branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/628-sanitizer-provenance
+          fetch-depth: 0
+
+      - name: Mark the unsupported hosted runtime unavailable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source_path = Path("tools/differential.c")
+          source = source_path.read_text(encoding="utf-8")
+          old = """    bool available = compiler.length > 0;
+          """
+          new = """#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64
+              // The hosted Windows Arm64 LLVM toolchain currently has no linkable
+              // compiler-rt UBSan runtime. Report the real runtime control as
+              // unavailable; never replace it with sanitizer-looking program text.
+              bool available = false;
+          #else
+              bool available = compiler.length > 0;
+          #endif
+          """
+          if source.count(old) != 1:
+              raise SystemExit("unexpected sanitizer availability source")
+          source_path.write_text(source.replace(old, new), encoding="utf-8")
+
+          docs_path = Path("docs/differential-testing.md")
+          docs = docs_path.read_text(encoding="utf-8")
+          anchor = """valid oracle observation.
+          """
+          addition = """valid oracle observation.
+
+          The real recovering/fatal UBSan self-test controls execute only where the
+          host toolchain supplies a linkable compiler-rt runtime. The hosted Windows
+          AArch64 LLVM toolchain currently reports this control as unavailable; it is
+          never replaced by simulated sanitizer text, and the ordinary-output,
+          crash, timeout, launch, wait, and worker controls still execute.
+          """
+          if docs.count(anchor) != 1:
+              raise SystemExit("unexpected sanitizer documentation anchor")
+          docs_path.write_text(docs.replace(anchor, addition), encoding="utf-8")
+          PY
+          git diff --check
+          git diff -- tools/differential.c docs/differential-testing.md
+
+      - name: Commit candidate repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tools/differential.c docs/differential-testing.md
+          git commit -m 'test: handle unavailable Windows Arm64 UBSan runtime'
+          git push origin HEAD:fix/628-sanitizer-provenance
