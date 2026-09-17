@@ -13,6 +13,12 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      cmake_profile:
+        description: Retain native per-tree CMake command profiles
+        required: false
+        default: false
+        type: boolean
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -100,6 +106,10 @@ jobs:
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
+      # Profiling is diagnostic and opt-in. The manual dispatch input is
+      # captured in the event payload, so delayed and retried jobs use one value.
+      # Every non-dispatch event and the default manual run stay uninstrumented.
+      BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
@@ -178,6 +188,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
           "$BUSTER_CI_PYTHON" tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-shard.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
+          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
@@ -309,6 +320,17 @@ jobs:
           }
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Postprocess only: build.c still owns every configure, probe and build.
+      # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
+      - name: Collect CMake configure evidence
+        id: configure_evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence.py --build-root build --output "$RUNNER_TEMP/buster-ci/configure" --profile-requested "$BUSTER_CMAKE_PROFILE"
 
       - name: Desktop result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
