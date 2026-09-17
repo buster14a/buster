@@ -27,9 +27,12 @@ PARTITIONED_JOBS = SHARDED_JOBS + NATIVE
 UEFI = ("UEFI firmware boot",)
 ANALYZER = ("Clang analyzer shards",)
 SUITE_JOBS = PARTITIONED_JOBS + UEFI + ANALYZER
+COMBINATION_SHARDS = ("release", "checks")
+COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS for shard in COMBINATION_SHARDS)
+COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
-JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "started_at", "completed_at", "labels")
+JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "created_at", "started_at", "completed_at", "labels")
 STEP_FIELDS = ("name", "status", "conclusion", "started_at", "completed_at")
 
 
@@ -46,7 +49,8 @@ def measure(run):
     result = None
     jobs = run.get("jobs", [])
     names = sorted(job.get("name", "") for job in jobs)
-    suites = names == sorted(PARTITIONED_JOBS) or names == sorted(SUITE_JOBS)
+    combinations = names == sorted(COMBINATION_JOBS)
+    suites = names == sorted(PARTITIONED_JOBS) or names == sorted(SUITE_JOBS) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
@@ -63,12 +67,18 @@ def measure(run):
         finishes = []
         busy = 0.0
         step_seconds = {}
+        job_seconds = {}
+        job_queue_seconds = {}
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in PLATFORMS:
+            if name in PLATFORMS or name in COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
+                if combinations:
+                    required.update(("Install verified Zig", "Desktop result and reproduction", "Retain desktop logs"))
+                    if name.endswith(" release"):
+                        required.update(("Workflow tool regression tests", "Bootstrap wrapper regression tests"))
                 if not suites and not name.startswith("Windows"):
                     required.add("Execution-mode matrix")
                 if not sharded:
@@ -86,6 +96,8 @@ def measure(run):
                 required.add("Validate every GitHub workflow")
             elif name == "CI complete":
                 required.add("Require every shard")
+                if combinations:
+                    required.add("Verify every desktop partition exists")
             elif name in UEFI:
                 required.add("Build compiler and boot both architectures in all allocators")
             elif name in ANALYZER:
@@ -100,7 +112,10 @@ def measure(run):
             else:
                 starts.append(start)
                 finishes.append(finish)
-                busy += (finish - start).total_seconds()
+                job_seconds[name] = (finish - start).total_seconds()
+                busy += job_seconds[name]
+            queued = timestamp(job.get("created_at"))
+            job_queue_seconds[name] = (start - queued).total_seconds() if queued is not None and start is not None and queued <= start else None
             durations = {}
             for step in job.get("steps", []):
                 left, right = timestamp(step.get("started_at")), timestamp(step.get("completed_at"))
@@ -116,7 +131,8 @@ def measure(run):
                           "elapsed_seconds": (max(finishes) - created).total_seconds(),
                           "execution_span_seconds": (max(finishes) - min(starts)).total_seconds(),
                           "initial_queue_seconds": (min(starts) - created).total_seconds(),
-                          "runner_seconds": busy, "step_seconds": step_seconds}
+                          "runner_seconds": busy, "step_seconds": step_seconds,
+                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds}
     return result, reason
 
 
@@ -157,6 +173,109 @@ def api_get(repository, path, token):
     with urllib.request.urlopen(request, timeout=30) as response:
         result = json.load(response)
     return result
+
+
+def validate_required_jobs(jobs, run_id, run_attempt, head_sha):
+    """Pure fail-closed gate for the latest jobs of this exact workflow run.
+
+    A partial rerun may retain a successful job from an earlier attempt of the
+    same immutable run/source. Failed historical attempts are not substituted
+    for latest results, and timing cohorts still reject all reruns.
+    """
+    errors = []
+    if not isinstance(jobs, list):
+        return ["job inventory is not a list"]
+    names = [job.get("name") if isinstance(job, dict) else None for job in jobs]
+    if Counter(names) != Counter(COMBINATION_JOBS):
+        errors.append("required job identities are missing, duplicated or unexpected")
+    for job in jobs:
+        if not isinstance(job, dict):
+            errors.append("malformed job record")
+            continue
+        name = job.get("name", "missing")
+        attempt = job.get("run_attempt")
+        if job.get("run_id") != run_id or job.get("head_sha") != head_sha:
+            errors.append(f"{name}: job belongs to another run or source")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= run_attempt:
+            errors.append(f"{name}: invalid job attempt")
+        if name == "CI complete":
+            if attempt != run_attempt or job.get("status") != "in_progress":
+                errors.append("CI complete is not the current active attempt")
+        elif job.get("status") != "completed" or job.get("conclusion") != "success":
+            errors.append(f"{name}: required job did not complete successfully")
+        if name in COMBINATION_PLATFORMS:
+            required = {"Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
+                        "Combination matrix (Windows)" if name.startswith("Windows") else "Combination matrix (Linux, macOS)"}
+            if name.endswith(" release"):
+                required.update(("Workflow tool regression tests", "Bootstrap wrapper regression tests"))
+            steps = job.get("steps", [])
+            if not isinstance(steps, list):
+                errors.append(f"{name}: malformed step records")
+                continue
+            for step_name in required:
+                matching = [step for step in steps if isinstance(step, dict) and step.get("name") == step_name]
+                if len(matching) != 1 or matching[0].get("conclusion") != "success":
+                    errors.append(f"{name}: {step_name} did not complete exactly once")
+    return sorted(set(errors))
+
+
+def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
+    """Select by attempt, never by success; prior green cannot hide later red."""
+    latest = {}
+    seen = set()
+    for job in jobs:
+        if not isinstance(job, dict):
+            raise ValueError("Malformed historical job")
+        name, attempt = job.get("name"), job.get("run_attempt")
+        if not isinstance(name, str) or not name or not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= run_attempt:
+            raise ValueError("Malformed historical job name/attempt")
+        if job.get("run_id") != run_id or job.get("head_sha") != head_sha:
+            raise ValueError("Historical job belongs to another run or source")
+        identity = (name, attempt)
+        if identity in seen:
+            raise ValueError("Duplicate job identity within one attempt")
+        seen.add(identity)
+        if name not in latest or attempt > latest[name]["run_attempt"]:
+            latest[name] = job
+    return list(latest.values())
+
+
+def require_jobs(args):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository or ""):
+        raise ValueError("Repository must have owner/name form")
+    if args.run_id <= 0 or args.run_attempt <= 0:
+        raise ValueError("A positive current run ID and attempt are required")
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+    run = api_get(args.repository, f"actions/runs/{args.run_id}", token)
+    if run.get("id") != args.run_id or run.get("run_attempt") != args.run_attempt or \
+            run.get("path", "").split("@", 1)[0] != ".github/workflows/ci.yml":
+        raise ValueError("The API run identity does not match this CI execution")
+    head_sha = run.get("head_sha")
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise ValueError("The API run has no exact source identity")
+    jobs = []
+    total = None
+    page = 1
+    while total is None or len(jobs) < total:
+        batch = api_get(args.repository, f"actions/runs/{args.run_id}/jobs?filter=all&per_page=100&page={page}", token)
+        count = batch.get("total_count")
+        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000 or (total is not None and count != total):
+            raise ValueError("Missing, changing or excessive job inventory")
+        total = count
+        chunk = batch.get("jobs")
+        if not isinstance(chunk, list) or not chunk or len(jobs) + len(chunk) > total:
+            raise ValueError("Incomplete job pagination; refusing a partial gate")
+        jobs.extend(chunk)
+        page += 1
+    # filter=latest is an API execution filter, not a proof that successful
+    # non-rerun jobs were retained. Reconstruct the logical latest result from
+    # all attempts of this immutable run and reject duplicate attempt records.
+    jobs = latest_run_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+    errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+    return {"schema": 1, "run_id": args.run_id, "run_attempt": args.run_attempt,
+            "run_head_sha": head_sha, "checkout_sha": os.getenv("GITHUB_SHA", "unknown"),
+            "success": not errors, "errors": errors,
+            "jobs": [{key: job.get(key) for key in ("id", "name", "run_attempt", "conclusion")} for job in jobs]}
 
 
 def collect(args):
@@ -211,6 +330,11 @@ def main():
     gather.add_argument("--limit", type=int, default=20)
     gather.add_argument("--max-pages", type=int, default=5)
     gather.add_argument("--output", required=True)
+    gate = sub.add_parser("require-jobs", help="Require all named partitions in the current Actions run")
+    gate.add_argument("--repository", default=os.getenv("GITHUB_REPOSITORY"))
+    gate.add_argument("--run-id", type=int, default=os.getenv("GITHUB_RUN_ID", "0"))
+    gate.add_argument("--run-attempt", type=int, default=os.getenv("GITHUB_RUN_ATTEMPT", "0"))
+    gate.add_argument("--output")
     report = sub.add_parser("summarize")
     report.add_argument("input")
     report.add_argument("--output")
@@ -221,6 +345,9 @@ def main():
             if not 1 <= args.limit <= 100 or not 1 <= args.max_pages <= 20:
                 raise ValueError("Use limit 1..100 and max-pages 1..20")
             data = collect(args)
+        elif args.command == "require-jobs":
+            data = require_jobs(args)
+            status = 0 if data["success"] else 1
         else:
             data = summarize(json.loads(Path(args.input).read_text(encoding="utf-8")))
         text = json.dumps(data, indent=2) + "\n"

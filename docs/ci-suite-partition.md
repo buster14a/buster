@@ -1,5 +1,10 @@
 # Independent Unix CI suites
 
+> Historical suite-level design/evidence. The subsequent internal desktop
+> partition and current 23-job completion contract are documented in
+> [Desktop combination shards](ci-combination-shards.md). Historical timings
+> below are not matched before/after evidence for #333.
+
 Related work: [#333](https://github.com/buster14a/buster/issues/333),
 [#335](https://github.com/buster14a/buster/issues/335), and
 [#92](https://github.com/buster14a/buster/issues/92).
