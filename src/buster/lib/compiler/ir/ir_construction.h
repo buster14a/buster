@@ -141,3 +141,10 @@ BUSTER_F_DECL String8 ir_construction_counter_name(IrConstructionCounter counter
 #else
 #define IR_CONSTRUCTION_RECORD(counter, amount) ((void)0)
 #endif
+
+#if BUSTER_UNITY_BUILD && BUSTER_INCLUDE_TESTS
+// ide.c includes the construction surface before entering the test-only Clang
+// optnone region. Preload the production append inline here so test headers
+// cannot stamp optnone onto it before c_gen.c is included.
+#include <buster/lib/compiler/ir/ir_append.h>
+#endif
