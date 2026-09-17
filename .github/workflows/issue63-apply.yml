@@ -1,0 +1,57 @@
+name: issue-63-apply
+
+on:
+  push:
+    branches:
+      - fix/issue-63-resource-failures
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-63-resource-failures
+          fetch-depth: 0
+      - name: Apply source transformation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/issue63_apply.py')
+          text = path.read_text()
+          old = '''    BUSTER_ENSURE(arena_destroy(arena, 1));
+          }
+          #endif''',
+          )
+
+          replace_function(
+              "src/buster/lib/os.c",
+              "void lane_run'''
+          new = '''    BUSTER_ENSURE(arena_destroy(arena, 1));
+          }''',
+          )
+
+          replace_function(
+              "src/buster/lib/os.c",
+              "void lane_run'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one lane boundary, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          python3 -m py_compile tools/issue63_apply.py
+          python3 tools/issue63_apply.py
+      - name: Check patch whitespace
+        run: git diff --check -- src tools/differential.c
+      - name: Commit implementation
+        shell: bash
+        run: |
+          git add src tools/differential.c
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'runtime: make resource failures transactional'
+          git push origin HEAD:fix/issue-63-resource-failures
