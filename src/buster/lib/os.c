@@ -4318,14 +4318,17 @@ void os_dynamic_library_unload(OsModuleHandle* module)
 
 OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol)
 {
+    TemporalArena scratch = scratch_begin(0, 0);
+    String8 terminated_symbol = string_duplicate_arena(scratch.arena, symbol, true);
     OsSymbol* result = {0};
 
 #if defined(_WIN32)
-    result = (OsSymbol*)GetProcAddress((HMODULE)module, symbol.pointer);
+    result = (OsSymbol*)GetProcAddress((HMODULE)module, terminated_symbol.pointer);
 #else
-    result = (OsSymbol*)dlsym((void*)module, symbol.pointer);
+    result = (OsSymbol*)dlsym((void*)module, terminated_symbol.pointer);
 #endif
 
+    scratch_end(scratch);
     return result;
 }
 
@@ -4528,10 +4531,15 @@ OsThreadHandle* os_get_current_thread_handle(void)
 
 void os_thread_set_name(String8 thread_name)
 {
+#if defined(__linux__) || defined(__APPLE__)
+    TemporalArena scratch = scratch_begin(0, 0);
+    String8 terminated_name = string_duplicate_arena(scratch.arena, thread_name, true);
 #if defined(__linux__)
-    pthread_setname_np(pthread_self(), thread_name.pointer);
-#elif defined(__APPLE__)
-    pthread_setname_np(thread_name.pointer);
+    pthread_setname_np(pthread_self(), terminated_name.pointer);
+#else
+    pthread_setname_np(terminated_name.pointer);
+#endif
+    scratch_end(scratch);
 #elif defined(_WIN32)
 #ifndef __TINYC__
     TemporalArena scratch = scratch_begin(0, 0);
