@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   repair:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-26.04
     steps:
       - name: Check out the PR branch
@@ -30,18 +29,17 @@ jobs:
           workflow_path = Path('.github/workflows/pr-734-ci-fix.yml')
           text = source_path.read_text()
 
-          old_symbols = '''        Simd512 thread_local_c23_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL_C23);'''
-          new_symbols = old_symbols + '''
-        Simd512 static_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_STATIC);'''
+          old_symbols = '        Simd512 thread_local_c23_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL_C23);'
+          new_symbols = old_symbols + '\n        Simd512 static_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_STATIC);'
           if text.count(old_symbols) != 1:
               raise SystemExit(f'expected exactly one declaration insertion point, found {text.count(old_symbols)}')
           text = text.replace(old_symbols, new_symbols, 1)
 
-          old_mask = '''                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
-                                        simd512_equal_byte(symbol_lanes, thread_local_c23_symbol))));'''
-          new_mask = '''                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
-                                        mask64_or(simd512_equal_byte(symbol_lanes, thread_local_c23_symbol),
-                                                  simd512_equal_byte(symbol_lanes, static_symbol)))));'''
+          old_mask = ('                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),\n'
+                      '                                        simd512_equal_byte(symbol_lanes, thread_local_c23_symbol))));')
+          new_mask = ('                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),\n'
+                      '                                        mask64_or(simd512_equal_byte(symbol_lanes, thread_local_c23_symbol),\n'
+                      '                                                  simd512_equal_byte(symbol_lanes, static_symbol)))));')
           if text.count(old_mask) != 1:
               raise SystemExit(f'expected exactly one declaration bitmap insertion point, found {text.count(old_mask)}')
           text = text.replace(old_mask, new_mask, 1)
