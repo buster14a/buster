@@ -18188,6 +18188,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_trailing_token_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    } invalid[] = {
+        {S8("int x y;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("int x 3;\nint take(void) { return 1; }\n"), 1, 7},
+        {S8("float f g;\nint take(void) { return 1; }\n"), 1, 9},
+        {S8("int x, y z;\nint take(void) { return 1; }\n"), 1, 10},
+        {S8("typedef int T; unsigned T v;\nint take(void) { return 1; }\n"), 1, 27},
+        {S8("typedef int T; T U v;\nint take(void) { return 1; }\n"), 1, 20},
+        {S8("int take(void) { int x y; return 1; }\n"), 1, 24},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            diagnosed |= diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION &&
+                         string_equal(diagnostic.message, S8("unexpected token after declarator")) &&
+                         diagnostic.location.line == invalid[case_index].line &&
+                         diagnostic.location.column == invalid[case_index].column;
+        }
+        bool recovered = false;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            recovered |= string_equal(parse.declarations[declaration_index].name, S8("take"));
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, recovered, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+
+    String8 valid[] = {
+        S8("int a, b;\n"),
+        S8("int (*callback)(int);\n"),
+        S8("int (*(*nested)(void))(int);\n"),
+        S8("typedef int T; T value; int take(void) { T local = value; return local; }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18378,6 +18439,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_same_scope_tag_redefinition_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 refused_sources[] = {
+        S8("struct S { int a; };\nstruct S { int b; };\nint following;\n"),
+        S8("union U { int a; };\nunion U { int b; };\nint following;\n"),
+        S8("enum E { A };\nenum E { B };\nint following;\n"),
+        S8("struct T { int a; };\nstruct T { int a; };\nint following;\n"),
+    };
+    String8 refused_tags[] = {S8("S"), S8("U"), S8("E"), S8("T")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(refused_sources); source_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, refused_sources[source_index],
+                (CPreprocessOptions){.source_path = S8("same-scope-tag-redefinition.c"),
+                                     .target = target_native, .data_layout = target_data_layout(target_native)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("same-scope-tag-redefinition.c"), preprocess, syntax,
+                target_native, (CIRLowerOptions){.disable_direct_ssa = frontend == 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, refused_sources[source_index]);
+            u32 redefinition_count = 0;
+            bool attributed = false;
+            bool blamed_following = false;
+            for (u32 diagnostic = 0; diagnostic < analyzed.diagnostic_count; diagnostic += 1)
+            {
+                CDiagnostic row = analyzed.diagnostics[diagnostic];
+                if (row.kind == C_DIAGNOSTIC_REDEFINITION)
+                {
+                    redefinition_count += 1;
+                    attributed |= row.location.line == 2 &&
+                                  string_first_sequence(row.message, refused_tags[source_index]) != BUSTER_STRING_NO_MATCH;
+                }
+                blamed_following |= row.location.line > 2;
+            }
+            BUSTER_TEST_RAW(arguments, redefinition_count == 1 && attributed && !blamed_following, refused_sources[source_index]);
+            scratch_end(temporary);
+        }
+    }
+
+    String8 accepted_sources[] = {
+        S8("struct S;\nstruct S { int a; };\nint take(void) { struct S s = {0}; return s.a; }\n"),
+        S8("struct S { int outer; };\nint take(void) { struct S { int inner; }; struct S s = {0}; return s.inner; }\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(accepted_sources); source_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, accepted_sources[source_index],
+                (CPreprocessOptions){.source_path = S8("valid-tag-definition.c"),
+                                     .target = target_native, .data_layout = target_data_layout(target_native)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("valid-tag-definition.c"), preprocess, syntax,
+                target_native, (CIRLowerOptions){.disable_direct_ssa = frontend == 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+                                       analyzed.diagnostic_count == 0 && analyzed.program != 0,
+                            accepted_sources[source_index]);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18467,7 +18594,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
