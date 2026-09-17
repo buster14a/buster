@@ -3951,24 +3951,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
                         if (flag_rejected)
                         {
                             arguments->show(arguments,
-                                            S8("WASM64_STACK_CAPABILITY {\"status\":\"unsupported\","
+                                            S8("WASM64_STACK_CAPABILITY {{\"status\":\"unsupported\","
                                                "\"reason\":\"memory64-flag-rejected\","
-                                               "\"flag\":\"--experimental-wasm-memory64\"}\n"));
+                                               "\"flag\":\"--experimental-wasm-memory64\"}}\n"));
                         }
                     }
                 }
                 if (!execution_succeeded && capability_unavailable)
                 {
                     arguments->show(arguments,
-                                    S8("WASM64_STACK_EXECUTION {\"status\":\"not-executed\","
-                                       "\"reason\":\"runtime-capability-unavailable\"}\n"));
+                                    S8("WASM64_STACK_EXECUTION {{\"status\":\"not-executed\","
+                                       "\"reason\":\"runtime-capability-unavailable\"}}\n"));
                 }
             }
             else
             {
                 arguments->show(arguments,
-                                S8("WASM64_STACK_CAPABILITY {\"status\":\"unavailable\","
-                                   "\"reason\":\"node-not-found\"}\n"));
+                                S8("WASM64_STACK_CAPABILITY {{\"status\":\"unavailable\","
+                                   "\"reason\":\"node-not-found\"}}\n"));
             }
         }
     }
