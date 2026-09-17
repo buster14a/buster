@@ -1,0 +1,173 @@
+name: Issue 707 cold/warm profile
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/issue-707-cold-warm-profile.yml
+      - CMakeLists.txt
+      - cmake/**
+      - tools/ci_zig.py
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && github.event.pull_request.number == 749 }}
+    name: Issue 707 ${{ matrix.os }} ${{ matrix.cache_mode }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-2025
+            zig_target: x86_64-windows
+            python: python
+            cache_mode: cold
+          - os: windows
+            runner: windows-2025
+            zig_target: x86_64-windows
+            python: python
+            cache_mode: warm
+          - os: macos
+            runner: macos-26-intel
+            zig_target: x86_64-macos
+            python: python3
+            cache_mode: cold
+          - os: macos
+            runner: macos-26-intel
+            zig_target: x86_64-macos
+            python: python3
+            cache_mode: warm
+    env:
+      BUSTER_CI_PYTHON: ${{ matrix.python }}
+    steps:
+      - name: Checkout exact head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Restore verified Zig archive
+        id: zig_archive
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/zig-archive/archive
+          key: zig-archive-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.zig_target }}-${{ hashFiles('.github/zig.json') }}
+
+      - name: Install verified Zig
+        shell: bash
+        env:
+          ZIG_TARGET: ${{ matrix.zig_target }}
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig"
+
+      - name: Prepare independent cache state
+        shell: bash
+        env:
+          CACHE_MODE: ${{ matrix.cache_mode }}
+          ARCHIVE_HIT: ${{ steps.zig_archive.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/issue707-profile"
+          cache="$RUNNER_TEMP/issue707-zig-cache-$CACHE_MODE"
+          rm -rf "$evidence" "$cache"
+          mkdir -p "$evidence" "$cache"
+          printf 'ZIG_GLOBAL_CACHE_DIR=%s\n' "$cache" >> "$GITHUB_ENV"
+          {
+            echo "cache_mode=$CACHE_MODE"
+            echo "archive_cache_hit=$ARCHIVE_HIT"
+            echo "github_sha=$GITHUB_SHA"
+            echo "head_sha=${{ github.event.pull_request.head.sha }}"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "image_os=${ImageOS-unknown}"
+            echo "image_version=${ImageVersion-unknown}"
+            git rev-parse HEAD 'HEAD^{tree}'
+            cmake --version
+            ninja --version
+            zig version
+            zig env
+          } > "$evidence/identity.txt" 2>&1
+          if [[ "$CACHE_MODE" == warm ]]; then
+            cat > "$evidence/warm.c" <<'EOF'
+          #include <stddef.h>
+          int main(void) { return (int)sizeof(size_t) == 0; }
+          EOF
+            "$BUSTER_CI_PYTHON" - "$evidence/warm.c" "$evidence/warm-output" "$evidence/warm.json" <<'PY'
+          import json, pathlib, subprocess, sys, time
+          source, output, report = map(pathlib.Path, sys.argv[1:])
+          samples=[]
+          for index in range(2):
+              target=output.with_name(output.name+str(index))
+              started=time.perf_counter()
+              result=subprocess.run(['zig','cc',str(source),'-o',str(target)],capture_output=True,text=True)
+              samples.append({'index':index,'seconds':time.perf_counter()-started,'returncode':result.returncode,'stderr':result.stderr})
+              if result.returncode: raise SystemExit(result.returncode)
+          report.write_text(json.dumps({'samples':samples},indent=2)+'\n',encoding='utf-8')
+          PY
+          fi
+
+      - name: Profile exact Zig configure
+        shell: bash
+        env:
+          CACHE_MODE: ${{ matrix.cache_mode }}
+          PLATFORM: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/issue707-profile"
+          build_root="build/issue707-$PLATFORM-$CACHE_MODE"
+          profile="$PWD/$build_root/cmake-profile.json"
+          mkdir -p "$build_root"
+          zig env > "$evidence/zig-env-before.txt"
+          start_ns="$($BUSTER_CI_PYTHON -c 'import time; print(time.time_ns())')"
+          set +e
+          extra=()
+          if [[ "$PLATFORM" == windows ]]; then
+            extra=(-DCMAKE_CROSS_CONFIGS=all)
+          else
+            extra=(-DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE -DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE)
+          fi
+          cmake --profiling-format=google-trace --profiling-output="$profile" --warn-uninitialized -Werror=dev \
+            -B "$build_root" -DBUSTER_CI=ON '-DCMAKE_C_COMPILER=zig;cc' \
+            -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT \
+            -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF \
+            -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON \
+            -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF \
+            -DBUSTER_BUILD_DRIVER="$PWD/build/build" -G 'Ninja Multi-Config' \
+            -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug \
+            -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            "${extra[@]}" 2>&1 | tee "$evidence/configure.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          end_ns="$($BUSTER_CI_PYTHON -c 'import time; print(time.time_ns())')"
+          zig env > "$evidence/zig-env-after.txt"
+          cp "$profile" "$evidence/cmake-profile.json"
+          "$BUSTER_CI_PYTHON" - "$evidence/result.json" "$start_ns" "$end_ns" "$status" "$ZIG_GLOBAL_CACHE_DIR" "$PLATFORM" "$CACHE_MODE" <<'PY'
+          import json, os, pathlib, sys
+          output,start,end,status,cache,platform,mode=sys.argv[1:]
+          total=0
+          for root,_,files in os.walk(cache):
+              for name in files:
+                  try: total += os.path.getsize(os.path.join(root,name))
+                  except OSError: pass
+          pathlib.Path(output).write_text(json.dumps({
+              'platform':platform,'cache_mode':mode,
+              'elapsed_seconds':(int(end)-int(start))/1e9,
+              'exit_code':int(status),'zig_global_cache_bytes':total,
+              'zig_global_cache_dir':cache,
+          },indent=2)+'\n',encoding='utf-8')
+          PY
+          exit "$status"
+
+      - name: Retain profile evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-707-cold-warm-${{ matrix.os }}-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue707-profile
+          if-no-files-found: error
+          retention-days: 7
