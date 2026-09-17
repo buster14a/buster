@@ -356,15 +356,15 @@ class ContractTests(unittest.TestCase):
         manifest = dict(line.split("=", 1) for line in
                         (self.shards[0] / "manifest.txt").read_text(encoding="utf-8").splitlines())
         manifest.update({"profile": "full-census", "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256,
-                         "inputs": "549", "subjects": "403", "shard_count": "4",
+                         "inputs": "558", "subjects": "410", "shard_count": "4",
                          "fixture_filter": "", "target_filter": ""})
         with self.assertRaisesRegex(AssertionError, "full census subject inventory is incomplete"):
             contract.validate_profile(manifest, {"tests/unit.c": {"role": "subject"}}, 192)
 
     def test_exact_full_profile_shape_is_admissible(self):
         manifest = {"profile": "full-census", "support_contract": "docs/native-retirement-support-v1.tsv",
-                    "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "549",
-                    "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "403"}
+                    "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "558",
+                    "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "410"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
         self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
                          (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
@@ -500,14 +500,13 @@ class ContractTests(unittest.TestCase):
         ledger_path = root / "docs/native-retirement-support-v1.tsv"
         fields, records = read_table(ledger_path)
         self.assertEqual(fields, contract.SUPPORT_FIELDS)
-        self.assertEqual(len(records), 549)
-        self.assertEqual(len({record["path"] for record in records}), 549)
+        self.assertEqual(len(records), 558)
+        self.assertEqual(len({record["path"] for record in records}), 558)
         self.assertEqual({record["role"] for record in records},
                          {"subject", "negative-diagnostic-fixture", "support-file", "dormant-custom-language"})
         role_counts = {role: sum(record["role"] == role for record in records)
                        for role in {record["role"] for record in records}}
-        self.assertEqual(role_counts, {"subject": 403, "negative-diagnostic-fixture": 12,
-                                       "support-file": 70, "dormant-custom-language": 64})
+        self.assertEqual(role_counts, {'dormant-custom-language': 64, 'negative-diagnostic-fixture': 12, 'subject': 410, 'support-file': 72})
         for record in records:
             path = root / record["path"]
             with self.subTest(path=record["path"]):

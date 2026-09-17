@@ -18,8 +18,8 @@ from pathlib import Path
 ALLOCATORS = ("none", "mir-stack", "fast", "quality")
 FULL_CENSUS_PROFILE = "full-census"
 SELF_TEST_PROFILE = "self-test"
-FULL_SUBJECT_COUNT = 403
-FULL_ROW_COUNT = 77376
+FULL_SUBJECT_COUNT = 410
+FULL_ROW_COUNT = 78720
 FULL_SHARD_COUNT = 4
 FULL_SUPPORTED_GAP_COUNT = 192
 # This is the SHA-256 of the canonical JSON list of full-census row numbers
@@ -27,7 +27,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "a8bf66c4a8a823298418425d70b42aaaa5fef4a71b5a487b704a49bb03433cec"
-FULL_SUPPORT_CONTRACT_SHA256 = "b80a5a0b2dab8c7738e5e3ef2b35be2b160f5011e021eba385899481a3119187"
+FULL_SUPPORT_CONTRACT_SHA256 = "c3c886c327dbb027ab1ca51b83a8a96bf26b19cd5c9e71ce3549650ca7b45e74"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -42,7 +42,7 @@ SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", 
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 341
-FULL_APPLICABILITY_LEDGER_SHA256 = "86cf28ef3b630a265335dacf8c795db31c012f793d183d3a23cdf8f24116efe7"
+FULL_APPLICABILITY_LEDGER_SHA256 = "aea04fb09de00349eea368c1cf97af315bfe943a2c6ce73c5951fd44a548dcdd"
 FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "65f1fae35801fff0c8bc27bfb08b1cc8627115d214fed1629ad5dbd8f89b4379"
 FULL_DEPENDENCY_RECEIPT_SHA256 = "b8f8297f11ebbc544193a5fcd9f48f058d9e8e76975f5fc202b0ce9a604cfa30"
 FULL_DEPENDENCY_PROJECT_SHA256 = "37650c9c33ca46059d14826bc163580b188894b6b43dd3b1a48bb5cc5cd0d22a"
@@ -526,7 +526,7 @@ def validate_profile(manifest, inputs, row_count):
     if profile == FULL_CENSUS_PROFILE:
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") == FULL_SUPPORT_CONTRACT_SHA256
-        assert manifest.get("inputs") == "549"
+        assert manifest.get("inputs") == "558"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
         assert manifest.get("subjects") == str(FULL_SUBJECT_COUNT)

@@ -2881,28 +2881,38 @@ BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make(IrProgram* progra
 BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, MachineFunction* machine_function, MachineDebugFacts const* facts,
                                                          IrValueId const* local_places, IrDebugLocal const* local, u32 parameter_ordinal)
 {
-    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
-    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID && function->published_cfg)
+    IrValueId parameter_place = IR_VALUE_ID_INVALID;
+    if (local->is_parameter && function->published_cfg)
     {
         for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
         {
             IrCfgParameter const* parameter = function->published_cfg->parameters + parameter_index;
             if (parameter->canonical_local.value == local->id.value)
             {
-                place = parameter->value;
+                parameter_place = parameter->value;
                 break;
             }
         }
     }
-    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID && parameter_ordinal < facts->argument_count)
+    if (local->is_parameter && parameter_place.value == IR_ID_UNDERLYING_INVALID && parameter_ordinal < facts->argument_count)
     {
-        place = facts->argument_results[parameter_ordinal];
+        parameter_place = facts->argument_results[parameter_ordinal];
+    }
+    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+    {
+        place = parameter_place;
     }
     if (place.value != IR_ID_UNDERLYING_INVALID && machine_debug_place_promoted(machine_function, facts, place))
     {
-        // A promoted place is only an implementation cell. Canonical
-        // block-local SSA values carry the source variable's value.
-        place = IR_VALUE_ID_INVALID;
+        // A promoted place is only an implementation cell. Preserve the ABI
+        // parameter value when one exists; canonical block-local SSA values
+        // carry every non-parameter source variable's value.
+        place = parameter_place;
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->is_parameter)
+    {
+        place = parameter_place;
     }
     if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
     {
