@@ -42,7 +42,7 @@ jobs:
                   for i in range(lo, hi):
                       print(f'{i + 1:07d}: {lines[i]}')
           PY
-          git cherry-pick --abort || true
+          git reset --hard origin/main
           git checkout -B codex/513-reconcile-probe origin/codex/513-reconcile-probe
           cp /tmp/issue513-conflicts.txt issue513-conflicts.txt
           git add issue513-conflicts.txt
