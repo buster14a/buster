@@ -9,19 +9,19 @@ differential runner; it does not replace either or authorize backend retirement.
 The admitted input inventory is
 [`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 558
 explicit SHA-256 rows bind every tracked test byte at the approval point: 410
-supported object subjects, 12 registered rejection controls, 72 support files
-and 64 dormant custom-language files. An added, removed, renamed, reclassified
+subject inputs (404 supported-object subjects and 6 registered non-object
+controls), 12 registered rejection controls, 72 support files and 64
+dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
 is therefore a reviewed support decision, not an automatic side effect of adding
 a fixture. Merging a contract change is the maintainer approval record.
 
-The September 16, 2026 rebase retains the `tests/issue36_target_wchar.c`
-subject already admitted on `main` by #694. It adds that subject to #645's
-original 548-input/402-subject census rather than dropping it: the integrated
-profile has 549 inputs, 403 subjects, 19,344 groups and 77,376 rows. The original
-192-row historical gap ledger and all 341 applicability classifications remain
-unchanged. The rebase makes no fixture edits: it retains main's expanded SIMD
-fixture and refreshes that input's two existing iOS applicability hashes.
+The September 17, 2026 integration retains every subject admitted by the
+current support ledger. The integrated profile has 558 inputs,
+410 subjects, 19,680 groups and 78,720 rows: 404 supported-object
+subjects plus 6 registered non-object controls. The original 192-row
+historical gap ledger and all 341 applicability classifications remain
+explicit and source-bound.
 
 ```sh
 ./build.sh native_retirement_census --self-test
@@ -161,8 +161,8 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 549 input rows, 403 subject inputs (397 supported-object subjects and six
-non-object controls), 77,376 support-contract identities,
+the 558 input rows, 410 subject inputs (404 supported-object subjects and six
+non-object controls), 78,720 support-contract identities,
 or the support ledger bytes and digests. Fixtures still needing libc, an SDK,
 generated data, or any other non-repo dependency remain visible diagnostic rows
 until their owning gate supplies that setup.

@@ -814,9 +814,9 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
         for row in rows:
             counts[row["role"]] = counts.get(row["role"], 0) + 1
         expected = {
-            "subject": 403,
+            "subject": 410,
             "negative-diagnostic-fixture": 12,
-            "support-file": 70,
+            "support-file": 72,
             "dormant-custom-language": 64,
         }
         self.assertEqual(counts, expected)
@@ -827,7 +827,7 @@ class NativeRetirementCensusTextTests(unittest.TestCase):
                 obligation = row["compile_obligation"]
                 subject_obligations[obligation] = subject_obligations.get(obligation, 0) + 1
         self.assertEqual(subject_obligations, {
-            "supported-object-zero-fallback": 397,
+            "supported-object-zero-fallback": 404,
             "registered-non-object-control": 6,
         })
         non_object_controls = [

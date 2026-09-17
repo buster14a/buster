@@ -3624,7 +3624,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     // inventory: it exists to exercise permissive fallback telemetry, not to
     // claim strict MIR support for inline assembly.
     String8 fallback_source = buster_test_temporary_path(arguments->arena, S8("buster-machine-fallback-inline-asm"), S8(".c"));
-    String8 fallback_source_text = S8("int machine_fallback_inline_asm(volatile int* pointer)\n{\n    __asm__ __volatile__(\"\" : : \"m\"(pointer[0]), \"m\"(pointer[1]), \"m\"(pointer[2]), \"m\"(pointer[3]), \"m\"(pointer[4]), \"m\"(pointer[5]), \"m\"(pointer[6]), \"m\"(pointer[7]), \"m\"(pointer[8]), \"m\"(pointer[9]), \"m\"(pointer[10]), \"m\"(pointer[11]), \"m\"(pointer[12]), \"m\"(pointer[13]), \"m\"(pointer[14]), \"m\"(pointer[15]), \"m\"(pointer[16]) : \"memory\");\n    return pointer[0];\n}\n");
+    String8 fallback_source_text = S8("int machine_fallback_inline_asm(volatile long long* pointer)\n{\n    long long expected = *pointer;\n    long long desired = expected;\n    __asm__ __volatile__(\n            \"lock ; cmpxchg %2, %1\"\n            : \"+a\"(expected), \"+m\"(*pointer)\n            : \"r\"(desired)\n            : \"memory\");\n    return (int)expected;\n}\n");
     BUSTER_TEST(arguments, file_write(fallback_source, BUSTER_SLICE_TO_BYTE_SLICE(fallback_source_text)));
     String8 fallback_targets[] = {S8("x86_64-unknown-windows")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)

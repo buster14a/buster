@@ -375,7 +375,7 @@ class ArchivedReplayTests(unittest.TestCase):
 
     def test_unpatched_historical_pin_rejects_other_contract(self):
         self.assertEqual(materializer.SUPPORT_CONTRACT_SHA256,
-                         "c3c886c327dbb027ab1ca51b83a8a96bf26b19cd5c9e71ce3549650ca7b45e74")
+                         "de31038ba09300a7d734dda5a9e3441ae12114ee42d966778912937c2776fd18")
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
