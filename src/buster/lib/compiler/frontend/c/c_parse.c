@@ -16662,6 +16662,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         u32 declaration_name_token = kind == C_DECLARATION_FUNCTION && syntax_declaration->function_name_token < token_count
                                          ? syntax_declaration->function_name_token
                                          : syntax_declaration->name_token;
+        bool is_static_storage = false;
         bool is_thread_local = false;
         if (kind == C_DECLARATION_OBJECT &&
             c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
@@ -16669,6 +16670,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
             {
                 CToken token = preprocess.tokens[token_index];
+                is_static_storage |= token.kind == C_TOKEN_IDENTIFIER &&
+                                     c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(STATIC));
                 is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
                                    c_token_in_well_known_set(preprocess.spelling_base, token,
                                                              C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
@@ -16693,6 +16696,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                     : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF
                                                     : C_ENTITY_OBJECT,
             .is_definition = declaration->is_definition,
+            .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
         };
