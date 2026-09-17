@@ -1,0 +1,61 @@
+name: Apply PR 568 review fixes
+
+on:
+  push:
+    branches:
+      - automation/pr568-review-comments
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    name: Validate and publish review fixes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out automation payload
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Reconstruct, validate, commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_branch='docs/511-retirement-performance-contract'
+          expected_head='787d7a15bad51055a12b207077aa98714d235320'
+          expected_patch_sha256='d9a6380e6f5a04a70419a8b80e09b2536ddf827e587a0880e1170b000f47269d'
+          payload_dir='.automation/pr568-review-comments'
+          patch_gz="$RUNNER_TEMP/pr568-review-comments.patch.gz"
+          patch="$RUNNER_TEMP/pr568-review-comments.patch"
+
+          cat "$payload_dir"/part-* > "$patch_gz"
+          gzip -dc "$patch_gz" > "$patch"
+          printf '%s  %s\n' "$expected_patch_sha256" "$patch" | sha256sum --check --strict
+
+          git fetch origin "$target_branch"
+          git switch --force-create "$target_branch" "origin/$target_branch"
+          test "$(git rev-parse HEAD)" = "$expected_head"
+
+          git apply --check "$patch"
+          git apply "$patch"
+          python3 -m py_compile \
+            tools/native_retirement_performance_binding.py \
+            tools/native_retirement_performance_binding_test.py \
+            tools/native_retirement_performance_identity_test.py
+          python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+          git diff --check
+
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git add \
+            docs/agents/benchmarking.md \
+            docs/native-retirement-performance-contract.md \
+            tools/native_retirement_performance_binding.py \
+            tools/native_retirement_performance_binding_test.py \
+            tools/native_retirement_performance_identity_test.py
+          git commit -m 'bench: close execution-evidence review gaps (#568)'
+          git push origin "HEAD:$target_branch"
+          git push origin --delete automation/pr568-review-comments || true
