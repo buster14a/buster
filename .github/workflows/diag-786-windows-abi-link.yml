@@ -1,4 +1,4 @@
-name: Bisect issue 786 CodeView subsections
+name: Bisect issue 786 many_ints records
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh run download 35282867175 --repo buster14a/buster --name issue-786-windows-abi-link-35282867175 --dir diag
 
-      - name: Build CodeView subsection variants
+      - name: Build many_ints record variants
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -32,7 +32,7 @@ jobs:
           original = pathlib.Path('diag/subject-fast-p2.o').read_bytes()
 
           def section(data, wanted):
-              machine, count, timestamp, symbols, symbol_count, optional_size, flags = struct.unpack_from('<HHLLLHH', data, 0)
+              _, count, _, symbols, symbol_count, optional_size, _ = struct.unpack_from('<HHLLLHH', data, 0)
               strings = b''
               if symbols and symbol_count:
                   start = symbols + symbol_count * 18
@@ -40,74 +40,87 @@ jobs:
                   strings = data[start:start + size]
               table = 20 + optional_size
               for index in range(count):
-                  offset = table + index * 40
-                  raw = data[offset:offset + 8]
+                  header = table + index * 40
+                  raw = data[header:header + 8]
                   if raw.startswith(b'/'):
                       name_offset = int(raw[1:].split(b'\0', 1)[0])
                       name = strings[name_offset:].split(b'\0', 1)[0]
                   else:
                       name = raw.split(b'\0', 1)[0]
-                  size, file_offset = struct.unpack_from('<LL', data, offset + 16)
+                  size, file_offset = struct.unpack_from('<LL', data, header + 16)
                   if name.decode('ascii') == wanted:
                       return file_offset, size
               raise RuntimeError(wanted)
 
           section_offset, section_size = section(original, '.debug$S')
           section_end = section_offset + section_size
-          subsections = []
           cursor = section_offset + 4
-          last_procedure = ''
+          records = []
           while cursor + 8 <= section_end:
               cursor = (cursor + 3) & ~3
               kind, length = struct.unpack_from('<LL', original, cursor)
               payload = cursor + 8
-              if payload + length > section_end:
-                  raise RuntimeError('truncated subsection')
-              procedure = ''
               if kind == 0xF1 and length:
                   record = payload
+                  procedure = ''
+                  local = ''
                   while record + 4 <= payload + length:
                       record_length, record_type = struct.unpack_from('<HH', original, record)
                       total = record_length + 2
-                      if total < 4 or record + total > payload + length:
-                          raise RuntimeError('truncated symbol record')
                       if record_type == 0x1110:
                           procedure = original[record + 39:record + total].split(b'\0', 1)[0].decode('utf-8')
-                          last_procedure = procedure
-                          break
+                      elif record_type == 0x113E:
+                          local = original[record + 10:record + total].split(b'\0', 1)[0].decode('utf-8')
+                      elif procedure == 'many_ints' and record_type in (0x1141, 0x1142):
+                          records.append({'offset': record, 'type': record_type, 'local': local})
                       record += total
-              elif kind == 0xF2:
-                  procedure = last_procedure
-              subsections.append({'header': cursor, 'kind': kind, 'length': length, 'procedure': procedure})
               cursor = (payload + length + 3) & ~3
 
-          for index, item in enumerate(subsections):
-              print(index, hex(item['kind']), item['length'], item['procedure'])
+          print([(item['local'], hex(item['type'])) for item in records])
 
-          IGNORE = 0x80000000
+          def dummy_local(data, offset):
+              struct.pack_into('<H', data, offset + 2, 0x113E)
+              struct.pack_into('<I', data, offset + 4, 0x74)
+              struct.pack_into('<H', data, offset + 8, 0)
+              data[offset + 10:offset + 16] = b'x\0\0\0\0\0'
+
           def write(name, predicate):
               data = bytearray(original)
               changed = 0
-              for index, item in enumerate(subsections):
-                  if predicate(index, item):
-                      struct.pack_into('<L', data, item['header'], IGNORE)
+              for item in records:
+                  if predicate(item):
+                      dummy_local(data, item['offset'])
                       changed += 1
               pathlib.Path(f'diag/{name}.o').write_bytes(data)
               print(name, changed)
 
           pathlib.Path('diag/original.o').write_bytes(original)
-          write('ignore-all-symbols', lambda index, item: item['kind'] == 0xF1)
-          write('ignore-all-lines', lambda index, item: item['kind'] == 0xF2)
-          write('ignore-metadata-symbols', lambda index, item: item['kind'] == 0xF1 and not item['procedure'])
-          write('ignore-checksums', lambda index, item: item['kind'] == 0xF4)
-          write('ignore-stringtable', lambda index, item: item['kind'] == 0xF3)
-          for procedure in ('many_ints', 'many_floats', 'pair', 'large', 'call_host'):
-              write(f'ignore-{procedure}-symbols', lambda index, item, p=procedure: item['kind'] == 0xF1 and item['procedure'] == p)
-              write(f'ignore-{procedure}-lines', lambda index, item, p=procedure: item['kind'] == 0xF2 and item['procedure'] == p)
-          '@ | Set-Content -Encoding utf8 diag\subsections.py
-          python diag\subsections.py
+          write('drop-all-defranges', lambda item: True)
+          write('drop-register-defranges', lambda item: item['type'] == 0x1141)
+          write('drop-frame-defranges', lambda item: item['type'] == 0x1142)
+          write('drop-extra-defranges', lambda item: False)
 
-      - name: Link every subsection variant
+          data = bytearray(original)
+          seen = set()
+          changed = 0
+          for item in records:
+              if item['local'] in seen:
+                  dummy_local(data, item['offset'])
+                  changed += 1
+              else:
+                  seen.add(item['local'])
+          pathlib.Path('diag/keep-first-defrange.o').write_bytes(data)
+          print('keep-first-defrange', changed)
+
+          for local in ('a','b','c','d','e','f','g','h'):
+              write(f'drop-{local}-defranges', lambda item, wanted=local: item['local'] == wanted)
+          write('drop-ef-defranges', lambda item: item['local'] in ('e','f'))
+          write('drop-gh-defranges', lambda item: item['local'] in ('g','h'))
+          write('drop-abcd-defranges', lambda item: item['local'] in ('a','b','c','d'))
+          '@ | Set-Content -Encoding utf8 diag\records.py
+          python diag\records.py
+
+      - name: Link every many_ints variant
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -118,14 +131,11 @@ jobs:
           $Sanitizer = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
           $LibraryArgs = @()
           foreach ($LibraryPath in @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })) { $LibraryArgs += "-L$LibraryPath" }
-          $Names = @('original','ignore-all-symbols','ignore-all-lines','ignore-metadata-symbols','ignore-checksums','ignore-stringtable')
-          foreach ($Procedure in @('many_ints','many_floats','pair','large','call_host')) {
-            $Names += "ignore-$Procedure-symbols"
-            $Names += "ignore-$Procedure-lines"
-          }
+          $Names = @('original','drop-all-defranges','drop-register-defranges','drop-frame-defranges','keep-first-defrange')
+          foreach ($Local in @('a','b','c','d','e','f','g','h')) { $Names += "drop-$Local-defranges" }
+          $Names += @('drop-ef-defranges','drop-gh-defranges','drop-abcd-defranges')
           $Results = @()
           foreach ($Name in $Names) {
-            Write-Host "===== LINK $Name ====="
             & clang.exe @Sanitizer @LibraryArgs diag\caller.o "diag\$Name.o" -o "diag\$Name.exe" 2>&1 |
               Tee-Object -FilePath "diag\link-$Name.log" |
               ForEach-Object { Write-Host $_ }
@@ -133,18 +143,19 @@ jobs:
             $Results += "$Name=$Code"
             Write-Host "LINK_RESULT $Name=$Code"
           }
-          $Results | Set-Content -Encoding ascii diag\subsection-summary.txt
-          Get-Content diag\subsection-summary.txt
+          $Results | Set-Content -Encoding ascii diag\records-summary.txt
+          Get-Content diag\records-summary.txt
+          exit 0
 
-      - name: Retain subsection bisection output
+      - name: Retain record bisection output
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-786-codeview-subsections-${{ github.run_id }}
+          name: issue-786-codeview-records-${{ github.run_id }}
           path: |
-            diag/subsection-summary.txt
+            diag/records-summary.txt
             diag/link-*.log
-            diag/subsections.py
+            diag/records.py
           retention-days: 3
           if-no-files-found: error
           compression-level: 6
