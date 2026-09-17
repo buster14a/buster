@@ -18,7 +18,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Reproduce sanitized p2 link
+      - name: Dump and reproduce sanitized p2 link
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -69,6 +69,19 @@ jobs:
           & $Ide @Common '-fno-target-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Ide @Common '-ftarget-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Write-Output '=== p0 CodeView ==='
+          & llvm-readobj.exe --codeview $SubjectP0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output '=== p2 CodeView ==='
+          & llvm-readobj.exe --codeview $SubjectP2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output '=== p0 raw .debug$S ==='
+          & llvm-objdump.exe -s -j '.debug$S' $SubjectP0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output '=== p2 raw .debug$S ==='
+          & llvm-objdump.exe -s -j '.debug$S' $SubjectP2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           Write-Output '=== p0 sanitized link ==='
