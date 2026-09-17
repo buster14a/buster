@@ -102,7 +102,10 @@
   `tests/mobile_ci_scripts_test.sh`. The Android and iOS fixture suites include
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
-  compilation and device/simulator execution remain separate CI gates.
+  compilation and device/simulator execution remain separate CI gates. Android
+  resolves safe `.` and `..` segments inside the rooted APK asset namespace so
+  nested quoted includes consume the same fixture bytes as desktop tests;
+  traversal above the asset root is rejected.
 - On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
   codesign deadline when the caller has not supplied one. This is separate
   from the test-execution, boot, install, and shutdown deadlines. Local and

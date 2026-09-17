@@ -101,7 +101,7 @@ complex_float complex_float_add(complex_float a, complex_float b) { return a + b
 // signature even as a bare scalar, so the section is compiled out rather than
 // testing that refusal. The macros are the ones both compilers predefine, so
 // the fixture is the same program under either.
-#if !defined(__aarch64__) || defined(__APPLE__) || defined(_WIN32)
+#if __LDBL_MANT_DIG__ != 113
 #define FIXTURE_LONG_DOUBLE_IN_SIGNATURE 1
 #else
 #define FIXTURE_LONG_DOUBLE_IN_SIGNATURE 0

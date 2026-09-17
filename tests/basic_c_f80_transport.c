@@ -1,3 +1,5 @@
+// This fixture observes the x87 format, including its 64-bit significand.
+#if __LDBL_MANT_DIG__ == 64
 typedef unsigned char u8;
 
 static long double identity(long double value)
@@ -31,3 +33,7 @@ int main(void)
     long double negative = assign(-0.0L);
     return !is_zero_with_sign(positive, 0) || !is_zero_with_sign(negative, 0x80);
 }
+
+#else
+int main(void) { return 0; }
+#endif

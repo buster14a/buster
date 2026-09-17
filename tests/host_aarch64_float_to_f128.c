@@ -10,24 +10,24 @@
 
 unsigned f128_read_status(void)
 {
-    unsigned long value;
+    unsigned long long value;
     __asm__ volatile("mrs %0, fpsr" : "=r"(value));
     return (unsigned)value;
 }
 
 void f128_write_status(unsigned value)
 {
-    __asm__ volatile("msr fpsr, %0" : : "r"((unsigned long)value));
+    __asm__ volatile("msr fpsr, %0" : : "r"((unsigned long long)value));
 }
 
 unsigned f128_read_control(void)
 {
-    unsigned long value;
+    unsigned long long value;
     __asm__ volatile("mrs %0, fpcr" : "=r"(value));
     return (unsigned)value;
 }
 
 void f128_write_control(unsigned value)
 {
-    __asm__ volatile("msr fpcr, %0" : : "r"((unsigned long)value));
+    __asm__ volatile("msr fpcr, %0" : : "r"((unsigned long long)value));
 }

@@ -454,11 +454,7 @@ jobs:
         run: python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"
 
       - name: Retain native logs
-        id: native_upload
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
-        # A transient control-plane failure gets one explicit retry below.
-        # The retry remains blocking, so evidence loss is never hidden.
-        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -467,32 +463,6 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
-
-      - name: Back off before retrying native log upload
-        if: ${{ !cancelled() && steps.pack.outcome == 'success' && steps.native_upload.outcome == 'failure' }}
-        shell: bash
-        run: |
-          printf '::warning::Native artifact upload failed; retrying once after 15 seconds.\n'
-          printf '## Native artifact upload\n\nInitial upload failed; retrying once after a 15-second backoff.\n' >> "$GITHUB_STEP_SUMMARY"
-          sleep 15
-
-      - name: Retain native logs (retry)
-        id: native_upload_retry
-        if: ${{ !cancelled() && steps.pack.outcome == 'success' && steps.native_upload.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/native-ci-upload/
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 7
-          # A timed-out CreateArtifact request may have committed remotely.
-          overwrite: true
-
-      - name: Record recovered native log upload
-        if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' && steps.native_upload_retry.outcome == 'success' }}
-        shell: bash
-        run: printf '\nRetry succeeded; native evidence was retained.\n' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record native packaging failure
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success' }}

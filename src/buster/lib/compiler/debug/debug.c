@@ -590,21 +590,28 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
             {
                 function->name = result.source_paths[declaration.source];
             }
-            u32 function_variable_capacity = 1;
-            if (input.module && function_index < input.module->function_count)
+            // Emitted debug seeds follow code layout, while the IR module
+            // retains declaration order. Match the canonical locals by
+            // symbol so each function DIE receives its own locations.
+            IrFunction* module_function = 0;
+            if (input.module)
             {
-                function_variable_capacity = input.module->functions[function_index].debug_local_count;
-                if (!function_variable_capacity)
+                for (u32 module_index = 0; module_index < input.module->function_count; module_index += 1)
                 {
-                    function_variable_capacity = 1;
+                    IrFunction* candidate = input.module->functions + module_index;
+                    if (candidate->symbol.value == seed->symbol.value)
+                    {
+                        module_function = candidate;
+                        break;
+                    }
                 }
             }
+            u32 function_variable_capacity = module_function && module_function->debug_local_count ? module_function->debug_local_count : 1;
             function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
                                               function->code_offset + function->code_size, function_variable_capacity);
-            if (input.module && function_index < input.module->function_count)
+            if (module_function)
             {
-                debug_add_canonical_locals(arena, &result, &input, function, seed, input.module->functions + function_index, scope_capacity,
-                                           function_variable_capacity);
+                debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity, function_variable_capacity);
             }
         }
         debug_add_canonical_globals(arena, &result, &input, variable_capacity);

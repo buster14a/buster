@@ -3,7 +3,7 @@
 // representation, and none of the aggregate classifications below apply
 // there.  The macros are the ones both Clang and Buster predefine, so the
 // fixture compiles to the same program under either compiler.
-#if defined(__x86_64__) && !defined(_WIN32)
+#if __LDBL_MANT_DIG__ == 64
 #define FIXTURE_WIDE_LONG_DOUBLE 1
 #else
 #define FIXTURE_WIDE_LONG_DOUBLE 0

@@ -608,3 +608,15 @@ without retaining arena allocations that a code-buffer retry could discard.
 The type table must not grow beyond the reserved count inside such a checkpoint.
 `allocated_bytes` counts context page/directory bytes; `classified_values` counts
 completed cache misses cumulatively, including misses after invalidation.
+
+## Large aggregate initialization
+
+Plain aggregates of at least 4 KiB use a bounded canonical byte loop for their
+initial zero image, then the existing nested initializer walker applies explicit
+values and designators once. The type worklist checks every member and rejects
+volatile or atomic storage from this representation shortcut. Existing integer,
+floating, boolean and null-pointer zero representations are retained; no libc
+helper is introduced. Small or qualified aggregates retain typed construction.
+The large-frame fixture checks zeroed nested storage, explicit values, copies
+and odd byte tails under both frontend lowering modes. This prevents initializer
+expansion from exceeding Windows ARM64's unwind function-size limit.
