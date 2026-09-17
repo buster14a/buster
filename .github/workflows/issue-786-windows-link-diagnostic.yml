@@ -18,7 +18,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Compare p0 and p2 ABI objects
+      - name: Reproduce sanitized p2 link
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -27,6 +27,13 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
           & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse | Sort-Object FullName)
+          if ($RuntimeDlls.Count -ne 1) { throw "Expected one ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)" }
+          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
+          $env:PATH = "$RuntimeDir;$env:PATH"
+          Write-Output "asan_runtime=$($RuntimeDlls[0].FullName)"
 
           $Driver = Join-Path $env:RUNNER_TEMP 'strict-build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
@@ -38,15 +45,16 @@ jobs:
 
           $Ide = (Resolve-Path 'build\Release\ide.exe').Path
           $Include = (Resolve-Path 'tests\differential').Path
-          $Caller = Join-Path $env:RUNNER_TEMP 'abi-caller.o'
+          $Caller = Join-Path $env:RUNNER_TEMP 'abi-caller-sanitized.o'
           $SubjectP0 = Join-Path $env:RUNNER_TEMP 'abi-p0.o'
           $SubjectP2 = Join-Path $env:RUNNER_TEMP 'abi-p2.o'
-          $ProgramP0 = Join-Path $env:RUNNER_TEMP 'abi-p0.exe'
-          $ProgramP2 = Join-Path $env:RUNNER_TEMP 'abi-p2.exe'
+          $ProgramP0 = Join-Path $env:RUNNER_TEMP 'abi-p0-sanitized.exe'
+          $ProgramP2 = Join-Path $env:RUNNER_TEMP 'abi-p2-sanitized.exe'
           $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
           if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
 
-          $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include")
+          $Sanitize = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char') + $Sanitize + @("-I$Include")
           foreach ($LibraryPath in $LibraryPaths) { $CallerArgs += "-L$LibraryPath" }
           $CallerArgs += @('tests\differential\abi_host.c', '-c', '-o', $Caller)
           & clang.exe @CallerArgs
@@ -58,36 +66,24 @@ jobs:
             '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include"
           )
           foreach ($LibraryPath in $LibraryPaths) { $Common += "-L$LibraryPath" }
-
           & $Ide @Common '-fno-target-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Ide @Common '-ftarget-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          Write-Output '=== caller symbols ==='
-          & llvm-nm.exe $Caller
-          Write-Output '=== p0 symbols ==='
-          & llvm-nm.exe $SubjectP0
-          Write-Output '=== p2 symbols ==='
-          & llvm-nm.exe $SubjectP2
-          Write-Output '=== p0 COFF ==='
-          & llvm-readobj.exe --file-headers --sections --symbols --relocations $SubjectP0
-          Write-Output '=== p2 COFF ==='
-          & llvm-readobj.exe --file-headers --sections --symbols --relocations $SubjectP2
-
-          $LinkP0 = @()
+          Write-Output '=== p0 sanitized link ==='
+          $LinkP0 = @() + $Sanitize
           foreach ($LibraryPath in $LibraryPaths) { $LinkP0 += "-L$LibraryPath" }
           $LinkP0 += @($Caller, $SubjectP0, '-o', $ProgramP0)
-          Write-Output '=== p0 link ==='
-          & clang.exe @LinkP0
+          & clang.exe -v @LinkP0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $ProgramP0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $LinkP2 = @()
+          Write-Output '=== p2 sanitized link ==='
+          $LinkP2 = @() + $Sanitize
           foreach ($LibraryPath in $LibraryPaths) { $LinkP2 += "-L$LibraryPath" }
           $LinkP2 += @($Caller, $SubjectP2, '-o', $ProgramP2)
-          Write-Output '=== p2 link ==='
           & clang.exe -v @LinkP2
           $P2LinkExit = $LASTEXITCODE
           Write-Output "p2_link_exit=$P2LinkExit"
