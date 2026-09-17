@@ -463,12 +463,12 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 // spelling so existing invariant sites keep their optimized code shape.
 #if BUSTER_OPTIMIZE
 #define BUSTER_DEBUG_CHECK(ok) ((void)0)
-#define BUSTER_ASSUME(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
+#define BUSTER_INVARIANT(ok) BUSTER_ASSUME(ok)
 #else
 #define BUSTER_DEBUG_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
-#define BUSTER_ASSUME(ok) BUSTER_DEBUG_CHECK(ok)
+#define BUSTER_INVARIANT(ok) BUSTER_DEBUG_CHECK(ok)
 #endif
-#define BUSTER_CHECK(ok) BUSTER_ASSUME(ok)
+#define BUSTER_CHECK(ok) BUSTER_INVARIANT(ok)
 
 // Stated by every global table that is still built on first use. Those builds
 // are unsynchronized on purpose: they run once and every later read is a plain
