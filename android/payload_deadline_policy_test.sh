@@ -140,6 +140,8 @@ run_batch_policy_case() {
     local output="$test_root/$case_name.out"
     local policy_log="$test_root/$case_name.log"
     local build_directory="$test_root/build-$case_name"
+    local config_args=()
+    read -r -a config_args <<<"$configs"
 
     (
         unset BUSTER_ANDROID_TEST_TIMEOUT_SECONDS
@@ -158,7 +160,7 @@ run_batch_policy_case() {
         export BUSTER_ANDROID_RUN_TESTS_SCRIPT="$test_root/payload.sh"
         export BUSTER_ANDROID_ADB="$test_root/bin/adb"
         export BUSTER_ANDROID_POLICY_LOG="$policy_log"
-        bash "$repo_root/android/test_ci.sh" $configs >"$output" 2>&1
+        bash "$repo_root/android/test_ci.sh" "${config_args[@]}" >"$output" 2>&1
     )
 
     if [[ $(cat "$policy_log") != "$expected_log" ]]; then
