@@ -1,4 +1,4 @@
-name: Issue 729 publish verified fix
+name: Issue 729 repair CI format strings
 
 on:
   push:
@@ -15,31 +15,58 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: fb008bb377d5bbf198b6b673c6797cdc5d8fead3
+          ref: codex/fix-729-memory64-provenance
+          fetch-depth: 1
           persist-credentials: true
-      - name: Verify and publish the tested patch
+      - name: Escape literal JSON braces and publish
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = fb008bb377d5bbf198b6b673c6797cdc5d8fead3
-          test "$(git rev-parse HEAD:src/buster/tests/compiler/driver/driver_test.c)" = 0807ae0dbdf1caaa39c0056346b9a44d1da40857
-          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
-          git show "$GITHUB_SHA:.github/issue-729.patch.xz" > "$RUNNER_TEMP/issue-729.patch.xz"
+          test "$(git rev-parse HEAD)" = 9f5012f6867efc32a4a3eb8a93ad72759728b3dc
           python3 - <<'PY'
-          import hashlib, lzma, os, pathlib
-          root = pathlib.Path(os.environ['RUNNER_TEMP'])
-          patch = lzma.decompress((root / 'issue-729.patch.xz').read_bytes())
-          assert hashlib.sha256(patch).hexdigest() == 'cf66c01f25864d6a6f5692d8d47f5337ae2aebca0b25256c0a14eac9e3ad8999'
-          (root / 'issue-729.patch').write_bytes(patch)
+          from pathlib import Path
+
+          path = Path("src/buster/tests/compiler/driver/driver_test.c")
+          text = path.read_text()
+          replacements = [
+              (r'WASM64_STACK_CAPABILITY {\"status\":\"unsupported\"',
+               r'WASM64_STACK_CAPABILITY {{\"status\":\"unsupported\"'),
+              (r'\"flag\":\"--experimental-wasm-memory64\"}\n',
+               r'\"flag\":\"--experimental-wasm-memory64\"}}\n'),
+              (r'WASM64_STACK_EXECUTION {\"status\":\"not-executed\"',
+               r'WASM64_STACK_EXECUTION {{\"status\":\"not-executed\"'),
+              (r'\"reason\":\"runtime-capability-unavailable\"}\n',
+               r'\"reason\":\"runtime-capability-unavailable\"}}\n'),
+              (r'WASM64_STACK_CAPABILITY {\"status\":\"unavailable\"',
+               r'WASM64_STACK_CAPABILITY {{\"status\":\"unavailable\"'),
+              (r'\"reason\":\"node-not-found\"}\n',
+               r'\"reason\":\"node-not-found\"}}\n'),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one occurrence, found {count}: {old}")
+              text = text.replace(old, new)
+          required = [
+              r'WASM64_STACK_CAPABILITY {{\"status\":\"unsupported\"',
+              r'\"flag\":\"--experimental-wasm-memory64\"}}\n',
+              r'WASM64_STACK_EXECUTION {{\"status\":\"not-executed\"',
+              r'\"reason\":\"runtime-capability-unavailable\"}}\n',
+              r'WASM64_STACK_CAPABILITY {{\"status\":\"unavailable\"',
+              r'\"reason\":\"node-not-found\"}}\n',
+          ]
+          for needle in required:
+              if text.count(needle) != 1:
+                  raise SystemExit(f"repaired formatter string missing or duplicated: {needle}")
+          path.write_text(text)
           PY
-          git apply --index "$RUNNER_TEMP/issue-729.patch"
+          git diff --check
+          test "$(git diff --name-only)" = src/buster/tests/compiler/driver/driver_test.c
+          git add src/buster/tests/compiler/driver/driver_test.c
           git diff --cached --check
-          test "$(git diff --cached --name-only)" = src/buster/tests/compiler/driver/driver_test.c
-          test "$(git hash-object src/buster/tests/compiler/driver/driver_test.c)" = a32e14f9b96e6194438aedefbca2072efef30e4e
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'test: report actual Memory64 runtime provenance'
+          git commit -m 'tests: escape Memory64 provenance JSON braces'
           git push origin HEAD:refs/heads/codex/fix-729-memory64-provenance
-          printf 'Published commit %s\nSource blob %s\nPatch SHA-256 %s\n' \
-            "$(git rev-parse HEAD)" "$(git hash-object src/buster/tests/compiler/driver/driver_test.c)" \
-            cf66c01f25864d6a6f5692d8d47f5337ae2aebca0b25256c0a14eac9e3ad8999 >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published commit %s\nSource blob %s\nEscaped literal JSON braces in three formatter messages.\n' \
+            "$(git rev-parse HEAD)" "$(git hash-object src/buster/tests/compiler/driver/driver_test.c)" >> "$GITHUB_STEP_SUMMARY"
