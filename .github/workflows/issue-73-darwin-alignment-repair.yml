@@ -1,0 +1,84 @@
+name: Issue 73 Darwin alignment repair
+
+on:
+  push:
+    branches:
+      - codex/issue-73-nonpow-vector-abi
+    paths:
+      - '.github/workflows/issue-73-darwin-alignment-repair.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: issue-73-darwin-alignment-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: codex/issue-73-nonpow-vector-abi
+          fetch-depth: 0
+      - name: Apply x86-64 Darwin alignment fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          source = Path('src/buster/lib/compiler/frontend/c/c_parse.c')
+          text = source.read_text()
+          old = '''        u32 alignment = (u32)storage_size;
+          bool padded = storage_size != logical_byte_size;
+          bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+          // Keep the established power-of-two vector layout unchanged. For the
+          // newly admitted padded GNU shape, Clang caps natural alignment at
+          // sixteen on AArch64 and Darwin while ELF x86-64, Windows, wasm,
+          // RISC-V, and BPF retain the rounded storage alignment.
+          if (padded && (target.cpu_arch == CPU_ARCH_AARCH64 || apple))
+          '''
+          new = '''        u32 alignment = (u32)storage_size;
+          bool padded = storage_size != logical_byte_size;
+          // Keep the established power-of-two vector layout unchanged. For the
+          // newly admitted padded GNU shape, Clang caps natural alignment at
+          // sixteen on AArch64. x86-64 Darwin, ELF, Windows, wasm, RISC-V, and
+          // BPF retain the rounded storage alignment.
+          if (padded && target.cpu_arch == CPU_ARCH_AARCH64)
+          '''
+          if text.count(old) == 1:
+              source.write_text(text.replace(old, new, 1))
+          elif old not in text and new in text:
+              print('Alignment fix is already present.')
+          else:
+              raise SystemExit('Expected padded-vector alignment block was not found exactly once.')
+
+          workflow = Path('.github/workflows/issue-73-darwin-alignment-repair.yml')
+          if workflow.exists():
+              workflow.unlink()
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'No repository changes remain to commit.'
+            exit 0
+          fi
+          git commit -m 'frontend: preserve x86-64 Darwin vector alignment'
+
+          branch='codex/issue-73-nonpow-vector-abi'
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${branch}"; then
+              exit 0
+            fi
+            echo "Push attempt ${attempt} raced another branch update; rebasing."
+            git fetch origin "${branch}"
+            git rebase "origin/${branch}"
+          done
+          echo 'Unable to publish the repair after five fast-forward attempts.' >&2
+          exit 1
