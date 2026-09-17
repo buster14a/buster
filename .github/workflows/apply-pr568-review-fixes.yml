@@ -54,7 +54,7 @@ jobs:
         working-directory: target
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e84443f0015caf20e275f891b
+          test "$(git rev-parse HEAD^)" = d70fd4b46a3537e844403f0015caf20e275f891b
           test -z "$(git status --porcelain)"
           python3 -m py_compile \
             tools/native_retirement_performance_binding.py \
