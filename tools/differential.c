@@ -931,6 +931,13 @@ BUSTER_GLOBAL_LOCAL void d_self_test_child(Arena* arena, String8 mode, String8 p
         fputs("runtime error: simulated recovering sanitizer\n", stderr);
         exit(0);
     }
+    else if (string_equal(mode, S8("sanitizer-name-stdout")) || string_equal(mode, S8("sanitizer-name-stderr")))
+    {
+        String8 text = S8("AddressSanitizer UndefinedBehaviorSanitizer MemorySanitizer ThreadSanitizer LeakSanitizer runtime error:\n");
+        StandardStream stream = string_equal(mode, S8("sanitizer-name-stdout")) ? STANDARD_STREAM_OUTPUT : STANDARD_STREAM_ERROR;
+        os_file_write(os_get_standard_stream(stream), (ByteSlice){.pointer = (u8*)text.pointer, .length = text.length});
+        exit(0);
+    }
     else if (string_equal(mode, S8("timeout")))
     {
 #if BUSTER_WINDOWS
@@ -1746,7 +1753,9 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     if (!d_create_output(arena, directory)) { errors += 1; }
     else
     {
-        String8 modes[] = {S8("exit"), S8("sanitizer"), S8("timeout"), S8("crash")};
+        String8 modes[] = {S8("exit"), S8("sanitizer"), S8("sanitizer-name-stdout"),
+                           S8("sanitizer-name-stderr"), S8("timeout"), S8("crash")};
+        String8 sanitizer_names = S8("AddressSanitizer UndefinedBehaviorSanitizer MemorySanitizer ThreadSanitizer LeakSanitizer runtime error:\n");
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
         {
             u32 before_child = errors;
@@ -1754,8 +1763,12 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
             DObservation child = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), path_join(arena, directory, modes[index]));
             if (index == 0) { errors += child.kind != D_EXIT || child.status != 7 || !string_equal(child.output, S8("a\0b")) || !string_equal(child.error, S8("child stderr\n")); }
             if (index == 1) { errors += child.kind != D_EXIT || child.status != 0 || !child.sanitizer || d_success(child); }
-            if (index == 2) { errors += child.kind != D_TIMEOUT; }
-            if (index == 3) { errors += child.kind != D_SIGNAL; }
+            if (index == 2) { errors += child.kind != D_EXIT || child.status != 0 || child.sanitizer || !d_success(child) ||
+                !string_equal(child.output, sanitizer_names) || child.error.length; }
+            if (index == 3) { errors += child.kind != D_EXIT || child.status != 0 || child.sanitizer || !d_success(child) ||
+                child.output.length || !string_equal(child.error, sanitizer_names); }
+            if (index == 4) { errors += child.kind != D_TIMEOUT; }
+            if (index == 5) { errors += child.kind != D_SIGNAL; }
             if (errors != before_child)
             {
                 string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL child={S8} kind={u32} status={u32} raw={u32}\n"), modes[index], (u32)child.kind, child.status, child.raw_status);
