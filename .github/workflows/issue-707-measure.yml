@@ -1,4 +1,4 @@
-name: Issue 707 experiment (baseline)
+name: Issue 707 experiment (candidate)
 
 # Temporary, issue-scoped measurement harness. The native build driver still
 # owns compiler discovery, configuration, probes, scheduling, coverage, builds,
@@ -13,7 +13,7 @@ permissions:
 jobs:
   measure:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && github.event.pull_request.number == 749 }}
-    name: Issue 707 baseline ${{ matrix.os }} ${{ matrix.case }}
+    name: Issue 707 candidate ${{ matrix.os }} ${{ matrix.case }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
     strategy:
@@ -101,7 +101,7 @@ jobs:
             profile: '1'
             warm: '1'
     env:
-      ISSUE707_ARM: baseline
+      ISSUE707_ARM: candidate
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CMAKE_PROFILE: ${{ matrix.profile }}
       BUSTER_MATRIX_THREADS: '4'
@@ -269,7 +269,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: issue-707-baseline-${{ matrix.os }}-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: issue-707-candidate-${{ matrix.os }}-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/issue707/
           if-no-files-found: error
           retention-days: 7
