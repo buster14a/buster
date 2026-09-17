@@ -530,16 +530,80 @@ BUSTER_GLOBAL_LOCAL bool production_profile_train(ProductionProfileContext* cont
     return trained.success;
 }
 
+BUSTER_GLOBAL_LOCAL int production_profile_path_compare(const void* left_pointer, const void* right_pointer)
+{
+    const String8* left = left_pointer;
+    const String8* right = right_pointer;
+    u64 count = BUSTER_MIN(left->length, right->length);
+    int result = count ? memcmp(left->pointer, right->pointer, (size_t)count) : 0;
+    return result ? result : (left->length > right->length) - (left->length < right->length);
+}
+
 BUSTER_GLOBAL_LOCAL bool production_profile_merge(ProductionProfileContext* context)
 {
+#if BUSTER_LINUX || BUSTER_APPLE
     Arena* arena = context->arena;
     String8 raw = path_join(arena, context->output, S8("profile/raw"));
+    String8 raw_z = string_duplicate_arena(arena, raw, true);
+    DIR* directory = opendir((const char*)raw_z.pointer);
+    if (!directory)
+    {
+        fprintf(stderr, "error: could not open the raw production-profile directory\n");
+        return false;
+    }
+
+    u64 file_count = 0;
+    errno = 0;
+    for (struct dirent* entry = readdir(directory); entry; entry = readdir(directory))
+    {
+        String8 name = string_from_pointer((char8*)entry->d_name);
+        file_count += string_ends_with_sequence(name, S8(".profraw"));
+    }
+    bool valid = errno == 0 && file_count != 0;
+    rewinddir(directory);
+
+    String8* files = valid ? arena_allocate(arena, String8, file_count) : 0;
+    u64 file_index = 0;
+    errno = 0;
+    for (struct dirent* entry = valid ? readdir(directory) : 0; entry; entry = readdir(directory))
+    {
+        String8 name = string_from_pointer((char8*)entry->d_name);
+        if (string_ends_with_sequence(name, S8(".profraw")))
+        {
+            if (file_index == file_count)
+            {
+                valid = false;
+                break;
+            }
+            files[file_index++] = path_join(arena, raw, name);
+        }
+    }
+    valid &= errno == 0 && file_index == file_count;
+    closedir(directory);
+    if (!valid)
+    {
+        fprintf(stderr, "error: could not enumerate raw production profiles\n");
+        return false;
+    }
+
+    qsort(files, (size_t)file_count, sizeof(files[0]), production_profile_path_compare);
     String8 output_argument = string_format(arena, S8("-output={S8}"), context->profile);
-    String8 command[] = {context->llvm_profdata, S8("merge"), output_argument, raw};
+    String8* command = arena_allocate(arena, String8, file_count + 3);
+    command[0] = context->llvm_profdata;
+    command[1] = S8("merge");
+    command[2] = output_argument;
+    for (u64 index = 0; index < file_count; index += 1)
+    {
+        command[index + 3] = files[index];
+    }
     ProductionProfileCommandResult merged = production_profile_command(
-        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+        arena, (SliceString8){.pointer = command, .length = file_count + 3}, (SliceString8){0}, (SliceString8){0},
         context->evidence, S8("merge-profile"), context->options.timeout_seconds, true);
     return merged.success && path_exists(arena, context->profile);
+#else
+    BUSTER_UNUSED(context);
+    return false;
+#endif
 }
 
 BUSTER_GLOBAL_LOCAL bool production_profile_validate_binary(ProductionProfileContext* context, String8 binary)
