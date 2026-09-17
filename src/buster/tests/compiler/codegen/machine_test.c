@@ -3703,14 +3703,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_aarch64_call_relocations(UnitTes
     u32 words[] = {UINT32_C(0x94000000), UINT32_C(0x94000000)};
     CodegenModuleEntry entries[] = {{.symbol = {.value = 1}, .offset = 4}, {.symbol = {.value = 2}, .offset = 0}};
     CodegenModuleRelocation relocations[] = {
-        {.symbol = {.value = 1}, .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26, .aarch64 = true},
-        {.symbol = {.value = 2}, .offset = 4, .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26, .aarch64 = true},
+        {.symbol = {.value = 1}, .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26},
+        {.symbol = {.value = 2}, .offset = 4, .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26},
     };
     CodegenModule module = {.code = {.pointer = (u8*)words, .length = sizeof(words)}, .entries = entries, .entry_count = 2,
                             .relocations = relocations, .relocation_count = 2};
     BUSTER_TEST(arguments, machine_test_patch_aarch64_calls(&module));
     BUSTER_TEST(arguments, words[0] == UINT32_C(0x94000001) && words[1] == UINT32_C(0x97ffffff));
-    for (u32 invalid = 0; invalid < 15; invalid += 1)
+    for (u32 invalid = 0; invalid < 14; invalid += 1)
     {
         u32 instruction = UINT32_C(0x94000000);
         CodegenModuleEntry entry = entries[0];
@@ -3727,14 +3727,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_aarch64_call_relocations(UnitTes
             case 4: entry.offset = 4; break;
             case 5: relocation.addend = 4; break;
             case 6: relocation.source = CODEGEN_MODULE_RELOCATION_DATA; break;
-            case 7: relocation.kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32; relocation.aarch64 = false; break;
-            case 8: relocation.aarch64 = false; break;
-            case 9: instruction = UINT32_C(0x14000000); break;
-            case 10: relocation.label_address = true; break;
-            case 11: rejected.relocations = 0; break;
-            case 12: rejected.entries = 0; break;
-            case 13: rejected.code.pointer = 0; break;
-            case 14: rejected.code.length = 3; break;
+            case 7: relocation.kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32; break;
+            case 8: instruction = UINT32_C(0x14000000); break;
+            case 9: relocation.label_address = true; break;
+            case 10: rejected.relocations = 0; break;
+            case 11: rejected.entries = 0; break;
+            case 12: rejected.code.pointer = 0; break;
+            case 13: rejected.code.length = 3; break;
         }
         u32 before = instruction;
         BUSTER_TEST(arguments, !machine_test_patch_aarch64_calls(&rejected));
@@ -9019,7 +9018,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             u32 local_index = relocation_index < none_module.relocation_count ? relocation_index : relocation_index - none_module.relocation_count;
             CodegenModuleRelocation* relocation = patched->relocations + local_index;
             BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
-            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_absolute(relocation->kind))
             {
                 continue;
             }
@@ -9124,7 +9123,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             CodegenModuleRelocation* relocation = quality_module.relocations + relocation_index;
             BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
-            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_absolute(relocation->kind))
             {
                 continue;
             }
@@ -9321,7 +9320,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             CodegenModuleRelocation* relocation = fast_module.relocations + relocation_index;
             BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
-            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_absolute(relocation->kind))
             {
                 continue;
             }
@@ -10089,7 +10088,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 {
                     CodegenModuleRelocation* relocation = vector_modules[mode_index].relocations + relocation_index;
                     BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
-                    if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+                    if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || codegen_module_relocation_kind_is_absolute(relocation->kind))
                     {
                         continue;
                     }

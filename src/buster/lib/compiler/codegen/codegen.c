@@ -60,6 +60,69 @@ bool codegen_module_relocation_kind_valid(u8 kind)
     return kind < (u8)CODEGEN_MODULE_RELOCATION_COUNT;
 }
 
+bool codegen_module_relocation_kind_is_aarch64(u8 kind)
+{
+    switch (kind)
+    {
+    case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool codegen_module_relocation_kind_is_absolute(u8 kind)
+{
+    return kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64;
+}
+
+bool codegen_module_relocation_kind_is_thread_local(u8 kind)
+{
+    switch (kind)
+    {
+    case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32:
+    case CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF:
+    case CODEGEN_MODULE_RELOCATION_X86_64_TLSGD:
+    case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
+    case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+    case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool codegen_module_relocation_kind_is_thread_local_low(u8 kind)
+{
+    return kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
+           kind == CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
+           kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
+}
+
+bool codegen_module_relocation_kind_is_thread_local_index(u8 kind)
+{
+    return kind == CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+           kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+           kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
+}
+
 bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 {
     if (!relocation || !codegen_module_relocation_kind_valid(relocation->kind) ||
@@ -68,99 +131,9 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
         return false;
     }
 
-    CodegenModuleRelocationKind kind = (CodegenModuleRelocationKind)relocation->kind;
-    bool aarch64 = false;
-    bool absolute = false;
-    bool is_thread_local = false;
-    bool thread_local_low = false;
-    bool thread_local_index = false;
-    switch (kind)
-    {
-        case CODEGEN_MODULE_RELOCATION_X86_64_PC32:
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26:
-        case CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26:
-            aarch64 = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_ABSOLUTE32:
-        case CODEGEN_MODULE_RELOCATION_ABSOLUTE64:
-            absolute = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32:
-            is_thread_local = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF:
-        case CODEGEN_MODULE_RELOCATION_X86_64_TLSGD:
-            is_thread_local = true;
-            break;
-        // The call in the general-dynamic pair patches a plain rel32 against
-        // __tls_get_addr, so it resolves like any other call and carries none
-        // of the thread-local bits even though it only ever appears beside a
-        // TLSGD site.
-        case CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32:
-            break;
-        case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
-            is_thread_local = true;
-            thread_local_index = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32:
-            is_thread_local = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
-            aarch64 = true;
-            is_thread_local = true;
-            thread_local_index = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
-            aarch64 = true;
-            is_thread_local = true;
-            thread_local_low = true;
-            thread_local_index = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
-            aarch64 = true;
-            is_thread_local = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
-            aarch64 = true;
-            is_thread_local = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
-            aarch64 = true;
-            is_thread_local = true;
-            thread_local_low = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32:
-            is_thread_local = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
-            aarch64 = true;
-            is_thread_local = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
-            aarch64 = true;
-            is_thread_local = true;
-            thread_local_low = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
-            aarch64 = true;
-            break;
-        case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL:
-        case CODEGEN_MODULE_RELOCATION_X86_64_PLT32:
-            break;
-        case CODEGEN_MODULE_RELOCATION_COUNT:
-            return false;
-    }
-
-    // The enum is authoritative.  These compatibility bits are checked,
-    // never consulted to choose a kind, so stale combinations fail loudly at
-    // the conversion boundary instead of silently producing the wrong object
-    // relocation.  label_address is an independent static-label operation,
-    // but it can only carry an absolute address payload.
-    return relocation->aarch64 == aarch64 && relocation->absolute == absolute && relocation->is_thread_local == is_thread_local &&
-           relocation->thread_local_low == thread_local_low && relocation->thread_local_index == thread_local_index &&
-           (!relocation->label_address || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64);
+    // label_address is independent payload, but only ABSOLUTE64 has the width
+    // required to carry a static label address.
+    return !relocation->label_address || relocation->kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64;
 }
 
 #include <buster/lib/compiler/assembly/assembly.h>
@@ -6282,9 +6255,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena
                 .symbol = symbol,
                 .offset = instruction_offset + (u32)relocation.offset,
                 .source = CODEGEN_MODULE_RELOCATION_CODE,
-                .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 ||
-                           kind == CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
-                .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                 .kind = (u8)kind,
             };
         }
@@ -10857,7 +10827,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                           : generated.read_only     ? CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA
                                                     : CODEGEN_MODULE_RELOCATION_DATA,
                 .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
-                .absolute = true,
             };
         }
         for (u32 relocation_index = 0; relocation_index < global->relocation_count; relocation_index += 1)
@@ -10877,7 +10846,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                           : generated.read_only     ? CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA
                                                     : CODEGEN_MODULE_RELOCATION_DATA,
                 .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
-                .absolute = true,
                 .label_address = relocation.is_label_address,
             };
         }
@@ -11746,11 +11714,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
                                                      : encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
-                                    .aarch64 = encoded.call_sites[site_index].absolute == 0,
-                                    .absolute = encoded.call_sites[site_index].absolute != 0,
-                                    .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
-                                    .thread_local_low = encoded.call_sites[site_index].thread_local_low != 0,
-                                    .thread_local_index = thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
                                 };
                             }
                             bool machine_inline_relocations_valid =
@@ -11782,9 +11745,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         .symbol = symbol,
                                         .offset = (u32)buffer.count + relocation.offset,
                                         .source = CODEGEN_MODULE_RELOCATION_CODE,
-                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 ||
-                                                   kind == CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
-                                        .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                                         .kind = (u8)kind,
                                     };
                                 }
@@ -11945,8 +11905,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = selected.function.call_targets[site_target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
                                     .kind = (u8)site_kind,
-                                    .is_thread_local = site_is_thread_local,
-                                    .thread_local_index = thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
                                 };
                             }
                             bool machine_inline_relocations_valid =
@@ -11978,9 +11936,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         .symbol = symbol,
                                         .offset = (u32)buffer.count + relocation.offset,
                                         .source = CODEGEN_MODULE_RELOCATION_CODE,
-                                        .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 ||
-                                                   kind == CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
-                                        .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                                         .kind = (u8)kind,
                                     };
                                 }
@@ -13237,14 +13192,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = index_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
-                                    .is_thread_local = true,
-                                    .thread_local_index = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = value_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32,
-                                    .is_thread_local = true,
                                 };
                             }
                             else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
@@ -13272,7 +13224,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = descriptor_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32,
-                                    .is_thread_local = true,
                                 };
                             }
                             else if (target.os != OPERATING_SYSTEM_LINUX && target.os != OPERATING_SYSTEM_ANDROID)
@@ -13297,7 +13248,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = general_dynamic_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_X86_64_TLSGD,
-                                    .is_thread_local = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
@@ -13343,7 +13293,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .offset = tls_relocation_offset,
                                     .kind = (u8)(initial_exec ? CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF
                                                               : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32),
-                                    .is_thread_local = true,
                                 };
                             }
                         }
@@ -19657,25 +19606,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = index_high_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
-                                    .thread_local_index = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = index_low_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
-                                    .thread_local_low = true,
-                                    .thread_local_index = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = value_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
                                 };
                             }
                             else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
@@ -19691,16 +19631,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = descriptor_high_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = descriptor_low_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
-                                    .thread_local_low = true,
                                 };
                             }
                             else if (target.os != OPERATING_SYSTEM_LINUX && target.os != OPERATING_SYSTEM_ANDROID)
@@ -19719,16 +19654,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = high_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = low_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12,
-                                    .aarch64 = true,
-                                    .is_thread_local = true,
-                                    .thread_local_low = true,
                                 };
                             }
                         }
@@ -19744,13 +19674,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = high_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21,
-                                    .aarch64 = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = low_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12,
-                                    .aarch64 = true,
                                 };
                             }
                             else
@@ -19763,7 +19691,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
-                                    .absolute = true,
                                 };
                             }
                         }
@@ -21235,7 +21162,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 .symbol = instruction->symbol,
                                 .offset = offset,
                                 .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
-                                .aarch64 = true,
                             };
                         }
                         if (stack_size)

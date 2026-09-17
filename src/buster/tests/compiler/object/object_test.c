@@ -951,10 +951,17 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult scaling = object_test_assembly_scaling(arguments);
     result.test_count += scaling.test_count;
     result.succeeded_test_count += scaling.succeeded_test_count;
-    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 32);
+    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 24);
     BUSTER_TEST(arguments, BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
-    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 27);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 0);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 8);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 12);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 16);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, source) == 20);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 21);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 22);
     BUSTER_TEST(arguments, CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
+
     typedef struct CodegenRelocationKindExpectation CodegenRelocationKindExpectation;
     struct CodegenRelocationKindExpectation
     {
@@ -996,22 +1003,49 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         CodegenRelocationKindExpectation expectation = relocation_kinds[kind_index];
         CodegenModuleRelocation relocation = {
             .kind = (u8)expectation.kind,
-            .aarch64 = expectation.aarch64,
-            .absolute = expectation.absolute,
-            .is_thread_local = expectation.is_thread_local,
-            .thread_local_low = expectation.thread_local_low,
-            .thread_local_index = expectation.thread_local_index,
         };
         BUSTER_TEST(arguments, codegen_module_relocation_kind_valid(relocation.kind));
+        BUSTER_TEST(arguments, codegen_module_relocation_kind_is_aarch64(relocation.kind) == expectation.aarch64);
+        BUSTER_TEST(arguments, codegen_module_relocation_kind_is_absolute(relocation.kind) == expectation.absolute);
+        BUSTER_TEST(arguments, codegen_module_relocation_kind_is_thread_local(relocation.kind) == expectation.is_thread_local);
+        BUSTER_TEST(arguments, codegen_module_relocation_kind_is_thread_local_low(relocation.kind) == expectation.thread_local_low);
+        BUSTER_TEST(arguments, codegen_module_relocation_kind_is_thread_local_index(relocation.kind) == expectation.thread_local_index);
         BUSTER_TEST(arguments, codegen_module_relocation_valid(&relocation));
-        relocation.kind = CODEGEN_MODULE_RELOCATION_COUNT;
-        BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(relocation.kind));
-        BUSTER_TEST(arguments, !codegen_module_relocation_valid(&relocation));
-        relocation.kind = (u8)expectation.kind;
-        relocation.aarch64 = !relocation.aarch64;
-        BUSTER_TEST(arguments, !codegen_module_relocation_valid(&relocation));
+        relocation.label_address = true;
+        BUSTER_TEST(arguments, codegen_module_relocation_valid(&relocation) ==
+                                   (expectation.kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64));
     }
-    BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(UINT8_MAX));
+
+    CodegenModuleRelocation zero_relocation = {0};
+    BUSTER_TEST(arguments, codegen_module_relocation_valid(&zero_relocation));
+    BUSTER_TEST(arguments, !codegen_module_relocation_valid(0));
+    for (u8 source = 0; source < CODEGEN_MODULE_RELOCATION_SOURCE_COUNT; source += 1)
+    {
+        CodegenModuleRelocation relocation = {
+            .source = source,
+        };
+        BUSTER_TEST(arguments, codegen_module_relocation_valid(&relocation));
+    }
+
+    CodegenModuleRelocation invalid_relocation = {
+        .kind = CODEGEN_MODULE_RELOCATION_COUNT,
+    };
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(invalid_relocation.kind));
+    BUSTER_TEST(arguments, !codegen_module_relocation_valid(&invalid_relocation));
+    invalid_relocation = (CodegenModuleRelocation){
+        .kind = UINT8_MAX,
+    };
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(invalid_relocation.kind));
+    BUSTER_TEST(arguments, !codegen_module_relocation_valid(&invalid_relocation));
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_is_aarch64(invalid_relocation.kind));
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_is_absolute(invalid_relocation.kind));
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_is_thread_local(invalid_relocation.kind));
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_is_thread_local_low(invalid_relocation.kind));
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_is_thread_local_index(invalid_relocation.kind));
+    invalid_relocation = (CodegenModuleRelocation){
+        .source = CODEGEN_MODULE_RELOCATION_SOURCE_COUNT,
+    };
+    BUSTER_TEST(arguments, !codegen_module_relocation_valid(&invalid_relocation));
 
     u8 x86_text[] = {
         0xe8, 0, 0, 0, 0, 0xc3, 0xb8, 42, 0, 0, 0, 0xc3,
