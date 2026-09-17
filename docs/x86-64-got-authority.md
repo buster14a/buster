@@ -19,9 +19,10 @@ how many there are, so the three GOT relocations stay three
 
 | ELF type | Kind | Bytes before the field | Vocabulary |
 |---|---|---|---|
-| 9 `R_X86_64_GOTPCREL` | `X86_64_GOTPCREL` | promises nothing | the closed MOV r64 -> LEA family only |
+| 9 `R_X86_64_GOTPCREL` | `X86_64_GOTPCREL` | promises nothing | never decoded; the link fails by symbol unless a real GOT slot exists |
 | 41 `R_X86_64_GOTPCRELX` | `X86_64_GOTPCRELX` | opcode and ModRM | every row with no REX prefix |
 | 42 `R_X86_64_REX_GOTPCRELX` | `X86_64_REX_GOTPCRELX` | one REX prefix more | every REX-prefixed row |
+| 43 `R_X86_64_CODE_4_GOTPCRELX` | `X86_64_CODE_4_GOTPCRELX` | REX2, opcode and ModRM | MOV, TEST and ALU rows using r16-r31 |
 
 Collapsing 41 and 42 makes `8b 05` and `48 8b 05` the same site, and the byte
 in front of a non-REX load is then read as a REX prefix it never had. Roughly
@@ -66,9 +67,10 @@ instruction may not cross the beginning of its section.
 
 A row costs an encoder emission, and the vocabulary is 323 of them, so
 `buster_x86_metadata_got_prepare` takes a tier mask the way
-`buster_x86_metadata_tls_prepare` does. Plain `R_X86_64_GOTPCREL` prepares the
-closed family alone, which is what this compiler's own `-fPIC` output needs;
-the rest is derived only when an object actually carries a relaxable spelling.
+`buster_x86_metadata_tls_prepare` does. Plain `R_X86_64_GOTPCREL` is never decoded because it promises no
+instruction boundary. This compiler's own `-fPIC` MOV-r64 loads are written as
+`R_X86_64_REX_GOTPCRELX`; the wider vocabulary is derived only when an object
+actually carries a relaxable spelling.
 Selection scans a mnemonic's candidates and is the expensive half, so a class
 selects once, on its highest register -- whose operands need every REX bit the
 class can use, and which therefore never selects a shorter accumulator form

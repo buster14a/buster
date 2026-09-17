@@ -228,10 +228,65 @@ static BusterX86MetadataGotSite x86_got_oracle_site(X86GotOracleClass entry, u32
 UnitTestResult x86_64_got_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, 0, 3, 7, -4));
+    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, 0, 3, 7, -4));
     u8 bytes[128];
     u8 expected[128];
     static u32 const values[] = {0, 1, 127, 128, 0x7fffffff, 0x80000000, 0xffffff80, 0xffffffff};
+    // Plain type 9 names only a field. None of the eight REX-looking
+    // bytes that previously matched may be consumed from the preceding
+    // instruction, and failure must be atomic.
+    for (u32 preceding = 0x40; preceding <= 0x4f; preceding += 1)
+    {
+        u8 ambiguous[] = {(u8)preceding, 0x8b, 0x05, 0x11, 0x22, 0x33, 0x44};
+        u8 unchanged[sizeof(ambiguous)];
+        memcpy(unchanged, ambiguous, sizeof(ambiguous));
+        BUSTER_TEST(arguments,
+                    buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, ambiguous, 3, sizeof(ambiguous), -4) ==
+                        BUSTER_X86_METADATA_GOT_PATCH_NONE);
+        BUSTER_TEST(arguments, memcmp(ambiguous, unchanged, sizeof(ambiguous)) == 0);
+    }
+    // Type 43 promises a four-byte REX2/opcode/ModRM prefix. Encoding one
+    // EGPR source and replacement through the checked metadata front door
+    // both forces preparation of the complete APX vocabulary and verifies the
+    // relocation field stays at the promised offset.
+    {
+        u8 apx_source[16] = {0};
+        u8 apx_direct[16] = {0};
+        String8 apx_features[1] = {S8("APX_F")};
+        BusterX86MetadataPhysicalOperand apx_operands[2] = {
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+             .reg = {.index = 16, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+             .memory = {.has_symbol = true, .symbol = S8("target"), .rip_relative = true,
+                        .has_displacement = true, .address_size = 64, .scale = 1}},
+        };
+        for (u32 output = 0; output < 2; output += 1)
+        {
+            BusterX86MetadataRelocation field = {0};
+            BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                .physical = {.mnemonic = output ? S8("LEA") : S8("MOV"), .operands = apx_operands, .operand_count = 2,
+                             .features = {.names = apx_features, .count = 1},
+                             .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64},
+                .output = output ? apx_direct : apx_source, .output_capacity = sizeof(apx_source),
+                .relocations = &field, .relocation_capacity = 1,
+            });
+            BUSTER_TEST(arguments, encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count == 8 &&
+                                       encoded.relocation_count == 1 && field.offset == 4 && field.width == 4 &&
+                                       field.kind == BUSTER_X86_METADATA_RELOCATION_PC32 && field.addend == -4 &&
+                                       (output ? apx_direct[0] : apx_source[0]) == 0xd5);
+        }
+        memcpy(bytes, apx_source, 8);
+        bytes[4] = 0x11;
+        bytes[5] = 0x22;
+        bytes[6] = 0x33;
+        bytes[7] = 0x44;
+        memcpy(expected, bytes, 8);
+        memcpy(expected, apx_direct, 4);
+        BUSTER_TEST(arguments,
+                    buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_CODE_4_GOTPCRELX, bytes, 4, 8, -4) ==
+                        BUSTER_X86_METADATA_GOT_PATCH_PC32);
+        BUSTER_TEST(arguments, memcmp(bytes, expected, 8) == 0);
+    }
     // The programmatic oracle and the hand-written one agree on the family
     // R_X86_64_GOTPCREL has always converted, which is what lets the rest of
     // the vocabulary rest on the programmatic one alone.
@@ -390,16 +445,16 @@ UnitTestResult x86_64_got_tests(UnitTestArguments* arguments)
             memset(bytes, 0xa5, sizeof(bytes));
             memcpy(bytes + alignment, x86_got_got_oracle[0], 7);
             memcpy(expected, bytes, sizeof(bytes));
-            bool success = buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, alignment + 3, size, -4) ==
+            bool success = buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, bytes, alignment + 3, size, -4) ==
                            BUSTER_X86_METADATA_GOT_PATCH_PC32;
             bool valid = size >= alignment + 7;
             if (valid) memcpy(expected + alignment, x86_got_address_oracle[0], 3);
             BUSTER_TEST(arguments, success == valid && memcmp(bytes, expected, sizeof(bytes)) == 0);
         }
     }
-    // Exhaust the finite REX/ModRM domain using independent oracle matching.
-    // A site that promises nothing takes the MOV-r64 family and no other row
-    // of the table, however much a neighbouring byte looks like one.
+    // Plain type 9 describes only the four-byte field. Exhaust every possible
+    // byte in the three positions before it and prove the implementation
+    // neither recognizes nor writes any of them.
     for (u32 rex = 0; rex < 256; rex += 1)
     {
         for (u32 modrm = 0; modrm < 256; modrm += 1)
@@ -408,20 +463,9 @@ UnitTestResult x86_64_got_tests(UnitTestArguments* arguments)
             bytes[0] = (u8)rex;
             bytes[2] = (u8)modrm;
             memcpy(expected, bytes, 7);
-            bool valid = false;
-            for (u32 reg = 0; reg < 16; reg += 1)
-            {
-                for (u32 variant = 0; variant < 4; variant += 1)
-                {
-                    if (rex == (u32)(x86_got_got_oracle[reg][0] | variant) && modrm == x86_got_got_oracle[reg][2])
-                    {
-                        memcpy(expected, x86_got_address_oracle[reg], 7);
-                        valid = true;
-                    }
-                }
-            }
-            BUSTER_TEST(arguments, (buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, 3, 7, -4) ==
-                                    BUSTER_X86_METADATA_GOT_PATCH_PC32) == valid);
+            BUSTER_TEST(arguments,
+                        buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, 3, 7, -4) ==
+                            BUSTER_X86_METADATA_GOT_PATCH_NONE);
             BUSTER_TEST(arguments, memcmp(bytes, expected, 7) == 0);
         }
     }
@@ -430,17 +474,16 @@ UnitTestResult x86_64_got_tests(UnitTestArguments* arguments)
         memcpy(bytes, x86_got_got_oracle[0], 7);
         bytes[1] = (u8)opcode;
         memcpy(expected, bytes, 7);
-        bool valid = opcode == x86_got_got_oracle[0][1];
-        if (valid) memcpy(expected, x86_got_address_oracle[0], 7);
-        BUSTER_TEST(arguments, (buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, 3, 7, -4) ==
-                                BUSTER_X86_METADATA_GOT_PATCH_PC32) == valid);
+        BUSTER_TEST(arguments,
+                    buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, 3, 7, -4) ==
+                        BUSTER_X86_METADATA_GOT_PATCH_NONE);
         BUSTER_TEST(arguments, memcmp(bytes, expected, 7) == 0);
     }
     memcpy(bytes, x86_got_got_oracle[0], 7);
     memcpy(expected, bytes, 7);
-    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, 2, 7, -4));
-    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, UINT64_MAX, 7, -4));
-    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_GOTPCREL, bytes, UINT64_MAX, UINT64_MAX, -4));
+    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, bytes, 2, 7, -4));
+    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, bytes, UINT64_MAX, 7, -4));
+    BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, bytes, UINT64_MAX, UINT64_MAX, -4));
     BUSTER_TEST(arguments, !buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_COUNT, bytes, 3, 7, -4));
     BUSTER_TEST(arguments, memcmp(bytes, expected, 7) == 0);
     return result;

@@ -148,10 +148,13 @@ typedef enum ObjectRelocationKind
     // above, which carries no promise at all.
     OBJECT_RELOCATION_X86_64_GOTPCRELX,
     OBJECT_RELOCATION_X86_64_REX_GOTPCRELX,
+    // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
+    // instruction begins four bytes before its relocated field.
+    OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
-// The three x86-64 GOT spellings share every rule but relaxation: one
+// The four x86-64 GOT spellings share every rule but relaxation: one
 // rip-relative 32-bit field, a -4 addend, and a value taken from the slot
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.

@@ -1142,9 +1142,9 @@ BUSTER_F_DECL bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity,
 // Rewrite a RIP-relative GOT reference into the direct instruction the psABI
 // conversion table (B.2) names for its shape. The site's psABI spelling says
 // how many bytes of the instruction precede the field, which is what makes
-// the shape decidable at all: plain GOTPCREL promises nothing and keeps the
-// closed MOV-r64 -> LEA family, while the two relaxable spellings open the
-// ALU, TEST, PUSH and indirect-branch conversions as well.
+// the shape decidable at all: plain GOTPCREL promises nothing and is never
+// decoded, while the relaxable spellings open the conversion rows whose exact
+// two-, three-, or four-byte prefix width they promise.
 //
 // The relocation field is section-relative and is never patched here, but the
 // answer says what the rewritten site now expects there: PC32 keeps the
@@ -1159,6 +1159,7 @@ typedef enum BusterX86MetadataGotSite
     BUSTER_X86_METADATA_GOT_SITE_GOTPCREL,
     BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX,
     BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX,
+    BUSTER_X86_METADATA_GOT_SITE_CODE_4_GOTPCRELX,
     BUSTER_X86_METADATA_GOT_SITE_COUNT,
 } BusterX86MetadataGotSite;
 typedef enum BusterX86MetadataGotPatch

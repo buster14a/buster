@@ -1446,9 +1446,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     // precede the field, and the linker rewrites a different instruction
     // without that.  Every kind writes its own type back out.  Local dynamic
     // is the one thread-local model with no kind, and the refusal names it.
-    u32 gotpc_rel_types[] = {9, 41, 42};
+    u32 gotpc_rel_types[] = {9, 41, 42, 43};
     ObjectRelocationKind gotpc_rel_kinds[] = {OBJECT_RELOCATION_X86_64_GOTPCREL, OBJECT_RELOCATION_X86_64_GOTPCRELX,
-                                              OBJECT_RELOCATION_X86_64_REX_GOTPCRELX};
+                                              OBJECT_RELOCATION_X86_64_REX_GOTPCRELX, OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX};
     for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(gotpc_rel_types); type_index += 1)
     {
         ObjectArtifact gotpc_rel_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);

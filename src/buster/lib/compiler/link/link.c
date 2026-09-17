@@ -2115,9 +2115,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataGotPatch link_x86_relax_got_reference(Objec
     BusterX86MetadataGotPatch result = BUSTER_X86_METADATA_GOT_PATCH_NONE;
     if (bytes && section_start <= field_offset && field_offset <= section_end)
     {
-        BusterX86MetadataGotSite site = kind == OBJECT_RELOCATION_X86_64_GOTPCRELX       ? BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX
-                                        : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX ? BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX
-                                                                                         : BUSTER_X86_METADATA_GOT_SITE_GOTPCREL;
+        BusterX86MetadataGotSite site = kind == OBJECT_RELOCATION_X86_64_GOTPCRELX          ? BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX
+                                        : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX    ? BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX
+                                        : kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX ? BUSTER_X86_METADATA_GOT_SITE_CODE_4_GOTPCRELX
+                                                                                            : BUSTER_X86_METADATA_GOT_SITE_GOTPCREL;
         result = buster_x86_metadata_relax_got_reference(site, bytes + section_start, field_offset - section_start, section_end - section_start, addend);
     }
     return result;
