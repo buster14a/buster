@@ -5,16 +5,20 @@
 
 #if BUSTER_COMPILER_MSVC
 #define IR_APPEND_NOINLINE __declspec(noinline)
+#define IR_APPEND_UNUSED
+#pragma warning(push)
+#pragma warning(disable : 4505)
 #else
 #define IR_APPEND_NOINLINE __attribute__((noinline))
+#define IR_APPEND_UNUSED __attribute__((unused))
 #endif
 
 // Keep validation, CFG invalidation, allocation, and growth out of the
 // capacity-available path. The checked public helper remains the single owner
 // of those semantics.
-static BUSTER_COLD IR_APPEND_NOINLINE IrInstructionId ir_instruction_append_slow(Arena* arena, IrFunction* function,
-                                                                                IrInstruction instruction,
-                                                                                IrSourceRange canonical_source)
+static IR_APPEND_UNUSED BUSTER_COLD IR_APPEND_NOINLINE IrInstructionId ir_instruction_append_slow(Arena* arena, IrFunction* function,
+                                                                                                 IrInstruction instruction,
+                                                                                                 IrSourceRange canonical_source)
 {
     return ir_function_add_instruction(arena, function, instruction, canonical_source);
 }
@@ -23,8 +27,9 @@ static BUSTER_COLD IR_APPEND_NOINLINE IrInstructionId ir_instruction_append_slow
 // function, an unpublished CFG, and valid instruction/source storage for the
 // current count and capacity. Callers that cannot prove those invariants must
 // use ir_function_add_instruction instead.
-static BUSTER_INLINE IrInstructionId ir_instruction_append_trusted(Arena* arena, IrFunction* function, IrInstruction instruction,
-                                                                  IrSourceRange canonical_source)
+static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_instruction_append_trusted(Arena* arena, IrFunction* function,
+                                                                                    IrInstruction instruction,
+                                                                                    IrSourceRange canonical_source)
 {
     u32 instruction_count = function->instruction_count;
     IrInstructionId result;
@@ -51,4 +56,8 @@ static BUSTER_INLINE IrInstructionId ir_instruction_append_trusted(Arena* arena,
     return result;
 }
 
+#if BUSTER_COMPILER_MSVC
+#pragma warning(pop)
+#endif
+#undef IR_APPEND_UNUSED
 #undef IR_APPEND_NOINLINE
