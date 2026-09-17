@@ -1,10 +1,8 @@
-name: Issue 75 diagnostic
+name: Issue 75 pre-645 diagnostic
 
 on:
   push:
     branches: [codex/issue-75-diagnose-20260917]
-  pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -14,10 +12,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - name: Checkout Buster
+      - name: Checkout pre-645 main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: 7491c8512d22b7456ffeacbda588c17ab255ecbf
           persist-credentials: false
+
+      - name: Record tested revision
+        shell: bash
+        run: git rev-parse HEAD
 
       - name: Install build and diagnostic tools
         shell: bash
@@ -52,6 +55,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/issue-75"
+          git rev-parse HEAD > "$RUNNER_TEMP/issue-75/buster-revision.txt"
           set +e
           "$RUNNER_TEMP/buster-build-driver" test_quickjs --config Release "$QUICKJS_SOURCE" 2>&1 | tee "$RUNNER_TEMP/issue-75/harness.log"
           harness_status=${PIPESTATUS[0]}
@@ -81,8 +85,6 @@ jobs:
               printf '%s\n' "$?" > "$RUNNER_TEMP/issue-75/strace-status.txt"
               set -e
             )
-            cp "$output_directory/none/qjs" "$RUNNER_TEMP/issue-75/qjs-none" || true
-            find "$output_directory/metrics/none" -type f -maxdepth 1 -print -exec cp {} "$RUNNER_TEMP/issue-75/" \; 2>/dev/null || true
           fi
 
           exit "$harness_status"
@@ -91,7 +93,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: issue-75-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          name: issue-75-pre-645-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/issue-75
           if-no-files-found: warn
           retention-days: 7
