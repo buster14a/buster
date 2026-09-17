@@ -44275,6 +44275,40 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 index = close;
                 continue;
             }
+            // A generic selection has the type and value of its selected
+            // association. Resolve the selector through the shared type matcher,
+            // then schedule only that association on the explicit constant-query
+            // stack. Unselected expressions remain semantically checked by the
+            // ordinary generic-selection walk but are never evaluated here.
+            if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end &&
+                string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Generic")) &&
+                c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                           C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                u32 selected_start = 0;
+                u32 selected_end = 0;
+                IrTypeId selected_type = IR_TYPE_ID_INVALID;
+                CIrConstantValue selected = {0};
+                builder->queries->value_count = value_start + value_count;
+                builder->queries->operator_count = operator_start + operator_count;
+                if (close >= end ||
+                    !c_ir_generic_selection(builder, index, close + 1, &selected_start, &selected_end, &selected_type) ||
+                    !c_ir_query_constant(builder, selected_start, selected_end, &selected))
+                {
+                    return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start,
+                                                          value_count, operator_count);
+                }
+                (void)selected_type;
+                if (value_count >= capacity)
+                {
+                    return false;
+                }
+                values[value_count++] = selected;
+                expect_operand = false;
+                index = close;
+                continue;
+            }
             // The constant-valued math intrinsics fold here as well as in the
             // runtime path: hosted <math.h> spells NAN as `(__builtin_nanf(""))`
             // and INFINITY as `(__builtin_inff())`, so a static initializer

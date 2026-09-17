@@ -4236,7 +4236,9 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     for (u32 token_offset = 0; token_offset < declaration.token_count; token_offset += 1)
     {
         CToken token = preprocess.tokens[declaration.token_start + token_offset];
-        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")))
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic"))))
         {
             deferred = true;
             break;
