@@ -373,13 +373,18 @@ Both `pre_sample_plan` and `post_aa_binding` carry the same `execution_plan`
 artifact descriptor. Its schema is
 `buster-native-retirement-execution-plan-v1`, integer version `1`. It binds
 `schedule=tp-retirement-block-schedule-v1`, the full uint64 seed, two rounds,
-pairs per round, two warmups per variant, admitted CPU, canonical performance-row
+pairs per round, two warmups per variant, the logical CPU and native target from
+the admitted profile/qualification/A/A receipts, the canonical performance-row
 digest, and exactly one contract per canonical row. Each row contract binds its
 canonical identity and independent oracle record. Baseline and candidate each
 bind compiler-command and deterministic output-artifact SHA-256 values,
 deterministic code-section digest/size, and the native runtime command and
 oracle-output digest where eligible. Inapplicable fields are explicitly null;
 callers cannot remove an applicable metric by changing an eligibility flag.
+Native-runtime applicability is derived from the frozen row execution obligation,
+artifact stage and admitted native target. A native-capable link/self-host row
+cannot be relabeled `not-applicable`; object-only and non-native-target rows
+cannot be relabeled as native runtime evidence.
 Command digests identify the frozen installed recipe's canonical argv, working
 directory and environment contract, not a label chosen after measurements.
 The admitted producer must supply and preserve those exact command identities.
@@ -409,23 +414,32 @@ independent replay, so there is no hash cycle.
 
 Every canonical UTF-8 JSONL invocation record includes its global sequence,
 compiler/runtime kind, warmup/sample phase, canonical row, round/pair or warmup
-index, pair position and variant; process ID, CPU, monotonic start/end; exit
-code, signal, timeout and cancellation status; executable, command and output
-digests; deterministic code-section digest/size; wall seconds and compiler
-peak-RSS bytes. Fields not meaningful for that invocation are null. Compiler
+index, pair position and variant; process ID, a supervisor-observed boot-scoped
+process-start token, their canonical process-instance digest, CPU, monotonic
+start/end; exit code, signal, timeout and cancellation status; executable,
+command and output digests; deterministic code-section digest/size; wall
+seconds and compiler peak-RSS bytes. Fields not meaningful for that invocation are null. Compiler
 and runtime executable identities are checked separately. Nonzero exits,
 signals, timeouts/cancellation, overlapping or out-of-window invocations,
-missing/duplicate/extra records, schedule deviations, wrong outputs, failed or
-non-native runtime oracles, and mismatched numeric measurements reject before
-statistics replay. Process wall seconds must match the recorded monotonic
+missing/duplicate/extra records, schedule deviations, reused or mismatched
+process instances, execution on a CPU other than the admitted logical CPU,
+wrong outputs, failed or non-native runtime oracles, and mismatched numeric
+measurements reject before statistics replay. PIDs may be reused after exit,
+so uniqueness is defined by the supervisor-bound job/attempt/boot/PID/start-token
+digest rather than by PID alone; one process instance may execute exactly one
+warmup or measured invocation. Process wall seconds must match the recorded monotonic
 interval within one nanosecond of decimal-serialization error. Warmups cannot
 substitute for samples. A numeric sample must equal its authenticated process
 observation; a positive number alone is insufficient.
 
 Transcript parsing is streamed, bounds each line to 8,192 bytes, limits receipt
 JSON to 1 MiB before loading it, and allows at most 4,096 transcript shards.
-It derives the exact total invocation count from the complete population and sampling policy,
-and hashes the same bytes that it consumes. Extra shards do not increase that
+The validator opens the trusted receipt once, bounds and hashes those exact
+bytes against both its descriptor and the independently supplied trust root,
+and only then parses those same bytes; a concurrently substituted path cannot
+supply one receipt for validation and another for sealing. It derives the exact
+total invocation count from the complete population and sampling policy, and
+hashes the same transcript bytes that it consumes. Extra shards do not increase that
 population or change the existing 39,518,208 numeric-record ceiling. The plan,
 receipt and every transcript shard are members of the durable sealed closure
 and independent archive verification. Missing trusted receipt input fails

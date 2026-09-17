@@ -32,7 +32,8 @@
   they do not silently replace the native harness's ordinary CI guard. Before
   any timing verdict, validate the complete immutable binding record with
   `python3 tools/native_retirement_performance_binding.py <record.json>
-  --evidence-root <bundle> --repository-root <immutable-checkout>`; the
+  --evidence-root <bundle> --repository-root <immutable-checkout>
+  --trusted-execution-receipt-sha256 <independently-obtained-sha256>`; the
   evidence-root form joins the exact #508 declaration, manifest, inputs,
   dependencies, environment, rows, independent validator report and
   versioned canonical performance-row artifact. It recomputes unique row
@@ -41,7 +42,10 @@
   publication/download/replay receipts. `--repository-root` is an immutable
   checkout used to verify commit-to-tree and source/build/harness identities;
   without it the result is explicitly downgraded and cannot prove those
-  relations. This validation does not itself accept a performance result.
+  relations. The trusted execution-receipt digest must come out of band
+  from the authenticated admitted control service for the exact job and attempt;
+  never derive it from the result bundle being validated. This validation does
+  not itself accept a performance result.
   A run without the evidence root is reported as `proof=structural-only`.
   The binding streams schema-2 result inputs through the existing #615 verifier
   with predeclared 16,777,216-record partitions, then replays #619 through the

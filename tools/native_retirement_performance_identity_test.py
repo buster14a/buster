@@ -289,6 +289,9 @@ class InvocationEvidenceTests(unittest.TestCase):
         by_row = {item["row"]: item for item in contracts}
         events = []
         last_end = 100
+        job_id = "synthetic-job"
+        attempt = 1
+        boot_id = "synthetic-boot"
         for identity in binding._execution_schedule(parsed, sampling):
             event = dict(identity)
             compiler = event["kind"] == "compiler"
@@ -298,8 +301,13 @@ class InvocationEvidenceTests(unittest.TestCase):
             metrics = samples[key]
             seconds = metrics["compiler_wall_time" if compiler else "generated_runtime"][event["variant"]]
             duration_ns = int(round(seconds * 1_000_000_000))
+            pid = 2000 + event["sequence"]
+            process_start_token = f"synthetic-process-{event['sequence']}"
             event.update({
-                "pid": 2000 + event["sequence"], "cpu": 3,
+                "pid": pid, "process_start_token": process_start_token,
+                "process_instance_sha256": binding._process_instance_digest(
+                    job_id, attempt, boot_id, pid, process_start_token),
+                "cpu": 3,
                 "started_ns": last_end + 1, "finished_ns": last_end + 1 + duration_ns,
                 "exit_code": 0, "signal": 0, "timed_out": False, "cancelled": False,
                 "executable_sha256": (record["subjects"][event["variant"]]["binary"]["sha256"]
@@ -316,8 +324,8 @@ class InvocationEvidenceTests(unittest.TestCase):
         raw_digest = "9" * 64
         receipt = {"schema": binding.EXECUTION_RECEIPT_SCHEMA, "version": 1,
                    "context_sha256": binding._canonical_json_digest(binding._execution_context(record, raw_digest)),
-                   "execution_plan_sha256": plan_descriptor["sha256"], "job_id": "synthetic-job",
-                   "attempt": 1, "boot_id": "synthetic-boot", "bound_at_ns": 100,
+                   "execution_plan_sha256": plan_descriptor["sha256"], "job_id": job_id,
+                   "attempt": attempt, "boot_id": boot_id, "bound_at_ns": 100,
                    "completed_at_ns": last_end + 1, "invocations": len(events), "shards": []}
         descriptor = cls.write_transcript(root, receipt, events)
         return plan_descriptor, receipt, descriptor, events, raw_digest
@@ -347,6 +355,7 @@ class InvocationEvidenceTests(unittest.TestCase):
             row = copy.deepcopy(template)
             row["row"] = i
             row["identity"]["fixture"] = f"tests/invocation-{i}.c"
+            row["identity"]["artifact_stage"] = "link" if i == 0 else "object"
             row["metrics"]["generated_runtime"] = i == 0
             row["eligibility"]["generated_runtime"] = i == 0
             row["eligibility"]["runtime_oracle"] = (
@@ -399,7 +408,8 @@ class InvocationEvidenceTests(unittest.TestCase):
         return binding._check_execution_transcript(
             self.root, descriptor, self.plan, self.record, self.rows,
             self.rules["sampling"], self.db, self.raw_digest,
-            trusted if trusted is not None else descriptor["sha256"])
+            trusted if trusted is not None else descriptor["sha256"],
+            3, "x86_64-unknown-linux-gnu")
 
     def test_complete_warmups_and_native_runtime_join(self):
         result = self.check()
@@ -410,12 +420,53 @@ class InvocationEvidenceTests(unittest.TestCase):
             with self.subTest(trusted=trusted), self.assertRaises(ValueError):
                 binding._check_execution_transcript(
                     self.root, self.descriptor, self.plan, self.record, self.rows,
-                    self.rules["sampling"], self.db, self.raw_digest, trusted)
+                    self.rules["sampling"], self.db, self.raw_digest, trusted,
+                    3, "x86_64-unknown-linux-gnu")
         original_trust = self.descriptor["sha256"]
         self.receipt["job_id"] = "another-job"
         changed = self.write_transcript(self.root, self.receipt, self.events)
         with self.assertRaisesRegex(ValueError, "independently trusted"):
             self.check(changed, original_trust)
+
+    def test_receipt_bytes_are_authenticated_before_json_parsing(self):
+        path = self.root / self.descriptor["path"]
+        path.write_bytes(b"x" * self.descriptor["bytes"])
+        with mock.patch.object(binding.json, "loads", wraps=json.loads) as loads:
+            with self.assertRaisesRegex(ValueError, "bytes do not match the independently trusted"):
+                self.check()
+            loads.assert_not_called()
+
+    def test_fresh_supervisor_process_instance_is_required(self):
+        events = copy.deepcopy(self.events)
+        events[0]["pid"] = 42
+        with self.assertRaisesRegex(ValueError, "not supervisor-bound"):
+            self.check(self.write_transcript(self.root, self.receipt, events))
+
+        events = copy.deepcopy(self.events)
+        for event in events:
+            event["pid"] = 42
+            event["process_start_token"] = "persistent-worker"
+            event["process_instance_sha256"] = binding._process_instance_digest(
+                self.receipt["job_id"], self.receipt["attempt"],
+                self.receipt["boot_id"], 42, "persistent-worker")
+        with self.assertRaisesRegex(ValueError, "reuses a process instance"):
+            self.check(self.write_transcript(self.root, self.receipt, events))
+
+    def test_execution_plan_cpu_must_match_admitted_profile(self):
+        plan = json.loads((self.root / self.plan["path"]).read_text())
+        plan["cpu"] = 999999
+        plan_descriptor = self.put(self.root, self.plan["path"], plan)
+        events = copy.deepcopy(self.events)
+        for event in events:
+            event["cpu"] = 999999
+        receipt = copy.deepcopy(self.receipt)
+        receipt["execution_plan_sha256"] = plan_descriptor["sha256"]
+        descriptor = self.write_transcript(self.root, receipt, events)
+        with self.assertRaisesRegex(ValueError, "CPU differs from the admitted host profile"):
+            binding._check_execution_transcript(
+                self.root, descriptor, plan_descriptor, self.record, self.rows,
+                self.rules["sampling"], self.db, self.raw_digest,
+                descriptor["sha256"], 3, "x86_64-unknown-linux-gnu")
 
     def test_wrong_order_missing_duplicate_and_extra_invocations_reject(self):
         cases = [self.events[1:], self.events + [self.events[-1]],
@@ -516,7 +567,8 @@ class InvocationEvidenceTests(unittest.TestCase):
             return binding._check_workflow_evidence(
                 self.root, self.record, self.record["workflow"], support,
                 (self.rows, {}, self.family), {}, self.rules,
-                trusted_execution_receipt_sha256=trust)
+                trusted_execution_receipt_sha256=trust,
+                admitted_cpu=3, native_target="x86_64-unknown-linux-gnu")
 
         with mock.patch.object(binding, "_check_adapter_series",
                                side_effect=RuntimeError("statistics boundary reached")) as statistics:
@@ -551,6 +603,17 @@ class InvocationEvidenceTests(unittest.TestCase):
             with self.subTest(field=field, bad=bad), self.assertRaisesRegex(ValueError, "oracle"):
                 self.check()
 
+    def test_runtime_applicability_is_derived_from_frozen_row_obligation(self):
+        rows = copy.deepcopy(self.rows)
+        rows[0]["identity"]["execution_obligation"] = "unavailable-platform-control"
+        plan, receipt, descriptor, _events, raw_digest = self.attach_execution(
+            self.root, self.record, rows, self.samples)
+        with self.assertRaisesRegex(ValueError, "frozen row obligation"):
+            binding._check_execution_transcript(
+                self.root, descriptor, plan, self.record, rows,
+                self.rules["sampling"], self.db, raw_digest,
+                descriptor["sha256"], 3, "x86_64-unknown-linux-gnu")
+
     def test_positive_but_wrong_result_measurement_rejects(self):
         self.db.execute("UPDATE samples SET baseline='1000' WHERE metric='compiler_peak_rss'")
         with self.assertRaisesRegex(ValueError, "not the authenticated invocation"):
@@ -574,7 +637,7 @@ class InvocationEvidenceTests(unittest.TestCase):
 
     def test_receipt_and_shard_metadata_are_bounded_before_reading(self):
         oversized = dict(self.descriptor, bytes=binding.EXECUTION_RECEIPT_BYTE_CAP + 1)
-        with mock.patch.object(binding, "_read_json_evidence") as read:
+        with mock.patch.object(binding, "_read_trusted_json_evidence") as read:
             with self.assertRaisesRegex(ValueError, "bounded metadata"):
                 self.check(oversized)
             read.assert_not_called()

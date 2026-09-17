@@ -361,12 +361,14 @@ class BindingTests(unittest.TestCase):
             "schema": binding.PROFILE_SCHEMA, "version": 1,
             "profile_id": "zen5-9700x-native", "profile_version": "profile-v1",
             "machine_id": "zen5-9700x-01", "native_only": True,
+            "logical_cpu": 3, "native_target": "x86_64-unknown-linux-gnu",
             "whole_host_isolation": True, "lease_protocol": binding.LEASE_PROTOCOL,
         })
         qualification = json_artifact("execution/qualification.json", {
             "schema": binding.QUALIFICATION_SCHEMA, "version": 1,
             "machine_id": "zen5-9700x-01", "profile_id": "zen5-9700x-native",
             "profile_version": "profile-v1", "qualified": True,
+            "logical_cpu": 3, "native_target": "x86_64-unknown-linux-gnu",
             "whole_host_isolation": True, "lease_protocol": binding.LEASE_PROTOCOL,
         })
         aa_admission = json_artifact("execution/aa-admission.json", {
@@ -374,6 +376,7 @@ class BindingTests(unittest.TestCase):
             "machine_id": "zen5-9700x-01", "profile_id": "zen5-9700x-native",
             "profile_version": "profile-v1", "service_id": "retirement-9700x",
             "admitted": True, "native_only": True,
+            "logical_cpu": 3, "native_target": "x86_64-unknown-linux-gnu",
             "baseline_source_commit": "3" * 40, "baseline_source_tree": "4" * 40,
             "lease_protocol": binding.LEASE_PROTOCOL,
         })
@@ -1079,8 +1082,8 @@ class BindingTests(unittest.TestCase):
 
         The production support declaration remains the 77,184-object-row
         census; the support-output function is patched only in this test so
-        the workflow/seal/replay composition can execute on one canonical
-        performance row and 120 streamed #615 records.  The independent
+        the workflow/seal/replay composition can execute on one object row,
+        one native link row, and 240 streamed #615 records.  The independent
         schema-2 validator has its own 23-case suite and is not replaced by
         this bounded wiring check.
         """
@@ -1116,15 +1119,22 @@ class BindingTests(unittest.TestCase):
         performance_rows_descriptor = support_files[
             binding.SUPPORT_FILE_ROLES.index("performance_rows")]
         rows_record = json.loads(contents[performance_rows_descriptor["path"]].decode())
-        row = copy.deepcopy(rows_record["rows"][0])
-        row["row"] = 0
-        row["eligibility"] = {
+        object_row = copy.deepcopy(rows_record["rows"][0])
+        object_row["row"] = 0
+        object_row["eligibility"] = {
             "compiler_wall_time": True, "compiler_peak_rss": True,
-            "generated_code_bytes": True, "generated_runtime": True,
-            "runtime_oracle": "independent-native-executable-oracle",
+            "generated_code_bytes": True, "generated_runtime": False,
+            "runtime_oracle": "not-applicable",
             "code_section": "deterministic-code-section",
         }
-        rows_record["rows"] = [row]
+        runtime_row = copy.deepcopy(object_row)
+        runtime_row["row"] = 1
+        runtime_row["identity"]["artifact_stage"] = "link"
+        runtime_row["eligibility"].update({
+            "generated_runtime": True,
+            "runtime_oracle": "independent-native-executable-oracle",
+        })
+        rows_record["rows"] = [object_row, runtime_row]
         rows_data = json_data(rows_record)
         performance_rows_descriptor.update(put(performance_rows_descriptor["path"], rows_data))
         parsed, axes, family = binding._performance_rows(rows_data)
@@ -1133,14 +1143,14 @@ class BindingTests(unittest.TestCase):
             binding.SUPPORT_FILE_ROLES.index("performance_declaration")]
         performance = json.loads(contents[performance_descriptor["path"]].decode())
         performance.update({"performance_rows_sha256": performance_rows_descriptor["sha256"],
-                            "required_row_count": 1, "axes": axes,
+                            "required_row_count": 2, "axes": axes,
                             "statistical_family": family})
         performance_descriptor.update(
             put(performance_descriptor["path"], json_data(performance)))
         record["support"]["root_sha256"] = binding._support_root_digest(
             support_files, record["support"]["validator"], record["support"]["closure"])
         record["population"].update({
-            "required_row_count": 1,
+            "required_row_count": 2,
             "required_rows_sha256": performance_rows_descriptor["sha256"],
             "axes": axes,
             "statistical_family": family,
@@ -1154,34 +1164,57 @@ class BindingTests(unittest.TestCase):
 
         admission_descriptor = record["workflow"]["records"]["admission"]
         admission = json.loads(contents[admission_descriptor["path"]].decode())
-        admission["records"] = [copy.deepcopy(admission["records"][0])]
-        admission["records"][0].update({"row": 0, "census_row": 0,
-                                         "identity": parsed[0]["identity"],
-                                         "artifact_stage": "object"})
+        admission_template = copy.deepcopy(admission["records"][0])
+        admission["records"] = []
+        for performance_row in parsed:
+            item = copy.deepcopy(admission_template)
+            stage = performance_row["identity"]["artifact_stage"]
+            item.update({"row": performance_row["row"], "census_row": 0,
+                         "identity": performance_row["identity"],
+                         "artifact_stage": stage,
+                         "artifact_kind": ("object" if stage == "object"
+                                           else "linked-executable")})
+            admission["records"].append(item)
         admission_descriptor.update(put(admission_descriptor["path"], json_data(admission)))
         oracle_descriptor = record["workflow"]["records"]["oracle"]
         oracle = json.loads(contents[oracle_descriptor["path"]].decode())
-        oracle["records"] = [copy.deepcopy(oracle["records"][0])]
-        oracle["records"][0].update({
-            "row": 0, "runtime_oracle_status": "passed-native",
-            "runtime_exit_code": 0, "native_runtime": True,
-        })
+        oracle_template = copy.deepcopy(oracle["records"][0])
+        oracle["records"] = []
+        for performance_row in parsed:
+            runtime = performance_row["metrics"]["generated_runtime"]
+            item = copy.deepcopy(oracle_template)
+            item.update({
+                "row": performance_row["row"],
+                "runtime_oracle_status": ("passed-native" if runtime
+                                            else "not-applicable"),
+                "runtime_exit_code": 0 if runtime else -1,
+                "native_runtime": runtime,
+            })
+            oracle["records"].append(item)
         oracle_descriptor.update(put(oracle_descriptor["path"], json_data(oracle)))
 
-        # Stream one complete canonical row over both rounds and all 60 pairs.
+        # Stream both canonical rows over both rounds and all 60 pairs.
         measurement_lines = []
-        for round_number in range(2):
-            for pair in range(60):
-                value = {
-                    "record_id": f"row-0/round-{round_number}/pair-{pair}",
-                    "row": 0, "round": round_number, "pair": pair,
-                    "measurements": {
-                        metric: {"baseline": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0),
-                                 "candidate": (1 if metric in ("generated_code_bytes", "compiler_peak_rss") else 1.0)}
-                        for metric in binding.METRICS
-                    },
-                }
-                measurement_lines.append(json_data(value))
+        for performance_row in parsed:
+            for round_number in range(2):
+                for pair in range(60):
+                    value = {
+                        "record_id": (f"row-{performance_row['row']}/"
+                                      f"round-{round_number}/pair-{pair}"),
+                        "row": performance_row["row"], "round": round_number,
+                        "pair": pair,
+                        "measurements": {
+                            metric: {
+                                "baseline": (1 if metric in ("generated_code_bytes",
+                                                              "compiler_peak_rss") else 1.0),
+                                "candidate": (1 if metric in ("generated_code_bytes",
+                                                               "compiler_peak_rss") else 1.0),
+                            }
+                            for metric in binding.METRICS
+                            if performance_row["metrics"][metric]
+                        },
+                    }
+                    measurement_lines.append(json_data(value))
         shard_data = b"".join(measurement_lines)
         shard_descriptor = put("results/input-shard-000.jsonl", shard_data)
         manifest_value = {
@@ -1198,18 +1231,18 @@ class BindingTests(unittest.TestCase):
                 binding.SUPPORT_FILE_ROLES.index("manifest")]["sha256"],
             "source_rows_sha256": support_files[
                 binding.SUPPORT_FILE_ROLES.index("rows")]["sha256"],
-            "object_row_count": 1, "sample_row_count": 1,
+            "object_row_count": 1, "sample_row_count": 2,
             "rounds": 2, "identity_field": "record_id",
             "coordinate_schema": "row-round-pair-v1",
             "sample_population": "canonical-performance-rows-with-required-metrics",
             "eligible_population": "canonical-performance-rows",
             "pairs_per_round": 60, "records_per_row": 120,
-            "required_records": 120,
+            "required_records": 240,
             "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
             "manifest_count": 1,
             "manifests": [{"identity": "result-input-manifest-000",
                            "path": manifest_descriptor["path"], "start_record": 0,
-                           "records": 120}],
+                           "records": 240}],
             "predeclared": True,
         }
         plan_descriptor = record["workflow"]["records"]["result_input_plan"]
@@ -1231,11 +1264,22 @@ class BindingTests(unittest.TestCase):
             index = cell_index[member] if is_cell else bootstrap_index[member]
             limit = binding.CELL_THRESHOLDS[metric_name] if is_cell \
                 else binding.AGGREGATE_THRESHOLDS[metric_name]
+            if is_cell:
+                selected_rows = [int(member.rsplit("=", 1)[1])]
+            elif member.endswith("/aggregate"):
+                selected_rows = [item["row"] for item in parsed
+                                 if item["metrics"][metric_name]]
+            else:
+                dimension, selected = member.split("/slice/", 1)[1].split("=", 1)
+                selected_rows = [item["row"] for item in parsed
+                                 if item["metrics"][metric_name]
+                                 and str(item["identity"][dimension]) == selected]
             series_lines.append(
                 f"member={member} metric={binding.STATISTICAL_METRICS.index(metric_name)} "
-                f"kind={1 if is_cell else 0} family={index} cells=1 pairs=60 "
+                f"kind={1 if is_cell else 0} family={index} "
+                f"cells={len(selected_rows)} pairs=60 "
                 f"resamples={0 if is_cell else 100000} limit={limit}\n")
-            series_lines.extend("ratio=1.0\n" for _ in range(120))
+            series_lines.extend("ratio=1.0\n" for _ in range(120 * len(selected_rows)))
             series_lines.append("end\n")
         series_data = "".join(series_lines).encode("utf-8")
         adapter_input_descriptor = put("results/statistics-series.txt", series_data)
@@ -1260,11 +1304,12 @@ class BindingTests(unittest.TestCase):
             connection.execute(
                 "CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
                 "metric TEXT, baseline TEXT, candidate TEXT)")
-            for round_number in range(2):
-                for pair in range(60):
-                    connection.execute(
-                        "INSERT INTO samples VALUES (0, ?, ?, 'generated_code_bytes', '1', '1')",
-                        (round_number, pair))
+            for performance_row in parsed:
+                for round_number in range(2):
+                    for pair in range(60):
+                        connection.execute(
+                            "INSERT INTO samples VALUES (?, ?, ?, 'generated_code_bytes', '1', '1')",
+                            (performance_row["row"], round_number, pair))
             connection.commit()
             code_summary = binding._code_bytes_summary(
                 parsed, connection, 2, 60)
@@ -1279,7 +1324,7 @@ class BindingTests(unittest.TestCase):
             "family_sha256": family["sha256"],
             "result_manifests": [{
                 "identity": "result-input-manifest-000", **manifest_descriptor,
-                "start_record": 0, "records": 120,
+                "start_record": 0, "records": 240,
                 "input_bytes": len(shard_data) + len(manifest_data),
             }],
             "raw_measurements_sha256": raw_measurements_digest,

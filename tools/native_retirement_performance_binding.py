@@ -429,6 +429,25 @@ def _canonical_json_digest(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _process_instance_digest(job_id, attempt, boot_id, pid, process_start_token):
+    """Bind one supervisor-observed OS process instance, not merely a PID.
+
+    PIDs may be reused after exit.  The admitted service therefore supplies a
+    boot-scoped process-start token (for example the Linux proc start time plus
+    its transient-unit invocation identity).  The independently authenticated
+    receipt binds that token; this digest makes accidental field substitution
+    and persistent-worker reuse machine-checkable without treating a PID as a
+    globally unique identifier.
+    """
+    return _canonical_json_digest({
+        "job_id": job_id,
+        "attempt": attempt,
+        "boot_id": boot_id,
+        "pid": pid,
+        "process_start_token": process_start_token,
+    })
+
+
 def _family_invocation_digest(family):
     """Digest one #619 C call per scope-free logical family member."""
     calls = [{"member": member, "scopes": list(STATISTICAL_SCOPES)}
@@ -502,6 +521,14 @@ def _row_identity(value, name):
         _token(value[field], f"{name}.{field}")
     _relative_path(value["argv_evidence"], f"{name}.argv_evidence")
     return value
+
+
+def _native_runtime_required(row, native_target):
+    """Derive native-runtime applicability from frozen row/host identities."""
+    identity = row["identity"]
+    return identity["execution_obligation"] == "semantic-gate-509" \
+        and identity["artifact_stage"] in {"link", "self-host-stage1"} \
+        and identity["target"] == native_target
 
 
 def _derive_axes(rows):
@@ -909,6 +936,41 @@ def _read_json_evidence(root, artifact, name):
         _fail(f"{name} is not a readable JSON receipt: {error}")
 
 
+def _read_trusted_json_evidence(root, artifact, name, trusted_sha256, byte_cap):
+    """Hash and parse one bounded trusted receipt from the same open stream."""
+    root = Path(root).resolve()
+    relative = PurePosixPath(artifact["path"])
+    target = root.joinpath(*relative.parts)
+    try:
+        target.resolve().relative_to(root)
+    except ValueError:
+        _fail(f"{name}.path escapes evidence root")
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            _fail(f"{name}.path contains a symbolic link")
+    try:
+        with target.open("rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                _fail(f"{name} is not a regular file")
+            data = stream.read(byte_cap + 1)
+    except OSError as error:
+        _fail(f"{name} is not readable: {error}")
+    if len(data) > byte_cap:
+        _fail(f"{name} exceeds the bounded metadata size")
+    if len(data) != artifact["bytes"]:
+        _fail(f"{name} byte count does not match evidence")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != artifact["sha256"] or digest != trusted_sha256:
+        _fail(f"{name} bytes do not match the independently trusted digest")
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        _fail(f"{name} is not a readable JSON receipt: {error}")
+
+
 def _check_provenance_evidence(root, binding, provenance):
     relation = _read_json_evidence(root, provenance["relation_receipt"],
                                    "provenance.relation_receipt")
@@ -1278,7 +1340,7 @@ TARGET_ABIS = {
 }
 
 
-def _check_support_output(root, binding, row_data):
+def _check_support_output(root, binding, row_data, native_target=None):
     """Cross-check every performance row against the independent #508 output.
 
     The support declaration and validator report are intentionally separate
@@ -1861,7 +1923,8 @@ def _execution_context(binding, raw_measurements_sha256):
     }
 
 
-def _check_execution_plan(root, descriptor, binding, parsed, sampling):
+def _check_execution_plan(root, descriptor, binding, parsed, sampling,
+                          admitted_cpu, native_target):
     _artifact(descriptor, "execution_plan")
     plan = _read_json_evidence(root, descriptor, "execution_plan")
     plan = _keys(plan, ("schema", "version", "schedule", "seed", "rounds",
@@ -1876,6 +1939,11 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling):
     if not 1 <= plan["seed"] <= (1 << 64) - 1:
         _fail("execution schedule seed must fit the #619 uint64 domain")
     _nonnegative_int(plan["cpu"], "execution_plan.cpu")
+    if type(admitted_cpu) is not int or admitted_cpu < 0 \
+            or plan["cpu"] != admitted_cpu:
+        _fail("execution plan CPU differs from the admitted host profile")
+    if native_target not in TARGETS:
+        _fail("admitted host profile does not identify a supported native target")
     performance_rows = _support_file(binding["support"], "performance_rows")
     if plan["performance_rows_sha256"] != performance_rows["sha256"]:
         _fail("execution plan does not bind the canonical performance rows")
@@ -1913,9 +1981,17 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling):
         if type(oracle_item["native_runtime"]) is not bool \
                 or type(oracle_item["runtime_exit_code"]) is not int:
             _fail("execution oracle native/status fields have invalid types")
-        runtime_eligible = (oracle_item["runtime_oracle_status"] == "passed-native"
-                            and oracle_item["runtime_exit_code"] == 0
-                            and oracle_item["native_runtime"])
+        runtime_required = _native_runtime_required(row, native_target)
+        if oracle_item["native_runtime"] is not runtime_required:
+            _fail("execution oracle native-runtime applicability differs from the frozen row obligation")
+        if runtime_required:
+            if oracle_item["runtime_oracle_status"] != "passed-native" \
+                    or oracle_item["runtime_exit_code"] != 0:
+                _fail("required native runtime lacks a passing independent oracle")
+        elif oracle_item["runtime_oracle_status"] != "not-applicable" \
+                or oracle_item["runtime_exit_code"] != -1:
+            _fail("inapplicable runtime oracle contradicts the frozen row obligation")
+        runtime_eligible = runtime_required
         if row["metrics"]["generated_code_bytes"] is not code_eligible \
                 or row["metrics"]["generated_runtime"] is not runtime_eligible:
             _fail("execution eligibility is not derived from the independent oracle")
@@ -1992,7 +2068,8 @@ def _execution_trace_records(root, shards, expected_count):
 
 def _check_execution_transcript(root, descriptor, plan_descriptor, binding, parsed,
                                  sampling, sample_db, raw_measurements_sha256,
-                                 trusted_receipt_sha256):
+                                 trusted_receipt_sha256, admitted_cpu,
+                                 native_target):
     """Join independent supervisor evidence to every warmup and timed sample.
 
     The receipt digest is an OUT-OF-BAND caller input. Hashes supplied only by
@@ -2007,7 +2084,9 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         _fail("execution receipt exceeds the bounded metadata size")
     if descriptor["sha256"] != trusted_receipt_sha256:
         _fail("execution receipt is not the independently trusted service receipt")
-    receipt = _read_json_evidence(root, descriptor, "execution_receipt")
+    receipt = _read_trusted_json_evidence(
+        root, descriptor, "execution_receipt", trusted_receipt_sha256,
+        EXECUTION_RECEIPT_BYTE_CAP)
     _keys(receipt, ("schema", "version", "context_sha256", "execution_plan_sha256",
                     "job_id", "attempt", "boot_id", "bound_at_ns", "completed_at_ns",
                     "invocations", "shards"), "execution_receipt")
@@ -2024,7 +2103,8 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         _positive_int(receipt[key], f"execution receipt.{key}")
     if receipt["completed_at_ns"] <= receipt["bound_at_ns"]:
         _fail("execution receipt completion must follow pre-sample binding")
-    plan = _check_execution_plan(root, plan_descriptor, binding, parsed, sampling)
+    plan = _check_execution_plan(root, plan_descriptor, binding, parsed, sampling,
+                                 admitted_cpu, native_target)
     contracts = {item["row"]: item for item in plan["rows"]}
     row_by_id = {row["row"]: row for row in parsed}
     campaigns = len(parsed) + sum(row["metrics"]["generated_runtime"] for row in parsed)
@@ -2036,13 +2116,15 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
     expected_order = iter(_execution_schedule(parsed, sampling))
     last_end = receipt["bound_at_ns"]
     count = 0
+    process_instances = set()
     observations = _execution_trace_records(root, shards, expected_count)
     try:
         for value in observations:
             expected = next(expected_order, None)
             if expected is None:
                 _fail("execution transcript contains an unexpected invocation")
-            _keys(value, tuple(expected) + ("pid", "cpu", "started_ns", "finished_ns",
+            _keys(value, tuple(expected) + ("pid", "process_start_token",
+                  "process_instance_sha256", "cpu", "started_ns", "finished_ns",
                   "exit_code", "signal", "timed_out", "cancelled", "executable_sha256",
                   "command_sha256", "output_sha256", "code_section_sha256",
                   "code_section_bytes", "wall_seconds", "peak_rss_bytes"),
@@ -2052,6 +2134,18 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                     _fail(f"execution invocation.{key} differs from the frozen seeded schedule")
             for key in ("pid", "started_ns", "finished_ns"):
                 _positive_int(value[key], f"execution invocation.{key}")
+            _token(value["process_start_token"],
+                   "execution invocation.process_start_token")
+            _sha(value["process_instance_sha256"],
+                 "execution invocation.process_instance_sha256")
+            expected_process = _process_instance_digest(
+                receipt["job_id"], receipt["attempt"], receipt["boot_id"],
+                value["pid"], value["process_start_token"])
+            if value["process_instance_sha256"] != expected_process:
+                _fail("execution invocation process identity is not supervisor-bound")
+            if expected_process in process_instances:
+                _fail("execution transcript reuses a process instance across invocations")
+            process_instances.add(expected_process)
             if value["started_ns"] <= last_end or value["finished_ns"] <= value["started_ns"] \
                     or value["finished_ns"] >= receipt["completed_at_ns"]:
                 _fail("execution invocations overlap or violate the bound job interval")
@@ -2787,7 +2881,8 @@ def _extract_downloaded_bundle_stream(archive, publication_id, expected_files,
 
 def _check_workflow_evidence(root, binding, workflow, support_output, row_data,
                              population, rules, repository_root=None,
-                             trusted_execution_receipt_sha256=None):
+                             trusted_execution_receipt_sha256=None,
+                             admitted_cpu=None, native_target=None):
     """Own the streamed sample index for the complete workflow check.
 
     ``TemporaryDirectory`` and ``sqlite3.Connection`` are both explicit
@@ -2805,12 +2900,14 @@ def _check_workflow_evidence(root, binding, workflow, support_output, row_data,
             return _check_workflow_evidence_open(root, binding, workflow, support_output,
                                                  row_data, population, rules, sample_db,
                                                  repository_root,
-                                                 trusted_execution_receipt_sha256)
+                                                 trusted_execution_receipt_sha256,
+                                                 admitted_cpu, native_target)
 
 
 def _check_workflow_evidence_open(root, binding, workflow, support_output, row_data,
                                   population, rules, sample_db, repository_root=None,
-                                  trusted_execution_receipt_sha256=None):
+                                  trusted_execution_receipt_sha256=None,
+                                  admitted_cpu=None, native_target=None):
     """Check the four non-circular workflow artifacts and their joins.
 
     The phase records deliberately carry only identities and frozen plan
@@ -2970,7 +3067,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
     _check_execution_transcript(
         root, result_bundle["execution_receipt"], pre["execution_plan"], binding,
         parsed, sampling, sample_db, measurement_digest.hexdigest(),
-        trusted_execution_receipt_sha256)
+        trusted_execution_receipt_sha256, admitted_cpu, native_target)
     _check_adapter_series(root, result_bundle["adapter_input"], family, parsed,
                           rules, sample_db)
     seal = _keys(sealed["seal"], ("schema", "version", "files", "root_sha256"),
@@ -3335,6 +3432,13 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
             _fail("inapplicable runtime oracle must use exit code -1")
         _boolean(item["native_runtime"],
                  f"workflow.records.oracle.records[{index}].native_runtime")
+        if item["native_runtime"] is not \
+                (item["runtime_oracle_status"] == "passed-native"):
+            _fail("oracle native-runtime flag contradicts its runtime status")
+        if native_target is not None:
+            runtime_required = _native_runtime_required(parsed[item["row"]], native_target)
+            if item["native_runtime"] is not runtime_required:
+                _fail("oracle native-runtime applicability differs from the frozen row obligation")
         oracle_by_row[item["row"]] = item
     if set(oracle_by_row) != set(range(len(parsed))):
         _fail("oracle records do not cover every canonical performance row")
@@ -3359,9 +3463,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                 == "compiler-wall-time-and-peak-rss",
             "generated_code_bytes": oracle_item["code_section_status"]
                 == "parsed-deterministic" and oracle_item["code_section_bytes"] > 0,
-            "generated_runtime": oracle_item["runtime_oracle_status"] == "passed-native"
-                and oracle_item["runtime_exit_code"] == 0
-                and oracle_item["native_runtime"],
+            "generated_runtime": oracle_item["native_runtime"],
             "runtime_oracle": ("independent-native-executable-oracle"
                                 if oracle_item["runtime_oracle_status"] == "passed-native"
                                 else "not-applicable"),
@@ -3449,8 +3551,9 @@ def _check_execution_evidence(root, binding):
     profile = _read_json_evidence(root, execution["profile"]["descriptor"],
                                   "execution.profile.descriptor")
     profile = _keys(profile, ("schema", "version", "profile_id", "profile_version",
-                              "machine_id", "native_only", "whole_host_isolation",
-                              "lease_protocol"), "profile_receipt")
+                              "machine_id", "logical_cpu", "native_target",
+                              "native_only", "whole_host_isolation", "lease_protocol"),
+                    "profile_receipt")
     if profile["schema"] != PROFILE_SCHEMA or profile["version"] != 1:
         _fail("host profile schema/version is not the admitted #437 profile")
     expected_profile = execution["profile"]
@@ -3464,13 +3567,17 @@ def _check_execution_evidence(root, binding):
             _fail(f"profile receipt.{field} is required")
     if profile["lease_protocol"] != LEASE_PROTOCOL:
         _fail("host profile does not identify the supervisor lease protocol")
+    _nonnegative_int(profile["logical_cpu"], "profile_receipt.logical_cpu")
+    if profile["native_target"] not in TARGETS:
+        _fail("host profile native target is not supported")
 
     host = execution["host"]
     qualification = _read_json_evidence(root, host["qualification_receipt"],
                                         "execution.host.qualification_receipt")
     qualification = _keys(qualification, (
         "schema", "version", "machine_id", "profile_id", "profile_version",
-        "qualified", "whole_host_isolation", "lease_protocol"),
+        "logical_cpu", "native_target", "qualified", "whole_host_isolation",
+        "lease_protocol"),
         "qualification_receipt")
     if qualification["schema"] != QUALIFICATION_SCHEMA or qualification["version"] != 1:
         _fail("host qualification schema/version is not the admitted #437 receipt")
@@ -3484,13 +3591,21 @@ def _check_execution_evidence(root, binding):
             _fail(f"qualification receipt.{field} is required")
     if qualification["lease_protocol"] != LEASE_PROTOCOL:
         _fail("host qualification does not identify the supervisor lease protocol")
+    _nonnegative_int(qualification["logical_cpu"],
+                     "qualification_receipt.logical_cpu")
+    if qualification["native_target"] not in TARGETS:
+        _fail("host qualification native target is not supported")
+    if (qualification["logical_cpu"], qualification["native_target"]) != \
+            (profile["logical_cpu"], profile["native_target"]):
+        _fail("host qualification CPU/target differs from the admitted profile")
 
     admission = _read_json_evidence(root, host["aa_admission_receipt"],
                                     "execution.host.aa_admission_receipt")
     admission = _keys(admission, (
         "schema", "version", "machine_id", "profile_id", "profile_version", "service_id",
-        "admitted", "native_only", "baseline_source_commit", "baseline_source_tree",
-        "lease_protocol"), "aa_admission_receipt")
+        "logical_cpu", "native_target", "admitted", "native_only",
+        "baseline_source_commit", "baseline_source_tree", "lease_protocol"),
+        "aa_admission_receipt")
     if admission["schema"] != AA_SCHEMA or admission["version"] != 1:
         _fail("A/A admission schema/version is not the admitted #437 receipt")
     if (admission["machine_id"], admission["profile_id"], admission["profile_version"],
@@ -3510,6 +3625,12 @@ def _check_execution_evidence(root, binding):
         _fail("A/A admission baseline does not match the bound direct subject")
     if admission["lease_protocol"] != LEASE_PROTOCOL:
         _fail("A/A admission does not identify the supervisor lease protocol")
+    _nonnegative_int(admission["logical_cpu"], "aa_admission_receipt.logical_cpu")
+    if admission["native_target"] not in TARGETS:
+        _fail("A/A admission native target is not supported")
+    if (admission["logical_cpu"], admission["native_target"]) != \
+            (profile["logical_cpu"], profile["native_target"]):
+        _fail("A/A admission CPU/target differs from the admitted profile")
 
     lease = _read_json_evidence(root, execution["lease"]["receipt"],
                                 "execution.lease.receipt")
@@ -3532,6 +3653,8 @@ def _check_execution_evidence(root, binding):
     if lease["candidate_can_access"] or not lease["cloexec_before_candidate"] \
             or not lease["cgroup_cleanup"] or not lease["descendant_cleanup"]:
         _fail("lease receipt does not prove inaccessible supervisor ownership and cleanup")
+    return {"logical_cpu": profile["logical_cpu"],
+            "native_target": profile["native_target"]}
 
 
 def _check_subject_receipts(root, binding):
@@ -3725,19 +3848,22 @@ def validate(binding_path, evidence_root=None, repository_root=None,
     if evidence_root is not None:
         for name, artifact in artifacts:
             _check_evidence(evidence_root, artifact, name)
+        execution_facts = _check_execution_evidence(evidence_root, binding)
+        execution_checked = True
         rows_artifact = support["files"][SUPPORT_FILE_ROLES.index("performance_rows")]
         rows = _performance_rows_with_sources(
             _evidence_bytes(evidence_root, rows_artifact,
                             "support.files.performance_rows"))
         _population(binding["population"], support, rows[:3])
-        support_output = _check_support_output(evidence_root, binding, rows)
+        support_output = _check_support_output(
+            evidence_root, binding, rows, execution_facts["native_target"])
         _check_workflow_evidence(evidence_root, binding, workflow, support_output,
                                  rows, binding["population"], rules,
-                                 repository_root, trusted_execution_receipt_sha256)
+                                 repository_root, trusted_execution_receipt_sha256,
+                                 execution_facts["logical_cpu"],
+                                 execution_facts["native_target"])
         support_checked = True
         _check_subject_receipts(evidence_root, binding)
-        _check_execution_evidence(evidence_root, binding)
-        execution_checked = True
         _check_provenance_evidence(evidence_root, binding, provenance)
         rows_recomputed = True
         provenance_checked = True
