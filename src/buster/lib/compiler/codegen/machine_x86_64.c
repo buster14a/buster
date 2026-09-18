@@ -12090,6 +12090,13 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
     // back to handwritten bytes, so registering it is what makes the row
     // reachable at all.
     (void)machine_x64_metadata_shape_cache_add(S8("MUL"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    // Atomic NAND expansions complement the proposed value at its actual
+    // width; prepare these shapes before the encoding workers start.
+    for (u32 width_index = 0; width_index < 4; width_index += 1)
+    {
+        operand = machine_x64_exact_gpr_operand(0, (u16)(8u << width_index));
+        (void)machine_x64_metadata_shape_cache_add(S8("NOT"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    }
     for (u32 register_index = 0; register_index < 16; register_index += 1)
     {
         operand = machine_x64_exact_gpr_operand(register_index, 64);

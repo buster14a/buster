@@ -401,7 +401,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_atomic_pair_updates(UnitTest
             for (u32 order = 0; order < BUSTER_ARRAY_LENGTH(order_flags); order += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                bool compare_exchange = operation >= IR_ATOMIC_OPERATION_COUNT;
+                bool compare_exchange = operation >= BUSTER_ARRAY_LENGTH(builtins) - 2;
                 String8 source = compare_exchange
                     ? string_format(temporary.arena, S8("typedef unsigned __int128 U; int update(_Atomic(U)* cell, U* expected, U const* value) {{ "
                                                         "return __c11_atomic_{S8}(cell, expected, *value, {u32}, {u32}); }"),
