@@ -121,6 +121,7 @@ typedef enum GpuPipelineError
     GPU_PIPELINE_ERROR_INVALID_INPUT,
     GPU_PIPELINE_ERROR_UNSUPPORTED_ACTION,
     GPU_PIPELINE_ERROR_TOOL_NOT_FOUND,
+    GPU_PIPELINE_ERROR_TOOL_TIMEOUT,
     GPU_PIPELINE_ERROR_TOOL_FAILED,
     GPU_PIPELINE_ERROR_FILE_READ,
     GPU_PIPELINE_ERROR_FILE_WRITE,
@@ -162,6 +163,8 @@ struct GpuPipelineOptions
     String8 rocm_path;
     GpuToolchain tools;
     GpuTarget target;
+    // Zero selects the finite production default.
+    u64 tool_timeout_microseconds;
     u32 input_count;
     u32 include_path_count;
     u32 system_include_path_count;
@@ -237,6 +240,8 @@ struct GpuPipelineResult
     ProcessResult process_result;
     GpuPipelineError error;
     u32 failed_step;
+    bool timed_out;
+    u8 reserved[3];
 };
 
 BUSTER_F_DECL GpuTargetParseResult gpu_target_parse(String8 triple);
