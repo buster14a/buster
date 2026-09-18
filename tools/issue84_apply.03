@@ -1,0 +1,100 @@
+                               mismatched_environment.error.v != 0 && os_process_spawn_test_released(mismatched_environment));
+
+    String8 invalid_keys[] = {S8("BAD=KEY")};
+    String8 invalid_values[] = {S8("value")};
+    ProcessSpawnResult invalid_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_keys),
+                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, invalid_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && invalid_environment.error.v != 0 &&
+                               os_process_spawn_test_released(invalid_environment));
+
+    String8 environment_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_EXPECTED"), S8("PATH")};
+    String8 environment_values[] = {S8("environment"), S8("present"), S8("hostile-path")};
+    ProcessSpawnResult exact_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                            (ProcessSpawnOptions){
+                                                                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                                           ((u64)1 << STANDARD_STREAM_ERROR),
+                                                            });
+    ProcessWaitResult exact_environment_wait = os_process_spawn_test_wait(arena, exact_environment);
+    BUSTER_TEST(arguments, exact_environment.failure == PROCESS_SPAWN_FAILURE_NONE && exact_environment.error.v == 0 &&
+                               exact_environment_wait.result == PROCESS_RESULT_SUCCESS);
+
+#if BUSTER_WINDOWS
+    String8 path_search_arguments[] = {S8("cmd.exe"), S8("/d"), S8("/c"), S8("exit 0")};
+#else
+    String8 path_search_arguments[] = {S8("sh"), S8("-c"), S8("exit 0")};
+#endif
+    ProcessSpawnResult no_search = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(path_search_arguments), (SliceString8){0},
+                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+    BUSTER_TEST(arguments, !no_search.handle && no_search.failure == PROCESS_SPAWN_FAILURE_SPAWN && no_search.error.v != 0 &&
+                               os_process_spawn_test_released(no_search));
+
+    ProcessSpawnResult searched = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(path_search_arguments), (SliceString8){0}, (SliceString8){0},
+                                                   (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    ProcessWaitResult searched_wait = os_process_spawn_test_wait(arena, searched);
+    BUSTER_TEST(arguments, searched.failure == PROCESS_SPAWN_FAILURE_NONE && searched_wait.result == PROCESS_RESULT_SUCCESS);
+
+    String8 descriptor_value = {0};
+#if BUSTER_WINDOWS
+    SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, TRUE};
+    HANDLE unrelated = CreateEventW(&security_attributes, TRUE, FALSE, 0);
+    bool unrelated_created = unrelated != 0;
+    if (unrelated_created)
+    {
+        descriptor_value = string_format(arena, S8("{u64}"), (u64)(uintptr_t)unrelated);
+    }
+#else
+    int unrelated[2] = {-1, -1};
+    bool unrelated_created = pipe(unrelated) == 0;
+    if (unrelated_created)
+    {
+        descriptor_value = string_format(arena, S8("{u64}"), (u64)unrelated[0]);
+    }
+#endif
+    BUSTER_TEST(arguments, unrelated_created);
+    if (unrelated_created)
+    {
+        String8 descriptor_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE")};
+        String8 descriptor_values[] = {S8("descriptor"), descriptor_value};
+        ProcessSpawnResult descriptor_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_keys),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_values), (ProcessSpawnOptions){0});
+        ProcessWaitResult descriptor_wait = os_process_spawn_test_wait(arena, descriptor_spawn);
+        BUSTER_TEST(arguments, descriptor_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && descriptor_wait.result == PROCESS_RESULT_SUCCESS);
+#if BUSTER_WINDOWS
+        CloseHandle(unrelated);
+#else
+        close(unrelated[0]);
+        close(unrelated[1]);
+#endif
+    }
+
+    String8 closed_keys[] = {S8("BUSTER_OS_SPAWN_PROBE")};
+    String8 closed_values[] = {S8("closed-stdio")};
+    ProcessSpawnResult closed_stdio = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_keys),
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_values), (ProcessSpawnOptions){0});
+    ProcessWaitResult closed_stdio_wait = os_process_spawn_test_wait(arena, closed_stdio);
+    BUSTER_TEST(arguments, closed_stdio.failure == PROCESS_SPAWN_FAILURE_NONE && closed_stdio_wait.result == PROCESS_RESULT_SUCCESS);
+
+#if BUSTER_WINDOWS
+    u64 environment_position = arena->position;
+    WindowsStringList empty_key_value = windows_environment_from_keys_and_values(arena, (SliceString8){0}, (SliceString8){0});
+    BUSTER_TEST(arguments, empty_key_value[0] == 0 && empty_key_value[1] == 0);
+    arena_set_position(arena, environment_position);
+    WindowsStringList empty_block = windows_environment_block_from_slice_string(arena, (SliceString8){0});
+    BUSTER_TEST(arguments, empty_block[0] == 0 && empty_block[1] == 0);
+    arena_set_position(arena, environment_position);
+#endif
+
+#if BUSTER_WINDOWS
+    OsProcessSpawnTestOperation operations[] = {
+        OS_PROCESS_SPAWN_TEST_PIPE,
+        OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION,
+        OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION,
+        OS_PROCESS_SPAWN_TEST_HANDLE_LIST,
+        OS_PROCESS_SPAWN_TEST_SPAWN,
+    };
+    ProcessSpawnFailure failures[] = {
