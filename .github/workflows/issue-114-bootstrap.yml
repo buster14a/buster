@@ -17,13 +17,13 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: codex/issue-114
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Install generator dependency
         run: |
           sudo apt-get update
           sudo apt-get install -y tcc
       - name: Validate repository patch
-        run: git diff --check HEAD^ HEAD
+        run: git diff --check origin/main...HEAD
       - name: Configure
         run: ./build.sh generate
       - name: Release test suite
