@@ -6516,6 +6516,56 @@ bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offse
     return false;
 }
 
+// LLVM's Mach-O linker splits __eh_frame into CFI records before it
+// processes symbols. A symbol inside a record is therefore a misaligned
+// subsection boundary. Difference relocations use the record start and carry
+// the field's intra-record displacement in the inline addend.
+BUSTER_GLOBAL_LOCAL bool object_mach_eh_frame_record_start(ByteSlice bytes, u64 field_offset, u64 field_size, u64* record_start)
+{
+    if (!record_start || (bytes.length && !bytes.pointer) || field_offset > bytes.length || field_size > bytes.length - field_offset)
+    {
+        return false;
+    }
+    u64 offset = 0;
+    while (offset < bytes.length)
+    {
+        u64 remaining = bytes.length - offset;
+        if (remaining < sizeof(u32))
+        {
+            return false;
+        }
+        u32 length32 = 0;
+        memcpy(&length32, bytes.pointer + offset, sizeof(length32));
+        if (!length32)
+        {
+            return false;
+        }
+        u64 header_size = sizeof(u32);
+        u64 payload_size = length32;
+        if (length32 == UINT32_MAX)
+        {
+            header_size = sizeof(u32) + sizeof(u64);
+            if (remaining < header_size)
+            {
+                return false;
+            }
+            memcpy(&payload_size, bytes.pointer + offset + sizeof(u32), sizeof(payload_size));
+        }
+        if (header_size > remaining || payload_size > remaining - header_size)
+        {
+            return false;
+        }
+        u64 end = offset + header_size + payload_size;
+        if (field_offset >= offset && field_offset < end && field_size <= end - field_offset)
+        {
+            *record_start = offset;
+            return true;
+        }
+        offset = end;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -7270,13 +7320,38 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             subtractor = &result.symbols[symbol_map[subtractor_source_symbol]];
                         }
                         u64 place = 0;
+                        u64 place_adjustment = 0;
                         if (read_ok)
                         {
                             place = section_bases[section_index] + (u64)source_offset_u32;
-                            if (place < section_bases[section_index] || subtractor->section != (u32)current_section_kind || subtractor->value != place)
+                            if (place < section_bases[section_index] || subtractor->section != (u32)current_section_kind)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                 read_ok = false;
+                            }
+                        }
+                        // Older Buster objects named the relocated field itself.
+                        // Keep reading that shape, but require new __eh_frame
+                        // objects to name the containing CFI record boundary.
+                        if (read_ok && subtractor->value != place)
+                        {
+                            u64 record_start = 0;
+                            ByteSlice section_bytes = {
+                                .pointer = bytes.pointer + raw_offset,
+                                .length = section_size,
+                            };
+                            bool record_valid = current_section_kind == OBJECT_SECTION_UNWIND &&
+                                                object_mach_eh_frame_record_start(section_bytes, source_offset_u32, sizeof(u32), &record_start);
+                            if (!record_valid || record_start > source_offset_u32 ||
+                                section_bases[section_index] > UINT64_MAX - record_start ||
+                                subtractor->value != section_bases[section_index] + record_start)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            if (read_ok)
+                            {
+                                place_adjustment = (u64)source_offset_u32 - record_start;
                             }
                         }
                         u32 stored = 0;
@@ -7288,10 +7363,24 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 read_ok = false;
                             }
                         }
+                        s64 canonical_addend = 0;
+                        if (read_ok)
+                        {
+                            canonical_addend = (s32)stored;
+                            if (place_adjustment > (u64)INT64_MAX || canonical_addend > INT64_MAX - (s64)place_adjustment)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            else
+                            {
+                                canonical_addend += (s64)place_adjustment;
+                            }
+                        }
                         if (read_ok)
                         {
                             result.relocations[result.relocation_count++] = (ObjectRelocation){
-                                .addend = (s32)stored,
+                                .addend = canonical_addend,
                                 .offset = place,
                                 .section = (u32)current_section_kind,
                                 .symbol = symbol_map[target_source_symbol],
@@ -11508,9 +11597,23 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     };
     u32 section_count = object->section_count;
     u32 prel32_count = 0;
+    u64* prel32_place_offsets = arena_allocate(arena, u64, object->relocation_count);
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
-        prel32_count += object_mach_place_difference(object, &object->relocations[relocation]);
+        ObjectRelocation* source = object->relocations + relocation;
+        prel32_place_offsets[relocation] = UINT64_MAX;
+        if (object_mach_place_difference(object, source))
+        {
+            u64 place_offset = source->offset;
+            if (object->sections[source->section].kind == OBJECT_SECTION_UNWIND &&
+                !object_mach_eh_frame_record_start(object->sections[source->section].data, source->offset, sizeof(u32), &place_offset))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                return result;
+            }
+            prel32_place_offsets[relocation] = place_offset;
+            prel32_count += 1;
+        }
     }
     if (prel32_count > UINT32_MAX - object->symbol_count || object->symbol_count + prel32_count > 0x00ffffff)
     {
@@ -11522,7 +11625,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     u32 next_place_symbol = object->symbol_count;
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
-        prel32_place_symbols[relocation] = object_mach_place_difference(object, &object->relocations[relocation]) ? next_place_symbol++ : UINT32_MAX;
+        prel32_place_symbols[relocation] = prel32_place_offsets[relocation] != UINT64_MAX ? next_place_symbol++ : UINT32_MAX;
     }
     if (section_count > (UINT32_MAX - MACH_SEGMENT_COMMAND_SIZE) / MACH_SECTION_SIZE)
     {
@@ -11573,15 +11676,33 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             }
             else if (place_difference)
             {
-                // Both architectures encode S + A - P as a symbol difference.
-                // Unlike x86 instruction relocations, this pair has no -4
-                // bias. Rewrite even a zero addend to discard stale slot bytes.
-                if (addend < INT32_MIN || addend > INT32_MAX)
+                // Mach-O computes target - base + inline. For CFI the base is
+                // the record boundary R, while the canonical relocation is
+                // target + A - field. Store A - (field - R).
+                u64 place_offset = prel32_place_offsets[relocation];
+                if (place_offset > source->offset || addend < INT32_MIN || addend > INT32_MAX)
                 {
                     buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     break;
                 }
-                object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)(s32)addend);
+                u64 adjustment = source->offset - place_offset;
+                bool wire_valid = adjustment <= (u64)INT64_MAX;
+                s64 wire_addend = 0;
+                if (wire_valid)
+                {
+                    s64 signed_adjustment = (s64)adjustment;
+                    wire_valid = addend >= INT64_MIN + signed_adjustment;
+                    if (wire_valid)
+                    {
+                        wire_addend = addend - signed_adjustment;
+                    }
+                }
+                if (!wire_valid || wire_addend < INT32_MIN || wire_addend > INT32_MAX)
+                {
+                    buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    break;
+                }
+                object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)(s32)wire_addend);
             }
             else if (addend && source->kind != OBJECT_RELOCATION_AARCH64_CALL26 && source->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
                      source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
@@ -11653,7 +11774,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     for (u32 symbol = object->symbol_count; symbol < symbol_count; symbol += 1)
     {
         symbol_name_offsets[symbol] = (u32)(buffer.count - string_offset);
-        String8 name = string_format(arena, S8("L_buster_eh_place_{u32}"), symbol - object->symbol_count);
+        String8 name = string_format(arena, S8("L_buster_difference_base_{u32}"), symbol - object->symbol_count);
         object_buffer_write(&buffer, name.pointer, name.length);
         object_buffer_write(&buffer, &zero, 1);
     }
@@ -11686,7 +11807,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
         buffer.bytes[offset + 4] = 0x0e;
         buffer.bytes[offset + 5] = (u8)(source->section + 1);
-        object_write_u64_at(&buffer, offset + 8, section_addresses[source->section] + source->offset);
+        object_write_u64_at(&buffer, offset + 8, section_addresses[source->section] + prel32_place_offsets[relocation]);
     }
     object_write_u32_at(&buffer, 0, 0xfeedfacf);
     object_write_u32_at(&buffer, 4, object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x01000007 : 0x0100000c);
