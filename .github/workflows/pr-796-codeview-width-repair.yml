@@ -35,43 +35,46 @@ jobs:
           emitter = Path('src/buster/lib/compiler/codeview/codeview.c')
           text = emitter.read_text(encoding='utf-8')
 
-          wrong_subfield = '''                symbols->overflow |= piece->value_offset > UINT16_MAX;
-                          byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
-          '''.replace('                          ', '                ')
+          wrong_subfield = (
+              '                symbols->overflow |= piece->value_offset > UINT16_MAX;\n'
+              '                byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);\n'
+          )
           correct_subfield = '                byte_writer_emit_u32_le(symbols, piece->value_offset);\n'
           if text.count(wrong_subfield) != 1:
               raise SystemExit(f'expected one narrowed S_DEFRANGE_SUBFIELD field, found {text.count(wrong_subfield)}')
           text = text.replace(wrong_subfield, correct_subfield, 1)
 
-          eager_globals = '''            u64 globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-                          for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
-                          {
-                              DebugVariable* variable = input.model->variables + variable_index;
-                              if (variable->kind == DEBUG_VARIABLE_GLOBAL)
-                              {
-                                  codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
-                              }
-                          }
-                          codeview_subsection_end(&symbols, globals);
-          '''.replace('                          ', '            ')
-          lazy_globals = '''            u64 globals = 0;
-                          for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
-                          {
-                              DebugVariable* variable = input.model->variables + variable_index;
-                              if (variable->kind == DEBUG_VARIABLE_GLOBAL)
-                              {
-                                  if (!globals)
-                                  {
-                                      globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-                                  }
-                                  codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
-                              }
-                          }
-                          if (globals)
-                          {
-                              codeview_subsection_end(&symbols, globals);
-                          }
-          '''.replace('                          ', '            ')
+          eager_globals = '\n'.join([
+              '            u64 globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);',
+              '            for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)',
+              '            {',
+              '                DebugVariable* variable = input.model->variables + variable_index;',
+              '                if (variable->kind == DEBUG_VARIABLE_GLOBAL)',
+              '                {',
+              '                    codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);',
+              '                }',
+              '            }',
+              '            codeview_subsection_end(&symbols, globals);',
+          ]) + '\n'
+          lazy_globals = '\n'.join([
+              '            u64 globals = 0;',
+              '            for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)',
+              '            {',
+              '                DebugVariable* variable = input.model->variables + variable_index;',
+              '                if (variable->kind == DEBUG_VARIABLE_GLOBAL)',
+              '                {',
+              '                    if (!globals)',
+              '                    {',
+              '                        globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);',
+              '                    }',
+              '                    codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);',
+              '                }',
+              '            }',
+              '            if (globals)',
+              '            {',
+              '                codeview_subsection_end(&symbols, globals);',
+              '            }',
+          ]) + '\n'
           if text.count(eager_globals) != 1:
               raise SystemExit(f'expected one eager globals subsection, found {text.count(eager_globals)}')
           text = text.replace(eager_globals, lazy_globals, 1)
@@ -79,20 +82,22 @@ jobs:
 
           consumer = Path('src/buster/tests/compiler/codegen/codegen_test.c')
           text = consumer.read_text(encoding='utf-8')
-          wrong_parser = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
-                          {
-                              // S_DEFRANGE_SUBFIELD stores OffsetInParent as 16 bits.
-                              memcpy(&range_start, bytes.pointer + record + 10, 4);
-                              memcpy(&range_length, bytes.pointer + record + 16, 2);
-                          }
-          '''.replace('                          ', '                ')
-          correct_parser = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)
-                          {
-                              // offsetInParent is 32 bits; the relocated address starts after it.
-                              memcpy(&range_start, bytes.pointer + record + 12, 4);
-                              memcpy(&range_length, bytes.pointer + record + 18, 2);
-                          }
-          '''.replace('                          ', '                ')
+          wrong_parser = '\n'.join([
+              '                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)',
+              '                {',
+              '                    // S_DEFRANGE_SUBFIELD stores OffsetInParent as 16 bits.',
+              '                    memcpy(&range_start, bytes.pointer + record + 10, 4);',
+              '                    memcpy(&range_length, bytes.pointer + record + 16, 2);',
+              '                }',
+          ]) + '\n'
+          correct_parser = '\n'.join([
+              '                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)',
+              '                {',
+              '                    // OffsetInParent is 32 bits; the relocated address starts after it.',
+              '                    memcpy(&range_start, bytes.pointer + record + 12, 4);',
+              '                    memcpy(&range_length, bytes.pointer + record + 18, 2);',
+              '                }',
+          ]) + '\n'
           if text.count(wrong_parser) != 1:
               raise SystemExit(f'expected one narrowed parser layout, found {text.count(wrong_parser)}')
           consumer.write_text(text.replace(wrong_parser, correct_parser, 1), encoding='utf-8')
@@ -100,10 +105,11 @@ jobs:
           tests = Path('src/buster/tests/compiler/codeview/codeview_test.c')
           text = tests.read_text(encoding='utf-8')
           old_expectation = '    UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 3, 1, 2, 1);\n'
-          new_expectation = '''    // A model containing only locals must not create a zero-length
-              // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.
-              UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);
-          '''.replace('              ', '    ')
+          new_expectation = (
+              '    // A model containing only locals must not create a zero-length\n'
+              '    // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.\n'
+              '    UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);\n'
+          )
           if text.count(old_expectation) != 1:
               raise SystemExit(f'expected one model subsection assertion, found {text.count(old_expectation)}')
           tests.write_text(text.replace(old_expectation, new_expectation, 1), encoding='utf-8')
