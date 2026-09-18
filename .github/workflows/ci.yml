@@ -19,6 +19,11 @@ on:
         required: false
         default: false
         type: boolean
+      analyzer_comparison:
+        description: Run an explicit reference/candidate Clang analyzer comparison
+        required: false
+        default: false
+        type: boolean
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -778,43 +783,79 @@ jobs:
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-analyzer"
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
           reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
+          candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
+          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
+          candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
+          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
+          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
+          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
           printf '%s\n' "$candidate_revision" | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"
           printf '%s\n' "$reference_revision" > "$RUNNER_TEMP/buster-analyzer/baseline-revision.txt"
-          if [[ "$candidate_revision" == "$reference_revision" && ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) ]]; then
-            selection=skip
-            reason=same-revision
-          else
-            selection=compare
-            if [[ "$candidate_revision" == "$reference_revision" ]]; then
-              reason=event-requires-comparison
-            else
-              reason=distinct-revisions
-            fi
+          clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
+          rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
+          rm -rf "$reference_root"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+            -MMD -MF "$candidate_depfile" build.c -o build/analyzer-driver
+          python3 tools/analyzer_reference.py manifest \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$candidate_manifest"
+
+          reference_materialized=true
+          if [[ "$candidate_revision" == "$reference_revision" && \
+                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
+                "$COMPARISON_REQUESTED" == false ]]; then
+            reference_materialized=false
           fi
-          {
-            printf 'BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n'
-            printf 'event=%s\n' "$EVENT_NAME"
-            printf 'candidate_revision=%s\n' "$candidate_revision"
-            printf 'reference_revision=%s\n' "$reference_revision"
-            printf 'selection=%s\n' "$selection"
-            printf 'reason=%s\n' "$reason"
-          } > "$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
+          if [[ "$reference_materialized" == true ]]; then
+            mkdir -p "$reference_root"
+            trap 'rm -rf "$reference_root"' EXIT
+            git archive --format=tar "$reference_revision" | tar -xf - -C "$reference_root"
+            if find "$reference_root" -type l -print -quit | grep -q .; then
+              echo '::error::Historical analyzer reference contains a symlink.'
+              exit 1
+            fi
+            (
+              cd "$reference_root"
+              clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+                -MMD -MF "$reference_depfile" build.c -o "$GITHUB_WORKSPACE/build/analyzer-baseline"
+            )
+            python3 tools/analyzer_reference.py manifest \
+              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
+              --root "$reference_root" --depfile "$reference_depfile" \
+              --output "$reference_manifest"
+          else
+            cp "$candidate_manifest" "$reference_manifest"
+          fi
+          python3 tools/analyzer_reference.py select \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$candidate_manifest" \
+            --reference-manifest "$reference_manifest" \
+            --output "$selection_path"
+          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
+          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
+          if [[ "$selection" == skip ]]; then
+            rm -f build/analyzer-baseline
+          fi
           printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection" >> "$GITHUB_ENV"
+          printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason" >> "$GITHUB_ENV"
+          printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized" >> "$GITHUB_ENV"
           {
             printf '## Clang analyzer comparison selection\n\n'
             printf '| Event | Candidate | Reference | Selection | Reason |\n| --- | --- | --- | --- | --- |\n'
             printf '| %s | %s | %s | %s | %s |\n' "$EVENT_NAME" "$candidate_revision" "$reference_revision" "$selection" "$reason"
           } >> "$GITHUB_STEP_SUMMARY"
-          clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver
-          if [[ "$selection" == compare ]]; then
-            git show "$reference_revision:build.c" > "$RUNNER_TEMP/buster-analyzer/baseline.c"
-            clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char "$RUNNER_TEMP/buster-analyzer/baseline.c" -o build/analyzer-baseline
+          if [[ "$reference_materialized" == true ]]; then
+            trap - EXIT
           fi
       - name: Exercise analyzer failure and coverage controls
         shell: bash
@@ -831,44 +872,84 @@ jobs:
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
           reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
-          if [[ "$candidate_revision" == "$reference_revision" && ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) ]]; then
-            expected_selection=skip
-            expected_reason=same-revision
-          else
-            expected_selection=compare
-            if [[ "$candidate_revision" == "$reference_revision" ]]; then
-              expected_reason=event-requires-comparison
-            else
-              expected_reason=distinct-revisions
-            fi
-          fi
+          candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
+          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
+          candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
+          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
           selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          if [[ ! -f "$selection_path" || -L "$selection_path" ]]; then
-            echo '::error::Missing analyzer comparison selection evidence.'
+          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
+          expected_directory="$(mktemp -d "$RUNNER_TEMP/buster-analyzer/.comparison-expected.XXXXXX")"
+          trap 'rm -rf "$expected_directory" "$reference_root"' EXIT
+          for evidence in "$candidate_depfile" "$candidate_manifest" "$reference_manifest" "$selection_path"; do
+            if [[ ! -f "$evidence" || -L "$evidence" ]]; then
+              echo '::error::Missing analyzer comparison provenance evidence.'
+              exit 1
+            fi
+          done
+          expected_materialized=true
+          if [[ "$candidate_revision" == "$reference_revision" && \
+                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
+                "$COMPARISON_REQUESTED" == false ]]; then
+            expected_materialized=false
+          fi
+          if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
+            echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
           fi
-          expected_selection_path="$(mktemp "$RUNNER_TEMP/buster-analyzer/.comparison-selection.expected.XXXXXX")"
-          trap 'rm -f "$expected_selection_path"' EXIT
-          {
-            printf 'BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n'
-            printf 'event=%s\n' "$EVENT_NAME"
-            printf 'candidate_revision=%s\n' "$candidate_revision"
-            printf 'reference_revision=%s\n' "$reference_revision"
-            printf 'selection=%s\n' "$expected_selection"
-            printf 'reason=%s\n' "$expected_reason"
-          } > "$expected_selection_path"
-          if ! cmp -s "$expected_selection_path" "$selection_path" ||
-             [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$expected_selection" ]]; then
+          python3 tools/analyzer_reference.py manifest \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$expected_directory/candidate.json"
+          if [[ "$expected_materialized" == true ]]; then
+            if [[ ! -d "$reference_root" || -L "$reference_root" || \
+                  ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
+              echo '::error::Historical analyzer reference evidence is missing or unsafe.'
+              exit 1
+            fi
+            python3 tools/analyzer_reference.py manifest \
+              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
+              --root "$reference_root" --depfile "$reference_depfile" \
+              --output "$expected_directory/reference.json"
+          else
+            if [[ -e "$reference_root" || -L "$reference_root" || \
+                  -e "$reference_depfile" || -L "$reference_depfile" ]]; then
+              echo '::error::Same-revision skip retained unexpected historical reference state.'
+              exit 1
+            fi
+            cp "$expected_directory/candidate.json" "$expected_directory/reference.json"
+          fi
+          if ! cmp -s "$expected_directory/candidate.json" "$candidate_manifest" || \
+             ! cmp -s "$expected_directory/reference.json" "$reference_manifest"; then
+            echo '::error::Missing, malformed, stale or inconsistent analyzer provenance evidence.'
+            exit 1
+          fi
+          python3 tools/analyzer_reference.py select \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$expected_directory/candidate.json" \
+            --reference-manifest "$expected_directory/reference.json" \
+            --output "$expected_directory/selection.txt"
+          if ! cmp -s "$expected_directory/selection.txt" "$selection_path"; then
             echo '::error::Missing, malformed, stale or inconsistent analyzer comparison selection evidence.'
             exit 1
           fi
-          rm -f "$expected_selection_path"
+          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
+          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
+          if [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$selection" || \
+                "${ANALYZER_COMPARISON_REASON-}" != "$reason" ]]; then
+            echo '::error::Analyzer comparison selection exports do not match retained evidence.'
+            exit 1
+          fi
+          rm -rf "$expected_directory" "$reference_root"
           trap - EXIT
-          case "$expected_selection" in
+          case "$selection" in
             compare)
               if [[ ! -f build/analyzer-baseline || -L build/analyzer-baseline || ! -x build/analyzer-baseline ]]; then
                 echo '::error::Analyzer comparison requires a regular, non-symlink executable baseline driver.'
