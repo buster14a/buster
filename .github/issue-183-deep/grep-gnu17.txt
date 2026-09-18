@@ -1,0 +1,56 @@
+$ bash -lc git grep -n -E 'GNU17|gnu17|C_PREPROCESS_DIALECT_GNU17|c-gnu' || true
+exit=0
+
+.github/issue-183-context.txt:20867:    C_PREPROCESS_DIALECT_GNU17,
+.github/issue-183-context.txt:21349:-- needle 'c-gnu': 0 occurrence(s) --
+.github/issue-183-context.txt:21353:-- needle 'gnu17': 0 occurrence(s) --
+.github/issue-183-context/header-dialect-01.txt:38:000459:     C_PREPROCESS_DIALECT_GNU17,
+.github/workflows/issue-183-deep-inspect.yml:6:      - fix/183-gnu17-enum-types
+.github/workflows/issue-183-deep-inspect.yml:73:          command('grep-gnu17.txt', ['bash', '-lc', "git grep -n -E 'GNU17|gnu17|C_PREPROCESS_DIALECT_GNU17|c-gnu' || true"])
+docs/agents/frontend/foundations.md:173:  not execute inside an invocation. C17 and GNU17 share this compatibility
+docs/performance-audits/2026-09-05T122006Z.md:152:  (the default is gnu17), so under them the walk can only answer "nothing"
+docs/performance-audits/2026-09-10T011012Z.md:171:Linux/Windows x86-64 and Linux AArch64 target descriptions and GNU17/GNU23.
+docs/performance-audits/2026-09-11T131903Z.md:79:clang -std=gnu17 -O3 -g -march=native -fwrapv -fno-strict-aliasing \
+docs/performance-audits/evidence/2026-09-06T125122Z/kernel-provenance.json:6:    "-std=gnu17",
+docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity-functions.txt:1042:      .               case COMPILER_DRIVER_C_DIALECT_GNU17:
+docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity-functions.txt:1043:      .                   return C_PREPROCESS_DIALECT_GNU17;
+docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity-functions.txt:1241:      .                   .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity-lines.txt:8828:    3,925,186 ( 0.02%)      return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
+docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity-lines.txt:8842:            .               case C_PREPROCESS_DIALECT_GNU17:
+docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity-lines.txt:8885:            .                   options.dialect = C_PREPROCESS_DIALECT_GNU17;
+src/buster/lib/compiler/driver/driver.c:97:    else if (string_equal(dialect, S8("gnu17")) || string_equal(dialect, S8("gnu18")))
+src/buster/lib/compiler/driver/driver.c:99:        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17;
+src/buster/lib/compiler/driver/driver.c:136:    case COMPILER_DRIVER_C_DIALECT_GNU17:
+src/buster/lib/compiler/driver/driver.c:137:        return C_PREPROCESS_DIALECT_GNU17;
+src/buster/lib/compiler/driver/driver.c:776:        .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+src/buster/lib/compiler/driver/driver.h:69:    COMPILER_DRIVER_C_DIALECT_GNU17,
+src/buster/lib/compiler/frontend/c/c.h:459:    C_PREPROCESS_DIALECT_GNU17,
+src/buster/lib/compiler/frontend/c/c_source.c:7834:    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
+src/buster/lib/compiler/frontend/c/c_source.c:7848:    case C_PREPROCESS_DIALECT_GNU17:
+src/buster/lib/compiler/frontend/c/c_source.c:7960:        options.dialect = C_PREPROCESS_DIALECT_GNU17;
+src/buster/tests/compiler/driver/driver_test.c:5846:    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+src/buster/tests/compiler/driver/driver_test.c:5914:                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"), S8("-o"), output, input};
+src/buster/tests/compiler/driver/driver_test.c:5950:                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"),
+src/buster/tests/compiler/driver/driver_test.c:5981:            String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"), S8("-o"), output, input};
+src/buster/tests/compiler/driver/driver_test.c:6019:                    String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), control_targets[target],
+src/buster/tests/compiler/driver/driver_test.c:8167:        S8("-std=gnu99"), S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23"),
+src/buster/tests/compiler/driver/driver_test.c:15342:        S8("buster-c-gnu-atomic-builtins"),
+src/buster/tests/compiler/frontend/c/c_test.c:3986:        CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+src/buster/tests/compiler/frontend/c/c_test.c:4098:                        .dialect = C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9515:        {S8("void none(void);\nint call_none(int x) { none(x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9517:        {S8("void two(int a, int b);\nint call_three(int x) { two(x, x, x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9519:        {S8("void two(int a, int b);\nint call_partial(int x) { two(x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9521:        {S8("void tail(int a, ...);\nint call_empty(void) { tail(); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9526:        {S8("void (*through)(int a, int b);\nint call_short(int x) { through(x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9528:        {S8("void (*through)(int a, int b);\nint call_long(int x) { through(x, x, x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9568:        {S8("int f(int);\nint g(void)\n{\n    return sizeof(f());\n}\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9570:        {S8("int f(void);\nint g(void)\n{\n    return sizeof(f(1));\n}\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9574:        {S8("int (*p)(int);\nint g(void)\n{\n    return sizeof(p());\n}\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9580:        {S8("int f(int); int h(int);\nint g(void) { return sizeof(h(f())); }\n"), C_PREPROCESS_DIALECT_GNU17,
+src/buster/tests/compiler/frontend/c/c_test.c:9582:        {S8("int f(int);\nint g(void) { return sizeof(f(1)); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+src/buster/tests/compiler/frontend/c/c_test.c:9584:        {S8("int f();\nint g(void) { return sizeof(f(1, 2)); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+src/buster/tests/compiler/frontend/c/c_test.c:9586:        {S8("int f(int); int h(int, int);\nint g(void) { return sizeof(f(h(1, 2))); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+src/buster/tests/compiler/frontend/c/c_test.c:9588:        {S8("int f(int);\nint g(void) { return sizeof(f((int[2]){1, 2}[0])); }\n"), C_PREPROCESS_DIALECT_GNU17, {0}},
+src/buster/tests/compiler/frontend/c/macro_conditional_test.c:76:    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
+src/buster/tests/compiler/frontend/c/macro_conditional_test.c:115:            String8 command[] = {compiler, S8("-E"), S8("-P"), S8("-std=gnu17"), source_path};
+tools/bench_pr139_simd/run.py:52:flags = ['-std=gnu17', '-O3', '-g', '-march=native', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function']

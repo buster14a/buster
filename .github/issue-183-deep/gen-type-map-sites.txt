@@ -1,0 +1,2792 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_type_ir_map[
+hits: [1628, 1644, 1663, 1688, 1693, 1701, 6185, 7347, 18653, 22928, 23062, 23138, 23174, 23203, 23569, 23597, 25469, 25507, 26240, 26410, 26494, 27924, 29053, 30769, 32308, 32543, 32794, 33735, 33753, 36255, 36275, 36284, 37766, 37812, 37850, 40402, 40413, 41105, 41119, 43133, 43150, 43164, 45923, 46897, 47343, 47441, 47447, 47756, 47759, 47780, 47866, 47878, 47968, 48065, 48067, 48072, 48078, 48095, 48100, 48116, 48126, 48128, 48129, 48137, 48168, 48222, 48583, 48589, 48596, 48610, 48670, 48735, 48966, 49017, 49022, 49192, 49240, 49266, 49659, 49996, 50032, 50055]
+
+===== line 1628 =====
+001616:                                                          CIrWideFloatCache* wide_float_cache, CParseResult* parse, CDeclaration declaration,
+001617:                                                          IrTypeId* c_type_ir_map, Target target)
+001618: {
+001619:     CIrSignature result = {
+001620:         .return_type = IR_TYPE_ID_INVALID,
+001621:     };
+001622:     CType* function_type = c_type_from_id(parse, declaration.type);
+001623:     if (function_type && function_type->kind == C_TYPE_FUNCTION)
+001624:     {
+001625:         CType* return_type = c_type_from_id(parse, function_type->return_type);
+001626:         if (return_type && function_type->return_type.value < parse->type_count)
+001627:         {
+001628:             result.return_type = c_type_ir_map[function_type->return_type.value];
+001629:             if (result.return_type.value != IR_ID_UNDERLYING_INVALID)
+001630:             {
+001631:                 result.returns_void = return_type->kind == C_TYPE_VOID;
+001632:                 // C 5.1.2.2.3: reaching the `}` that terminates `main`
+001633:                 // returns 0. libc-test's regression/sem_close-unmap is 19
+001634:                 // lines with no return statement at all, and without this the
+001635:                 // fall-off is the same `unreachable` every other function
+001636:                 // gets -- a `ud2` the process dies on with SIGILL after the
+001637:                 // body has run correctly.
+001638:                 result.returns_zero_at_end = return_type->kind == C_TYPE_INT && string_equal(declaration.name, S8("main"));
+001639:                 result.is_variadic = function_type->is_variadic;
+001640:                 // The declaration's IR type carries the marker after the C
+001641:                 // dialect has been applied.  This must remain the selected
+001642:                 // declaration rather than the entity's first declaration: a
+001643:                 // later prototype supersedes an earlier `f()` at call sites.
+001644:                 IrType* declaration_function = ir_type_from_id(&program->types, c_type_ir_map[declaration.type.value]);
+001645:                 result.is_unprototyped = declaration_function && declaration_function->kind == IR_TYPE_FUNCTION &&
+001646:                                           declaration_function->is_unprototyped;
+001647:                 // Redeclarations retain the entity's first compatible
+001648:                 // function type as the canonical identity, even when this
+===== line 1644 =====
+001632:                 // C 5.1.2.2.3: reaching the `}` that terminates `main`
+001633:                 // returns 0. libc-test's regression/sem_close-unmap is 19
+001634:                 // lines with no return statement at all, and without this the
+001635:                 // fall-off is the same `unreachable` every other function
+001636:                 // gets -- a `ud2` the process dies on with SIGILL after the
+001637:                 // body has run correctly.
+001638:                 result.returns_zero_at_end = return_type->kind == C_TYPE_INT && string_equal(declaration.name, S8("main"));
+001639:                 result.is_variadic = function_type->is_variadic;
+001640:                 // The declaration's IR type carries the marker after the C
+001641:                 // dialect has been applied.  This must remain the selected
+001642:                 // declaration rather than the entity's first declaration: a
+001643:                 // later prototype supersedes an earlier `f()` at call sites.
+001644:                 IrType* declaration_function = ir_type_from_id(&program->types, c_type_ir_map[declaration.type.value]);
+001645:                 result.is_unprototyped = declaration_function && declaration_function->kind == IR_TYPE_FUNCTION &&
+001646:                                           declaration_function->is_unprototyped;
+001647:                 // Redeclarations retain the entity's first compatible
+001648:                 // function type as the canonical identity, even when this
+001649:                 // declaration has an equivalent declarator-specific type
+001650:                 // node.  That identity supplies the parameter IR IDs below,
+001651:                 // but not the selected declaration's prototype marker.
+001652:                 CTypeId canonical_c_type = declaration.type;
+001653:                 if (declaration.entity.value < parse->entity_count)
+001654:                 {
+001655:                     CTypeId entity_c_type = parse->entities[declaration.entity.value].type;
+001656:                     CType* entity_function_type = c_type_from_id(parse, entity_c_type);
+001657:                     if (entity_function_type && entity_function_type->kind == C_TYPE_FUNCTION)
+001658:                     {
+001659:                         canonical_c_type = entity_c_type;
+001660:                     }
+001661:                 }
+001662:                 IrType* canonical_function = canonical_c_type.value < parse->type_count
+001663:                                                   ? ir_type_from_id(&program->types, c_type_ir_map[canonical_c_type.value])
+001664:                                                   : 0;
+===== line 1663 =====
+001651:                 // but not the selected declaration's prototype marker.
+001652:                 CTypeId canonical_c_type = declaration.type;
+001653:                 if (declaration.entity.value < parse->entity_count)
+001654:                 {
+001655:                     CTypeId entity_c_type = parse->entities[declaration.entity.value].type;
+001656:                     CType* entity_function_type = c_type_from_id(parse, entity_c_type);
+001657:                     if (entity_function_type && entity_function_type->kind == C_TYPE_FUNCTION)
+001658:                     {
+001659:                         canonical_c_type = entity_c_type;
+001660:                     }
+001661:                 }
+001662:                 IrType* canonical_function = canonical_c_type.value < parse->type_count
+001663:                                                   ? ir_type_from_id(&program->types, c_type_ir_map[canonical_c_type.value])
+001664:                                                   : 0;
+001665:                 // A declarator with no parameter list of its own may still
+001666:                 // have a function type from its specifiers -- musl's
+001667:                 // `extern __typeof(dummy) alias;` -- and its parameters live
+001668:                 // on the type rather than on the declaration.
+001669:                 u32 parameter_start = declaration.parameter_count ? declaration.parameter_start : function_type->parameter_start;
+001670:                 result.parameters = &parse->parameters[parameter_start];
+001671:                 result.parameter_count = declaration.parameter_count ? declaration.parameter_count : function_type->parameter_count;
+001672:                 if (result.parameter_count != function_type->parameter_count)
+001673:                 {
+001674:                     return (CIrSignature){0};
+001675:                 }
+001676:                 result.parameter_types = arena_allocate(arena, IrTypeId, result.parameter_count);
+001677:                 // No eager whole-program ABI sweep here.  Every read of a type's ABI goes
+001678:                 // through ir_type_abi_value, which resolves the type on demand, so this
+001679:                 // was pre-warming only -- and running it once per function declaration
+001680:                 // made signature lowering cost O(functions * types).
+001681:                 for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
+001682:                 {
+001683:                     CType* parameter_type = c_type_from_id(parse, result.parameters[parameter_index].type);
+===== line 1688 =====
+001676:                 result.parameter_types = arena_allocate(arena, IrTypeId, result.parameter_count);
+001677:                 // No eager whole-program ABI sweep here.  Every read of a type's ABI goes
+001678:                 // through ir_type_abi_value, which resolves the type on demand, so this
+001679:                 // was pre-warming only -- and running it once per function declaration
+001680:                 // made signature lowering cost O(functions * types).
+001681:                 for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
+001682:                 {
+001683:                     CType* parameter_type = c_type_from_id(parse, result.parameters[parameter_index].type);
+001684:                     if (!parameter_type || result.parameters[parameter_index].type.value >= parse->type_count)
+001685:                     {
+001686:                         return (CIrSignature){0};
+001687:                     }
+001688:                     result.parameter_types[parameter_index] = c_type_ir_map[result.parameters[parameter_index].type.value];
+001689:                     if (parameter_type->kind == C_TYPE_ARRAY)
+001690:                     {
+001691:                         CTypeId element_type = parameter_type->element_type;
+001692:                         CType* element = c_type_from_id(parse, element_type);
+001693:                         IrTypeId canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+001694:                         if (canonical_element.value == IR_ID_UNDERLYING_INVALID)
+001695:                         {
+001696:                             while (element && element->kind == C_TYPE_ARRAY)
+001697:                             {
+001698:                                 element_type = element->element_type;
+001699:                                 element = c_type_from_id(parse, element_type);
+001700:                             }
+001701:                             canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+001702:                         }
+001703:                         if (canonical_element.value != IR_ID_UNDERLYING_INVALID)
+001704:                         {
+001705:                             result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, canonical_element);
+001706:                         }
+001707:                     }
+001708:                     else if (parameter_type->kind == C_TYPE_FUNCTION)
+===== line 1693 =====
+001681:                 for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
+001682:                 {
+001683:                     CType* parameter_type = c_type_from_id(parse, result.parameters[parameter_index].type);
+001684:                     if (!parameter_type || result.parameters[parameter_index].type.value >= parse->type_count)
+001685:                     {
+001686:                         return (CIrSignature){0};
+001687:                     }
+001688:                     result.parameter_types[parameter_index] = c_type_ir_map[result.parameters[parameter_index].type.value];
+001689:                     if (parameter_type->kind == C_TYPE_ARRAY)
+001690:                     {
+001691:                         CTypeId element_type = parameter_type->element_type;
+001692:                         CType* element = c_type_from_id(parse, element_type);
+001693:                         IrTypeId canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+001694:                         if (canonical_element.value == IR_ID_UNDERLYING_INVALID)
+001695:                         {
+001696:                             while (element && element->kind == C_TYPE_ARRAY)
+001697:                             {
+001698:                                 element_type = element->element_type;
+001699:                                 element = c_type_from_id(parse, element_type);
+001700:                             }
+001701:                             canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+001702:                         }
+001703:                         if (canonical_element.value != IR_ID_UNDERLYING_INVALID)
+001704:                         {
+001705:                             result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, canonical_element);
+001706:                         }
+001707:                     }
+001708:                     else if (parameter_type->kind == C_TYPE_FUNCTION)
+001709:                     {
+001710:                         result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
+001711:                     }
+001712:                     else if (parameter_type->kind == C_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+001713:                     {
+===== line 1701 =====
+001689:                     if (parameter_type->kind == C_TYPE_ARRAY)
+001690:                     {
+001691:                         CTypeId element_type = parameter_type->element_type;
+001692:                         CType* element = c_type_from_id(parse, element_type);
+001693:                         IrTypeId canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+001694:                         if (canonical_element.value == IR_ID_UNDERLYING_INVALID)
+001695:                         {
+001696:                             while (element && element->kind == C_TYPE_ARRAY)
+001697:                             {
+001698:                                 element_type = element->element_type;
+001699:                                 element = c_type_from_id(parse, element_type);
+001700:                             }
+001701:                             canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+001702:                         }
+001703:                         if (canonical_element.value != IR_ID_UNDERLYING_INVALID)
+001704:                         {
+001705:                             result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, canonical_element);
+001706:                         }
+001707:                     }
+001708:                     else if (parameter_type->kind == C_TYPE_FUNCTION)
+001709:                     {
+001710:                         result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
+001711:                     }
+001712:                     else if (parameter_type->kind == C_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+001713:                     {
+001714:                         result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
+001715:                     }
+001716:                     result.parameter_types[parameter_index] = c_ir_parameter_value_type(program, result.parameter_types[parameter_index]);
+001717:                     if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
+001718:                     {
+001719:                         return (CIrSignature){0};
+001720:                     }
+001721:                 }
+===== line 6185 =====
+006173:             if (candidate->kind != C_ENTITY_OBJECT || candidate->scope.value != 0 || !string_equal(candidate->name, entity_value->name) ||
+006174:                 builder->entity_symbols[candidate_index].value == IR_ID_UNDERLYING_INVALID)
+006175:             {
+006176:                 continue;
+006177:             }
+006178:             symbol = builder->entity_symbols[candidate_index];
+006179:             builder->entity_symbols[entity.value] = symbol;
+006180:             break;
+006181:         }
+006182:     }
+006183:     if (symbol.value == IR_ID_UNDERLYING_INVALID && entity_value->kind == C_ENTITY_LOCAL && entity_value->type.value < builder->parse.type_count)
+006184:     {
+006185:         IrTypeId type = builder->c_type_ir_map[entity_value->type.value];
+006186:         bool internal = entity_value->is_static_storage;
+006187:         String8 link_name = internal ? c_ir_static_local_link_name(builder, entity) : entity_value->name;
+006188:         symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+006189:                                                                .name = entity_value->name,
+006190:                                                                .link_name = link_name,
+006191:                                                                .source = source,
+006192:                                                                .type = type,
+006193:                                                                .kind = IR_SYMBOL_DATA,
+006194:                                                                .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
+006195:                                                                .is_definition = internal,
+006196:                                                                .is_thread_local = entity_value->is_thread_local,
+006197:                                                            });
+006198:         builder->entity_symbols[entity.value] = symbol;
+006199:     }
+006200:     IrSymbol* symbol_value = ir_symbol_from_id(&builder->program->symbols, symbol);
+006201:     if (!symbol_value || symbol_value->kind != IR_SYMBOL_DATA)
+006202:     {
+006203:         return IR_VALUE_ID_INVALID;
+006204:     }
+006205:     IrValueId place = ir_function_add_value(builder->arena, builder->function,
+===== line 7347 =====
+007335: }
+007336: 
+007337: BUSTER_C_INTERNAL bool c_ir_transparent_union_member_qualifiers_compatible(CIntegerIrBuilder* builder, IrTypeId union_type, u32 field_index,
+007338:                                                                              bool source_points_to_read_only)
+007339: {
+007340:     bool result = true;
+007341:     if (source_points_to_read_only)
+007342:     {
+007343:         result = false;
+007344:         for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+007345:         {
+007346:             CType* c_type = &builder->parse.types[type_index];
+007347:             if (c_type->kind == C_TYPE_UNION && builder->c_type_ir_map[type_index].value == union_type.value && field_index < c_type->member_count)
+007348:             {
+007349:                 CMember* member = &builder->parse.members[c_type->member_start + field_index];
+007350:                 result = c_ir_c_type_points_to_read_only(builder, member->type);
+007351:                 break;
+007352:             }
+007353:         }
+007354:     }
+007355:     return result;
+007356: }
+007357: 
+007358: BUSTER_C_INTERNAL bool c_ir_transparent_union_representation(CIntegerIrBuilder* builder, IrTypeId union_type)
+007359: {
+007360:     bool result = false;
+007361:     IrType* value = builder ? ir_type_from_id(&builder->program->types, union_type) : 0;
+007362:     if (value && value->kind == IR_TYPE_UNION && value->layout.resolved && value->field_count != 0)
+007363:     {
+007364:         IrType* first = ir_type_from_id(&builder->program->types, value->fields[0].type);
+007365:         if (first && first->layout.resolved)
+007366:         {
+007367:             IrAbiConvention convention = ir_abi_convention_for_target(builder->target);
+===== line 18653 =====
+018641:                 }
+018642:                 else if (object_start + 1 == object_end && builder->preprocess.tokens[object_start].kind == C_TOKEN_IDENTIFIER)
+018643:                 {
+018644:                     CEntityId entity = c_ir_identifier_entity(builder, object_start);
+018645:                     IrTypeId object_type = IR_TYPE_ID_INVALID;
+018646:                     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+018647:                     if (local)
+018648:                     {
+018649:                         object_type = local->type;
+018650:                     }
+018651:                     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].type.value < builder->parse.type_count)
+018652:                     {
+018653:                         object_type = builder->c_type_ir_map[builder->parse.entities[entity.value].type.value];
+018654:                     }
+018655:                     IrType* object = ir_type_from_id(&builder->program->types, object_type);
+018656:                     if (object && object->kind == IR_TYPE_ARRAY && object->layout.resolved)
+018657:                     {
+018658:                         size = object->layout.size;
+018659:                     }
+018660:                 }
+018661:                 selected->result = c_ir_emit_integer_value_typed(builder, size, false, token, builder->size_type);
+018662:             }
+018663:             else
+018664:             {
+018665:                 u64 alignment = 0;
+018666:                 u64 offset = 0;
+018667:                 if ((argument_count != 2 && argument_count != 3) ||
+018668:                     !c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &alignment) || !alignment ||
+018669:                     (argument_count == 3 && !c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[2], ends[2], &offset)))
+018670:                 {
+018671:                     return false;
+018672:                 }
+018673:                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED)
+===== line 22928 =====
+022916: // c_parse_atomic_drops_type_alignment owns that rule for the declaration side
+022917: // too, so the two cannot answer differently, and the replacement is built from
+022918: // the alias's *unqualified* type exactly as the type-mapping pass builds the
+022919: // typedef spelling: c_ir_add_qualified_type's dedup then hands back the very
+022920: // IrType that spelling mapped to.
+022921: BUSTER_C_INTERNAL IrTypeId c_ir_atomic_over_aligned_alias(CIntegerIrBuilder* builder, CTypeId named_type)
+022922: {
+022923:     IrTypeId replacement = IR_TYPE_ID_INVALID;
+022924:     if (c_parse_atomic_drops_type_alignment(&builder->parse, named_type, true))
+022925:     {
+022926:         CType* named = builder->parse.types + named_type.value;
+022927:         IrTypeId unqualified = named->unqualified_type.value < builder->parse.type_count
+022928:                                    ? builder->c_type_ir_map[named->unqualified_type.value]
+022929:                                    : IR_TYPE_ID_INVALID;
+022930:         if (unqualified.value != IR_ID_UNDERLYING_INVALID)
+022931:         {
+022932:             replacement = c_ir_add_qualified_type(builder->program, unqualified, true, named->is_volatile);
+022933:         }
+022934:     }
+022935: 
+022936:     return replacement;
+022937: }
+022938: 
+022939: // The typedef a single-identifier type name names, or invalid.  The `_Atomic (
+022940: // T )` operator spells its operand as a type name of its own, so the rule
+022941: // above has to reach it through the tokens rather than through the IrType the
+022942: // operand resolved to: an alias and the type it aliases can map to one IrType.
+022943: BUSTER_C_INTERNAL CTypeId c_ir_named_typedef_type(CIntegerIrBuilder* builder, u32 start, u32 end)
+022944: {
+022945:     CTypeId named = C_TYPE_ID_INVALID;
+022946:     if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+022947:     {
+022948:         CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+===== line 23062 =====
+023050:                 {
+023051:                     local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[index + 2]);
+023052:                 }
+023053:                 if (local)
+023054:                 {
+023055:                     type = local->type;
+023056:                 }
+023057:                 else if (operand_entity.value < builder->parse.entity_count)
+023058:                 {
+023059:                     CTypeId c_type = builder->parse.entities[operand_entity.value].type;
+023060:                     if (c_type.value < builder->parse.type_count)
+023061:                     {
+023062:                         type = builder->c_type_ir_map[c_type.value];
+023063:                     }
+023064:                 }
+023065:                 u32 postfix = index + 3;
+023066:                 while (type.value != IR_ID_UNDERLYING_INVALID && postfix < close)
+023067:                 {
+023068:                     IrType* base = ir_type_from_id(&builder->program->types, type);
+023069:                     if (!base)
+023070:                     {
+023071:                         type = IR_TYPE_ID_INVALID;
+023072:                         break;
+023073:                     }
+023074:                     if (c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_LEFT_BRACKET))
+023075:                     {
+023076:                         u32 bracket_close = c_ir_matching_delimiter_cached(builder, postfix, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+023077:                         if (bracket_close >= close || (base->kind != IR_TYPE_ARRAY && base->kind != IR_TYPE_POINTER))
+023078:                         {
+023079:                             type = IR_TYPE_ID_INVALID;
+023080:                             break;
+023081:                         }
+023082:                         type = base->element_type;
+===== line 23138 =====
+023126:             {
+023127:                 c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
+023128:             }
+023129:             index = close + 1;
+023130:         }
+023131:     }
+023132:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
+023133:     {
+023134:         CTypeId c_type = builder->parse.entities[entity.value].type;
+023135:         if (c_type.value < builder->parse.type_count)
+023136:         {
+023137:             named_type = c_type;
+023138:             type = builder->c_type_ir_map[c_type.value];
+023139:             if (type.value == IR_ID_UNDERLYING_INVALID && c_type.value < builder->parse.type_count)
+023140:             {
+023141:                 CType* c_type_value = builder->parse.types + c_type.value;
+023142:                 if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
+023143:                     builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
+023144:                 {
+023145:                     type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+023146:                 }
+023147:             }
+023148:             index += 1;
+023149:         }
+023150:     }
+023151:     else if (first.kind == C_TOKEN_IDENTIFIER &&
+023152:              (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("enum"))) &&
+023153:              index + 1 < end)
+023154:     {
+023155:         CTypeKind kind = string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) ? C_TYPE_STRUCT : string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) ? C_TYPE_UNION : C_TYPE_ENUM;
+023156:         // A type name may define the aggregate rather than name one:
+023157:         // `(union{float _f; uint32_t _i;}){x}` is how a libc's math library
+023158:         // punts a float through an integer. The parser registered the
+===== line 23174 =====
+023162:         u32 body_open = index + 1;
+023163:         if (body_open < end && builder->preprocess.tokens[body_open].kind == C_TOKEN_IDENTIFIER)
+023164:         {
+023165:             body_open += 1;
+023166:         }
+023167:         if (body_open < end && c_token_is_punctuator(&builder->preprocess.tokens[body_open], C_PUNCTUATOR_LEFT_BRACE))
+023168:         {
+023169:             u32 body_close = c_ir_matching_delimiter_cached(builder, body_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+023170:             for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+023171:             {
+023172:                 if (builder->parse.types[type_index].definition_start == body_open + 1)
+023173:                 {
+023174:                     type = builder->c_type_ir_map[type_index];
+023175:                     break;
+023176:                 }
+023177:             }
+023178:             index = body_close < end ? body_close + 1 : end;
+023179:         }
+023180:         else
+023181:         {
+023182:             bool named = builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
+023183:             String8 tag = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+023184:             // Several types may carry one tag -- a block-scope definition
+023185:             // shadows a sibling's or the file scope's -- so among candidates
+023186:             // visible from the reference the innermost wins, exactly as the
+023187:             // parse-side lookup resolves it.  The first match stays the
+023188:             // answer when nothing is visible or nothing beats it, which is
+023189:             // what every unique-tag unit resolved to before scopes were
+023190:             // consulted -- including the forward-declared tag whose pointer
+023191:             // typedef was lowered against the opaque made before the
+023192:             // definition.
+023193:             CScopeId reference_scope = c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);
+023194:             u32 best_distance = UINT32_MAX;
+===== line 23203 =====
+023191:             // typedef was lowered against the opaque made before the
+023192:             // definition.
+023193:             CScopeId reference_scope = c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);
+023194:             u32 best_distance = UINT32_MAX;
+023195:             for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+023196:             {
+023197:                 CType* candidate = &builder->parse.types[type_index];
+023198:                 if (candidate->kind == kind && !candidate->has_unqualified_type && string_equal(candidate->tag, tag))
+023199:                 {
+023200:                     u32 distance = c_parse_scope_distance(&builder->parse, candidate->tag_scope, reference_scope);
+023201:                     if (type.value == IR_ID_UNDERLYING_INVALID || (distance < best_distance))
+023202:                     {
+023203:                         type = builder->c_type_ir_map[type_index];
+023204:                         best_distance = distance;
+023205:                     }
+023206:                 }
+023207:             }
+023208:             // A tag first named inside a type name declares an incomplete
+023209:             // type there and then (C11 6.7.2.3p8): musl's `dlinfo` writes
+023210:             // `*(struct link_map **)res = dso;` without ever including the
+023211:             // header that defines the tag, and only a pointer to it is
+023212:             // formed. Give it the opaque aggregate that stands for one,
+023213:             // reusing the opaque already made for this tag so two casts to
+023214:             // it agree on one type.
+023215:             if (type.value == IR_ID_UNDERLYING_INVALID && (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION) && named && tag.length)
+023216:             {
+023217:                 IrTypeKind opaque_kind = kind == C_TYPE_STRUCT ? IR_TYPE_STRUCT : IR_TYPE_UNION;
+023218:                 for (u32 type_index = 0; type_index < builder->program->types.count; type_index += 1)
+023219:                 {
+023220:                     IrType* candidate = builder->program->types.types + type_index;
+023221:                     if (candidate->kind == opaque_kind && !candidate->layout.resolved && !candidate->field_count && string_equal(candidate->name, tag))
+023222:                     {
+023223:                         type = (IrTypeId){
+===== line 23569 =====
+023557: }
+023558: 
+023559: BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
+023560: {
+023561:     if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+023562:     {
+023563:         CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+023564:         if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
+023565:         {
+023566:             CTypeId c_type = builder->parse.entities[entity.value].type;
+023567:             if (c_type.value < builder->parse.type_count)
+023568:             {
+023569:                 IrTypeId direct = builder->c_type_ir_map[c_type.value];
+023570:                 if (direct.value == IR_ID_UNDERLYING_INVALID)
+023571:                 {
+023572:                     CType* c_type_value = builder->parse.types + c_type.value;
+023573:                     if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
+023574:                         builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
+023575:                     {
+023576:                         direct = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+023577:                     }
+023578:                 }
+023579:                 if (direct.value != IR_ID_UNDERLYING_INVALID)
+023580:                 {
+023581:                     return direct;
+023582:                 }
+023583:             }
+023584:         }
+023585:     }
+023586:     CIrQueryFrame result = {0};
+023587:     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_NAME, .flag = true}, &result) || !result.success)
+023588:     {
+023589:         if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+===== line 23597 =====
+023585:     }
+023586:     CIrQueryFrame result = {0};
+023587:     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_NAME, .flag = true}, &result) || !result.success)
+023588:     {
+023589:         if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+023590:         {
+023591:             CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+023592:             if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
+023593:             {
+023594:                 CTypeId c_type = builder->parse.entities[entity.value].type;
+023595:                 if (c_type.value < builder->parse.type_count)
+023596:                 {
+023597:                     IrTypeId fallback = builder->c_type_ir_map[c_type.value];
+023598:                     if (fallback.value == IR_ID_UNDERLYING_INVALID)
+023599:                     {
+023600:                         CType* c_type_value = builder->parse.types + c_type.value;
+023601:                         if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
+023602:                             builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
+023603:                         {
+023604:                             fallback = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+023605:                         }
+023606:                     }
+023607:                     if (fallback.value != IR_ID_UNDERLYING_INVALID)
+023608:                     {
+023609:                         return fallback;
+023610:                     }
+023611:                 }
+023612:             }
+023613:         }
+023614:         return IR_TYPE_ID_INVALID;
+023615:     }
+023616:     return result.result_type;
+023617: }
+===== line 25469 =====
+025457:         }
+025458:         type = local->type;
+025459:     }
+025460:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+025461:     {
+025462:         type = builder->s32_type;
+025463:     }
+025464:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+025465:     {
+025466:         CTypeId c_type = builder->parse.entities[entity.value].type;
+025467:         if (c_type.value < builder->parse.type_count)
+025468:         {
+025469:             type = builder->c_type_ir_map[c_type.value];
+025470:         }
+025471:     }
+025472:     if (type.value == IR_ID_UNDERLYING_INVALID && chain_start < end &&
+025473:         c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+025474:     {
+025475:         // A direct call through a function name resolves to the declared return type.
+025476:         CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, start);
+025477:         u32 close = UINT32_MAX;
+025478:         if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
+025479:         {
+025480:             type = builder->function->values[prepared_call->result.value].canonical_type;
+025481:             close = prepared_call->close_index;
+025482:         }
+025483:         else
+025484:         {
+025485:             u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+025486:             if (declaration_index != UINT32_MAX && builder->signatures)
+025487:             {
+025488:                 type = builder->signatures[declaration_index].return_type;
+025489:                 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+===== line 25507 =====
+025495:                 // `char buffer[sizeof(helper())]` that fails here classifies
+025496:                 // the local as a VLA — which a static local then rejects.
+025497:                 // Resolve the declared return type through the parse
+025498:                 // declaration instead; an unmapped return type still fails,
+025499:                 // deferring the bound to a later mapping round rather than
+025500:                 // guessing.
+025501:                 CDeclaration* function_declaration = &builder->parse.declarations[declaration_index];
+025502:                 if (function_declaration->type.value < builder->parse.type_count)
+025503:                 {
+025504:                     CType* function_type = &builder->parse.types[function_declaration->type.value];
+025505:                     if (function_type->kind == C_TYPE_FUNCTION && function_type->return_type.value < builder->parse.type_count)
+025506:                     {
+025507:                         type = builder->c_type_ir_map[function_type->return_type.value];
+025508:                     }
+025509:                 }
+025510:                 if (type.value != IR_ID_UNDERLYING_INVALID)
+025511:                 {
+025512:                     close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+025513:                 }
+025514:             }
+025515:         }
+025516:         if (close >= end)
+025517:         {
+025518:             return false;
+025519:         }
+025520:         chain_start = close + 1;
+025521:     }
+025522:     else if (type.value == IR_ID_UNDERLYING_INVALID)
+025523:     {
+025524:         // A bare function name resolves to its function type so a call applied
+025525:         // through parentheses, e.g. `(name)(...)`, still reaches the return type.
+025526:         u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+025527:         if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
+===== line 26240 =====
+026228: // guard never sees it.
+026229: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
+026230: {
+026231:     bool result = false;
+026232:     if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+026233:     {
+026234:         CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+026235:         if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT &&
+026236:             !c_ir_find_local_by_entity(builder, entity))
+026237:         {
+026238:             CTypeId c_type = builder->parse.entities[entity.value].type;
+026239:             CType* record = c_type.value < builder->parse.type_count ? &builder->parse.types[c_type.value] : 0;
+026240:             result = record && record->kind == C_TYPE_ARRAY && builder->c_type_ir_map[c_type.value].value == IR_ID_UNDERLYING_INVALID;
+026241:         }
+026242:     }
+026243:     return result;
+026244: }
+026245: 
+026246: // Whether a sizeof/_Alignof operand is a type name wrapped in its own
+026247: // parentheses.  The word's own parentheses are already outside start..end, so
+026248: // any strippable pair here was a second pair in the source -- and
+026249: // `sizeof ((T))` is not C: the operand grammar is a unary expression or
+026250: // `( type-name )` with exactly one pair, and `(T)` as an expression names a
+026251: // type where a value is required.  Every resolver above correctly fails on
+026252: // it, which left the int prediction to answer 4 -- and autoconf's
+026253: // AC_CHECK_TYPE compiles exactly this shape and requires it to fail, so a
+026254: // compiler that accepts it reports every type as absent: CPython's configure
+026255: // lost clock_t, socklen_t, ssize_t, mode_t, off_t, pid_t and size_t at once,
+026256: // and `#define size_t unsigned int` followed.
+026257: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_parenthesized_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
+026258: {
+026259:     u32 stripped = 0;
+026260:     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+===== line 26410 =====
+026398:             nested_end -= 1;
+026399:         }
+026400:         if (close < end && nested_start < nested_end && builder->preprocess.tokens[nested_start].kind == C_TOKEN_IDENTIFIER)
+026401:         {
+026402:             CEntityId entity = c_ir_identifier_entity_or_lookup(builder, nested_start);
+026403:             CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+026404:             IrTypeId type = local ? local->type : IR_TYPE_ID_INVALID;
+026405:             if (!local && entity.value < builder->parse.entity_count)
+026406:             {
+026407:                 CTypeId c_type = builder->parse.entities[entity.value].type;
+026408:                 if (c_type.value < builder->parse.type_count)
+026409:                 {
+026410:                     type = builder->c_type_ir_map[c_type.value];
+026411:                 }
+026412:             }
+026413:             if (type.value != IR_ID_UNDERLYING_INVALID && c_ir_static_postfix_type(builder, &type, nested_start + 1, nested_end) &&
+026414:                 c_ir_static_postfix_type(builder, &type, close + 1, end))
+026415:             {
+026416:                 u32 remaining_dereferences = dereference_count;
+026417:                 while (remaining_dereferences)
+026418:                 {
+026419:                     IrType* pointer = ir_type_from_id(&builder->program->types, type);
+026420:                     if (!pointer || pointer->kind != IR_TYPE_POINTER)
+026421:                     {
+026422:                         return false;
+026423:                     }
+026424:                     type = pointer->element_type;
+026425:                     remaining_dereferences -= 1;
+026426:                 }
+026427:                 IrType* value = ir_type_from_id(&builder->program->types, type);
+026428:                 if (value && value->layout.resolved)
+026429:                 {
+026430:                     *size_out = c_ir_sizeof_operand_size(value);
+===== line 26494 =====
+026482:         }
+026483:         if (close < end && nested_end == nested_start + 1)
+026484:         {
+026485:             base_index = nested_start;
+026486:             postfix_index = close + 1;
+026487:         }
+026488:     }
+026489:     if (base_index < end && builder->preprocess.tokens[base_index].kind == C_TOKEN_IDENTIFIER)
+026490:     {
+026491:         CEntityId entity = c_ir_identifier_entity_or_lookup(builder, base_index);
+026492:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+026493:         IrTypeId type = local                                        ? local->type
+026494:                         : entity.value < builder->parse.entity_count ? builder->c_type_ir_map[builder->parse.entities[entity.value].type.value]
+026495:                                                                      : IR_TYPE_ID_INVALID;
+026496:         u32 index = postfix_index;
+026497:         while (type.value != IR_ID_UNDERLYING_INVALID && index < end)
+026498:         {
+026499:             IrType* value = ir_type_from_id(&builder->program->types, type);
+026500:             if (!value)
+026501:             {
+026502:                 return false;
+026503:             }
+026504:             CToken token = builder->preprocess.tokens[index];
+026505:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+026506:             {
+026507:                 u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+026508:                 if (close >= end || (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER))
+026509:                 {
+026510:                     return false;
+026511:                 }
+026512:                 type = value->element_type;
+026513:                 index = close + 1;
+026514:                 continue;
+===== line 27924 =====
+027912:                                                                         : IR_TYPE_ID_INVALID;
+027913:             }
+027914:             if (cast_type.value == IR_ID_UNDERLYING_INVALID && close + 2 < end &&
+027915:                 c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+027916:                 builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+027917:             {
+027918:                 CEntityId type_entity = c_ir_identifier_entity(builder, index + 1);
+027919:                 if (type_entity.value < builder->parse.entity_count && builder->parse.entities[type_entity.value].kind == C_ENTITY_TYPEDEF)
+027920:                 {
+027921:                     CTypeId c_type = builder->parse.entities[type_entity.value].type;
+027922:                     if (c_type.value < builder->parse.type_count)
+027923:                     {
+027924:                         cast_type = builder->c_type_ir_map[c_type.value];
+027925:                         if (cast_type.value == IR_ID_UNDERLYING_INVALID)
+027926:                         {
+027927:                             CType* c_type_value = builder->parse.types + c_type.value;
+027928:                             if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
+027929:                                 builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
+027930:                             {
+027931:                                 cast_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+027932:                             }
+027933:                         }
+027934:                     }
+027935:                 }
+027936:             }
+027937:             if (cast_type.value != IR_ID_UNDERLYING_INVALID)
+027938:             {
+027939:                 if (compound_literal)
+027940:                 {
+027941:                     c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count,
+027942:                                               operation_count, initializer_close + 1, expect_operand);
+027943:                     state->pending_type = cast_type;
+027944:                     state->pending_source = source;
+===== line 29053 =====
+029041:             {
+029042:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029043:                 return;
+029044:             }
+029045:             state->bounds[result->dimension_count++] = builder->parse.array_bounds[type->array_bound];
+029046:             type_id = type->element_type;
+029047:         }
+029048:         if (!result->dimension_count || type_id.value >= builder->parse.type_count)
+029049:         {
+029050:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029051:             return;
+029052:         }
+029053:         result->element_type = builder->c_type_ir_map[type_id.value];
+029054:         IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
+029055:         if (!element || !element->layout.resolved || !element->layout.size)
+029056:         {
+029057:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029058:             return;
+029059:         }
+029060:         result->dimension_counts = arena_allocate(builder->arena, IrValueId, result->dimension_count);
+029061:         result->suffix_sizes = arena_allocate(builder->arena, IrValueId, result->dimension_count + 1);
+029062:         memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
+029063:         memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
+029064:         state->source = c_ir_source_range(c_ir_token_location(builder, state->token), c_token_length(builder->preprocess.spelling_base, state->token));
+029065:         state->dimension = 0;
+029066:         frame->stage = C_IR_LOWER_STAGE_FINISH;
+029067:     }
+029068:     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+029069:     {
+029070:         arena_set_position(builder->temporary_arena, state->temporary_mark);
+029071:         if (!machine->child_result.success)
+029072:         {
+029073:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+===== line 30769 =====
+030757:                     }
+030758:                 }
+030759:                 if (consumed_postfix)
+030760:                 {
+030761:                     index = postfix - 1;
+030762:                 }
+030763:             }
+030764:             else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+030765:             {
+030766:                 CTypeId c_type = builder->parse.entities[entity.value].type;
+030767:                 if (c_type.value < builder->parse.type_count)
+030768:                 {
+030769:                     candidate = builder->c_type_ir_map[c_type.value];
+030770:                     if (index + 1 < end)
+030771:                     {
+030772:                         IrTypeId postfix_type = candidate;
+030773:                         if (c_ir_static_postfix_type(builder, &postfix_type, index + 1, end))
+030774:                         {
+030775:                             candidate = postfix_type;
+030776:                             index = end - 1;
+030777:                         }
+030778:                     }
+030779:                 }
+030780:             }
+030781:             else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+030782:             {
+030783:                 candidate = builder->s32_type;
+030784:             }
+030785:             else
+030786:             {
+030787:                 u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+030788:                 if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
+030789:                 {
+===== line 32308 =====
+032296:         *target_out = builder->cleanup_functions[entity_id.value];
+032297:         *signature_out = builder->cleanup_signatures[entity_id.value];
+032298:         return c_ir_signature_call_supported(builder, *signature_out, entity->name);
+032299:     }
+032300:     u32 declaration_index = c_ir_function_declaration_for_entity(&builder->parse, entity_id);
+032301:     if (declaration_index != UINT32_MAX && builder->declaration_functions[declaration_index] && builder->signatures[declaration_index].valid)
+032302:     {
+032303:         *target_out = builder->declaration_functions[declaration_index];
+032304:         *signature_out = builder->signatures[declaration_index];
+032305:         return c_ir_signature_call_supported(builder, *signature_out, entity->name);
+032306:     }
+032307:     CType* function_type = c_type_from_id(&builder->parse, entity->type);
+032308:     IrTypeId canonical_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+032309:     if (!function_type || function_type->kind != C_TYPE_FUNCTION || canonical_type.value == IR_ID_UNDERLYING_INVALID)
+032310:     {
+032311:         return false;
+032312:     }
+032313:     CDeclaration synthetic = {
+032314:         .name = entity->name,
+032315:         .location = entity->location,
+032316:         .type = entity->type,
+032317:         .parameter_start = function_type->parameter_start,
+032318:         .parameter_count = function_type->parameter_count,
+032319:         .entity = entity_id,
+032320:         .kind = C_DECLARATION_FUNCTION,
+032321:     };
+032322:     CIrSignature signature = c_ir_function_signature(builder->arena, builder->program, builder->pointer_types, builder->wide_float_cache,
+032323:                                                       &builder->parse, synthetic, builder->c_type_ir_map, builder->target);
+032324:     if (!signature.valid)
+032325:     {
+032326:         return false;
+032327:     }
+032328:     if (!c_ir_signature_call_supported(builder, signature, entity->name))
+===== line 32543 =====
+032531:             !c_ir_cleanup_is_outside_target(&builder->parse, entity, target_scope, target_token))
+032532:         {
+032533:             continue;
+032534:         }
+032535:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity_id);
+032536:         if (!local)
+032537:         {
+032538:             continue;
+032539:         }
+032540:         IrFunction* callback_function = 0;
+032541:         CIrSignature callback_signature = {0};
+032542:         bool callback_resolved = c_ir_cleanup_function_target(builder, entity->cleanup_function, &callback_function, &callback_signature);
+032543:         IrTypeId variable_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+032544:         if (!callback_resolved || variable_type.value == IR_ID_UNDERLYING_INVALID || callback_signature.parameter_count != 1)
+032545:         {
+032546:             return false;
+032547:         }
+032548:         CToken callback_token = c_ir_space_name_token(builder, entity->name);
+032549:         IrValueId flag = builder->cleanup_flags[cleanup_index - 1];
+032550:         IrValueId active = c_ir_emit_load_place_raw(builder, flag, builder->bool_type, source);
+032551:         active = active.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_truth_value(builder, active, source);
+032552:         IrBlockId call_block = c_ir_block_create(builder);
+032553:         IrBlockId next_block = c_ir_block_create(builder);
+032554:         if (active.value == IR_ID_UNDERLYING_INVALID || call_block.value == IR_ID_UNDERLYING_INVALID || next_block.value == IR_ID_UNDERLYING_INVALID)
+032555:         {
+032556:             return false;
+032557:         }
+032558:         IrBlockId targets[2] = {call_block, next_block};
+032559:         if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &active, 1, targets, 2, source) || !c_ir_switch_block(builder, call_block))
+032560:         {
+032561:             return false;
+032562:         }
+032563:         IrValueId address = c_ir_emit_address_of_place(builder, local->place, variable_type, source);
+===== line 32794 =====
+032782:         return true;
+032783:     }
+032784:     for (CEntityId entity = builder->parse.scopes[scope.value].first_entity; entity.value < builder->parse.entity_count;
+032785:          entity = builder->parse.entities[entity.value].next_in_scope)
+032786:     {
+032787:         CEntity* value = builder->parse.entities + entity.value;
+032788:         u32 declaration_token = value->declaration_token_plus_one ? value->declaration_token_plus_one - 1 : UINT32_MAX;
+032789:         if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || declaration_token < body_start ||
+032790:             declaration_token >= prefix_end || value->type.value >= builder->parse.type_count || c_ir_find_local_by_entity(builder, entity))
+032791:         {
+032792:             continue;
+032793:         }
+032794:         IrTypeId local_type = builder->c_type_ir_map[value->type.value];
+032795:         IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
+032796:         u32 alignment = local_type_value ? local_type_value->layout.alignment : 0;
+032797:         String8 rejection = {0};
+032798:         if (!local_type_value || !local_type_value->layout.resolved ||
+032799:             c_ir_alignment_evaluate(builder, value->alignment_start, value->alignment_count, alignment, &alignment, 0, &rejection) != C_IR_ALIGNMENT_RESOLVED ||
+032800:             c_ir_emit_local(builder, builder->preprocess.tokens[declaration_token], local_type, entity, alignment).value == IR_ID_UNDERLYING_INVALID)
+032801:         {
+032802:             builder->failure_message =
+032803:                 rejection.length ? rejection
+032804:                                  : string_format(builder->arena, S8("could not declare local '{S8}', which precedes the first case label of a switch"), value->name);
+032805:             builder->failure_kind_plus_one = rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
+032806:             builder->failure_token_index = declaration_token;
+032807:             return false;
+032808:         }
+032809:     }
+032810:     return true;
+032811: }
+032812: 
+032813: typedef struct CIrSubstatementCase CIrSubstatementCase;
+032814: struct CIrSubstatementCase
+===== line 33735 =====
+033723:     }
+033724:     if (name_index >= end || entity.value >= builder->parse.entity_count)
+033725:     {
+033726:         builder->failure_message = S8("could not resolve the automatic local declaration");
+033727:         return false;
+033728:     }
+033729:     CEntity* local_entity = &builder->parse.entities[entity.value];
+033730:     if (local_entity->type.value >= builder->parse.type_count)
+033731:     {
+033732:         builder->failure_message = S8("automatic local declaration has an invalid C type");
+033733:         return false;
+033734:     }
+033735:     IrTypeId local_type = builder->c_type_ir_map[local_entity->type.value];
+033736:     CType* local_c_type = &builder->parse.types[local_entity->type.value];
+033737:     // An array C type reaches c_type_ir_map only when every bound folded, so an
+033738:     // unmapped one is a variable-length array. The single-declarator path in
+033739:     // c_ir_lower_body_advance recognises the same shape; this one is what a
+033740:     // declarator split out of a comma-separated list arrives through, which is
+033741:     // how musl's res_msend writes `int qpos[nqueries], apos[nqueries];`.
+033742:     bool variable_length_array = false;
+033743:     IrTypeId variable_element_type = IR_TYPE_ID_INVALID;
+033744:     if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY)
+033745:     {
+033746:         CTypeId element_c_type = local_entity->type;
+033747:         CType* element_c = local_c_type;
+033748:         while (element_c && element_c->kind == C_TYPE_ARRAY)
+033749:         {
+033750:             element_c_type = element_c->element_type;
+033751:             element_c = c_type_from_id(&builder->parse, element_c_type);
+033752:         }
+033753:         variable_element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+033754:         variable_length_array = variable_element_type.value != IR_ID_UNDERLYING_INVALID;
+033755:         if (variable_length_array)
+===== line 33753 =====
+033741:     // how musl's res_msend writes `int qpos[nqueries], apos[nqueries];`.
+033742:     bool variable_length_array = false;
+033743:     IrTypeId variable_element_type = IR_TYPE_ID_INVALID;
+033744:     if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY)
+033745:     {
+033746:         CTypeId element_c_type = local_entity->type;
+033747:         CType* element_c = local_c_type;
+033748:         while (element_c && element_c->kind == C_TYPE_ARRAY)
+033749:         {
+033750:             element_c_type = element_c->element_type;
+033751:             element_c = c_type_from_id(&builder->parse, element_c_type);
+033752:         }
+033753:         variable_element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+033754:         variable_length_array = variable_element_type.value != IR_ID_UNDERLYING_INVALID;
+033755:         if (variable_length_array)
+033756:         {
+033757:             local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
+033758:         }
+033759:     }
+033760:     IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
+033761:     IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
+033762:     CToken name = builder->preprocess.tokens[name_index];
+033763:     bool local_extern = false;
+033764:     bool local_static = local_entity->is_static_storage;
+033765:     bool local_thread_local = local_entity->is_thread_local;
+033766:     for (u32 token_index = start; token_index < end; token_index += 1)
+033767:     {
+033768:         CToken token = builder->preprocess.tokens[token_index];
+033769:         if (token.kind != C_TOKEN_IDENTIFIER)
+033770:         {
+033771:             continue;
+033772:         }
+033773:         local_extern |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("extern"));
+===== line 36255 =====
+036243:     {
+036244:         if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+036245:         {
+036246:             continue;
+036247:         }
+036248:         CEntityId entity = c_ir_local_entity_at(builder, index);
+036249:         if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_LOCAL)
+036250:         {
+036251:             continue;
+036252:         }
+036253:         CTypeId type = builder->parse.entities[entity.value].type;
+036254:         result = type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_ARRAY &&
+036255:                  builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID;
+036256:     }
+036257: 
+036258:     return result;
+036259: }
+036260: 
+036261: // Is this C type a pointer to a variably modified array -- `char (*p)[width]`,
+036262: // which musl's lsearch and lfind walk their tables with? Such a pointer never
+036263: // reaches c_type_ir_map, because the array it addresses has no constant size.
+036264: // It is the type `char p[][width]` adjusts to, so the local it becomes is the
+036265: // same one an array parameter becomes: a pointer to the innermost element,
+036266: // carrying the runtime dimension table that scales an index by the row size.
+036267: // The pointee is what the caller hands the layout walk, which prepends the
+036268: // absent outermost dimension.
+036269: BUSTER_C_INTERNAL bool c_ir_pointer_to_variable_array(CIntegerIrBuilder* builder, CTypeId type, CTypeId* array_out, IrTypeId* element_out)
+036270: {
+036271:     bool result = false;
+036272:     CType* pointer = c_type_from_id(&builder->parse, type);
+036273:     CTypeId array_type = pointer && pointer->kind == C_TYPE_POINTER ? pointer->element_type : C_TYPE_ID_INVALID;
+036274:     CType* array = c_type_from_id(&builder->parse, array_type);
+036275:     if (array && array->kind == C_TYPE_ARRAY && builder->c_type_ir_map[array_type.value].value == IR_ID_UNDERLYING_INVALID)
+===== line 36275 =====
+036263: // reaches c_type_ir_map, because the array it addresses has no constant size.
+036264: // It is the type `char p[][width]` adjusts to, so the local it becomes is the
+036265: // same one an array parameter becomes: a pointer to the innermost element,
+036266: // carrying the runtime dimension table that scales an index by the row size.
+036267: // The pointee is what the caller hands the layout walk, which prepends the
+036268: // absent outermost dimension.
+036269: BUSTER_C_INTERNAL bool c_ir_pointer_to_variable_array(CIntegerIrBuilder* builder, CTypeId type, CTypeId* array_out, IrTypeId* element_out)
+036270: {
+036271:     bool result = false;
+036272:     CType* pointer = c_type_from_id(&builder->parse, type);
+036273:     CTypeId array_type = pointer && pointer->kind == C_TYPE_POINTER ? pointer->element_type : C_TYPE_ID_INVALID;
+036274:     CType* array = c_type_from_id(&builder->parse, array_type);
+036275:     if (array && array->kind == C_TYPE_ARRAY && builder->c_type_ir_map[array_type.value].value == IR_ID_UNDERLYING_INVALID)
+036276:     {
+036277:         CTypeId element_c_type = array_type;
+036278:         CType* element_c = array;
+036279:         while (element_c && element_c->kind == C_TYPE_ARRAY)
+036280:         {
+036281:             element_c_type = element_c->element_type;
+036282:             element_c = c_type_from_id(&builder->parse, element_c_type);
+036283:         }
+036284:         IrTypeId element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+036285:         IrType* element = ir_type_from_id(&builder->program->types, element_type);
+036286:         result = element && element->layout.resolved && element->layout.size;
+036287:         if (result)
+036288:         {
+036289:             *array_out = array_type;
+036290:             *element_out = element_type;
+036291:         }
+036292:     }
+036293: 
+036294:     return result;
+036295: }
+===== line 36284 =====
+036272:     CType* pointer = c_type_from_id(&builder->parse, type);
+036273:     CTypeId array_type = pointer && pointer->kind == C_TYPE_POINTER ? pointer->element_type : C_TYPE_ID_INVALID;
+036274:     CType* array = c_type_from_id(&builder->parse, array_type);
+036275:     if (array && array->kind == C_TYPE_ARRAY && builder->c_type_ir_map[array_type.value].value == IR_ID_UNDERLYING_INVALID)
+036276:     {
+036277:         CTypeId element_c_type = array_type;
+036278:         CType* element_c = array;
+036279:         while (element_c && element_c->kind == C_TYPE_ARRAY)
+036280:         {
+036281:             element_c_type = element_c->element_type;
+036282:             element_c = c_type_from_id(&builder->parse, element_c_type);
+036283:         }
+036284:         IrTypeId element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+036285:         IrType* element = ir_type_from_id(&builder->program->types, element_type);
+036286:         result = element && element->layout.resolved && element->layout.size;
+036287:         if (result)
+036288:         {
+036289:             *array_out = array_type;
+036290:             *element_out = element_type;
+036291:         }
+036292:     }
+036293: 
+036294:     return result;
+036295: }
+036296: 
+036297: BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
+036298: {
+036299:     return c_ir_emit_vla_storage(builder, state->vla_layout, state->vla_pointer_type, state->vla_element_type, state->vla_entity, state->vla_name,
+036300:                                  state->vla_alignment);
+036301: }
+036302: 
+036303: // The keyword groups the statement walker classifies its first token
+036304: // against, as C_SYMBOL_WELL_KNOWN_BIT sets: one shift-and-mask each, in
+===== line 37766 =====
+037754:                     }
+037755:                     index = end == task.end ? task.end : end + 1;
+037756:                     continue;
+037757:                 }
+037758:                 CToken name = builder->preprocess.tokens[name_index];
+037759:                 if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].type.value >= builder->parse.type_count)
+037760:                 {
+037761:                     builder->failure_message = S8("local declaration has an invalid C type");
+037762:                     return false;
+037763:                 }
+037764:                 CTypeId local_c_type_id = builder->parse.entities[entity.value].type;
+037765:                 CType* local_c_type = &builder->parse.types[local_c_type_id.value];
+037766:                 IrTypeId local_type = builder->c_type_ir_map[local_c_type_id.value];
+037767:                 bool variable_length_array = false;
+037768:                 IrTypeId variable_element_type = IR_TYPE_ID_INVALID;
+037769:                 if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY &&
+037770:                     local_c_type->array_bound < builder->parse.array_bound_count && !builder->parse.array_bounds[local_c_type->array_bound].token_count)
+037771:                 {
+037772:                     u32 initializer_index = end;
+037773:                     u32 initializer_parentheses = 0;
+037774:                     u32 initializer_brackets = 0;
+037775:                     u32 initializer_braces = 0;
+037776:                     for (u32 scan = name_index + 1; scan < end; scan += 1)
+037777:                     {
+037778:                         CToken token = builder->preprocess.tokens[scan];
+037779:                         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+037780:                         {
+037781:                             initializer_parentheses += 1;
+037782:                         }
+037783:                         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && initializer_parentheses)
+037784:                         {
+037785:                             initializer_parentheses -= 1;
+037786:                         }
+===== line 37812 =====
+037800:                         {
+037801:                             initializer_braces -= 1;
+037802:                         }
+037803:                         else if (!initializer_parentheses && !initializer_brackets && !initializer_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+037804:                         {
+037805:                             initializer_index = scan;
+037806:                             break;
+037807:                         }
+037808:                     }
+037809:                     u32 initializer_start = initializer_index + 1;
+037810:                     CType* element_c = c_type_from_id(&builder->parse, local_c_type->element_type);
+037811:                     IrTypeId element_type = local_c_type->element_type.value < builder->parse.type_count
+037812:                                                 ? builder->c_type_ir_map[local_c_type->element_type.value]
+037813:                                                 : IR_TYPE_ID_INVALID;
+037814:                     IrType* element = ir_type_from_id(&builder->program->types, element_type);
+037815:                     CIrDecodedString decoded = {0};
+037816:                     if (initializer_index < end && c_ir_tokens_are_string_literals(builder->preprocess, initializer_start, end) &&
+037817:                         c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, initializer_start, end, &decoded) &&
+037818:                         element_c && element && element->kind == IR_TYPE_INTEGER && element->bit_width == decoded.element_width * 8 &&
+037819:                         decoded.element_count < UINT64_MAX)
+037820:                     {
+037821:                         u64 element_count = decoded.element_count + 1;
+037822:                         if (element_count > UINT64_MAX / element->layout.size)
+037823:                         {
+037824:                             return false;
+037825:                         }
+037826:                         local_type = ir_program_add_type(builder->program, (IrType){
+037827:                                                                                .name = S8("inferred C character array"),
+037828:                                                                                .element_type = element_type,
+037829:                                                                                .return_type = IR_TYPE_ID_INVALID,
+037830:                                                                                .layout =
+037831:                                                                                    {
+037832:                                                                                        .size = element_count * element->layout.size,
+===== line 37850 =====
+037838:                                                                            });
+037839:                     }
+037840:                 }
+037841:                 if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY)
+037842:                 {
+037843:                     CTypeId element_c_type = local_c_type_id;
+037844:                     CType* element_c = local_c_type;
+037845:                     while (element_c && element_c->kind == C_TYPE_ARRAY)
+037846:                     {
+037847:                         element_c_type = element_c->element_type;
+037848:                         element_c = c_type_from_id(&builder->parse, element_c_type);
+037849:                     }
+037850:                     variable_element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+037851:                     variable_length_array = variable_element_type.value != IR_ID_UNDERLYING_INVALID;
+037852:                     if (variable_length_array)
+037853:                     {
+037854:                         local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
+037855:                     }
+037856:                 }
+037857:                 CTypeId variable_array_type = C_TYPE_ID_INVALID;
+037858:                 bool pointer_to_variable_array = local_type.value == IR_ID_UNDERLYING_INVALID &&
+037859:                                                  c_ir_pointer_to_variable_array(builder, local_c_type_id, &variable_array_type, &variable_element_type);
+037860:                 if (pointer_to_variable_array)
+037861:                 {
+037862:                     // An ordinary pointer local: it holds an address the
+037863:                     // initializer computes rather than storage this
+037864:                     // declaration allocates, so no stack checkpoint and no
+037865:                     // ALLOCATE. Only the dimension table below is added, and
+037866:                     // it is added once the local exists.
+037867:                     local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
+037868:                 }
+037869:                 if (local_type.value == IR_ID_UNDERLYING_INVALID)
+037870:                 {
+===== line 40402 =====
+040390:     if (end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+040391:     {
+040392:         if (scope.value < builder->parse.scope_count)
+040393:         {
+040394:             CEntityId scoped = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, scope, &builder->preprocess.tokens[start]);
+040395:             if (scoped.value == C_ID_UNDERLYING_INVALID)
+040396:             {
+040397:                 scoped = c_parse_lookup_entity_at(&builder->parse, builder->preprocess, scope, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), start);
+040398:             }
+040399:             if (scoped.value < builder->parse.entity_count && builder->parse.entities[scoped.value].kind == C_ENTITY_OBJECT)
+040400:             {
+040401:                 CTypeId c_type = builder->parse.entities[scoped.value].type;
+040402:                 IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
+040403:                 if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
+040404:                 {
+040405:                     return true;
+040406:                 }
+040407:             }
+040408:         }
+040409:         CEntityId entity = c_ir_identifier_entity(builder, start);
+040410:         if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+040411:         {
+040412:             CTypeId c_type = builder->parse.entities[entity.value].type;
+040413:             IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
+040414:             if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
+040415:             {
+040416:                 return true;
+040417:             }
+040418:         }
+040419:     }
+040420:     IrTypeId expression_type = c_ir_predict_expression_type(builder, start, end);
+040421:     return c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
+040422: }
+===== line 40413 =====
+040401:                 CTypeId c_type = builder->parse.entities[scoped.value].type;
+040402:                 IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
+040403:                 if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
+040404:                 {
+040405:                     return true;
+040406:                 }
+040407:             }
+040408:         }
+040409:         CEntityId entity = c_ir_identifier_entity(builder, start);
+040410:         if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+040411:         {
+040412:             CTypeId c_type = builder->parse.entities[entity.value].type;
+040413:             IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
+040414:             if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
+040415:             {
+040416:                 return true;
+040417:             }
+040418:         }
+040419:     }
+040420:     IrTypeId expression_type = c_ir_predict_expression_type(builder, start, end);
+040421:     return c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
+040422: }
+040423: 
+040424: BUSTER_C_INTERNAL u64 c_ir_constant_initializer_slot_count(CIntegerIrBuilder* builder, IrType* type);
+040425: BUSTER_C_INTERNAL u32 c_ir_constant_initializer_field_slot(CIntegerIrBuilder* builder, IrType* type, u32 field_index);
+040426: BUSTER_C_INTERNAL IrField* c_ir_constant_initializer_field_at(CIntegerIrBuilder* builder, IrType* type, u64 slot);
+040427: 
+040428: BUSTER_C_INTERNAL bool c_ir_initializer_inference_slots(CIntegerIrBuilder* builder, CIrInitializerInferenceFrame* frame, u64* slots_out)
+040429: {
+040430:     if (frame->root)
+040431:     {
+040432:         *slots_out = UINT64_MAX;
+040433:         return true;
+===== line 41105 =====
+041093:     for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+041094:     {
+041095:         CType* type = builder->parse.types + type_index;
+041096:         if (type->kind != C_TYPE_ARRAY || type->array_bound >= builder->parse.array_bound_count)
+041097:         {
+041098:             continue;
+041099:         }
+041100:         CArrayBound bound = builder->parse.array_bounds[type->array_bound];
+041101:         candidates[type_index] = !bound.token_count && !bound.is_star && !bound.has_inferred_count &&
+041102:                                  c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &(u32){0}, &(u32){0}, &(CScopeId){0});
+041103:         if (candidates[type_index])
+041104:         {
+041105:             builder->c_type_ir_map[type_index] = IR_TYPE_ID_INVALID;
+041106:         }
+041107:     }
+041108:     for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+041109:     {
+041110:         if (!candidates[type_index])
+041111:         {
+041112:             continue;
+041113:         }
+041114:         CType* type = builder->parse.types + type_index;
+041115:         if (type->element_type.value >= builder->parse.type_count)
+041116:         {
+041117:             continue;
+041118:         }
+041119:         IrTypeId element_type = builder->c_type_ir_map[type->element_type.value];
+041120:         IrType* element = ir_type_from_id(&builder->program->types, element_type);
+041121:         u32 initializer_start = 0;
+041122:         u32 initializer_end = 0;
+041123:         CScopeId initializer_scope = C_SCOPE_ID_INVALID;
+041124:         if (!element || !element->layout.resolved ||
+041125:             !c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &initializer_start, &initializer_end, &initializer_scope))
+===== line 41119 =====
+041107:     }
+041108:     for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+041109:     {
+041110:         if (!candidates[type_index])
+041111:         {
+041112:             continue;
+041113:         }
+041114:         CType* type = builder->parse.types + type_index;
+041115:         if (type->element_type.value >= builder->parse.type_count)
+041116:         {
+041117:             continue;
+041118:         }
+041119:         IrTypeId element_type = builder->c_type_ir_map[type->element_type.value];
+041120:         IrType* element = ir_type_from_id(&builder->program->types, element_type);
+041121:         u32 initializer_start = 0;
+041122:         u32 initializer_end = 0;
+041123:         CScopeId initializer_scope = C_SCOPE_ID_INVALID;
+041124:         if (!element || !element->layout.resolved ||
+041125:             !c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &initializer_start, &initializer_end, &initializer_scope))
+041126:         {
+041127:             continue;
+041128:         }
+041129:         u64 count = 0;
+041130:         String8 failure = {0};
+041131:         u32 failure_token = initializer_start;
+041132:         if (!c_ir_infer_initializer_array_count(builder, initializer_scope, element_type, initializer_start, initializer_end, &count, &failure, &failure_token))
+041133:         {
+041134:             if (failure.length && result->diagnostic_count < builder->parse.declaration_count + builder->parse.entity_count + 1)
+041135:             {
+041136:                 String8 candidate_name = {0};
+041137:                 for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
+041138:                 {
+041139:                     CEntity* entity = builder->parse.entities + entity_index;
+===== line 43133 =====
+043121:     }
+043122:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
+043123:     {
+043124:         *result = (CIrConstantValue){.type = builder->nullptr_type, .kind = C_IR_CONSTANT_POINTER};
+043125:         return true;
+043126:     }
+043127:     CEntityId entity_id = c_ir_constant_entity_at(builder, token_index);
+043128:     if (entity_id.value < builder->parse.entity_count)
+043129:     {
+043130:         CEntity* entity = builder->parse.entities + entity_id.value;
+043131:         if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
+043132:         {
+043133:             IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
+043134:             u64 value = entity->constant_value;
+043135:             if (entity->constant_is_negative)
+043136:             {
+043137:                 value = 0 - value;
+043138:             }
+043139:             *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+043140:             return true;
+043141:         }
+043142:         // A function-local static is C_ENTITY_LOCAL with a symbol -- the
+043143:         // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
+043144:         // _kwtuple is exactly that -- and it folds like any file-scope
+043145:         // object.  An automatic local has no symbol and stays refused.
+043146:         bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
+043147:         if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
+043148:         {
+043149:             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
+043150:             IrTypeId type = builder->c_type_ir_map[entity->type.value];
+043151:             IrType* type_value = ir_type_from_id(&builder->program->types, type);
+043152:             if (type_value && type_value->layout.resolved)
+043153:             {
+===== line 43150 =====
+043138:             }
+043139:             *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+043140:             return true;
+043141:         }
+043142:         // A function-local static is C_ENTITY_LOCAL with a symbol -- the
+043143:         // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
+043144:         // _kwtuple is exactly that -- and it folds like any file-scope
+043145:         // object.  An automatic local has no symbol and stays refused.
+043146:         bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
+043147:         if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
+043148:         {
+043149:             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
+043150:             IrTypeId type = builder->c_type_ir_map[entity->type.value];
+043151:             IrType* type_value = ir_type_from_id(&builder->program->types, type);
+043152:             if (type_value && type_value->layout.resolved)
+043153:             {
+043154:                 *result = (CIrConstantValue){
+043155:                     .type = type,
+043156:                     .symbol = symbol,
+043157:                     .kind = C_IR_CONSTANT_LVALUE,
+043158:                 };
+043159:                 return true;
+043160:             }
+043161:         }
+043162:         if (entity->kind == C_ENTITY_FUNCTION && entity->type.value < builder->parse.type_count)
+043163:         {
+043164:             IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+043165:             IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
+043166:             if (pointer_type.value != IR_ID_UNDERLYING_INVALID)
+043167:             {
+043168:                 *result = (CIrConstantValue){
+043169:                     .type = pointer_type,
+043170:                     .symbol = builder->entity_symbols[entity_id.value],
+===== line 43164 =====
+043152:             if (type_value && type_value->layout.resolved)
+043153:             {
+043154:                 *result = (CIrConstantValue){
+043155:                     .type = type,
+043156:                     .symbol = symbol,
+043157:                     .kind = C_IR_CONSTANT_LVALUE,
+043158:                 };
+043159:                 return true;
+043160:             }
+043161:         }
+043162:         if (entity->kind == C_ENTITY_FUNCTION && entity->type.value < builder->parse.type_count)
+043163:         {
+043164:             IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+043165:             IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
+043166:             if (pointer_type.value != IR_ID_UNDERLYING_INVALID)
+043167:             {
+043168:                 *result = (CIrConstantValue){
+043169:                     .type = pointer_type,
+043170:                     .symbol = builder->entity_symbols[entity_id.value],
+043171:                     .kind = C_IR_CONSTANT_POINTER,
+043172:                 };
+043173:                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
+043174:             }
+043175:         }
+043176:     }
+043177: 
+043178:     return false;
+043179: }
+043180: 
+043181: BUSTER_C_INTERNAL bool c_ir_constant_lvalue_field(CIntegerIrBuilder* builder, CIrConstantValue* value, String8 name)
+043182: {
+043183:     if (value->kind == C_IR_CONSTANT_UNKNOWN)
+043184:     {
+===== line 45923 =====
+045911:                 c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+045912:             {
+045913:                 CEntityId entity_id = c_ir_constant_entity_at(builder, index);
+045914:                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+045915:                 if (entity_id.value >= builder->parse.entity_count || builder->parse.entities[entity_id.value].kind != C_ENTITY_FUNCTION || close >= end)
+045916:                 {
+045917:                     return false;
+045918:                 }
+045919:                 IrTypeId return_type = builder->s32_type;
+045920:                 CEntity* entity = builder->parse.entities + entity_id.value;
+045921:                 if (entity->type.value < builder->parse.type_count)
+045922:                 {
+045923:                     IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+045924:                     IrType* function = ir_type_from_id(&builder->program->types, function_type);
+045925:                     if (function && function->kind == IR_TYPE_FUNCTION && function->return_type.value != IR_ID_UNDERLYING_INVALID)
+045926:                     {
+045927:                         return_type = function->return_type;
+045928:                     }
+045929:                 }
+045930:                 if (value_count >= capacity) return false;
+045931:                 values[value_count++] = (CIrConstantValue){.type = return_type, .kind = C_IR_CONSTANT_UNKNOWN};
+045932:                 index = close;
+045933:                 expect_operand = false;
+045934:                 continue;
+045935:             }
+045936:             if (token.kind == C_TOKEN_IDENTIFIER)
+045937:             {
+045938:                 CIrConstantValue value = {0};
+045939:                 if (!c_ir_constant_identifier(builder, index, &value)) return false;
+045940:                 while (index + 2 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_DOT) &&
+045941:                        builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
+045942:                 {
+045943:                     if (!c_ir_constant_lvalue_field(builder, &value, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2]))) return false;
+===== line 46897 =====
+046885:             if (entity.value == IR_ID_UNDERLYING_INVALID)
+046886:             {
+046887:                 for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+046888:                 {
+046889:                     if (string_equal(parse.entities[entity_index].name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[identifier_index])))
+046890:                     {
+046891:                         entity.value = entity_index;
+046892:                         break;
+046893:                     }
+046894:                 }
+046895:             }
+046896:             IrType* referenced_type = entity.value < parse.entity_count && parse.entities[entity.value].type.value < parse.type_count
+046897:                                           ? ir_type_from_id(&program->types, builder->c_type_ir_map[parse.entities[entity.value].type.value])
+046898:                                           : 0;
+046899:             if (entity.value < parse.entity_count && entity_symbols[entity.value].value != IR_ID_UNDERLYING_INVALID && referenced_type &&
+046900:                 referenced_type->kind == IR_TYPE_POINTER)
+046901:             {
+046902:                 IrGlobal* referenced_global = 0;
+046903:                 for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+046904:                 {
+046905:                     if (module->globals[global_index].symbol.value == entity_symbols[entity.value].value)
+046906:                     {
+046907:                         referenced_global = &module->globals[global_index];
+046908:                         break;
+046909:                     }
+046910:                 }
+046911:                 if (referenced_global && referenced_global->is_read_only)
+046912:                 {
+046913:                     if (referenced_global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO)
+046914:                     {
+046915:                         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+046916:                         return true;
+046917:                     }
+===== line 47343 =====
+047331:     bool standard_below_natural = false;
+047332:     CIrAlignmentStatus status = C_IR_ALIGNMENT_RESOLVED;
+047333:     if (alignment_start > parse.alignment_count || alignment_count > parse.alignment_count - alignment_start)
+047334:     {
+047335:         return C_IR_ALIGNMENT_PENDING;
+047336:     }
+047337:     for (u32 index = 0; index < alignment_count; index += 1)
+047338:     {
+047339:         CAlignmentSpecifier specifier = parse.alignments[alignment_start + index];
+047340:         u64 requested = 0;
+047341:         if (specifier.type.value < parse.type_count)
+047342:         {
+047343:             IrTypeId type = c_type_ir_map[specifier.type.value];
+047344:             IrType* value = ir_type_from_id(&program->types, type);
+047345:             if (!value || !value->layout.resolved)
+047346:             {
+047347:                 return C_IR_ALIGNMENT_PENDING;
+047348:             }
+047349:             requested = value->layout.alignment;
+047350:         }
+047351:         else if (!c_ir_array_bound_evaluate(builder, (CArrayBound){
+047352:                                                 .token_start = specifier.token_start,
+047353:                                                 .token_count = specifier.token_count,
+047354:                                             },
+047355:                                             &requested))
+047356:         {
+047357:             return C_IR_ALIGNMENT_PENDING;
+047358:         }
+047359:         if (!requested)
+047360:         {
+047361:             continue;
+047362:         }
+047363:         if (requested > UINT32_MAX || (requested & (requested - 1)))
+===== line 47441 =====
+047429:         {
+047430:             flexible[member->type.value] = true;
+047431:         }
+047432:     }
+047433: }
+047434: 
+047435: // A type can still act in a mapping pass while it is unmapped, tracks a
+047436: // qualified alias of another mapping, or is a mapped aggregate whose layout
+047437: // has not been completed; every pass branch is gated by one of these.
+047438: BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 type_index)
+047439: {
+047440:     CType* c_type = &parse->types[type_index];
+047441:     if (c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID || c_type->has_unqualified_type)
+047442:     {
+047443:         return true;
+047444:     }
+047445:     if (c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION)
+047446:     {
+047447:         IrType* mapped = ir_type_from_id(&program->types, c_type_ir_map[type_index]);
+047448:         return !mapped || !mapped->layout.resolved;
+047449:     }
+047450:     return false;
+047451: }
+047452: 
+047453: CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+047454:                                          CIRLowerOptions options)
+047455: {
+047456:     CIRLowerResult result = {0};
+047457:     if (!arena || parse.diagnostic_count)
+047458:     {
+047459:         return result;
+047460:     }
+047461:     if (preprocess.token_count > UINT32_MAX)
+===== line 47447 =====
+047435: // A type can still act in a mapping pass while it is unmapped, tracks a
+047436: // qualified alias of another mapping, or is a mapped aggregate whose layout
+047437: // has not been completed; every pass branch is gated by one of these.
+047438: BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 type_index)
+047439: {
+047440:     CType* c_type = &parse->types[type_index];
+047441:     if (c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID || c_type->has_unqualified_type)
+047442:     {
+047443:         return true;
+047444:     }
+047445:     if (c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION)
+047446:     {
+047447:         IrType* mapped = ir_type_from_id(&program->types, c_type_ir_map[type_index]);
+047448:         return !mapped || !mapped->layout.resolved;
+047449:     }
+047450:     return false;
+047451: }
+047452: 
+047453: CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+047454:                                          CIRLowerOptions options)
+047455: {
+047456:     CIRLowerResult result = {0};
+047457:     if (!arena || parse.diagnostic_count)
+047458:     {
+047459:         return result;
+047460:     }
+047461:     if (preprocess.token_count > UINT32_MAX)
+047462:     {
+047463:         return result;
+047464:     }
+047465:     u32 token_capacity = (u32)preprocess.token_count;
+047466:     u32 identifier_token_count = 0;
+047467:     u32 string_literal_count = 0;
+===== line 47756 =====
+047744:     // frontend tests do, preprocessing with a default target and lowering with
+047745:     // the native one -- otherwise gets a `size_type` narrower than a pointer.
+047746:     // Nothing noticed while that only reached arithmetic; an integer widened
+047747:     // to it on its way to a pointer notices immediately.
+047748:     IrType* unsigned_long_scalar = ir_type_from_id(&program->types, type_context.scalar_types[C_TYPE_UNSIGNED_LONG]);
+047749:     bool pointer_sized_long = unsigned_long_scalar && unsigned_long_scalar->bit_width == program->data_layout.pointer.size * 8;
+047750:     IrTypeId size_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG];
+047751:     IrTypeId ptrdiff_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_LONG : C_TYPE_LONG_LONG];
+047752:     IrTypeId* c_type_ir_map = arena_allocate(arena, IrTypeId, parse.type_count);
+047753:     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
+047754:     {
+047755:         IrTypeId scalar = c_ir_scalar_type(&type_context, parse.types[type_index].kind);
+047756:         c_type_ir_map[type_index] = scalar;
+047757:         if (scalar.value != IR_ID_UNDERLYING_INVALID && (parse.types[type_index].is_atomic || parse.types[type_index].is_volatile))
+047758:         {
+047759:             c_type_ir_map[type_index] = c_ir_add_qualified_type(program, scalar, parse.types[type_index].is_atomic,
+047760:                                                                 parse.types[type_index].is_volatile);
+047761:         }
+047762:     }
+047763:     // An aligned alias keeps the kind it copied, so the seed above just
+047764:     // answered it with the aliased type's own scalar mapping -- the alignment
+047765:     // the alias exists to replace.  The alias branch of the mapping rounds
+047766:     // owns those, and an aggregate that embeds one has to wait for it rather
+047767:     // than lay out the seed's answer.  A typedef's own copy is built where the
+047768:     // typedef is written and so precedes every aggregate that embeds it, but a
+047769:     // *qualified* copy of one is built where the qualifier is written, which is
+047770:     // inside the aggregate and therefore after the aggregate's own type index:
+047771:     // the round that lays the aggregate out reached the stale seed first and
+047772:     // `struct { char c; const cache_line f; }` came out four-byte aligned
+047773:     // (#714).  Walking the records rather than testing every type keeps the
+047774:     // empty case -- almost every translation unit -- free.
+047775:     for (u32 alias_index = 0; alias_index < parse.type_alignment_count; alias_index += 1)
+047776:     {
+===== line 47759 =====
+047747:     // to it on its way to a pointer notices immediately.
+047748:     IrType* unsigned_long_scalar = ir_type_from_id(&program->types, type_context.scalar_types[C_TYPE_UNSIGNED_LONG]);
+047749:     bool pointer_sized_long = unsigned_long_scalar && unsigned_long_scalar->bit_width == program->data_layout.pointer.size * 8;
+047750:     IrTypeId size_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG];
+047751:     IrTypeId ptrdiff_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_LONG : C_TYPE_LONG_LONG];
+047752:     IrTypeId* c_type_ir_map = arena_allocate(arena, IrTypeId, parse.type_count);
+047753:     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
+047754:     {
+047755:         IrTypeId scalar = c_ir_scalar_type(&type_context, parse.types[type_index].kind);
+047756:         c_type_ir_map[type_index] = scalar;
+047757:         if (scalar.value != IR_ID_UNDERLYING_INVALID && (parse.types[type_index].is_atomic || parse.types[type_index].is_volatile))
+047758:         {
+047759:             c_type_ir_map[type_index] = c_ir_add_qualified_type(program, scalar, parse.types[type_index].is_atomic,
+047760:                                                                 parse.types[type_index].is_volatile);
+047761:         }
+047762:     }
+047763:     // An aligned alias keeps the kind it copied, so the seed above just
+047764:     // answered it with the aliased type's own scalar mapping -- the alignment
+047765:     // the alias exists to replace.  The alias branch of the mapping rounds
+047766:     // owns those, and an aggregate that embeds one has to wait for it rather
+047767:     // than lay out the seed's answer.  A typedef's own copy is built where the
+047768:     // typedef is written and so precedes every aggregate that embeds it, but a
+047769:     // *qualified* copy of one is built where the qualifier is written, which is
+047770:     // inside the aggregate and therefore after the aggregate's own type index:
+047771:     // the round that lays the aggregate out reached the stale seed first and
+047772:     // `struct { char c; const cache_line f; }` came out four-byte aligned
+047773:     // (#714).  Walking the records rather than testing every type keeps the
+047774:     // empty case -- almost every translation unit -- free.
+047775:     for (u32 alias_index = 0; alias_index < parse.type_alignment_count; alias_index += 1)
+047776:     {
+047777:         u32 alias_type = parse.type_alignments[alias_index].type_index;
+047778:         if (alias_type < parse.type_count)
+047779:         {
+===== line 47780 =====
+047768:     // typedef is written and so precedes every aggregate that embeds it, but a
+047769:     // *qualified* copy of one is built where the qualifier is written, which is
+047770:     // inside the aggregate and therefore after the aggregate's own type index:
+047771:     // the round that lays the aggregate out reached the stale seed first and
+047772:     // `struct { char c; const cache_line f; }` came out four-byte aligned
+047773:     // (#714).  Walking the records rather than testing every type keeps the
+047774:     // empty case -- almost every translation unit -- free.
+047775:     for (u32 alias_index = 0; alias_index < parse.type_alignment_count; alias_index += 1)
+047776:     {
+047777:         u32 alias_type = parse.type_alignments[alias_index].type_index;
+047778:         if (alias_type < parse.type_count)
+047779:         {
+047780:             c_type_ir_map[alias_type] = IR_TYPE_ID_INVALID;
+047781:         }
+047782:     }
+047783:     u32* token_entities_plus_one = arena_allocate_zeroed(arena, u32, preprocess.token_count);
+047784:     for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+047785:     {
+047786:         CIdentifierUse use = parse.identifier_uses[use_index];
+047787:         if (use.token_index < preprocess.token_count)
+047788:         {
+047789:             token_entities_plus_one[use.token_index] = use.entity.value + 1;
+047790:         }
+047791:     }
+047792:     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+047793:     {
+047794:         CEntity* entity = &parse.entities[entity_index];
+047795:         if (entity->declaration_token_plus_one && entity->declaration_token_plus_one <= preprocess.token_count)
+047796:         {
+047797:             token_entities_plus_one[entity->declaration_token_plus_one - 1] = entity_index + 1;
+047798:         }
+047799:     }
+047800:     IrFunction** declaration_functions = arena_allocate(arena, IrFunction*, parse.declaration_count);
+===== line 47866 =====
+047854:         .f64_type = f64_type,
+047855:         .long_double_type = long_double_type,
+047856:         .target = target,
+047857:         .failure_token_index = UINT32_MAX,
+047858:         .body_token_start = (u32)preprocess.token_count,
+047859:         .stream_matching_delimiters_plus_one = stream_matching_delimiters_plus_one,
+047860:     };
+047861:     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
+047862:     {
+047863:         CType* c_type = &parse.types[type_index];
+047864:         if (c_type->kind == C_TYPE_ENUM && !c_type->has_unqualified_type)
+047865:         {
+047866:             c_type_ir_map[type_index] = c_type->element_type.value < parse.type_count ? c_type_ir_map[c_type->element_type.value] : s32_type;
+047867:             continue;
+047868:         }
+047869:         if ((c_type->kind != C_TYPE_STRUCT && c_type->kind != C_TYPE_UNION) || c_type->has_unqualified_type)
+047870:         {
+047871:             continue;
+047872:         }
+047873:         IrField* fields = c_type->member_count ? arena_allocate(arena, IrField, c_type->member_count) : 0;
+047874:         if (fields)
+047875:         {
+047876:             memset(fields, 0, sizeof(*fields) * c_type->member_count);
+047877:         }
+047878:         c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+047879:                                                                      .name = c_type->tag,
+047880:                                                                      .fields = fields,
+047881:                                                                      .element_type = IR_TYPE_ID_INVALID,
+047882:                                                                      .return_type = IR_TYPE_ID_INVALID,
+047883:                                                                      .layout = (IrTypeLayout){0},
+047884:                                                                      .kind = c_type->kind == C_TYPE_STRUCT ? IR_TYPE_STRUCT : IR_TYPE_UNION,
+047885:                                                                      .field_count = c_type->member_count,
+047886:                                                                      .is_transparent_union = c_type->is_transparent_union,
+===== line 47878 =====
+047866:             c_type_ir_map[type_index] = c_type->element_type.value < parse.type_count ? c_type_ir_map[c_type->element_type.value] : s32_type;
+047867:             continue;
+047868:         }
+047869:         if ((c_type->kind != C_TYPE_STRUCT && c_type->kind != C_TYPE_UNION) || c_type->has_unqualified_type)
+047870:         {
+047871:             continue;
+047872:         }
+047873:         IrField* fields = c_type->member_count ? arena_allocate(arena, IrField, c_type->member_count) : 0;
+047874:         if (fields)
+047875:         {
+047876:             memset(fields, 0, sizeof(*fields) * c_type->member_count);
+047877:         }
+047878:         c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+047879:                                                                      .name = c_type->tag,
+047880:                                                                      .fields = fields,
+047881:                                                                      .element_type = IR_TYPE_ID_INVALID,
+047882:                                                                      .return_type = IR_TYPE_ID_INVALID,
+047883:                                                                      .layout = (IrTypeLayout){0},
+047884:                                                                      .kind = c_type->kind == C_TYPE_STRUCT ? IR_TYPE_STRUCT : IR_TYPE_UNION,
+047885:                                                                      .field_count = c_type->member_count,
+047886:                                                                      .is_transparent_union = c_type->is_transparent_union,
+047887:                                                                  });
+047888:     }
+047889:     // One slot per aligned typedef, not per type: the table behind
+047890:     // c_parse_type_alignment is empty in almost every translation unit, and the
+047891:     // slot is what keeps the mapping pass from minting a fresh IrType for the
+047892:     // same alias on every round it revisits it.
+047893:     IrTypeId* aligned_alias_types = parse.type_alignment_count ? arena_allocate(temporary_arena, IrTypeId, parse.type_alignment_count) : 0;
+047894:     for (u32 alias_index = 0; alias_index < parse.type_alignment_count; alias_index += 1)
+047895:     {
+047896:         aligned_alias_types[alias_index] = IR_TYPE_ID_INVALID;
+047897:     }
+047898:     bool* flexible_array_types = arena_allocate(temporary_arena, bool, parse.type_count);
+===== line 47968 =====
+047956:             }
+047957:             type_mapping_worklist_count = kept_count;
+047958:             for (u32 position = 0; position < type_mapping_worklist_count; position += 1)
+047959:             {
+047960:                 u32 type_index = type_mapping_worklist[position];
+047961:                 CType* c_type = &parse.types[type_index];
+047962:                 if (c_type->has_unqualified_type)
+047963:                 {
+047964:                     if (c_type->unqualified_type.value >= parse.type_count)
+047965:                     {
+047966:                         continue;
+047967:                     }
+047968:                     IrTypeId unqualified = c_type_ir_map[c_type->unqualified_type.value];
+047969:                     if (unqualified.value == IR_ID_UNDERLYING_INVALID)
+047970:                     {
+047971:                         continue;
+047972:                     }
+047973:                     IrTypeId qualified = unqualified;
+047974:                     if (c_type->is_atomic || c_type->is_volatile)
+047975:                     {
+047976:                         qualified = c_ir_add_qualified_type(program, unqualified, c_type->is_atomic, c_type->is_volatile);
+047977:                         // Refused for one of two reasons, and the second is
+047978:                         // recoverable: the operand's layout is not resolved yet
+047979:                         // -- a retry, which the worklist performs -- or the
+047980:                         // operand is qualified already.  `typedef _Atomic int
+047981:                         // ai` builds `_Atomic int` from its specifiers rather
+047982:                         // than as a qualified copy, so an alias of it, or a
+047983:                         // further qualification of that alias, maps onto an IR
+047984:                         // type that is atomic already, and stacking a qualifier
+047985:                         // on a qualified type is what the call refuses.  Asking
+047986:                         // again against its operand with the union of both
+047987:                         // sides' qualifiers is the same question spelled the
+047988:                         // way the constructor accepts, and its dedup then hands
+===== line 48065 =====
+048053:                                                     : (CSourceLocation){0},
+048054:                                     .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+048055:                                 };
+048056:                             }
+048057:                             aligned_alias_types[alias_index] = c_ir_add_aligned_type(program, qualified, requested);
+048058:                         }
+048059:                         if (aligned_alias_types[alias_index].value == IR_ID_UNDERLYING_INVALID)
+048060:                         {
+048061:                             continue;
+048062:                         }
+048063:                         qualified = aligned_alias_types[alias_index];
+048064:                     }
+048065:                     if (c_type_ir_map[type_index].value != qualified.value)
+048066:                     {
+048067:                         c_type_ir_map[type_index] = qualified;
+048068:                         progress = true;
+048069:                     }
+048070:                     continue;
+048071:                 }
+048072:                 if (c_type->kind == C_TYPE_FUNCTION && c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID)
+048073:                 {
+048074:                     if (c_type->return_type.value >= parse.type_count)
+048075:                     {
+048076:                         continue;
+048077:                     }
+048078:                     IrTypeId return_type = c_type_ir_map[c_type->return_type.value];
+048079:                     if (return_type.value == IR_ID_UNDERLYING_INVALID)
+048080:                     {
+048081:                         continue;
+048082:                     }
+048083:                     bool parameters_resolved = true;
+048084:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048085:                     {
+===== line 48067 =====
+048055:                                 };
+048056:                             }
+048057:                             aligned_alias_types[alias_index] = c_ir_add_aligned_type(program, qualified, requested);
+048058:                         }
+048059:                         if (aligned_alias_types[alias_index].value == IR_ID_UNDERLYING_INVALID)
+048060:                         {
+048061:                             continue;
+048062:                         }
+048063:                         qualified = aligned_alias_types[alias_index];
+048064:                     }
+048065:                     if (c_type_ir_map[type_index].value != qualified.value)
+048066:                     {
+048067:                         c_type_ir_map[type_index] = qualified;
+048068:                         progress = true;
+048069:                     }
+048070:                     continue;
+048071:                 }
+048072:                 if (c_type->kind == C_TYPE_FUNCTION && c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID)
+048073:                 {
+048074:                     if (c_type->return_type.value >= parse.type_count)
+048075:                     {
+048076:                         continue;
+048077:                     }
+048078:                     IrTypeId return_type = c_type_ir_map[c_type->return_type.value];
+048079:                     if (return_type.value == IR_ID_UNDERLYING_INVALID)
+048080:                     {
+048081:                         continue;
+048082:                     }
+048083:                     bool parameters_resolved = true;
+048084:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048085:                     {
+048086:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048087:                         if (parameter.value >= parse.type_count)
+===== line 48072 =====
+048060:                         {
+048061:                             continue;
+048062:                         }
+048063:                         qualified = aligned_alias_types[alias_index];
+048064:                     }
+048065:                     if (c_type_ir_map[type_index].value != qualified.value)
+048066:                     {
+048067:                         c_type_ir_map[type_index] = qualified;
+048068:                         progress = true;
+048069:                     }
+048070:                     continue;
+048071:                 }
+048072:                 if (c_type->kind == C_TYPE_FUNCTION && c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID)
+048073:                 {
+048074:                     if (c_type->return_type.value >= parse.type_count)
+048075:                     {
+048076:                         continue;
+048077:                     }
+048078:                     IrTypeId return_type = c_type_ir_map[c_type->return_type.value];
+048079:                     if (return_type.value == IR_ID_UNDERLYING_INVALID)
+048080:                     {
+048081:                         continue;
+048082:                     }
+048083:                     bool parameters_resolved = true;
+048084:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048085:                     {
+048086:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048087:                         if (parameter.value >= parse.type_count)
+048088:                         {
+048089:                             parameters_resolved = false;
+048090:                             break;
+048091:                         }
+048092:                         CType* parameter_c_type = &parse.types[parameter.value];
+===== line 48078 =====
+048066:                     {
+048067:                         c_type_ir_map[type_index] = qualified;
+048068:                         progress = true;
+048069:                     }
+048070:                     continue;
+048071:                 }
+048072:                 if (c_type->kind == C_TYPE_FUNCTION && c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID)
+048073:                 {
+048074:                     if (c_type->return_type.value >= parse.type_count)
+048075:                     {
+048076:                         continue;
+048077:                     }
+048078:                     IrTypeId return_type = c_type_ir_map[c_type->return_type.value];
+048079:                     if (return_type.value == IR_ID_UNDERLYING_INVALID)
+048080:                     {
+048081:                         continue;
+048082:                     }
+048083:                     bool parameters_resolved = true;
+048084:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048085:                     {
+048086:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048087:                         if (parameter.value >= parse.type_count)
+048088:                         {
+048089:                             parameters_resolved = false;
+048090:                             break;
+048091:                         }
+048092:                         CType* parameter_c_type = &parse.types[parameter.value];
+048093:                         CTypeId resolved_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+048094:                         CType* resolved_c_type = resolved_parameter.value < parse.type_count ? &parse.types[resolved_parameter.value] : 0;
+048095:                         while (resolved_c_type && resolved_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[resolved_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048096:                         {
+048097:                             resolved_parameter = resolved_c_type->element_type;
+048098:                             resolved_c_type = resolved_parameter.value < parse.type_count ? &parse.types[resolved_parameter.value] : 0;
+===== line 48095 =====
+048083:                     bool parameters_resolved = true;
+048084:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048085:                     {
+048086:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048087:                         if (parameter.value >= parse.type_count)
+048088:                         {
+048089:                             parameters_resolved = false;
+048090:                             break;
+048091:                         }
+048092:                         CType* parameter_c_type = &parse.types[parameter.value];
+048093:                         CTypeId resolved_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+048094:                         CType* resolved_c_type = resolved_parameter.value < parse.type_count ? &parse.types[resolved_parameter.value] : 0;
+048095:                         while (resolved_c_type && resolved_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[resolved_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048096:                         {
+048097:                             resolved_parameter = resolved_c_type->element_type;
+048098:                             resolved_c_type = resolved_parameter.value < parse.type_count ? &parse.types[resolved_parameter.value] : 0;
+048099:                         }
+048100:                         if (resolved_parameter.value >= parse.type_count || c_type_ir_map[resolved_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048101:                         {
+048102:                             parameters_resolved = false;
+048103:                             break;
+048104:                         }
+048105:                     }
+048106:                     if (!parameters_resolved)
+048107:                     {
+048108:                         continue;
+048109:                     }
+048110:                     IrTypeId* parameter_types = arena_allocate(arena, IrTypeId, c_type->parameter_count);
+048111:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048112:                     {
+048113:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048114:                         CType* parameter_c_type = &parse.types[parameter.value];
+048115:                         CTypeId adjusted_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+===== line 48100 =====
+048088:                         {
+048089:                             parameters_resolved = false;
+048090:                             break;
+048091:                         }
+048092:                         CType* parameter_c_type = &parse.types[parameter.value];
+048093:                         CTypeId resolved_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+048094:                         CType* resolved_c_type = resolved_parameter.value < parse.type_count ? &parse.types[resolved_parameter.value] : 0;
+048095:                         while (resolved_c_type && resolved_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[resolved_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048096:                         {
+048097:                             resolved_parameter = resolved_c_type->element_type;
+048098:                             resolved_c_type = resolved_parameter.value < parse.type_count ? &parse.types[resolved_parameter.value] : 0;
+048099:                         }
+048100:                         if (resolved_parameter.value >= parse.type_count || c_type_ir_map[resolved_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048101:                         {
+048102:                             parameters_resolved = false;
+048103:                             break;
+048104:                         }
+048105:                     }
+048106:                     if (!parameters_resolved)
+048107:                     {
+048108:                         continue;
+048109:                     }
+048110:                     IrTypeId* parameter_types = arena_allocate(arena, IrTypeId, c_type->parameter_count);
+048111:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048112:                     {
+048113:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048114:                         CType* parameter_c_type = &parse.types[parameter.value];
+048115:                         CTypeId adjusted_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+048116:                         if (parameter_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[adjusted_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048117:                         {
+048118:                             CType* adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048119:                             while (adjusted_c_type && adjusted_c_type->kind == C_TYPE_ARRAY)
+048120:                             {
+===== line 48116 =====
+048104:                         }
+048105:                     }
+048106:                     if (!parameters_resolved)
+048107:                     {
+048108:                         continue;
+048109:                     }
+048110:                     IrTypeId* parameter_types = arena_allocate(arena, IrTypeId, c_type->parameter_count);
+048111:                     for (u32 parameter_index = 0; parameter_index < c_type->parameter_count; parameter_index += 1)
+048112:                     {
+048113:                         CTypeId parameter = parse.parameters[c_type->parameter_start + parameter_index].type;
+048114:                         CType* parameter_c_type = &parse.types[parameter.value];
+048115:                         CTypeId adjusted_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+048116:                         if (parameter_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[adjusted_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048117:                         {
+048118:                             CType* adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048119:                             while (adjusted_c_type && adjusted_c_type->kind == C_TYPE_ARRAY)
+048120:                             {
+048121:                                 adjusted_parameter = adjusted_c_type->element_type;
+048122:                                 adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048123:                             }
+048124:                         }
+048125:                         IrTypeId parameter_type = parameter_c_type->kind == C_TYPE_ARRAY
+048126:                                                       ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[adjusted_parameter.value])
+048127:                                                       : parameter_c_type->kind == C_TYPE_FUNCTION
+048128:                                                             ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[parameter.value])
+048129:                                                             : c_type_ir_map[parameter.value];
+048130:                         IrType* parameter_value = ir_type_from_id(&program->types, parameter_type);
+048131:                         if (parameter_value && parameter_value->kind == IR_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+048132:                         {
+048133:                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
+048134:                         }
+048135:                         parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
+048136:                     }
+===== line 48126 =====
+048114:                         CType* parameter_c_type = &parse.types[parameter.value];
+048115:                         CTypeId adjusted_parameter = parameter_c_type->kind == C_TYPE_ARRAY ? parameter_c_type->element_type : parameter;
+048116:                         if (parameter_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[adjusted_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048117:                         {
+048118:                             CType* adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048119:                             while (adjusted_c_type && adjusted_c_type->kind == C_TYPE_ARRAY)
+048120:                             {
+048121:                                 adjusted_parameter = adjusted_c_type->element_type;
+048122:                                 adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048123:                             }
+048124:                         }
+048125:                         IrTypeId parameter_type = parameter_c_type->kind == C_TYPE_ARRAY
+048126:                                                       ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[adjusted_parameter.value])
+048127:                                                       : parameter_c_type->kind == C_TYPE_FUNCTION
+048128:                                                             ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[parameter.value])
+048129:                                                             : c_type_ir_map[parameter.value];
+048130:                         IrType* parameter_value = ir_type_from_id(&program->types, parameter_type);
+048131:                         if (parameter_value && parameter_value->kind == IR_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+048132:                         {
+048133:                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
+048134:                         }
+048135:                         parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
+048136:                     }
+048137:                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048138:                                                                                  .name = S8("C function"),
+048139:                                                                                  .element_type = IR_TYPE_ID_INVALID,
+048140:                                                                                  .return_type = return_type,
+048141:                                                                                  .layout =
+048142:                                                                                      {
+048143:                                                                                          .size = program->data_layout.pointer.size,
+048144:                                                                                          .alignment = program->data_layout.pointer.alignment,
+048145:                                                                                          .resolved = true,
+048146:                                                                                      },
+===== line 48128 =====
+048116:                         if (parameter_c_type->kind == C_TYPE_ARRAY && c_type_ir_map[adjusted_parameter.value].value == IR_ID_UNDERLYING_INVALID)
+048117:                         {
+048118:                             CType* adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048119:                             while (adjusted_c_type && adjusted_c_type->kind == C_TYPE_ARRAY)
+048120:                             {
+048121:                                 adjusted_parameter = adjusted_c_type->element_type;
+048122:                                 adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048123:                             }
+048124:                         }
+048125:                         IrTypeId parameter_type = parameter_c_type->kind == C_TYPE_ARRAY
+048126:                                                       ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[adjusted_parameter.value])
+048127:                                                       : parameter_c_type->kind == C_TYPE_FUNCTION
+048128:                                                             ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[parameter.value])
+048129:                                                             : c_type_ir_map[parameter.value];
+048130:                         IrType* parameter_value = ir_type_from_id(&program->types, parameter_type);
+048131:                         if (parameter_value && parameter_value->kind == IR_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+048132:                         {
+048133:                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
+048134:                         }
+048135:                         parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
+048136:                     }
+048137:                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048138:                                                                                  .name = S8("C function"),
+048139:                                                                                  .element_type = IR_TYPE_ID_INVALID,
+048140:                                                                                  .return_type = return_type,
+048141:                                                                                  .layout =
+048142:                                                                                      {
+048143:                                                                                          .size = program->data_layout.pointer.size,
+048144:                                                                                          .alignment = program->data_layout.pointer.alignment,
+048145:                                                                                          .resolved = true,
+048146:                                                                                      },
+048147:                                                                                  .kind = IR_TYPE_FUNCTION,
+048148:                                                                                  .parameter_types = parameter_types,
+===== line 48129 =====
+048117:                         {
+048118:                             CType* adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048119:                             while (adjusted_c_type && adjusted_c_type->kind == C_TYPE_ARRAY)
+048120:                             {
+048121:                                 adjusted_parameter = adjusted_c_type->element_type;
+048122:                                 adjusted_c_type = adjusted_parameter.value < parse.type_count ? &parse.types[adjusted_parameter.value] : 0;
+048123:                             }
+048124:                         }
+048125:                         IrTypeId parameter_type = parameter_c_type->kind == C_TYPE_ARRAY
+048126:                                                       ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[adjusted_parameter.value])
+048127:                                                       : parameter_c_type->kind == C_TYPE_FUNCTION
+048128:                                                             ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[parameter.value])
+048129:                                                             : c_type_ir_map[parameter.value];
+048130:                         IrType* parameter_value = ir_type_from_id(&program->types, parameter_type);
+048131:                         if (parameter_value && parameter_value->kind == IR_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+048132:                         {
+048133:                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
+048134:                         }
+048135:                         parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
+048136:                     }
+048137:                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048138:                                                                                  .name = S8("C function"),
+048139:                                                                                  .element_type = IR_TYPE_ID_INVALID,
+048140:                                                                                  .return_type = return_type,
+048141:                                                                                  .layout =
+048142:                                                                                      {
+048143:                                                                                          .size = program->data_layout.pointer.size,
+048144:                                                                                          .alignment = program->data_layout.pointer.alignment,
+048145:                                                                                          .resolved = true,
+048146:                                                                                      },
+048147:                                                                                  .kind = IR_TYPE_FUNCTION,
+048148:                                                                                  .parameter_types = parameter_types,
+048149:                                                                                  .parameter_count = c_type->parameter_count,
+===== line 48137 =====
+048125:                         IrTypeId parameter_type = parameter_c_type->kind == C_TYPE_ARRAY
+048126:                                                       ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[adjusted_parameter.value])
+048127:                                                       : parameter_c_type->kind == C_TYPE_FUNCTION
+048128:                                                             ? c_ir_add_pointer_type(program, &pointer_types, c_type_ir_map[parameter.value])
+048129:                                                             : c_type_ir_map[parameter.value];
+048130:                         IrType* parameter_value = ir_type_from_id(&program->types, parameter_type);
+048131:                         if (parameter_value && parameter_value->kind == IR_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+048132:                         {
+048133:                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
+048134:                         }
+048135:                         parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
+048136:                     }
+048137:                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048138:                                                                                  .name = S8("C function"),
+048139:                                                                                  .element_type = IR_TYPE_ID_INVALID,
+048140:                                                                                  .return_type = return_type,
+048141:                                                                                  .layout =
+048142:                                                                                      {
+048143:                                                                                          .size = program->data_layout.pointer.size,
+048144:                                                                                          .alignment = program->data_layout.pointer.alignment,
+048145:                                                                                          .resolved = true,
+048146:                                                                                      },
+048147:                                                                                  .kind = IR_TYPE_FUNCTION,
+048148:                                                                                  .parameter_types = parameter_types,
+048149:                                                                                  .parameter_count = c_type->parameter_count,
+048150:                                                                                  .calling_convention = IR_CALLING_CONVENTION_C,
+048151:                                                                                  .is_variadic = c_type->is_variadic,
+048152:                                                                                  // The marker a declarator spelled on this type
+048153:                                                                                  // rather than on a declaration; the indirect call
+048154:                                                                                  // site has nothing else to read it from.
+048155:                                                                                  .is_noreturn = c_parse_type_is_noreturn(&parse, (CTypeId){.value = type_index}),
+048156:                                                                                  // C23 made `()` mean `(void)`, so the marker that
+048157:                                                                                  // lets a call supply its own parameters is a
+===== line 48168 =====
+048156:                                                                                  // C23 made `()` mean `(void)`, so the marker that
+048157:                                                                                  // lets a call supply its own parameters is a
+048158:                                                                                  // pre-C23 one; see IrType.is_unprototyped.
+048159:                                                                                  .is_unprototyped = c_type->is_unprototyped &&
+048160:                                                                                                     !c_preprocess_dialect_is_c23(preprocess.dialect),
+048161:                                                                              });
+048162:                     progress = true;
+048163:                     continue;
+048164:                 }
+048165:             bool aggregate = c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION;
+048166:             if (aggregate)
+048167:             {
+048168:                 IrType* aggregate_type = ir_type_from_id(&program->types, c_type_ir_map[type_index]);
+048169:                 if (!aggregate_type || aggregate_type->layout.resolved || !c_type->is_complete)
+048170:                 {
+048171:                     continue;
+048172:                 }
+048173:                 // The layout runs in bits, which is what the System V rule for
+048174:                 // bit-fields is written in: a bit-field takes the next
+048175:                 // available bits and only moves on to the next storage unit of
+048176:                 // its declared type when it would otherwise straddle one. A
+048177:                 // per-declared-type unit model instead started a fresh unit
+048178:                 // whenever the declared type changed, so
+048179:                 // `struct { int a:3; unsigned char b:1; }` measured 8 bytes
+048180:                 // where every other C compiler on the target measures 4.
+048181:                 u64 bit_position = 0;
+048182:                 u32 alignment = 1;
+048183:                 // `__attribute__((packed))` on the definition and `#pragma
+048184:                 // pack(N)` around it ask the same question: the ceiling a
+048185:                 // member's alignment is clamped to. Packed is that ceiling at
+048186:                 // one byte. c_parse_type_layout folds sizeof through the same
+048187:                 // two inputs, and the two must agree or a folded size
+048188:                 // contradicts the object it sizes.
+===== line 48222 =====
+048210:                 String8 definition_rejection = {0};
+048211:                 String8 member_rejection = {0};
+048212:                 u32 definition_rejection_member = UINT32_MAX;
+048213:                 CDiagnosticKind definition_rejection_kind = C_DIAGNOSTIC_INVALID_ALIGNMENT;
+048214:                 for (u32 field_index = 0; field_index < c_type->member_count; field_index += 1)
+048215:                 {
+048216:                     CMember* member = &parse.members[c_type->member_start + field_index];
+048217:                     if (member->type.value >= parse.type_count)
+048218:                     {
+048219:                         fields_resolved = false;
+048220:                         break;
+048221:                     }
+048222:                     IrTypeId field_type_id = c_type_ir_map[member->type.value];
+048223:                     // A bit-field of enumerated type is read with the
+048224:                     // signedness C leaves to the implementation, and the
+048225:                     // choice GCC and Clang make is the enum's own underlying
+048226:                     // type: unsigned when no enumerator is negative. Read as
+048227:                     // a signed field instead, QuickJS's
+048228:                     // `JSClosureTypeEnum closure_type : 3` answers -3 for the
+048229:                     // enumerator 5 and its switch falls to `default: abort()`.
+048230:                     if (member->is_bit_field)
+048231:                     {
+048232:                         CType const* enumeration = &parse.types[member->type.value];
+048233:                         if (enumeration->has_unqualified_type && enumeration->unqualified_type.value < parse.type_count)
+048234:                         {
+048235:                             enumeration = &parse.types[enumeration->unqualified_type.value];
+048236:                         }
+048237:                         if (enumeration->kind == C_TYPE_ENUM && enumeration->element_type.value >= parse.type_count)
+048238:                         {
+048239:                             bool negative_enumerator = false;
+048240:                             for (u32 enum_index = 0; enum_index < enumeration->enum_member_count; enum_index += 1)
+048241:                             {
+048242:                                 negative_enumerator |= parse.enum_members[enumeration->enum_member_start + enum_index].is_negative;
+===== line 48583 =====
+048571:                     field->offset = unit_offset;
+048572:                     field->bit_offset = (u32)(absolute - unit_offset * 8);
+048573:                     field->access_size = unit == declared ? 0 : (u8)unit;
+048574:                 }
+048575:                 aggregate_type->layout = (IrTypeLayout){
+048576:                     .size = size,
+048577:                     .alignment = alignment,
+048578:                     .resolved = true,
+048579:                 };
+048580:                 progress = true;
+048581:                 continue;
+048582:             }
+048583:             if (c_type_ir_map[type_index].value != IR_ID_UNDERLYING_INVALID ||
+048584:                 (c_type->kind != C_TYPE_POINTER && c_type->kind != C_TYPE_ARRAY && c_type->kind != C_TYPE_VECTOR) ||
+048585:                 c_type->element_type.value >= parse.type_count)
+048586:             {
+048587:                 continue;
+048588:             }
+048589:             IrTypeId element = c_type_ir_map[c_type->element_type.value];
+048590:             if (element.value == IR_ID_UNDERLYING_INVALID)
+048591:             {
+048592:                 continue;
+048593:             }
+048594:             if (c_type->kind == C_TYPE_POINTER)
+048595:             {
+048596:                 c_type_ir_map[type_index] = c_ir_add_pointer_type(program, &pointer_types, element);
+048597:             }
+048598:             else if (c_type->kind == C_TYPE_VECTOR)
+048599:             {
+048600:                 IrType* element_type = ir_type_from_id(&program->types, element);
+048601:                 u64 element_count = 0;
+048602:                 u64 storage_size = 0;
+048603:                 u32 vector_alignment = 0;
+===== line 48589 =====
+048577:                     .alignment = alignment,
+048578:                     .resolved = true,
+048579:                 };
+048580:                 progress = true;
+048581:                 continue;
+048582:             }
+048583:             if (c_type_ir_map[type_index].value != IR_ID_UNDERLYING_INVALID ||
+048584:                 (c_type->kind != C_TYPE_POINTER && c_type->kind != C_TYPE_ARRAY && c_type->kind != C_TYPE_VECTOR) ||
+048585:                 c_type->element_type.value >= parse.type_count)
+048586:             {
+048587:                 continue;
+048588:             }
+048589:             IrTypeId element = c_type_ir_map[c_type->element_type.value];
+048590:             if (element.value == IR_ID_UNDERLYING_INVALID)
+048591:             {
+048592:                 continue;
+048593:             }
+048594:             if (c_type->kind == C_TYPE_POINTER)
+048595:             {
+048596:                 c_type_ir_map[type_index] = c_ir_add_pointer_type(program, &pointer_types, element);
+048597:             }
+048598:             else if (c_type->kind == C_TYPE_VECTOR)
+048599:             {
+048600:                 IrType* element_type = ir_type_from_id(&program->types, element);
+048601:                 u64 element_count = 0;
+048602:                 u64 storage_size = 0;
+048603:                 u32 vector_alignment = 0;
+048604:                 if (!element_type || !element_type->layout.resolved ||
+048605:                     !c_vector_type_layout(target, element_type->layout.size, c_type->vector_byte_size, &element_count, &storage_size,
+048606:                                           &vector_alignment))
+048607:                 {
+048608:                     continue;
+048609:                 }
+===== line 48596 =====
+048584:                 (c_type->kind != C_TYPE_POINTER && c_type->kind != C_TYPE_ARRAY && c_type->kind != C_TYPE_VECTOR) ||
+048585:                 c_type->element_type.value >= parse.type_count)
+048586:             {
+048587:                 continue;
+048588:             }
+048589:             IrTypeId element = c_type_ir_map[c_type->element_type.value];
+048590:             if (element.value == IR_ID_UNDERLYING_INVALID)
+048591:             {
+048592:                 continue;
+048593:             }
+048594:             if (c_type->kind == C_TYPE_POINTER)
+048595:             {
+048596:                 c_type_ir_map[type_index] = c_ir_add_pointer_type(program, &pointer_types, element);
+048597:             }
+048598:             else if (c_type->kind == C_TYPE_VECTOR)
+048599:             {
+048600:                 IrType* element_type = ir_type_from_id(&program->types, element);
+048601:                 u64 element_count = 0;
+048602:                 u64 storage_size = 0;
+048603:                 u32 vector_alignment = 0;
+048604:                 if (!element_type || !element_type->layout.resolved ||
+048605:                     !c_vector_type_layout(target, element_type->layout.size, c_type->vector_byte_size, &element_count, &storage_size,
+048606:                                           &vector_alignment))
+048607:                 {
+048608:                     continue;
+048609:                 }
+048610:                 c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048611:                                                                              .name = S8("GNU vector"),
+048612:                                                                              .element_type = element,
+048613:                                                                              .return_type = IR_TYPE_ID_INVALID,
+048614:                                                                              .layout =
+048615:                                                                                  {
+048616:                                                                                      .size = storage_size,
+===== line 48610 =====
+048598:             else if (c_type->kind == C_TYPE_VECTOR)
+048599:             {
+048600:                 IrType* element_type = ir_type_from_id(&program->types, element);
+048601:                 u64 element_count = 0;
+048602:                 u64 storage_size = 0;
+048603:                 u32 vector_alignment = 0;
+048604:                 if (!element_type || !element_type->layout.resolved ||
+048605:                     !c_vector_type_layout(target, element_type->layout.size, c_type->vector_byte_size, &element_count, &storage_size,
+048606:                                           &vector_alignment))
+048607:                 {
+048608:                     continue;
+048609:                 }
+048610:                 c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048611:                                                                              .name = S8("GNU vector"),
+048612:                                                                              .element_type = element,
+048613:                                                                              .return_type = IR_TYPE_ID_INVALID,
+048614:                                                                              .layout =
+048615:                                                                                  {
+048616:                                                                                      .size = storage_size,
+048617:                                                                                      .alignment = vector_alignment,
+048618:                                                                                      .resolved = true,
+048619:                                                                                  },
+048620:                                                                              .kind = IR_TYPE_VECTOR,
+048621:                                                                              .element_count = element_count,
+048622:                                                                              .bit_width = (u32)storage_size * 8,
+048623:                                                                          });
+048624:             }
+048625:             else
+048626:             {
+048627:                 if (c_type->array_bound >= parse.array_bound_count)
+048628:                 {
+048629:                     continue;
+048630:                 }
+===== line 48670 =====
+048658:                         }
+048659:                     }
+048660:                 }
+048661:                 if (!count_resolved)
+048662:                 {
+048663:                     continue;
+048664:                 }
+048665:                 IrType* element_type = ir_type_from_id(&program->types, element);
+048666:                 if (!element_type || !element_type->layout.resolved || (element_count && element_type->layout.size > UINT64_MAX / element_count))
+048667:                 {
+048668:                     continue;
+048669:                 }
+048670:                 c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+048671:                                                                              .name = S8("array"),
+048672:                                                                              .element_type = element,
+048673:                                                                              .return_type = IR_TYPE_ID_INVALID,
+048674:                                                                              .layout =
+048675:                                                                                  {
+048676:                                                                                      .size = element_type->layout.size * element_count,
+048677:                                                                                      .alignment = element_type->layout.alignment,
+048678:                                                                                      .resolved = true,
+048679:                                                                                  },
+048680:                                                                              .kind = IR_TYPE_ARRAY,
+048681:                                                                              .element_count = element_count,
+048682:                                                                          });
+048683:             }
+048684:             progress = true;
+048685:         }
+048686:             if (!progress)
+048687:             {
+048688:                 break;
+048689:             }
+048690:         }
+===== line 48735 =====
+048723:     if (reported_array_bounds)
+048724:     {
+048725:         memset(reported_array_bounds, 0, sizeof(*reported_array_bounds) * parse.array_bound_count);
+048726:     }
+048727:     for (u32 type_index = 0; reported_array_bounds && type_index < parse.type_count; type_index += 1)
+048728:     {
+048729:         CType* c_type = &parse.types[type_index];
+048730:         if (c_type->kind != C_TYPE_ARRAY || c_type->element_type.value >= parse.type_count || c_type->array_bound >= parse.array_bound_count ||
+048731:             reported_array_bounds[c_type->array_bound])
+048732:         {
+048733:             continue;
+048734:         }
+048735:         IrType* element_type = ir_type_from_id(&program->types, c_type_ir_map[c_type->element_type.value]);
+048736:         if (!element_type || !element_type->layout.resolved || !element_type->layout.alignment ||
+048737:             element_type->layout.size % element_type->layout.alignment == 0)
+048738:         {
+048739:             continue;
+048740:         }
+048741:         reported_array_bounds[c_type->array_bound] = true;
+048742:         // c_parse_array_suffixes records token_start as the token after the
+048743:         // opening bracket, so the bracket is the token before it -- which is
+048744:         // where Clang's own caret points, and is a real token even for the
+048745:         // empty bound `[]`, whose token_start is the closing bracket.
+048746:         u32 bracket = parse.array_bounds[c_type->array_bound].token_start;
+048747:         result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+048748:             .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
+048749:                                      element_type->layout.size, element_type->layout.alignment),
+048750:             .location = bracket && bracket <= preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[bracket - 1])
+048751:                                                                      : (CSourceLocation){0},
+048752:             .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+048753:         };
+048754:     }
+048755:     for (u32 deferred_index = 0; deferred_index < parse.deferred_static_assert_count; deferred_index += 1)
+===== line 48966 =====
+048954:         {
+048955:             declarations_by_entity[declarations_by_entity_offsets[entity_value] + declarations_by_entity_cursors[entity_value]] = declaration_index;
+048956:             declarations_by_entity_cursors[entity_value] += 1;
+048957:         }
+048958:     }
+048959:     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+048960:     {
+048961:         CEntity* entity = parse.entities + entity_index;
+048962:         if (entity->kind != C_ENTITY_OBJECT || entity->type.value >= parse.type_count)
+048963:         {
+048964:             continue;
+048965:         }
+048966:         IrTypeId type = c_type_ir_map[entity->type.value];
+048967:         IrType* type_value = ir_type_from_id(&program->types, type);
+048968:         CDeclaration* definition = 0;
+048969:         CDeclaration* first = 0;
+048970:         bool internal = false;
+048971:         bool is_thread_local = false;
+048972:         u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+048973:         for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
+048974:         {
+048975:             CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+048976:             if (declaration->kind != C_DECLARATION_OBJECT)
+048977:             {
+048978:                 continue;
+048979:             }
+048980:             if (!first)
+048981:             {
+048982:                 first = declaration;
+048983:             }
+048984:             u64 specifiers = declaration_specifier_sets[declarations_by_entity[bucket_index]] &
+048985:                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) |
+048986:                               C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+===== line 49017 =====
+049005:         }
+049006:         if (!type_value && !definition && entity->type.value < parse.type_count)
+049007:         {
+049008:             // `extern char pad[];` with no completing declaration in this unit:
+049009:             // the incomplete array never maps, but the import still lowers.
+049010:             // The symbol takes a zero-length array of the mapped element type —
+049011:             // indexing gets its element layout while c_type_ir_map stays
+049012:             // unmapped, so sizeof over the entity keeps failing as it must.
+049013:             CType* c_type = &parse.types[entity->type.value];
+049014:             if (c_type->kind == C_TYPE_ARRAY && c_type->array_bound < parse.array_bound_count && c_type->element_type.value < parse.type_count)
+049015:             {
+049016:                 CArrayBound bound = parse.array_bounds[c_type->array_bound];
+049017:                 IrType* element_type = ir_type_from_id(&program->types, c_type_ir_map[c_type->element_type.value]);
+049018:                 if (!bound.token_count && !bound.is_star && !bound.has_inferred_count && element_type && element_type->layout.resolved)
+049019:                 {
+049020:                     type = ir_program_add_type(program, (IrType){
+049021:                                                             .name = S8("array"),
+049022:                                                             .element_type = c_type_ir_map[c_type->element_type.value],
+049023:                                                             .return_type = IR_TYPE_ID_INVALID,
+049024:                                                             .layout =
+049025:                                                                 {
+049026:                                                                     .size = 0,
+049027:                                                                     .alignment = element_type->layout.alignment,
+049028:                                                                     .resolved = true,
+049029:                                                                 },
+049030:                                                             .kind = IR_TYPE_ARRAY,
+049031:                                                             .element_count = 0,
+049032:                                                         });
+049033:                     type_value = ir_type_from_id(&program->types, type);
+049034:                 }
+049035:             }
+049036:         }
+049037:         if (!type_value)
+===== line 49022 =====
+049010:             // The symbol takes a zero-length array of the mapped element type —
+049011:             // indexing gets its element layout while c_type_ir_map stays
+049012:             // unmapped, so sizeof over the entity keeps failing as it must.
+049013:             CType* c_type = &parse.types[entity->type.value];
+049014:             if (c_type->kind == C_TYPE_ARRAY && c_type->array_bound < parse.array_bound_count && c_type->element_type.value < parse.type_count)
+049015:             {
+049016:                 CArrayBound bound = parse.array_bounds[c_type->array_bound];
+049017:                 IrType* element_type = ir_type_from_id(&program->types, c_type_ir_map[c_type->element_type.value]);
+049018:                 if (!bound.token_count && !bound.is_star && !bound.has_inferred_count && element_type && element_type->layout.resolved)
+049019:                 {
+049020:                     type = ir_program_add_type(program, (IrType){
+049021:                                                             .name = S8("array"),
+049022:                                                             .element_type = c_type_ir_map[c_type->element_type.value],
+049023:                                                             .return_type = IR_TYPE_ID_INVALID,
+049024:                                                             .layout =
+049025:                                                                 {
+049026:                                                                     .size = 0,
+049027:                                                                     .alignment = element_type->layout.alignment,
+049028:                                                                     .resolved = true,
+049029:                                                                 },
+049030:                                                             .kind = IR_TYPE_ARRAY,
+049031:                                                             .element_count = 0,
+049032:                                                         });
+049033:                     type_value = ir_type_from_id(&program->types, type);
+049034:                 }
+049035:             }
+049036:         }
+049037:         if (!type_value)
+049038:         {
+049039:             continue;
+049040:         }
+049041:         IrSourceRange source = c_ir_source_range(first->location, first->name.length);
+049042:         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
+===== line 49192 =====
+049180:                 continue;
+049181:             }
+049182:             if (!first)
+049183:             {
+049184:                 first = declaration;
+049185:             }
+049186:             if (declaration->is_definition)
+049187:             {
+049188:                 definition = declaration;
+049189:             }
+049190:             internal |= (declaration_specifier_sets[declarations_by_entity[bucket_index]] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+049191:         }
+049192:         IrTypeId type = c_type_ir_map[entity->type.value];
+049193:         IrType* type_value = ir_type_from_id(&program->types, type);
+049194:         if (!first || !type_value || type_value->kind != IR_TYPE_FUNCTION)
+049195:         {
+049196:             continue;
+049197:         }
+049198:         IrSourceRange source = c_ir_source_range(first->location, first->name.length);
+049199:         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
+049200:                                                                           .name = entity->name,
+049201:                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
+049202:                                                                           .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+049203:                                                                           .source = source,
+049204:                                                                           .type = type,
+049205:                                                                           .kind = IR_SYMBOL_FUNCTION,
+049206:                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
+049207:                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+049208:                                                                           .is_weak = entity_weak[entity_index],
+049209:                                                                       });
+049210:     }
+049211:     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+049212:     {
+===== line 49240 =====
+049228:                 continue;
+049229:             }
+049230:             if (!first)
+049231:             {
+049232:                 first = declaration;
+049233:             }
+049234:             if (declaration->is_definition)
+049235:             {
+049236:                 definition = declaration;
+049237:             }
+049238:             internal |= (declaration_specifier_sets[declarations_by_entity[bucket_index]] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+049239:         }
+049240:         IrTypeId type = c_type_ir_map[entity->type.value];
+049241:         IrType* type_value = ir_type_from_id(&program->types, type);
+049242:         if (!first || !type_value || type_value->kind != IR_TYPE_FUNCTION)
+049243:         {
+049244:             continue;
+049245:         }
+049246:         IrSourceRange source = c_ir_source_range(first->location, first->name.length);
+049247:         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
+049248:                                                                           .name = entity->name,
+049249:                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
+049250:                                                                           .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
+049251:                                                                           .source = source,
+049252:                                                                           .type = type,
+049253:                                                                           .kind = IR_SYMBOL_FUNCTION,
+049254:                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
+049255:                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+049256:                                                                           .is_weak = entity_weak[entity_index],
+049257:                                                                       });
+049258:     }
+049259:     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+049260:     {
+===== line 49266 =====
+049254:                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
+049255:                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+049256:                                                                           .is_weak = entity_weak[entity_index],
+049257:                                                                       });
+049258:     }
+049259:     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+049260:     {
+049261:         CEntity* entity = parse.entities + entity_index;
+049262:         if (entity->kind != C_ENTITY_OBJECT || entity->type.value >= parse.type_count)
+049263:         {
+049264:             continue;
+049265:         }
+049266:         IrTypeId type = c_type_ir_map[entity->type.value];
+049267:         IrType* type_value = ir_type_from_id(&program->types, type);
+049268:         CDeclaration* definition = 0;
+049269:         CDeclaration* first = 0;
+049270:         bool internal = false;
+049271:         u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+049272:         for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
+049273:         {
+049274:             CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+049275:             if (declaration->kind != C_DECLARATION_OBJECT)
+049276:             {
+049277:                 continue;
+049278:             }
+049279:             if (!first)
+049280:             {
+049281:                 first = declaration;
+049282:             }
+049283:             u64 specifiers = declaration_specifier_sets[declarations_by_entity[bucket_index]] &
+049284:                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC));
+049285:             bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
+049286:             bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
+===== line 49659 =====
+049647:                 IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
+049648:                 symbol->is_definition = true;
+049649:                 String8 section_name = c_declaration_section_name(arena, preprocess, declaration);
+049650:                 if (section_name.length)
+049651:                 {
+049652:                     symbol->section_name = section_name;
+049653:                 }
+049654:                 existing_function->source = c_ir_source_range(declaration.location, declaration.name.length);
+049655:                 existing_function->state = IR_FUNCTION_REJECTED;
+049656:             }
+049657:             continue;
+049658:         }
+049659:         IrTypeId function_type = declaration.type.value < parse.type_count ? c_type_ir_map[declaration.type.value] : IR_TYPE_ID_INVALID;
+049660:         IrType* function_type_value = ir_type_from_id(&program->types, function_type);
+049661:         if (!function_type_value || function_type_value->kind != IR_TYPE_FUNCTION)
+049662:         {
+049663:             if (!declaration.is_definition)
+049664:             {
+049665:                 continue;
+049666:             }
+049667:             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+049668:                 .message = string_format(arena, S8("C IR lowering could not resolve the type of function '{S8}'"), declaration.name),
+049669:                 .location = declaration.location,
+049670:                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+049671:             };
+049672:             continue;
+049673:         }
+049674:         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+049675:         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+049676:         if ((internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index] &&
+049677:             !c_declaration_section_name(arena, preprocess, declaration).length)
+049678:         {
+049679:             continue;
+===== line 49996 =====
+049984:         // scan of every body token) runs only for malformed streams.
+049985:         bool delimiters_valid = builder.stream_matching_delimiters_plus_one ? true : c_ir_build_delimiter_index(&builder);
+049986:         if (!delimiters_valid)
+049987:         {
+049988:             builder.failure_message = S8("function body has mismatched delimiters");
+049989:         }
+049990:         CIrSignature signature = signatures[declaration_index];
+049991:         bool parameters_lowered = true;
+049992:         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
+049993:         {
+049994:             CParameter parameter = signature.parameters[parameter_index];
+049995:             IrTypeId value_type = signature.parameter_types[parameter_index];
+049996:             IrTypeId object_type = parameter.type.value < parse.type_count ? c_type_ir_map[parameter.type.value] : IR_TYPE_ID_INVALID;
+049997:             // Arrays, function parameters and ABI-specific va_list shapes keep
+049998:             // their adjusted type. Ordinary qualified objects retain the type
+049999:             // of the definition, independently of the callable value type.
+050000:             if (c_ir_parameter_value_type(program, object_type).value != value_type.value)
+050001:             {
+050002:                 object_type = value_type;
+050003:             }
+050004:             if (!c_ir_emit_parameter(&builder, c_ir_space_name_token(&builder, parameter.name), parameter_index,
+050005:                                      value_type, object_type, parameter.entity))
+050006:             {
+050007:                 parameters_lowered = false;
+050008:                 break;
+050009:             }
+050010:             CType* parameter_type = c_type_from_id(&builder.parse, parameter.type);
+050011:             if (parameter_type && parameter_type->kind == C_TYPE_ARRAY)
+050012:             {
+050013:                 IrType* adjusted_parameter_type = ir_type_from_id(&program->types, signature.parameter_types[parameter_index]);
+050014:                 bool fixed_inner_array = adjusted_parameter_type && adjusted_parameter_type->kind == IR_TYPE_POINTER &&
+050015:                                          adjusted_parameter_type->element_type.value < program->types.count &&
+050016:                                          ir_type_from_id(&program->types, adjusted_parameter_type->element_type)->kind == IR_TYPE_ARRAY;
+===== line 50032 =====
+050020:                 // its layout would be a CONSTANT count, a CONSTANT element size
+050021:                 // and a MULTIPLY of the two emitted into the entry block. The
+050022:                 // parameter is a pointer either way, nothing reads a constant
+050023:                 // parameter's runtime_size — c_ir_lower_expression_core_step's
+050024:                 // sizeof arm refuses suffix 0 for is_vla_parameter, because
+050025:                 // `sizeof slots` is the pointer's — and every other consumer
+050026:                 // reaches the same answer through that pointer type, which is
+050027:                 // what local->type already holds. So skip the layout and leave the
+050028:                 // local unflagged. Every mapped array of two or more dimensions
+050029:                 // is already a pointer to a mapped array, hence fixed_inner_array
+050030:                 // above; this test therefore only ever adds the one-dimensional
+050031:                 // constant bound.
+050032:                 bool constant_bound = parameter.type.value < parse.type_count && c_type_ir_map[parameter.type.value].value != IR_ID_UNDERLYING_INVALID;
+050033:                 // An unspecified outermost bound — `u8 slots[]`, which is how
+050034:                 // main's argv and envp are spelled — has no constant to detect,
+050035:                 // so the test above cannot see it, but its layout is nearly
+050036:                 // empty anyway. c_ir_lower_vla_layout_step discards an absent
+050037:                 // outermost bound for a parameter, leaving dimension_counts[0]
+050038:                 // and therefore suffix_sizes[0] invalid, so all it emits is the
+050039:                 // one CONSTANT element size in suffix_sizes[1]. Skip it on the
+050040:                 // same grounds: the parameter is a pointer, `sizeof slots` is
+050041:                 // that pointer's, and `sizeof slots[0]` and `slots[i]` both
+050042:                 // reach the same answer through local->type's element.
+050043:                 // One dimension only. `u8 slots[][n]` genuinely needs
+050044:                 // suffix_sizes[1] to index through, and `u8 slots[][3]` is a
+050045:                 // pointer to a mapped array, so it took fixed_inner_array
+050046:                 // above. The element type must map for the same reason the
+050047:                 // layout step demands a resolved element layout.
+050048:                 CArrayBound outermost_bound = parameter_type->array_bound < parse.array_bound_count
+050049:                                                   ? c_ir_vla_bound_expression(preprocess, parse.array_bounds[parameter_type->array_bound])
+050050:                                                   : (CArrayBound){0};
+050051:                 bool unspecified_bound = parameter_type->array_bound < parse.array_bound_count && !outermost_bound.has_inferred_count &&
+050052:                                          (!outermost_bound.token_count || outermost_bound.is_star) &&
+===== line 50055 =====
+050043:                 // One dimension only. `u8 slots[][n]` genuinely needs
+050044:                 // suffix_sizes[1] to index through, and `u8 slots[][3]` is a
+050045:                 // pointer to a mapped array, so it took fixed_inner_array
+050046:                 // above. The element type must map for the same reason the
+050047:                 // layout step demands a resolved element layout.
+050048:                 CArrayBound outermost_bound = parameter_type->array_bound < parse.array_bound_count
+050049:                                                   ? c_ir_vla_bound_expression(preprocess, parse.array_bounds[parameter_type->array_bound])
+050050:                                                   : (CArrayBound){0};
+050051:                 bool unspecified_bound = parameter_type->array_bound < parse.array_bound_count && !outermost_bound.has_inferred_count &&
+050052:                                          (!outermost_bound.token_count || outermost_bound.is_star) &&
+050053:                                          parameter_type->element_type.value < parse.type_count &&
+050054:                                          parse.types[parameter_type->element_type.value].kind != C_TYPE_ARRAY &&
+050055:                                          c_type_ir_map[parameter_type->element_type.value].value != IR_ID_UNDERLYING_INVALID;
+050056:                 if (!fixed_inner_array && !constant_bound && !unspecified_bound)
+050057:                 {
+050058:                     CIntegerIrLocal* local = c_ir_find_local_by_entity(&builder, parameter.entity);
+050059:                     CIrVlaLayout layout = {0};
+050060:                     CToken parameter_token = c_ir_space_name_token(&builder, parameter.name);
+050061:                     if (!local || !c_ir_prepare_vla_layout(&builder, parameter.type, parameter_token, true, false, &layout))
+050062:                     {
+050063:                         builder.failure_message = S8("could not lower variable-length array parameter bounds");
+050064:                         parameters_lowered = false;
+050065:                         break;
+050066:                     }
+050067:                     local->runtime_size = layout.runtime_size;
+050068:                     local->vla_element_type = layout.element_type;
+050069:                     local->vla_dimension_counts = layout.dimension_counts;
+050070:                     local->vla_suffix_sizes = layout.suffix_sizes;
+050071:                     local->vla_dimension_count = layout.dimension_count;
+050072:                     local->is_variable_length_array = true;
+050073:                     local->is_vla_parameter = true;
+050074:                     c_ir_vla_local_shape(&builder, local);
+050075:                 }

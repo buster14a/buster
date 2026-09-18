@@ -1,0 +1,704 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+lines: 10280-10980
+
+010280:         !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[aggregate_index], C_PARSE_AGGREGATE_KEYWORDS))
+010281:     {
+010282:         if (aggregate_index == start && aggregate_index < end && preprocess.tokens[aggregate_index].kind == C_TOKEN_IDENTIFIER)
+010283:         {
+010284:             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]);
+010285:             // The old entity walk chose the oldest matching typedef, even when
+010286:             // a scoped lookup had already rejected the name. Keep that
+010287:             // fallback contract; the bucket helper validates partial parse
+010288:             // metadata before using the newest-first chain.
+010289:             CEntityId typedef_entity = c_parse_lookup_typedef_name_fallback(result, spelling);
+010290:             if (typedef_entity.value < result->entity_count)
+010291:             {
+010292:                 CEntity* entity = &result->entities[typedef_entity.value];
+010293:                 if (entity->kind == C_ENTITY_TYPEDEF)
+010294:                 {
+010295:                     u32 qualifier_index = aggregate_index + 1;
+010296:                     CTypeId type = entity->type;
+010297:                     if (type.value >= result->type_count)
+010298:                     {
+010299:                         return C_TYPE_ID_INVALID;
+010300:                     }
+010301:                     CType qualified = result->types[type.value];
+010302:                     bool has_qualifier = false;
+010303:                     while (qualifier_index < end && preprocess.tokens[qualifier_index].kind == C_TOKEN_IDENTIFIER)
+010304:                     {
+010305:                         if (!c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[qualifier_index], &qualified))
+010306:                         {
+010307:                             break;
+010308:                         }
+010309:                         has_qualifier = true;
+010310:                         qualifier_index += 1;
+010311:                     }
+010312:                     *declarator_start = qualifier_index;
+010313:                     return has_qualifier ? c_parse_add_qualified_type(result, type, qualified) : type;
+010314:                 }
+010315:             }
+010316:         }
+010317:         return c_parse_primitive_type(result, preprocess, start, end, declarator_start);
+010318:     }
+010319:     // The words the scan above stepped over to reach the tag keyword. A
+010320:     // qualifier, a storage class or an alignment specifier stands beside a
+010321:     // tag; a word that names a type of its own is a second type specifier,
+010322:     // and reading the tag through it gave `int struct S v` the aggregate's
+010323:     // layout under a spelling it never had. Walking the run again costs only
+010324:     // the declarations that reach a tag, where the scan above already walked
+010325:     // every declaration there is.
+010326:     u32 specifier_index = start;
+010327:     u32 invalid_specifier = UINT32_MAX;
+010328:     while (specifier_index < aggregate_index && invalid_specifier == UINT32_MAX)
+010329:     {
+010330:         u32 decorated = c_parse_skip_alignment_specifiers(preprocess, specifier_index, aggregate_index);
+010331:         decorated = c_parse_skip_attributes(preprocess, decorated, aggregate_index);
+010332:         if (decorated != specifier_index)
+010333:         {
+010334:             specifier_index = decorated;
+010335:         }
+010336:         else
+010337:         {
+010338:             invalid_specifier = c_parse_type_specifier_token(preprocess, specifier_index) ? specifier_index : UINT32_MAX;
+010339:             specifier_index += 1;
+010340:         }
+010341:     }
+010342:     if (invalid_specifier != UINT32_MAX)
+010343:     {
+010344:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[invalid_specifier]),
+010345:             C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
+010346:         *declarator_start = aggregate_index;
+010347:         return C_TYPE_ID_INVALID;
+010348:     }
+010349:     String8 aggregate_spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]);
+010350:     CTypeKind kind = string_equal(aggregate_spelling, S8("struct"))  ? C_TYPE_STRUCT
+010351:                      : string_equal(aggregate_spelling, S8("union")) ? C_TYPE_UNION
+010352:                                                                      : C_TYPE_ENUM;
+010353:     u32 index = c_parse_skip_attributes(preprocess, aggregate_index + 1, end);
+010354:     u32 tag_index = index;
+010355:     String8 tag = {0};
+010356:     if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+010357:     {
+010358:         tag = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+010359:         index += 1;
+010360:     }
+010361:     index = c_parse_skip_attributes(preprocess, index, end);
+010362:     CTypeId enum_underlying_type = C_TYPE_ID_INVALID;
+010363:     if (kind == C_TYPE_ENUM && index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_COLON))
+010364:     {
+010365:         u32 underlying_start = index + 1;
+010366:         u32 underlying_end = underlying_start;
+010367:         while (underlying_end < end && !c_token_is_punctuator(&preprocess.tokens[underlying_end], C_PUNCTUATOR_LEFT_BRACE))
+010368:         {
+010369:             underlying_end += 1;
+010370:         }
+010371:         u32 underlying_declarator = underlying_start;
+010372:         enum_underlying_type = c_parse_qualified_typedef_type(result, preprocess, frame->scope, underlying_start, underlying_end, &underlying_declarator);
+010373:         if (enum_underlying_type.value == C_ID_UNDERLYING_INVALID)
+010374:         {
+010375:             enum_underlying_type = c_parse_primitive_type(result, preprocess, underlying_start, underlying_end, &underlying_declarator);
+010376:         }
+010377:         CType* underlying = enum_underlying_type.value < result->type_count ? &result->types[enum_underlying_type.value] : 0;
+010378:         bool integer_underlying = false;
+010379:         if (underlying)
+010380:         {
+010381:             switch (underlying->kind)
+010382:             {
+010383:             case C_TYPE_BOOL:
+010384:             case C_TYPE_CHAR:
+010385:             case C_TYPE_SIGNED_CHAR:
+010386:             case C_TYPE_UNSIGNED_CHAR:
+010387:             case C_TYPE_SHORT:
+010388:             case C_TYPE_UNSIGNED_SHORT:
+010389:             case C_TYPE_INT:
+010390:             case C_TYPE_UNSIGNED_INT:
+010391:             case C_TYPE_LONG:
+010392:             case C_TYPE_UNSIGNED_LONG:
+010393:             case C_TYPE_LONG_LONG:
+010394:             case C_TYPE_UNSIGNED_LONG_LONG:
+010395:             case C_TYPE_INT128:
+010396:             case C_TYPE_UNSIGNED_INT128:
+010397:             {
+010398:                 integer_underlying = true;
+010399:                 break;
+010400:             }
+010401:             case C_TYPE_INVALID:
+010402:             case C_TYPE_VOID:
+010403:             case C_TYPE_FLOAT16:
+010404:             case C_TYPE_BFLOAT16:
+010405:             case C_TYPE_FLOAT:
+010406:             case C_TYPE_DOUBLE:
+010407:             case C_TYPE_LONG_DOUBLE:
+010408:             case C_TYPE_FLOAT16_COMPLEX:
+010409:             case C_TYPE_FLOAT_COMPLEX:
+010410:             case C_TYPE_DOUBLE_COMPLEX:
+010411:             case C_TYPE_LONG_DOUBLE_COMPLEX:
+010412:             case C_TYPE_VA_LIST:
+010413:             case C_TYPE_NULLPTR:
+010414:             case C_TYPE_POINTER:
+010415:             case C_TYPE_ARRAY:
+010416:             case C_TYPE_VECTOR:
+010417:             case C_TYPE_FUNCTION:
+010418:             case C_TYPE_STRUCT:
+010419:             case C_TYPE_UNION:
+010420:             case C_TYPE_ENUM:
+010421:             case C_TYPE_COUNT:
+010422:             {
+010423:                 break;
+010424:             }
+010425:             }
+010426:         }
+010427:         if (!integer_underlying || underlying_declarator != underlying_end)
+010428:         {
+010429:             return C_TYPE_ID_INVALID;
+010430:         }
+010431:         index = underlying_end;
+010432:     }
+010433:     CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
+010434:     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+010435:     if (!definition)
+010436:     {
+010437:         if (!tag.length)
+010438:         {
+010439:             return C_TYPE_ID_INVALID;
+010440:         }
+010441:         if (type.value == C_ID_UNDERLYING_INVALID)
+010442:         {
+010443:             type = c_parse_add_type(result, (CType){
+010444:                                                 .tag = tag,
+010445:                                                 .tag_scope = frame->scope,
+010446:                                                 .element_type = enum_underlying_type,
+010447:                                                 .return_type = C_TYPE_ID_INVALID,
+010448:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+010449:                                                 .kind = kind,
+010450:                                             });
+010451:         }
+010452:         type = c_parse_apply_trailing_qualifiers(result, preprocess, type, &index, end);
+010453:         *declarator_start = index;
+010454:         return type;
+010455:     }
+010456:     u32 open = index;
+010457:     u32 depth = 1;
+010458:     index += 1;
+010459:     while (index < end && depth)
+010460:     {
+010461:         if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+010462:         {
+010463:             depth += 1;
+010464:         }
+010465:         else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+010466:         {
+010467:             depth -= 1;
+010468:         }
+010469:         index += 1;
+010470:     }
+010471:     if (depth)
+010472:     {
+010473:         return C_TYPE_ID_INVALID;
+010474:     }
+010475:     u32 close = index - 1;
+010476:     u32 definition_type_start = result->type_count;
+010477:     // A body against a tag that is already complete is two different things
+010478:     // by scope.  In the same scope it is a redefinition and stays refused.
+010479:     // In an inner scope it is a new, distinct type that shadows the outer one
+010480:     // -- clang's xmmintrin.h defines `struct __mm_storeh_pi_struct` inside
+010481:     // two intrinsics, and the second body must not be read against the
+010482:     // first's completed record, which both mis-sized the second struct and
+010483:     // sent the whole statement back through the expression parser.  An
+010484:     // incomplete found tag keeps its existing completion path whatever the
+010485:     // scope, which is the `struct S; struct S { ... };` forward idiom.
+010486:     if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].is_complete)
+010487:     {
+010488:         if (result->types[type.value].tag_scope.value == frame->scope.value)
+010489:         {
+010490:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
+010491:                                string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
+010492:             return C_TYPE_ID_INVALID;
+010493:         }
+010494:         type = C_TYPE_ID_INVALID;
+010495:     }
+010496:     if (type.value == C_ID_UNDERLYING_INVALID)
+010497:     {
+010498:         type = c_parse_add_type(result, (CType){
+010499:                                             .tag = tag,
+010500:                                             .tag_scope = frame->scope,
+010501:                                             .element_type = enum_underlying_type,
+010502:                                             .return_type = C_TYPE_ID_INVALID,
+010503:                                             .array_bound = C_ARRAY_BOUND_INVALID,
+010504:                                             .member_start = result->member_count,
+010505:                                             .kind = kind,
+010506:                                         });
+010507:     }
+010508:     if (type.value < definition_type_start && !c_type_parse_record_mutation(machine, result, type))
+010509:     {
+010510:         return C_TYPE_ID_INVALID;
+010511:     }
+010512:     CType* aggregate = &result->types[type.value];
+010513:     if (kind == C_TYPE_ENUM && enum_underlying_type.value != C_ID_UNDERLYING_INVALID)
+010514:     {
+010515:         if (aggregate->element_type.value != C_ID_UNDERLYING_INVALID && aggregate->element_type.value != enum_underlying_type.value)
+010516:         {
+010517:             return C_TYPE_ID_INVALID;
+010518:         }
+010519:         aggregate->element_type = enum_underlying_type;
+010520:     }
+010521:     aggregate->member_start = result->member_count;
+010522:     aggregate->definition_start = open + 1;
+010523:     aggregate->definition_token_count = close - (open + 1);
+010524:     if (kind == C_TYPE_ENUM)
+010525:     {
+010526:         aggregate->enum_member_start = result->enum_member_count;
+010527:         u32 enum_start = open + 1;
+010528:         s64 previous_value = -1;
+010529:         // Only a top-level comma separates enumerators. An initializer may
+010530:         // group commas of its own inside parentheses, brackets or braces --
+010531:         // `enum { E = (int)sizeof (struct S){1, 2}, F }` -- and splitting on
+010532:         // one of those cuts the initializer in half and fails the whole
+010533:         // definition.
+010534:         u32 enum_group_depth = 0;
+010535:         for (u32 token_index = enum_start; token_index <= close; token_index += 1)
+010536:         {
+010537:             if (token_index < close && c_punctuator_in_set(preprocess.tokens[token_index].punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+010538:             {
+010539:                 enum_group_depth += 1;
+010540:             }
+010541:             else if (token_index < close && c_punctuator_in_set(preprocess.tokens[token_index].punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+010542:             {
+010543:                 enum_group_depth -= enum_group_depth != 0;
+010544:             }
+010545:             bool enum_end = token_index == close ||
+010546:                             (!enum_group_depth && c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_COMMA));
+010547:             if (!enum_end)
+010548:             {
+010549:                 continue;
+010550:             }
+010551:             if (enum_start == token_index)
+010552:             {
+010553:                 enum_start = token_index + 1;
+010554:                 continue;
+010555:             }
+010556:             CToken name = preprocess.tokens[enum_start];
+010557:             if (name.kind != C_TOKEN_IDENTIFIER)
+010558:             {
+010559:                 return C_TYPE_ID_INVALID;
+010560:             }
+010561:             // An enumerator carries its attributes between the name and the
+010562:             // '=', or after the name when it has no value at all:
+010563:             // `enum { A [[deprecated]] = 1, B [[deprecated]] }`. The commas
+010564:             // inside an attribute list are already covered, because the
+010565:             // enumerator split above counts '[' as an opening delimiter.
+010566:             u32 enum_value_index = c_parse_skip_attributes(preprocess, enum_start + 1, token_index);
+010567:             s64 value = previous_value + 1;
+010568:             if (enum_value_index < token_index)
+010569:             {
+010570:                 if (!c_token_is_punctuator(&preprocess.tokens[enum_value_index], C_PUNCTUATOR_ASSIGN))
+010571:                 {
+010572:                     return C_TYPE_ID_INVALID;
+010573:                 }
+010574:                 u32 expression_start = enum_value_index + 1;
+010575:                 TemporalArena temporary = scratch_begin(0, 0);
+010576:                 CToken* constant_tokens = 0;
+010577:                 u32 constant_token_count = 0;
+010578:                 if (!c_parse_generic_constant_tokens(machine, temporary.arena, preprocess, result, frame->scope, expression_start, token_index,
+010579:                                                      &constant_tokens, &constant_token_count))
+010580:                 {
+010581:                     scratch_end(temporary);
+010582:                     return C_TYPE_ID_INVALID;
+010583:                 }
+010584:                 CPreprocessResult constant_preprocess = preprocess;
+010585:                 constant_preprocess.tokens = constant_tokens;
+010586:                 u32 expression_count = constant_token_count;
+010587:                 CToken* evaluation_tokens = arena_allocate(temporary.arena, CToken, expression_count * 2 + 1);
+010588:                 u32 evaluation_token_count = 0;
+010589:                 u64 enum_spelling_capacity = 0;
+010590:                 for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
+010591:                 {
+010592:                     enum_spelling_capacity +=
+010593:                         c_token_length(constant_preprocess.spelling_base, constant_preprocess.tokens[expression_start + expression_index]) + 21;
+010594:                 }
+010595:                 CSpellingSpace enum_space = c_space_local(temporary.arena, enum_spelling_capacity);
+010596:                 bool expression_valid = true;
+010597:                 for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
+010598:                 {
+010599:                     u32 source_index = expression_start + expression_index;
+010600:                     CToken expression_token = constant_preprocess.tokens[source_index];
+010601:                     if (c_token_is_punctuator(&expression_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+010602:                     {
+010603:                         u32 cast_end = expression_index + 1;
+010604:                         bool cast_type = false;
+010605:                         bool cast_valid = true;
+010606:                         bool tag_name = false;
+010607:                         while (cast_end < expression_count &&
+010608:                                !c_token_is_punctuator(&constant_preprocess.tokens[expression_start + cast_end], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+010609:                         {
+010610:                             CToken cast_token = constant_preprocess.tokens[expression_start + cast_end];
+010611:                             if (cast_token.kind == C_TOKEN_IDENTIFIER)
+010612:                             {
+010613:                                 bool typedef_name = false;
+010614:                                 for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+010615:                                 {
+010616:                                     CEntity* entity = &result->entities[entity_index];
+010617:                                     if (entity->kind == C_ENTITY_TYPEDEF &&
+010618:                                         string_equal(entity->name, c_token_spelling(constant_preprocess.spelling_base, cast_token)))
+010619:                                     {
+010620:                                         typedef_name = true;
+010621:                                         break;
+010622:                                     }
+010623:                                 }
+010624:                                 bool type_word = c_parse_type_word_for_dialect_token(constant_preprocess, cast_token);
+010625:                                 cast_valid &= type_word || typedef_name || tag_name;
+010626:                                 cast_type |= type_word || typedef_name;
+010627:                                 tag_name = string_equal(c_token_spelling(constant_preprocess.spelling_base, cast_token), S8("struct")) ||
+010628:                                            string_equal(c_token_spelling(constant_preprocess.spelling_base, cast_token), S8("union")) ||
+010629:                                            string_equal(c_token_spelling(constant_preprocess.spelling_base, cast_token), S8("enum"));
+010630:                             }
+010631:                             else
+010632:                             {
+010633:                                 cast_valid &= c_token_is_punctuator(&cast_token, C_PUNCTUATOR_STAR);
+010634:                                 tag_name = false;
+010635:                             }
+010636:                             cast_end += 1;
+010637:                         }
+010638:                         if (cast_valid && cast_type && cast_end < expression_count && cast_end + 1 < expression_count)
+010639:                         {
+010640:                             expression_index = cast_end;
+010641:                             continue;
+010642:                         }
+010643:                     }
+010644:                     // sizeof/_Alignof has to be folded here: the evaluator below
+010645:                     // is the preprocessor's, which reads both words as ordinary
+010646:                     // identifiers and substitutes zero for them.
+010647:                     bool enum_word_is_alignof = expression_token.kind == C_TOKEN_IDENTIFIER &&
+010648:                                                 c_parse_alignof_word(c_token_spelling(constant_preprocess.spelling_base, expression_token));
+010649:                     if (expression_token.kind == C_TOKEN_IDENTIFIER &&
+010650:                         (enum_word_is_alignof || string_equal(c_token_spelling(constant_preprocess.spelling_base, expression_token), S8("sizeof"))))
+010651:                     {
+010652:                         u32 expression_end = expression_start + expression_count;
+010653:                         bool parenthesized = expression_index + 2 < expression_count &&
+010654:                                              c_token_is_punctuator(&constant_preprocess.tokens[source_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+010655:                         u32 operand_start = source_index + 2;
+010656:                         u32 operand_end = operand_start;
+010657:                         u32 operand_depth = 1;
+010658:                         while (parenthesized && operand_end < expression_end)
+010659:                         {
+010660:                             CToken operand_token = constant_preprocess.tokens[operand_end];
+010661:                             if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+010662:                             {
+010663:                                 operand_depth += 1;
+010664:                             }
+010665:                             else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+010666:                             {
+010667:                                 operand_depth -= 1;
+010668:                                 if (!operand_depth)
+010669:                                 {
+010670:                                     break;
+010671:                                 }
+010672:                             }
+010673:                             operand_end += 1;
+010674:                         }
+010675:                         // `sizeof (T){...}` sizes the compound literal. The
+010676:                         // size is the same as the type name's, but the
+010677:                         // initializer has to be consumed here too or it stays
+010678:                         // in the retokenized integer expression and fails to
+010679:                         // evaluate, taking the whole enum definition with it.
+010680:                         u32 literal_close = UINT32_MAX;
+010681:                         if (parenthesized && !operand_depth && operand_end + 1 < expression_end &&
+010682:                             c_token_is_punctuator(&constant_preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_BRACE))
+010683:                         {
+010684:                             u32 initializer_close = c_parse_matching_delimiter(constant_preprocess, operand_end + 1, expression_end,
+010685:                                                                                C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+010686:                             literal_close = initializer_close < expression_end ? initializer_close : UINT32_MAX;
+010687:                         }
+010688:                         u64 operand_size = 0;
+010689:                         u32 operand_alignment = 0;
+010690:                         if (!parenthesized || operand_depth || operand_end == operand_start ||
+010691:                             !c_parse_machineless_sizeof_operand_layout(temporary.arena, result, constant_preprocess, frame->scope, operand_start,
+010692:                                                                        operand_end, &operand_size, &operand_alignment))
+010693:                         {
+010694:                             // Substituting zero here would silently misfold the
+010695:                             // enumerator. Diagnose the declaration and retain a
+010696:                             // recovery member so later uses do not cascade.
+010697:                             c_parse_diagnostic(
+010698:                                 result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+010699:                                 string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
+010700:                                               c_token_spelling(preprocess.spelling_base, name)));
+010701:                             expression_valid = false;
+010702:                             break;
+010703:                         }
+010704:                         evaluation_tokens[evaluation_token_count++] =
+010705:                             c_space_token(&enum_space, string_format(temporary.arena, S8("{u64}"), enum_word_is_alignof ? operand_alignment : operand_size),
+010706:                                           C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+010707:                         expression_index = (literal_close != UINT32_MAX ? literal_close : operand_end) - expression_start;
+010708:                         continue;
+010709:                     }
+010710:                     bool folded_member = false;
+010711:                     if (expression_token.kind == C_TOKEN_IDENTIFIER)
+010712:                     {
+010713:                         for (u32 member_index = 0; member_index < result->enum_member_count; member_index += 1)
+010714:                         {
+010715:                             CEnumMember* member = &result->enum_members[member_index];
+010716:                             if (!string_equal(member->name, c_token_spelling(constant_preprocess.spelling_base, expression_token)))
+010717:                             {
+010718:                                 continue;
+010719:                             }
+010720:                             if (member->is_negative)
+010721:                             {
+010722:                                 evaluation_tokens[evaluation_token_count++] = c_space_token(&enum_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
+010723:                             }
+010724:                             evaluation_tokens[evaluation_token_count++] = c_space_token(&enum_space, string_format(temporary.arena, S8("{u64}"), member->value),
+010725:                                                                                         C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+010726:                             folded_member = true;
+010727:                             break;
+010728:                         }
+010729:                     }
+010730:                     if (!folded_member && expression_token.kind == C_TOKEN_IDENTIFIER)
+010731:                     {
+010732:                         String8 spelling = c_token_spelling(preprocess.spelling_base, expression_token);
+010733:                         if (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")))
+010734:                         {
+010735:                             evaluation_tokens[evaluation_token_count++] =
+010736:                                 c_space_token(&enum_space, string_equal(spelling, S8("true")) ? S8("1") : S8("0"),
+010737:                                               C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+010738:                             folded_member = true;
+010739:                         }
+010740:                         else
+010741:                         {
+010742:                             c_parse_diagnostic(
+010743:                                 result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+010744:                                 string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
+010745:                                               c_token_spelling(preprocess.spelling_base, name)));
+010746:                             expression_valid = false;
+010747:                             break;
+010748:                         }
+010749:                     }
+010750:                     if (!folded_member)
+010751:                     {
+010752:                         evaluation_tokens[evaluation_token_count++] =
+010753:                             c_space_retoken(&enum_space, constant_preprocess.spelling_base, expression_token);
+010754:                     }
+010755:                 }
+010756:                 if (expression_valid)
+010757:                 {
+010758:                     CPreprocessResult evaluation = {
+010759:                         .diagnostics = arena_allocate(temporary.arena, CDiagnostic, evaluation_token_count + 1),
+010760:                         .target = constant_preprocess.target,
+010761:                         .dialect = constant_preprocess.dialect,
+010762:                     };
+010763:                     u64 evaluated = 0;
+010764:                     bool valid = c_integer_expression_evaluate(temporary.arena, enum_space.base, evaluation_tokens,
+010765:                                                                evaluation_token_count, 65536, &evaluation, &evaluated);
+010766:                     if (!valid || evaluation.diagnostic_count)
+010767:                     {
+010768:                         c_parse_diagnostic(
+010769:                             result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+010770:                             string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
+010771:                                           c_token_spelling(preprocess.spelling_base, name)));
+010772:                     }
+010773:                     else if (evaluated <= INT64_MAX)
+010774:                     {
+010775:                         value = (s64)evaluated;
+010776:                     }
+010777:                     else
+010778:                     {
+010779:                         value = -1 - (s64)(UINT64_MAX - evaluated);
+010780:                     }
+010781:                 }
+010782:                 scratch_end(temporary);
+010783:             }
+010784:             BUSTER_VALIDATE(result->enum_member_count < result->enum_member_capacity);
+010785:             result->enum_members[result->enum_member_count++] = (CEnumMember){
+010786:                 .name = c_token_spelling(preprocess.spelling_base, name),
+010787:                 .location = c_preprocess_token_location(&preprocess, name),
+010788:                 .symbol = name.symbol,
+010789:                 .value = value < 0 ? (u64)(-value) : (u64)value,
+010790:                 .is_negative = value < 0,
+010791:             };
+010792:             previous_value = value;
+010793:             enum_start = token_index + 1;
+010794:         }
+010795:     }
+010796:     if (kind != C_TYPE_ENUM)
+010797:     {
+010798:         // The definition's own attributes sit on either side of the body:
+010799:         // `struct __attribute__((packed)) P { ... }` writes them between the
+010800:         // keyword and the brace, `struct P { ... } __attribute__((packed));`
+010801:         // after the closing one. Both ranges are scanned back to back so the
+010802:         // alignment records they append stay one contiguous run.
+010803:         bool is_packed = false;
+010804:         u32 attribute_alignment_start = 0;
+010805:         u32 attribute_alignment_count = 0;
+010806:         u32 suffix_end = c_parse_skip_attributes(preprocess, close + 1, end);
+010807:         c_parse_layout_attributes(result, preprocess, aggregate_index + 1, open, &is_packed, &attribute_alignment_start, &attribute_alignment_count);
+010808:         {
+010809:             bool suffix_packed = false;
+010810:             u32 suffix_alignment_start = 0;
+010811:             u32 suffix_alignment_count = 0;
+010812:             c_parse_layout_attributes(result, preprocess, close + 1, suffix_end, &suffix_packed, &suffix_alignment_start, &suffix_alignment_count);
+010813:             is_packed |= suffix_packed;
+010814:             if (!attribute_alignment_count)
+010815:             {
+010816:                 attribute_alignment_start = suffix_alignment_start;
+010817:             }
+010818:             attribute_alignment_count += suffix_alignment_count;
+010819:         }
+010820:         if (is_packed || attribute_alignment_count)
+010821:         {
+010822:             // One entry per aggregate, rewritten rather than appended when
+010823:             // the definition is parsed again: the type machine rolls a
+010824:             // speculative parse back and retries it, and a table that grew on
+010825:             // every attempt could outrun the one-per-definition bound its
+010826:             // capacity is sized to and start dropping the answer.
+010827:             u32 record_index = 0;
+010828:             while (record_index < result->aggregate_attribute_count && result->aggregate_attributes[record_index].type_index != type.value)
+010829:             {
+010830:                 record_index += 1;
+010831:             }
+010832:             if (record_index < result->aggregate_attribute_count || result->aggregate_attribute_count < result->aggregate_attribute_capacity)
+010833:             {
+010834:                 result->aggregate_attribute_count += record_index == result->aggregate_attribute_count;
+010835:                 result->aggregate_attributes[record_index] = (CAggregateAttributes){
+010836:                     .type_index = type.value,
+010837:                     .alignment_start = attribute_alignment_start,
+010838:                     .alignment_count = attribute_alignment_count,
+010839:                     .is_packed = is_packed,
+010840:                 };
+010841:             }
+010842:         }
+010843:         frame->type = type;
+010844:         frame->original_type_id = type;
+010845:         frame->original_type_valid = true;
+010846:         frame->definition_type_start = definition_type_start;
+010847:         frame->pending_index = definition_type_start;
+010848:         frame->close = close;
+010849:         frame->has_function_suffix = true;
+010850:         *declarator_start = close + 1;
+010851:         return type;
+010852:     }
+010853:     aggregate = &result->types[type.value];
+010854:     aggregate->member_count = result->member_count - aggregate->member_start;
+010855:     aggregate->enum_member_count = result->enum_member_count - aggregate->enum_member_start;
+010856:     aggregate->is_complete = true;
+010857:     c_parse_validate_flexible_array_members(result, aggregate);
+010858:     u32 enum_declarator_start = close + 1;
+010859:     type = c_parse_apply_trailing_qualifiers(result, preprocess, type, &enum_declarator_start, end);
+010860:     *declarator_start = enum_declarator_start;
+010861:     return type;
+010862: }
+010863: 
+010864: BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end)
+010865: {
+010866:     while (*index < end && c_token_is_punctuator(&preprocess.tokens[*index], C_PUNCTUATOR_STAR))
+010867:     {
+010868:         *index += 1;
+010869:         CType pointer = {
+010870:             .element_type = base,
+010871:             .return_type = C_TYPE_ID_INVALID,
+010872:             .array_bound = C_ARRAY_BOUND_INVALID,
+010873:             .kind = C_TYPE_POINTER,
+010874:         };
+010875:         while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER)
+010876:         {
+010877:             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[*index]);
+010878:             if (c_parse_type_qualifier_word(spelling, &pointer))
+010879:             {
+010880:             }
+010881:             else if (string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
+010882:             {
+010883:                 /* Nullability affects diagnostics, not the C object
+010884:                    representation. */
+010885:             }
+010886:             else
+010887:             {
+010888:                 break;
+010889:             }
+010890:             *index += 1;
+010891:         }
+010892:         base = c_parse_add_type(result, pointer);
+010893:     }
+010894:     return base;
+010895: }
+010896: 
+010897: BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index)
+010898: {
+010899:     if (declarator_start >= end || !c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+010900:     {
+010901:         return false;
+010902:     }
+010903:     u32 index = declarator_start + 1;
+010904:     while (index < end)
+010905:     {
+010906:         while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
+010907:         {
+010908:             index += 1;
+010909:             CType ignored = {0};
+010910:             while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+010911:             {
+010912:                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+010913:                 if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
+010914:                     string_equal(spelling, S8("_Null_unspecified")))
+010915:                 {
+010916:                     index += 1;
+010917:                     continue;
+010918:                 }
+010919:                 break;
+010920:             }
+010921:         }
+010922:         // A declarator group may hold another one: the name of
+010923:         // `void (*(*xDlSym)(sqlite3_vfs*, void*, const char*))(void)` is two
+010924:         // groups deep, and it is still the one name the declarator declares.
+010925:         if (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+010926:         {
+010927:             index += 1;
+010928:             continue;
+010929:         }
+010930:         break;
+010931:     }
+010932:     // Parenthesized declarators may redundantly wrap a plain function name
+010933:     // (`extern int (f)(void)`) as well as a function pointer (`int (*f)`).
+010934:     // Requiring a `*` here drops the API declarations used by Lua and system
+010935:     // headers, leaving every call looking undeclared.
+010936:     if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+010937:     {
+010938:         return false;
+010939:     }
+010940:     *name_index = index;
+010941:     return true;
+010942: }
+010943: 
+010944: // Return the name of a parenthesized function declarator (`(f)(...)` or
+010945: // `(*f)(...)`).  The parser's declaration scan normally recognizes a function
+010946: // from the identifier immediately before its parameter list; a redundant
+010947: // pair of parentheses moves that identifier inside the first group, so keep
+010948: // this small shape test shared by the AST and semantic declaration passes.
+010949: BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+010950: {
+010951:     if (start >= end || !c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+010952:     {
+010953:         return false;
+010954:     }
+010955:     u32 candidate = 0;
+010956:     if (!c_parse_parenthesized_declarator_name(preprocess, start, end, &candidate))
+010957:     {
+010958:         return false;
+010959:     }
+010960:     u32 depth = 1;
+010961:     u32 close = start + 1;
+010962:     while (close < end && depth)
+010963:     {
+010964:         if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+010965:         {
+010966:             depth += 1;
+010967:         }
+010968:         else if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+010969:         {
+010970:             depth -= 1;
+010971:         }
+010972:         close += 1;
+010973:     }
+010974:     if (depth || close >= end || !c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+010975:     {
+010976:         return false;
+010977:     }
+010978:     *name_index = candidate;
+010979:     return true;
+010980: }

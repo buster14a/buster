@@ -1,0 +1,100 @@
+$ bash -lc git grep -n -E 'enum \{|enum [A-Za-z_].*\{' -- tests test src 2>/dev/null | sed -n '1,1200p' || true
+exit=0
+
+src/buster/apps/ide/ide.c:364:    enum { BENCHMARK_ITERATIONS = BUSTER_OPTIMIZE ? 30 : 5 };
+src/buster/apps/ide/selection_benchmark.h:92:    enum { SELECTION_BENCHMARK_ITERATIONS = BUSTER_OPTIMIZE ? 30 : 5 };
+src/buster/lib/compiler/assembly/arm_a64_canonical_import.c:1576:    enum { ARM_A64_FEATURE_STACK_CAPACITY = 64 };
+src/buster/lib/compiler/assembly/arm_a64_canonical_import.c:2538:                                   "typedef enum BusterAarch64ArmM1ScalarIntegerRecipe {\n"
+src/buster/lib/compiler/assembly/arm_a64_canonical_import.c:2553:                                   "typedef enum BusterAarch64ArmM1ScalarIntegerOperandKind {\n"
+src/buster/lib/compiler/assembly/arm_a64_canonical_import.c:2557:                                   "typedef enum BusterAarch64ArmM1ScalarIntegerRegister31Role {\n"
+src/buster/lib/compiler/assembly/arm_a64_canonical_import.c:2663:                                   "typedef enum BusterAarch64ArmM1GprRegister31Role {\n"
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:12:typedef enum BusterAarch64GeneratedCoverageClass {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:23:typedef enum BusterAarch64GeneratedEncoderFamily {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:37:typedef enum BusterAarch64GeneratedTestClass {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:49:typedef enum BusterAarch64GeneratedReason {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:72:typedef enum BusterAarch64GeneratedFieldTransform {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:83:typedef enum BusterAarch64GeneratedRelocationKind {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:93:typedef enum BusterAarch64GeneratedOperandKind {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:104:typedef enum BusterAarch64GeneratedAddressKind {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:116:enum {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:126:enum {
+src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h:134:enum {
+src/buster/lib/compiler/assembly/generated/arm-a64-m1-gpr.generated.h:7:typedef enum BusterAarch64ArmM1GprRegister31Role {
+src/buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h:7:typedef enum BusterAarch64ArmM1ScalarIntegerRecipe {
+src/buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h:23:typedef enum BusterAarch64ArmM1ScalarIntegerOperandKind {
+src/buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h:28:typedef enum BusterAarch64ArmM1ScalarIntegerRegister31Role {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:6:typedef enum BusterX86GeneratedCoverageClass {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:18:typedef enum BusterX86GeneratedPrefixKind {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:27:typedef enum BusterX86GeneratedMap {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:41:enum {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:68:typedef enum BusterX86GeneratedTupleKind {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:84:enum {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:95:enum {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:106:enum {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:115:enum {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:127:enum {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:134:typedef enum BusterX86GeneratedFieldSource {
+src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h:144:enum {
+src/buster/lib/compiler/driver/driver.c:2599:    enum { compiler_driver_preprocess_line_gap_cap = 8 };
+src/buster/lib/compiler/frontend/c/c_gen.c:8092:    enum { C_IR_MEMBER_SEARCH_LOCAL_CAPACITY = 32 };
+src/buster/lib/compiler/frontend/c/c_gen.c:38094:                // enumerators carry `=` of their own: `enum { LCASE = 1 << 0,
+src/buster/lib/compiler/frontend/c/c_parse.c:949:        // introduced it -- an `enum { ... }` body ends the scan with the range
+src/buster/lib/compiler/frontend/c/c_parse.c:1915:                            // `enum { N = 5, E = sizeof(int[N]) }` folds.
+src/buster/lib/compiler/frontend/c/c_parse.c:9919:// `enum { N = sizeof(table) / sizeof(table[0]) }`, whose failure used to
+src/buster/lib/compiler/frontend/c/c_parse.c:10531:        // `enum { E = (int)sizeof (struct S){1, 2}, F }` -- and splitting on
+src/buster/lib/compiler/frontend/c/c_parse.c:10563:            // `enum { A [[deprecated]] = 1, B [[deprecated]] }`. The commas
+src/buster/lib/compiler/frontend/c/c_source.c:290:        enum { C_SOURCE_MAP_RADIX_BITS = 8, C_SOURCE_MAP_RADIX_BUCKETS = 1 << C_SOURCE_MAP_RADIX_BITS };
+src/buster/lib/compiler/link/link.c:1393:        enum { INITIALIZER_RADIX_BITS = 8, INITIALIZER_RADIX_BUCKETS = 1 << INITIALIZER_RADIX_BITS };
+src/buster/lib/os.c:3412:    enum {OS_LINUX_PROCESS_GROUP_CENSUS_ATTEMPTS = 8};
+src/buster/lib/os.c:3563:    enum {OS_PROCESS_GROUP_CLEANUP_ATTEMPTS = 101};
+src/buster/lib/os.c:3611:    enum {OS_APPLE_PROCESS_GROUP_MEMBER_LIMIT = 4096};
+src/buster/lib/os.c:3739:    enum {OS_PROCESS_GROUP_RECOVERY_CAMPAIGNS = 4};
+src/buster/tests/compiler/codegen/codegen_test.c:1356:    enum { ROW_COUNT = 40000, VALUE_COUNT = 20000 };
+src/buster/tests/compiler/codegen/debug_location_block_start_test_internal.h:26:    enum { EXPECTATION_ASSERTION_COUNT = 10 };
+src/buster/tests/compiler/codegen/ebpf_test_internal.h:56:    enum { string_count = 65, local_function_count = string_count / 2 };
+src/buster/tests/compiler/codegen/ebpf_test_internal.h:650:            enum { pressure = 65 };
+src/buster/tests/compiler/codegen/machine_test.c:2042:    enum { BLOCK_COUNT = 7, ROW_COUNT = BLOCK_COUNT * 2, EDGE_COUNT = BLOCK_COUNT * 3, CASE_COUNT = BLOCK_COUNT * 3 };
+src/buster/tests/compiler/codegen/machine_test.c:6066:    enum { LOCAL_COUNT = 64 };
+src/buster/tests/compiler/codeview/codeview_test.c:24:    enum { MEMBER_COUNT = 4096, TYPE_BASE = 0x1000, MAX_RECORD = 0xff00 };
+src/buster/tests/compiler/driver/driver_test.c:5401:        enum { PIC_ARGUMENT_CAPACITY = 14 };
+src/buster/tests/compiler/driver/driver_test.c:5932:    String8 tag_prelude = S8("struct S { int a; int b; };\nunion U { int a; };\nenum E { A };\n");
+src/buster/tests/compiler/frontend/c/c_test.c:233:               "enum { COUNT = BUSTER_ARRAY_LENGTH(table) };\n"
+src/buster/tests/compiler/frontend/c/c_test.c:257:                            "enum { BROKEN = value };\n"
+src/buster/tests/compiler/frontend/c/c_test.c:463:           " enum { STATIC_LOCAL_INDEX = 7 };"
+src/buster/tests/compiler/frontend/c/c_test.c:959:    enum { MEMBER_SMALL, MEMBER_WIDE, MEMBER_DEEP, MEMBER_DIRECT_FIRST, MEMBER_DIRECT_LAST,
+src/buster/tests/compiler/frontend/c/c_test.c:6726:                                                                 "    typedef enum Local {\n"
+src/buster/tests/compiler/frontend/c/c_test.c:6847:                                                          S8("enum StaticValue {\n"
+src/buster/tests/compiler/frontend/c/c_test.c:7519:                                                            S8("enum NativeStrategy {\n"
+src/buster/tests/compiler/frontend/c/c_test.c:8379:                                                         "enum Direction {\n"
+src/buster/tests/compiler/frontend/c/c_test.c:8995:                                               "enum SizeofConstants {\n"
+src/buster/tests/compiler/frontend/c/c_test.c:11998:                                                          " enum { PICK = 1 };"
+src/buster/tests/compiler/frontend/c/c_test.c:13545:            ordinary_enum_temporary.arena, S8("enum { ORDINARY_ENUM = 41 + 1 };\n"), (CPreprocessOptions){0});
+src/buster/tests/compiler/frontend/c/c_test.c:13560:               "enum { GENERIC_ENUM = _Generic(1, int: 3, default: unselected()) };\n"
+src/buster/tests/compiler/frontend/c/c_test.c:14045:                            "enum { BASE_INDEX = 3 };\n"
+src/buster/tests/compiler/frontend/c/c_test.c:14657:    String8 source = S8("enum { even = 4 };"
+src/buster/tests/compiler/frontend/c/c_test.c:17397:    source_parts[source_part_count++] = S8("void constant_lookup(void) { enum { shadow = 1, ");
+src/buster/tests/compiler/frontend/c/c_test.c:17406:    source_parts[source_part_count++] = S8(" }; { enum { shadow = 2 }; (void)shadow; } }\n");
+src/buster/tests/compiler/frontend/c/c_test.c:18462:        {S8("enum E { VALUE = "), S8(" };\n")},
+src/buster/tests/compiler/frontend/c/c_test.c:18586:    enum { C_METRICS_COLLISION_PATH_COUNT = 600, C_METRICS_COLLISION_PATH_LENGTH = 7 };
+src/buster/tests/compiler/frontend/c/c_test.c:18906:                S8("struct S {{ int a; int b; }};\nunion U {{ int a; }};\nenum E {{ A }};\n{S8}"), declaration);
+src/buster/tests/compiler/frontend/c/c_test.c:18945:            S8("struct S {{ int a; int b; }};\nunion U {{ int a; }};\nenum E {{ A }};\n{S8}"), tag_recovered[recovery]);
+src/buster/tests/compiler/frontend/c/c_test.c:18976:            S8("struct S {{ int a; int b; }};\nunion U {{ int a; }};\nenum E {{ A }};\n{S8} v;\nint take(void) {{ return sizeof(v); }}\n"),
+src/buster/tests/compiler/frontend/c/c_test.c:19009:        S8("enum E { A };\nenum E { B };\nint following;\n"),
+src/buster/tests/compiler/ir/ir_complex_value_test.c:158:    enum { IR_COMPLEX_TEST_TERMS = 128 };
+src/buster/tests/compiler/ir/ir_test.c:1353:        enum { ABI_BENCH_REPETITIONS = 4096 };
+src/buster/tests/compiler/object/object_test.c:632:    enum { OBJECT_TEST_READER_ARENA_SIZE = 16384, OBJECT_TEST_READER_SENTINEL_SIZE = 16 };
+src/buster/tests/compiler/pdb/pdb_test.c:371:    enum { MEMBER_COUNT = 4096 };
+src/buster/tests/compiler/pdb/pdb_test.c:767:    enum { module_files = 32768, total_files = module_files * 2, name_stride = 8, checksum_stride = 8 };
+src/buster/tests/os_test.c:351:            enum { OS_TEST_THREAD_NAME_BOUNDARY = 15 };
+src/buster/tests/os_test.c:353:            enum { OS_TEST_THREAD_NAME_BOUNDARY = 63 };
+tests/basic_c_bool_aggregate_constants.c:2:enum { even = 4 };
+tests/basic_c_enum_sizeof_object.c:2:// type name: the array-length idiom `enum { N = sizeof(t) / sizeof(t[0]) }`
+tests/basic_c_inline_aggregate_sizeof.c:42:static const ulong anonymous_enum = sizeof(enum { inline_first, inline_second });
+tests/basic_c_local_enum_declarator.c:2:// carries a declarator: `enum { SECTION_NONE = 0, SECTION_CONFIG, ... }
+tests/basic_c_local_enum_declarator.c:38:    enum shift { SHIFT_ONE = 1, SHIFT_TWO } named = SHIFT_TWO;
+tests/basic_c_local_enum_declarator.c:39:    enum { INNER_A = 3, INNER_B } inner;
+tests/basic_c_macro_task_batches.c:27:enum { task_sum = TASK_256(TASK_VALUE) };
+tests/basic_c_vla.c:86:enum { bound_enumerator = 2 };
+tests/basic_stb_compat.c:72:    enum { table_count = 7 };
+tests/basic_zlib_compat.c:14:enum { ZLIB_COMPAT_CORPUS_SIZE = 131072 };
+tests/host_atomic_pair_contention.c:10:enum { THREADS = 4, UPDATES = 4096, MESSAGES = 2048, SC_ROUNDS = 512 };

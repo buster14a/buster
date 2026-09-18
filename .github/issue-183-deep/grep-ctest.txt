@@ -1,0 +1,4 @@
+$ bash -lc git grep -n -E 'add_test|ctest|BUILD_TESTING' -- CMakeLists.txt cmake tests test .github 2>/dev/null | sed -n '1,1600p' || true
+exit=0
+
+.github/workflows/issue-183-deep-inspect.yml:75:          command('grep-ctest.txt', ['bash', '-lc', "git grep -n -E 'add_test|ctest|BUILD_TESTING' -- CMakeLists.txt cmake tests test .github 2>/dev/null | sed -n '1,1600p' || true"])

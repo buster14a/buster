@@ -1,0 +1,126 @@
+path: src/buster/lib/compiler/frontend/c/c_internal.h
+needle: c_integer_expression_evaluate
+hits: [338]
+
+===== line 338 =====
+000298: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start,
+000299:                                                                                       u32 index)
+000300: {
+000301:     return index < preprocess->token_count && preprocess->tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND &&
+000302:            c_parse_label_address_prefix_proven(preprocess, expression_start, index);
+000303: }
+000304: BUSTER_C_EXTERN bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u32 start, u32 end);
+000305: BUSTER_C_EXTERN bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect);
+000306: BUSTER_C_EXTERN bool c_parse_type_start_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token);
+000307: typedef struct CSpellingSpace CSpellingSpace;
+000308: struct CSpellingSpace
+000309: {
+000310:     char8* base;
+000311:     u64 used;
+000312:     u64 capacity;
+000313:     Arena* arena;
+000314: };
+000315: BUSTER_C_EXTERN CSpellingSpace c_space_local(Arena* arena, u64 capacity);
+000316: BUSTER_C_EXTERN bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator);
+000317: // Punctuator sets the frontend asks about repeatedly (see c_punctuator_in_set
+000318: // in c.h). The parenthesis pair is what the two backward scans that look for
+000319: // a control-statement head classify on; the statement-boundary set is the
+000320: // punctuators that can precede a labelled statement without further proof.
+000321: #define C_PUNCTUATOR_SET_PARENTHESES (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS))
+000322: #define C_PUNCTUATOR_SET_STATEMENT_BOUNDARY                                                                                                    \
+000323:     (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SEMICOLON))
+000324: // The three nesting pairs a declarator scan tracks, split by side. Each side
+000325: // is three ids that are not adjacent in the enum — the pairs interleave — so
+000326: // a compare chain over one side does not fold into a range test the way the
+000327: // unary-operator chains do; these are the sets worth spelling as sets.
+000328: // Digraph spellings carry distinct ids and are absent here, exactly as the
+000329: // chains these replaced were written.
+000330: #define C_PUNCTUATOR_SET_DELIMITER_OPEN                                                                                                        \
+000331:     (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACE))
+000332: #define C_PUNCTUATOR_SET_DELIMITER_CLOSE                                                                                                       \
+000333:     (C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) |                                         \
+000334:      C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACE))
+000335: BUSTER_C_EXTERN u16 c_token_length_field(u64 length);
+000336: BUSTER_C_EXTERN CToken c_space_token(CSpellingSpace* space, String8 text, CTokenKind kind, CPunctuator punctuator);
+000337: BUSTER_C_EXTERN CToken c_space_retoken(CSpellingSpace* space, char8 const* from_base, CToken token);
+000338: BUSTER_C_EXTERN bool c_integer_expression_evaluate(Arena* arena, char8 const* spelling_base, CToken* tokens, u32 token_count, u32 expansion_limit,
+000339:                                                     CPreprocessResult* result, u64* value_out);
+000340: 
+000341: typedef struct CSymbolSlot CSymbolSlot;
+000342: typedef enum CSymbolBuiltin
+000343: {
+000344:     C_SYMBOL_BUILTIN_NONE,
+000345:     C_SYMBOL_BUILTIN_EXPECT,
+000346:     C_SYMBOL_BUILTIN_CONSTANT_P,
+000347:     C_SYMBOL_BUILTIN_CHOOSE_EXPR,
+000348:     C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P,
+000349:     C_SYMBOL_BUILTIN_OBJECT_SIZE,
+000350:     C_SYMBOL_BUILTIN_ASSUME_ALIGNED,
+000351:     C_SYMBOL_BUILTIN_DEBUGTRAP,
+000352:     C_SYMBOL_BUILTIN_SPIN_PAUSE,
+000353:     C_SYMBOL_BUILTIN_UNREACHABLE,
+000354:     C_SYMBOL_BUILTIN_STRLEN,
+000355:     C_SYMBOL_BUILTIN_CLEAR_CACHE,
+000356:     C_SYMBOL_BUILTIN_PREFETCH,
+000357:     C_SYMBOL_BUILTIN_VA_ARG,
+000358:     C_SYMBOL_BUILTIN_VA_START,
+000359:     C_SYMBOL_BUILTIN_VA_START_C23,
+000360:     C_SYMBOL_BUILTIN_VA_COPY,
+000361:     C_SYMBOL_BUILTIN_VA_END,
+000362:     C_SYMBOL_BUILTIN_GENERIC,
+000363:     C_SYMBOL_BUILTIN_ATOMIC,
+000364:     C_SYMBOL_BUILTIN_MATH,
+000365:     C_SYMBOL_BUILTIN_MEMORY,
+000366:     C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS,
+000367:     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
+000368:     C_SYMBOL_BUILTIN_POPULATION_COUNT,
+000369:     C_SYMBOL_BUILTIN_SIMD,
+000370:     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
+000371:     C_SYMBOL_BUILTIN_ALLOCA,
+000372:     C_SYMBOL_BUILTIN_COMPLEX,
+000373:     C_SYMBOL_BUILTIN_COUNT,
+000374: } CSymbolBuiltin;
+000375: BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
+000376: 
+000377: struct CSymbolTable
+000378: {
+000379:     Arena* arena;
+000380:     String8* names;
+000381:     CSymbolSlot* slots;
+000382:     u8* builtin_kinds;
+000383:     u8* class_bits;
+000384:     // Specifier-word facts per predefined id (C_WORD_* in c_parse.c), the
+000385:     // same dense shape as class_bits: every spelling any of the specifier
+000386:     // predicates can accept is interned into the predefined range at create
+000387:     // time, so `symbol > predefined_limit` is a constant-time "no" and the
+000388:     // id-keyed load replaces the spelling ladders for interned tokens.
+000389:     u16* word_bits;
+000390:     u32 predefined_limit;
+000391:     u32 slot_capacity;
+000392:     u32 name_capacity;
+000393:     u32 count;
+000394: };
+000395: 
+000396: // The names a pass compares an identifier token against by hand, and their
+000397: // interned ids. c_symbol_table_create interns this list first and in order,
+000398: // so an enumerator *is* the id its spelling was assigned: a comparison is
+000399: // `token.symbol == C_SYMBOL_WELL_KNOWN_FOR`, one immediate compare against a
+000400: // field the token already carries, in place of materializing the spelling
+000401: // through c_token_length's oversized guard and running string_equal.
+000402: // C_SYMBOL_WELL_KNOWN_NONE is 0 so it coincides with the uninterned marker,
+000403: // and the create-time BUSTER_CHECK holds the enum and the table together.
+000404: typedef enum CSymbolWellKnown
+000405: {
+000406:     C_SYMBOL_WELL_KNOWN_NONE,
+000407:     C_SYMBOL_WELL_KNOWN_CASE,
+000408:     C_SYMBOL_WELL_KNOWN_DEFAULT,
+000409:     C_SYMBOL_WELL_KNOWN_IF,
+000410:     C_SYMBOL_WELL_KNOWN_FOR,
+000411:     C_SYMBOL_WELL_KNOWN_WHILE,
+000412:     C_SYMBOL_WELL_KNOWN_SWITCH,
+000413:     C_SYMBOL_WELL_KNOWN_DO,
+000414:     C_SYMBOL_WELL_KNOWN_ELSE,
+000415:     C_SYMBOL_WELL_KNOWN_OVERLOADABLE,
+000416:     C_SYMBOL_WELL_KNOWN_STATIC_ASSERT,
+000417:     C_SYMBOL_WELL_KNOWN_BREAK,
+000418:     C_SYMBOL_WELL_KNOWN_CONTINUE,

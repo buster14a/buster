@@ -1,0 +1,94 @@
+$ bash -lc git grep -n '_Generic' -- ':!src/buster/lib/compiler/frontend/c/c_gen.c' || true
+exit=0
+
+.github/issue-183-context.txt:6723:                // discovery never looked inside _Generic, so its calls are
+.github/issue-183-context.txt:21347:-- needle '_Generic': 0 occurrence(s) --
+.github/issue-183-context.txt:21360:src/buster/lib/compiler/frontend/c/c_gen.c:45://   a conditional, the right side of && or ||, a _Generic association: that
+.github/issue-183-context.txt:21366:src/buster/lib/compiler/frontend/c/c_gen.c:16470:        !string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]), S8("_Generic")) ||
+.github/issue-183-context.txt:21367:src/buster/lib/compiler/frontend/c/c_gen.c:16481:        if (token.kind != C_TOKEN_IDENTIFIER || !string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Generic")) ||
+.github/issue-183-context.txt:21368:src/buster/lib/compiler/frontend/c/c_gen.c:16490:            builder->failure_message = S8("unterminated _Generic selection");
+.github/issue-183-context.txt:21369:src/buster/lib/compiler/frontend/c/c_gen.c:16566:            builder->failure_message = S8("_Generic requires a controlling expression and at least one association");
+.github/issue-183-context.txt:21370:src/buster/lib/compiler/frontend/c/c_gen.c:16574:            builder->failure_message = S8("could not determine the type of the _Generic controlling expression");
+.github/issue-183-context.txt:21371:src/buster/lib/compiler/frontend/c/c_gen.c:16633:                builder->failure_message = S8("expected 'type-name: expression' or 'default: expression' in _Generic association");
+.github/issue-183-context.txt:21372:src/buster/lib/compiler/frontend/c/c_gen.c:16644:                    builder->failure_message = S8("_Generic selection has more than one default association");
+.github/issue-183-context.txt:21373:src/buster/lib/compiler/frontend/c/c_gen.c:16659:                    builder->failure_message = S8("_Generic association requires a complete object type");
+.github/issue-183-context.txt:21374:src/buster/lib/compiler/frontend/c/c_gen.c:16668:                        builder->failure_message = S8("_Generic selection has multiple compatible type associations");
+.github/issue-183-context.txt:21375:src/buster/lib/compiler/frontend/c/c_gen.c:16694:            builder->failure_message = S8("_Generic controlling type matches more than one association");
+.github/issue-183-context.txt:21376:src/buster/lib/compiler/frontend/c/c_gen.c:16706:            builder->failure_message = S8("_Generic controlling type is not compatible with any association and no default was provided");
+.github/issue-183-context.txt:21377:src/buster/lib/compiler/frontend/c/c_gen.c:16716:            builder->failure_message = S8("could not determine the type of the selected _Generic association");
+.github/issue-183-context.txt:21378:src/buster/lib/compiler/frontend/c/c_gen.c:16974:                builder->failure_message = S8("unterminated _Generic selection");
+.github/issue-183-context.txt:21379:src/buster/lib/compiler/frontend/c/c_gen.c:18104:        // _Generic likewise owns the lowering of its selected expression.
+.github/issue-183-context.txt:21380:src/buster/lib/compiler/frontend/c/c_gen.c:18732:                // discovery never looked inside _Generic, so its calls are
+.github/issue-183-context.txt:21392:src/buster/lib/compiler/frontend/c/c_gen.c:45726:                string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Generic")) &&
+.github/issue-183-context.txt:21397:src/buster/lib/compiler/frontend/c/c_parse.c:3737:                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Generic")) &&
+.github/issue-183-context.txt:21398:src/buster/lib/compiler/frontend/c/c_parse.c:3900:                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+.github/issue-183-context.txt:21399:src/buster/lib/compiler/frontend/c/c_parse.c:3945:                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+.github/issue-183-context.txt:21400:src/buster/lib/compiler/frontend/c/c_parse.c:3957:// Flatten only selected _Generic associations into a compact token stream for
+.github/issue-183-context.txt:21401:src/buster/lib/compiler/frontend/c/c_parse.c:3960:// keep the original token view; only a range containing _Generic needs storage,
+.github/issue-183-context.txt:21403:src/buster/lib/compiler/frontend/c/c_parse.c:4545:             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic"))))
+.github/issue-183-context.txt:21415:src/buster/lib/compiler/frontend/c/c_parse.c:14832:// Declarations, `_Generic`, statement expressions and every other construct that can hold a `;`
+.github/issue-183-context.txt:21419:src/buster/lib/compiler/frontend/c/c_source.c:2891:    { S8_INITIALIZER("_Generic"), C_SYMBOL_BUILTIN_GENERIC },
+.github/issue-183-context.txt:21420:src/buster/lib/compiler/frontend/c/c_source.c:3216:    S8_INITIALIZER("_Atomic"),       S8_INITIALIZER("_Bool"),     S8_INITIALIZER("_Complex"),       S8_INITIALIZER("_Generic"),
+.github/issue-183-context/gen-emit-integer-52.txt:200:018732:                 // discovery never looked inside _Generic, so its calls are
+.github/issue-183-context/gen-emit-integer-53.txt:147:018732:                 // discovery never looked inside _Generic, so its calls are
+.github/workflows/issue-183-deep-inspect.yml:72:          command('grep-generic.txt', ['bash', '-lc', "git grep -n '_Generic' -- ':!src/buster/lib/compiler/frontend/c/c_gen.c' || true"])
+docs/agents/frontend/foundations.md:193:  materializes a stream when the expression contains a `_Generic` selection
+docs/agents/frontend/layout.md:156:  explicitly so `_Generic(+field)` and conditional arms agree with emitted
+docs/audits/2026-09-11-branch-recovery/semantic_stress.py.txt:50:        text = "int f(int x) {\n" + "x += _Generic(x, int:1, default:0);\n" * count + "return x; }\n"
+docs/performance-audits/2026-09-06T161430Z.md:141:`_Generic` probe testing the following `(` and then the interned builtin kind
+docs/performance-audits/2026-09-06T161430Z.md:143:`_Generic` (**-161,1 M**); the locals table keyed by entity through an
+docs/performance-audits/2026-09-07T220133Z.md:34:| Calls and overload-like selection | The active frontend is C-only; there is no active C++ overload-resolution pass to optimize. The suite exercises ordinary call/type compatibility, and the new generator stresses `_Generic`. Dormant experimental-language files are not evidence of an active overload engine. No selection or conversion rule is changed. |
+docs/performance-audits/2026-09-07T220133Z.md:85:many common-prefix symbols, C23 constants, `_Generic`, rejected out-of-scope
+docs/performance-audits/2026-09-07T220133Z.md:135:`_Generic` 33.510/33.373; invalid scope references 24.386/23.364. These
+docs/performance-audits/2026-09-13T131103Z.md:244:| Unevaluated operands | Type-only constraints that remain required, such as named-call arity | Unevaluated does not mean unchecked. VLA `sizeof`, `_Generic`, `typeof` and diagnostics cannot be handled by blanket skipping or eager evaluation. |
+docs/performance-audits/2026-09-13T131103Z.md:850:CONTROL={'if','for','while','switch','sizeof','_Alignof','alignof','__alignof__','__typeof__','__typeof','typeof','typeof_unqual','_Generic','_Static_assert','static_assert','__attribute__','__attribute'}
+docs/performance-audits/2026-09-17T233321Z.md:30:`_Generic`. A range without one returns the original token pointer and count;
+docs/performance-audits/2026-09-17T233321Z.md:74:- Existing nested `_Generic` constant-expression tests passed on both frontend
+src/buster/lib/compiler/frontend/c/c_parse.c:3737:                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Generic")) &&
+src/buster/lib/compiler/frontend/c/c_parse.c:3900:                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+src/buster/lib/compiler/frontend/c/c_parse.c:3945:                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+src/buster/lib/compiler/frontend/c/c_parse.c:3957:// Flatten only selected _Generic associations into a compact token stream for
+src/buster/lib/compiler/frontend/c/c_parse.c:3960:// keep the original token view; only a range containing _Generic needs storage,
+src/buster/lib/compiler/frontend/c/c_parse.c:4545:             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic"))))
+src/buster/lib/compiler/frontend/c/c_parse.c:14832:// Declarations, `_Generic`, statement expressions and every other construct that can hold a `;`
+src/buster/lib/compiler/frontend/c/c_source.c:2891:    { S8_INITIALIZER("_Generic"), C_SYMBOL_BUILTIN_GENERIC },
+src/buster/lib/compiler/frontend/c/c_source.c:3216:    S8_INITIALIZER("_Atomic"),       S8_INITIALIZER("_Bool"),     S8_INITIALIZER("_Complex"),       S8_INITIALIZER("_Generic"),
+src/buster/tests/compiler/driver/driver_test.c:1493:        {S8("int g(int x) { return _Generic(x, int: 1, int: 2); }\n"), false},
+src/buster/tests/compiler/frontend/c/c_test.c:4981:        {S8("_Generic"), 0},
+src/buster/tests/compiler/frontend/c/c_test.c:13500:                                                       " return _Generic(control++,"
+src/buster/tests/compiler/frontend/c/c_test.c:13503:                                                       " + _Generic(floating,"
+src/buster/tests/compiler/frontend/c/c_test.c:13559:               "_Static_assert(_Generic((float)0, float: 1, default: unselected()), \"generic static assertion\");\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13560:               "enum { GENERIC_ENUM = _Generic(1, int: 3, default: unselected()) };\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13561:               "static int generic_array[_Generic((double)0, int: unselected(), default: 2)];\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13562:               "static int generic_value = _Generic((float)0, float: 5, default: unselected());\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13563:               "static int generic_default = _Generic((double)0, int: unselected(), default: 11);\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13564:               "static int generic_nested = _Generic(1, int: _Generic(1.0, double: 13, default: unselected()), default: unselected());\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13565:               "int generic_case(int value) { switch (value) { case _Generic(1, int: 7, default: unselected()): return GENERIC_ENUM; default: return 0; } }\n"
+src/buster/tests/compiler/frontend/c/c_test.c:13590:            S8("_Static_assert(_Generic(1, int: 1, default: missing_identifier), \"unselected association\");\n"),
+src/buster/tests/compiler/frontend/c/c_test.c:13612:                                                           " return _Generic(nullptr,"
+src/buster/tests/compiler/frontend/c/c_test.c:14000:               " return _Generic(1,"
+src/buster/tests/compiler/frontend/c/c_test.c:14002:            S8("in function 'main': _Generic selection has more than one default association"),
+src/buster/tests/compiler/frontend/c/c_test.c:14006:               " return _Generic(1,"
+src/buster/tests/compiler/frontend/c/c_test.c:14008:            S8("in function 'main': _Generic selection has multiple compatible type associations"),
+src/buster/tests/compiler/frontend/c/c_test.c:14012:               " return _Generic(1.0, int: 1); }\n"),
+src/buster/tests/compiler/frontend/c/c_test.c:14013:            S8("in function 'main': _Generic controlling type is not compatible with any association and no default was provided"),
+src/buster/tests/compiler/frontend/c/c_test.c:14017:               " return _Generic(1, void: 1,"
+src/buster/tests/compiler/frontend/c/c_test.c:14019:            S8("in function 'main': _Generic association requires a complete object type"),
+tests/basic_c_bit_field_promotion.c:41:    result |= _Generic(+p->one, int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:42:    result |= _Generic(+p->three, int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:43:    result |= _Generic(+p->thirty_one, int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:44:    result |= _Generic(+p->full, unsigned int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:45:    result |= _Generic(+p->signed_three, int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:46:    result |= _Generic(+(nested->promoted), int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:47:    result |= _Generic(+((unsigned int)p->three), unsigned int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:53:    result |= _Generic(p->one ? p->three : p->one, int: 1, default: 0) != 1;
+tests/basic_c_bit_field_promotion.c:54:    result |= _Generic(+(0, p->three), int: 1, default: 0) != 1;
+tests/basic_c_dialect.c:51:    int generic_truth = _Generic(true, bool: 1, default: 0);
+tests/basic_c_generic.c:21:    int first = _Generic(control++, int: selected(), default: unselected());
+tests/basic_c_generic.c:22:    int second = _Generic(floating, int: unselected(), double: 23, default: (control ? unselected() : unselected()));
+tests/basic_c_generic.c:23:    int third = 3 + _Generic(pointer, int*: 29, default: unselected());
+tests/basic_c_generic.c:24:    int nested = _Generic(_Generic(floating, double: control, default: floating), int: 31, default: unselected());
+tests/basic_c_generic.c:25:    int string_type = _Generic("buster", char*: 37, default: unselected());
+tests/basic_c_nullptr.c:47:    if (_Generic(nullptr, nullptr_t: 1, default: 0) != 1)
+tests/basic_c_nullptr.c:51:    if (_Generic(pointer, nullptr_t: 0, int*: 1, default: 0) != 1)
+tests/basic_c_type_generic_math.c:2:// type-generic macros do not use `_Generic`: they pick a function with a

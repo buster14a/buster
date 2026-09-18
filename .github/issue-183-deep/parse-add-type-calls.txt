@@ -1,0 +1,1926 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: c_parse_add_type(
+hits: [2229, 2439, 2449, 2799, 2879, 3569, 4875, 4903, 5947, 5958, 6030, 6103, 6138, 6643, 6744, 7728, 8732, 9241, 9559, 10443, 10498, 10892, 11069, 11635, 12186, 12406, 13498, 13507, 13603, 13694, 17214]
+
+===== line 2229 =====
+002199: BUSTER_C_SHARED u32 c_parse_name_symbol(CParseResult* result, String8 name);
+002200: CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name, u32 token_index);
+002201: 
+002202: // A record's interned id, or the on-demand intern for one that carries none:
+002203: // a pasted, synthesized or test-built token, or a parse without a symbol
+002204: // table, where the intern answers 0 and the spelling-keyed fallback of every
+002205: // probe takes over.  The interned answer is the field itself, so the common
+002206: // case is no call at all.
+002207: BUSTER_C_INTERNAL u32 c_parse_symbol_or_intern(CParseResult* result, u32 symbol, String8 name)
+002208: {
+002209:     return symbol ? symbol : c_parse_name_symbol(result, name);
+002210: }
+002211: 
+002212: BUSTER_C_INTERNAL u32 c_parse_token_symbol(CParseResult* result, char8 const* spelling_base, CToken token)
+002213: {
+002214:     return c_parse_symbol_or_intern(result, token.symbol, c_token_spelling(spelling_base, token));
+002215: }
+002216: 
+002217: // Resolve an identifier token's entity: interned tokens skip the name hash
+002218: // entirely, symbol-less tokens intern on demand so the symbol-keyed buckets
+002219: // stay authoritative.
+002220: BUSTER_C_SHARED CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base, CScopeId scope, CToken const* token)
+002221: {
+002222:     String8 spelling = c_token_spelling(spelling_base, *token);
+002223:     return c_parse_lookup_entity_symbol(result, scope, c_parse_symbol_or_intern(result, token->symbol, spelling), spelling);
+002224: }
+002225: 
+002226: BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_at_symbol(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 symbol, String8 name,
+002227:                                                              u32 token_index);
+002228: 
+002229: BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type);
+002230: 
+002231: BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id);
+002232: BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type);
+002233: BUSTER_C_INTERNAL CTypeId c_parse_adjust_parameter_type(CParseResult* result, CTypeId type);
+002234: BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+002235:                                                           CTypeId return_type, u32 open, u32 end, u32* index_out);
+002236: 
+002237: BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end);
+002238: 
+002239: // Shared by evaluated calls and type-only operand checking. A prototype fixes
+002240: // the count, a variadic prototype sets a floor, and the pre-C23 unprototyped
+002241: // form has no declared parameters. The dialect is already recorded in CType.
+002242: BUSTER_C_SHARED bool c_semantic_call_accepts_arity(u32 parameter_count, bool is_variadic, bool is_unprototyped, u32 argument_count)
+002243: {
+002244:     bool result = is_variadic || is_unprototyped ? argument_count >= parameter_count : argument_count == parameter_count;
+002245:     return result;
+002246: }
+002247: 
+002248: BUSTER_C_SHARED String8 c_semantic_call_arity_message(Arena* arena, String8 name, u32 parameter_count, bool is_variadic, u32 argument_count)
+002249: {
+002250:     if (!name.length)
+002251:     {
+002252:         name = S8("<function pointer>");
+002253:     }
+002254:     String8 direction = argument_count > parameter_count ? S8("too many") : S8("too few");
+002255:     String8 result;
+002256:     if (!parameter_count && !is_variadic)
+002257:     {
+002258:         result = string_format(arena, S8("{S8} arguments in the call to '{S8}': it declares no parameters"), direction, name);
+002259:     }
+===== line 2439 =====
+002409:     {S8_INITIALIZER("__builtin_ia32_selectsbf_128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_BFLOAT16, 8}, {C_TYPE_BFLOAT16, 8}}, 3},
+002410:     {S8_INITIALIZER("__builtin_ia32_selectps_128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_FLOAT, 4}, {C_TYPE_FLOAT, 4}}, 3},
+002411:     {S8_INITIALIZER("__builtin_ia32_selectps_256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_UNSIGNED_CHAR}, {C_TYPE_FLOAT, 8}, {C_TYPE_FLOAT, 8}}, 3},
+002412:     {S8_INITIALIZER("__builtin_ia32_selectps_512"), {{C_TYPE_FLOAT, 16}, {C_TYPE_UNSIGNED_SHORT}, {C_TYPE_FLOAT, 16}, {C_TYPE_FLOAT, 16}}, 3},
+002413:     {S8_INITIALIZER("__builtin_ia32_vbcstnebf162ps128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 0, true}}, 1},
+002414:     {S8_INITIALIZER("__builtin_ia32_vbcstnebf162ps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 0, true}}, 1},
+002415:     {S8_INITIALIZER("__builtin_ia32_vcvtneebf162ps128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 8, true}}, 1},
+002416:     {S8_INITIALIZER("__builtin_ia32_vcvtneebf162ps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 16, true}}, 1},
+002417:     {S8_INITIALIZER("__builtin_ia32_vcvtneobf162ps128"), {{C_TYPE_FLOAT, 4}, {C_TYPE_BFLOAT16, 8, true}}, 1},
+002418:     {S8_INITIALIZER("__builtin_ia32_vcvtneobf162ps256"), {{C_TYPE_FLOAT, 8}, {C_TYPE_BFLOAT16, 16, true}}, 1},
+002419:     {S8_INITIALIZER("__builtin_ia32_vcvtneps2bf16128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 4}}, 1},
+002420:     {S8_INITIALIZER("__builtin_ia32_vcvtneps2bf16256"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 8}}, 1},
+002421: };
+002422: 
+002423: BUSTER_C_INTERNAL CBfloat16Builtin const* c_parse_bfloat16_builtin(String8 name)
+002424: {
+002425:     CBfloat16Builtin const* result = 0;
+002426:     if (string_starts_with_sequence(name, S8("__builtin_ia32_")))
+002427:     {
+002428:         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_bfloat16_builtins) && !result; index += 1)
+002429:         {
+002430:             if (string_equal(name, c_bfloat16_builtins[index].name)) result = c_bfloat16_builtins + index;
+002431:         }
+002432:     }
+002433:     return result;
+002434: }
+002435: 
+002436: BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, CBfloat16Builtin const* builtin)
+002437: {
+002438:     CBfloat16BuiltinType shape = builtin->types[0];
+002439:     CTypeId type = c_parse_add_type(result, (CType){
+002440:         .element_type = C_TYPE_ID_INVALID,
+002441:         .return_type = C_TYPE_ID_INVALID,
+002442:         .unqualified_type = C_TYPE_ID_INVALID,
+002443:         .array_bound = C_ARRAY_BOUND_INVALID,
+002444:         .kind = shape.kind,
+002445:         .is_complete = true,
+002446:     });
+002447:     if (shape.lanes && type.value < result->type_count)
+002448:     {
+002449:         type = c_parse_add_type(result, (CType){
+002450:             .element_type = type,
+002451:             .return_type = C_TYPE_ID_INVALID,
+002452:             .unqualified_type = C_TYPE_ID_INVALID,
+002453:             .array_bound = C_ARRAY_BOUND_INVALID,
+002454:             .kind = C_TYPE_VECTOR,
+002455:             .vector_byte_size = (u32)shape.lanes * (shape.kind == C_TYPE_FLOAT ? 4u : 2u),
+002456:             .is_complete = true,
+002457:         });
+002458:     }
+002459:     return type;
+002460: }
+002461: 
+002462: BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+002463:                                                          u32 base_start, u32 base_end)
+002464: {
+002465:     CTypeId type = C_TYPE_ID_INVALID;
+002466:     bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
+002467:                      c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+002468:                      c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+002469:     if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
+===== line 2449 =====
+002419:     {S8_INITIALIZER("__builtin_ia32_vcvtneps2bf16128"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 4}}, 1},
+002420:     {S8_INITIALIZER("__builtin_ia32_vcvtneps2bf16256"), {{C_TYPE_BFLOAT16, 8}, {C_TYPE_FLOAT, 8}}, 1},
+002421: };
+002422: 
+002423: BUSTER_C_INTERNAL CBfloat16Builtin const* c_parse_bfloat16_builtin(String8 name)
+002424: {
+002425:     CBfloat16Builtin const* result = 0;
+002426:     if (string_starts_with_sequence(name, S8("__builtin_ia32_")))
+002427:     {
+002428:         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_bfloat16_builtins) && !result; index += 1)
+002429:         {
+002430:             if (string_equal(name, c_bfloat16_builtins[index].name)) result = c_bfloat16_builtins + index;
+002431:         }
+002432:     }
+002433:     return result;
+002434: }
+002435: 
+002436: BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, CBfloat16Builtin const* builtin)
+002437: {
+002438:     CBfloat16BuiltinType shape = builtin->types[0];
+002439:     CTypeId type = c_parse_add_type(result, (CType){
+002440:         .element_type = C_TYPE_ID_INVALID,
+002441:         .return_type = C_TYPE_ID_INVALID,
+002442:         .unqualified_type = C_TYPE_ID_INVALID,
+002443:         .array_bound = C_ARRAY_BOUND_INVALID,
+002444:         .kind = shape.kind,
+002445:         .is_complete = true,
+002446:     });
+002447:     if (shape.lanes && type.value < result->type_count)
+002448:     {
+002449:         type = c_parse_add_type(result, (CType){
+002450:             .element_type = type,
+002451:             .return_type = C_TYPE_ID_INVALID,
+002452:             .unqualified_type = C_TYPE_ID_INVALID,
+002453:             .array_bound = C_ARRAY_BOUND_INVALID,
+002454:             .kind = C_TYPE_VECTOR,
+002455:             .vector_byte_size = (u32)shape.lanes * (shape.kind == C_TYPE_FLOAT ? 4u : 2u),
+002456:             .is_complete = true,
+002457:         });
+002458:     }
+002459:     return type;
+002460: }
+002461: 
+002462: BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+002463:                                                          u32 base_start, u32 base_end)
+002464: {
+002465:     CTypeId type = C_TYPE_ID_INVALID;
+002466:     bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
+002467:                      c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+002468:                      c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+002469:     if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
+002470:     {
+002471:         CEntityId entity_id = C_ENTITY_ID_INVALID;
+002472:         u32 base_use_index = c_parse_identifier_use_index(result, base_start);
+002473:         if (base_use_index != C_ID_UNDERLYING_INVALID)
+002474:         {
+002475:             entity_id = result->identifier_uses[base_use_index].entity;
+002476:         }
+002477:         CScopeId lookup_scope = scope;
+002478:         if (lookup_scope.value == C_ID_UNDERLYING_INVALID && result->scope_count)
+002479:         {
+===== line 2799 =====
+002769:         CParseDirectExpressionFrame frame = frames[--frame_count];
+002770:         if (frame.comma)
+002771:         {
+002772:             type = c_parse_auto_decay_type(result, type);
+002773:         }
+002774:         type = c_parse_direct_expression_postfix(scratch, preprocess, result, type, frame.postfix, frame.end);
+002775:         u32 synthetic_pointer_depth = 0;
+002776:         for (u32 prefix = frame.prefix_end; prefix > frame.prefix_mark && type.value != C_ID_UNDERLYING_INVALID;)
+002777:         {
+002778:             u8 operation = prefixes[--prefix];
+002779:             if (operation == '&')
+002780:             {
+002781:                 synthetic_pointer_depth += 1;
+002782:             }
+002783:             else if (synthetic_pointer_depth)
+002784:             {
+002785:                 synthetic_pointer_depth -= 1;
+002786:             }
+002787:             else if (type.value < result->type_count &&
+002788:                      (result->types[type.value].kind == C_TYPE_POINTER || result->types[type.value].kind == C_TYPE_ARRAY))
+002789:             {
+002790:                 type = result->types[type.value].element_type;
+002791:             }
+002792:             else
+002793:             {
+002794:                 type = C_TYPE_ID_INVALID;
+002795:             }
+002796:         }
+002797:         while (synthetic_pointer_depth && type.value != C_ID_UNDERLYING_INVALID)
+002798:         {
+002799:             type = c_parse_add_type(result, (CType){
+002800:                 .element_type = type,
+002801:                 .return_type = C_TYPE_ID_INVALID,
+002802:                 .array_bound = C_ARRAY_BOUND_INVALID,
+002803:                 .kind = C_TYPE_POINTER,
+002804:             });
+002805:             synthetic_pointer_depth -= 1;
+002806:         }
+002807:     }
+002808:     bool valid = type.value != C_ID_UNDERLYING_INVALID;
+002809:     if (valid)
+002810:     {
+002811:         *type_out = type;
+002812:     }
+002813:     scratch_end(temporary);
+002814:     return valid;
+002815: }
+002816: 
+002817: BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start, u32 end,
+002818:                                                      CTypeId* type_out)
+002819: {
+002820:     BUSTER_UNUSED(arena);
+002821:     TemporalArena temporary = scratch_begin(&result->arena, 1);
+002822:     bool valid = c_parse_direct_expression_type_core(temporary.arena, preprocess, result, scope, start, end, type_out);
+002823:     scratch_end(temporary);
+002824:     return valid;
+002825: }
+002826: 
+002827: #if BUSTER_INCLUDE_TESTS
+002828: bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end, CTypeId* type_out)
+002829: {
+===== line 2879 =====
+002849:     u64 delimiters = C_PUNCTUATOR_BIT(opening) | C_PUNCTUATOR_BIT(closing);
+002850:     u32 depth = 0;
+002851:     for (u32 index = open; index < end; index += 1)
+002852:     {
+002853:         u8 punctuator = preprocess.tokens[index].punctuator;
+002854:         if (c_punctuator_in_set(punctuator, delimiters))
+002855:         {
+002856:             if (punctuator == opening)
+002857:             {
+002858:                 depth += 1;
+002859:             }
+002860:             else
+002861:             {
+002862:                 if (!depth)
+002863:                 {
+002864:                     return end;
+002865:                 }
+002866:                 depth -= 1;
+002867:                 if (!depth)
+002868:                 {
+002869:                     return index;
+002870:                 }
+002871:             }
+002872:         }
+002873:     }
+002874:     return end;
+002875: }
+002876: 
+002877: BUSTER_C_INTERNAL CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind)
+002878: {
+002879:     return c_parse_add_type(result, (CType){
+002880:                                         .element_type = C_TYPE_ID_INVALID,
+002881:                                         .return_type = C_TYPE_ID_INVALID,
+002882:                                         .unqualified_type = C_TYPE_ID_INVALID,
+002883:                                         .array_bound = C_ARRAY_BOUND_INVALID,
+002884:                                         .kind = kind,
+002885:                                         .is_complete = true,
+002886:                                     });
+002887: }
+002888: 
+002889: BUSTER_C_INTERNAL bool c_parse_expression_integer_kind(CTypeKind kind)
+002890: {
+002891:     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+002892:            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
+002893:            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
+002894: }
+002895: 
+002896: BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind)
+002897: {
+002898:     return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+002899:            kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+002900: }
+002901: 
+002902: BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
+002903: {
+002904:     switch (kind)
+002905:     {
+002906:     case C_TYPE_CHAR:
+002907:     case C_TYPE_SIGNED_CHAR:
+002908:     case C_TYPE_UNSIGNED_CHAR:
+002909:         return C_TYPE_UNSIGNED_CHAR;
+===== line 3569 =====
+003539:             else if (result->types[last.value].kind == C_TYPE_VECTOR)
+003540:             {
+003541:                 CTypeId element = result->types[last.value].element_type;
+003542:                 CTypeKind kind = element.value < result->type_count ? result->types[element.value].kind : C_TYPE_INVALID;
+003543:                 bool complement = c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_TILDE);
+003544:                 bool valid = complement ? c_parse_expression_integer_kind(kind) : c_parse_expression_real_kind(kind);
+003545:                 // GNU vector +/- preserve the vector type, not a promoted
+003546:                 // scalar element. This is used by FMA's negated arguments.
+003547:                 if (!valid) last = C_TYPE_ID_INVALID;
+003548:             }
+003549:             else
+003550:             {
+003551:                 CTypeKind kind = result->types[last.value].kind;
+003552:                 kind = c_parse_expression_promoted_kind(kind);
+003553:                 last = (c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
+003554:                         kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE)
+003555:                            ? c_parse_expression_scalar_type(result, kind)
+003556:                            : C_TYPE_ID_INVALID;
+003557:             }
+003558:             task_count -= 1;
+003559:             continue;
+003560:         }
+003561:         if (task->operation == C_PARSE_EXPRESSION_TYPE_INDIRECTION || task->operation == C_PARSE_EXPRESSION_TYPE_ADDRESS_OF)
+003562:         {
+003563:             if (last.value >= result->type_count)
+003564:             {
+003565:                 last = C_TYPE_ID_INVALID;
+003566:             }
+003567:             else if (task->operation == C_PARSE_EXPRESSION_TYPE_ADDRESS_OF)
+003568:             {
+003569:                 last = c_parse_add_type(result, (CType){
+003570:                                                     .element_type = last,
+003571:                                                     .return_type = C_TYPE_ID_INVALID,
+003572:                                                     .array_bound = C_ARRAY_BOUND_INVALID,
+003573:                                                     .kind = C_TYPE_POINTER,
+003574:                                                 });
+003575:             }
+003576:             else
+003577:             {
+003578:                 CType* pointer = result->types + last.value;
+003579:                 last = pointer->kind == C_TYPE_POINTER || pointer->kind == C_TYPE_ARRAY ? pointer->element_type : C_TYPE_ID_INVALID;
+003580:             }
+003581:             task_count -= 1;
+003582:             continue;
+003583:         }
+003584:         if (task->state == 1)
+003585:         {
+003586:             task->left_type = last;
+003587:             task->state = 2;
+003588:             u32 right_start = task->operation == C_PARSE_EXPRESSION_TYPE_CONDITIONAL ? task->colon + 1 : task->split + 1;
+003589:             if (task_count >= capacity)
+003590:             {
+003591:                 last = C_TYPE_ID_INVALID;
+003592:                 break;
+003593:             }
+003594:             tasks[task_count++] = (CParseExpressionTypeTask){
+003595:                 .start = right_start,
+003596:                 .end = task->end,
+003597:             };
+003598:             continue;
+003599:         }
+===== line 4875 =====
+004845: 
+004846:    The type is *copied* first, always, even when the declarator built it: a
+004847:    declarator that merely names an existing type -- `typedef int raised
+004848:    __attribute__((aligned(16)));` names the one builtin `int` -- would
+004849:    otherwise realign every other declaration in the translation unit written
+004850:    with that type.  This is the anti-infection guard
+004851:    c_parse_noreturn_candidate_function_type applies to the noreturn marker,
+004852:    taken one step further: the copy is unconditional because the layout engines
+004853:    want one place to read the natural alignment from, and pointing every
+004854:    aligned alias at the type it aliases gives them that.
+004855: 
+004856:    The copy carries `has_unqualified_type`, which is what makes the alias
+004857:    behave as a variant of the original everywhere else: type compatibility
+004858:    strips back to the same unqualified type, and both layout engines already
+004859:    have an alias branch to hang the replaced alignment off.  A request that
+004860:    cannot be recorded leaves the type as it was, which is the alignment the
+004861:    declaration had before this ran. */
+004862: BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CTypeId type, u32 alignment_start, u32 alignment_count)
+004863: {
+004864:     if (!result || !alignment_count || type.value >= result->type_count)
+004865:     {
+004866:         return type;
+004867:     }
+004868:     if (!c_parse_reserve_type_alignment(result))
+004869:     {
+004870:         return type;
+004871:     }
+004872:     CType alias = result->types[type.value];
+004873:     alias.unqualified_type = alias.has_unqualified_type ? alias.unqualified_type : type;
+004874:     alias.has_unqualified_type = true;
+004875:     CTypeId aligned = c_parse_add_type(result, alias);
+004876:     if (aligned.value == C_ID_UNDERLYING_INVALID)
+004877:     {
+004878:         return type;
+004879:     }
+004880:     result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
+004881:         .type_index = aligned.value,
+004882:         .alignment_start = alignment_start,
+004883:         .alignment_count = alignment_count,
+004884:     };
+004885: 
+004886:     return aligned;
+004887: }
+004888: 
+004889: BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
+004890: {
+004891:     CIrDecodedString decoded = {0};
+004892:     if (!c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded) || decoded.element_count == UINT64_MAX ||
+004893:         !c_parse_result_reserve_array_bounds(result, 1))
+004894:     {
+004895:         return C_TYPE_ID_INVALID;
+004896:     }
+004897:     CTypeId element = c_parse_expression_scalar_type(result, decoded.element_kind);
+004898:     u32 bound_index = result->array_bound_count++;
+004899:     result->array_bounds[bound_index] = (CArrayBound){
+004900:         .inferred_count = decoded.element_count + 1,
+004901:         .has_inferred_count = true,
+004902:     };
+004903:     return c_parse_add_type(result, (CType){
+004904:                                         .element_type = element,
+004905:                                         .return_type = C_TYPE_ID_INVALID,
+===== line 4903 =====
+004873:     alias.unqualified_type = alias.has_unqualified_type ? alias.unqualified_type : type;
+004874:     alias.has_unqualified_type = true;
+004875:     CTypeId aligned = c_parse_add_type(result, alias);
+004876:     if (aligned.value == C_ID_UNDERLYING_INVALID)
+004877:     {
+004878:         return type;
+004879:     }
+004880:     result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
+004881:         .type_index = aligned.value,
+004882:         .alignment_start = alignment_start,
+004883:         .alignment_count = alignment_count,
+004884:     };
+004885: 
+004886:     return aligned;
+004887: }
+004888: 
+004889: BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
+004890: {
+004891:     CIrDecodedString decoded = {0};
+004892:     if (!c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded) || decoded.element_count == UINT64_MAX ||
+004893:         !c_parse_result_reserve_array_bounds(result, 1))
+004894:     {
+004895:         return C_TYPE_ID_INVALID;
+004896:     }
+004897:     CTypeId element = c_parse_expression_scalar_type(result, decoded.element_kind);
+004898:     u32 bound_index = result->array_bound_count++;
+004899:     result->array_bounds[bound_index] = (CArrayBound){
+004900:         .inferred_count = decoded.element_count + 1,
+004901:         .has_inferred_count = true,
+004902:     };
+004903:     return c_parse_add_type(result, (CType){
+004904:                                         .element_type = element,
+004905:                                         .return_type = C_TYPE_ID_INVALID,
+004906:                                         .unqualified_type = C_TYPE_ID_INVALID,
+004907:                                         .array_bound = bound_index,
+004908:                                         .kind = C_TYPE_ARRAY,
+004909:                                         .is_complete = true,
+004910:                                     });
+004911: }
+004912: 
+004913: typedef struct CParseInitializerInferenceFrame CParseInitializerInferenceFrame;
+004914: struct CParseInitializerInferenceFrame
+004915: {
+004916:     CTypeId type;
+004917:     CTypeId element_type;
+004918:     u32 cursor;
+004919:     u32 limit;
+004920:     u64 next_index;
+004921:     bool borrowed;
+004922:     bool root;
+004923: };
+004924: 
+004925: typedef struct CParseInitializerInferenceDesignator CParseInitializerInferenceDesignator;
+004926: struct CParseInitializerContinuation
+004927: {
+004928:     CTypeId type;
+004929:     u64 next_index;
+004930: };
+004931: 
+004932: struct CParseInitializerInferenceDesignator
+004933: {
+===== line 5947 =====
+005917:             if (!lookup->incomplete)
+005918:             {
+005919:                 lookup->fill += 1;
+005920:                 *slot = (CAggregateLookupSlot){
+005921:                     .tag = type->tag,
+005922:                     .kind = (u32)type->kind,
+005923:                     .type_index = id.value,
+005924:                     .used = true,
+005925:                 };
+005926:             }
+005927:         }
+005928:     }
+005929: }
+005930: 
+005931: // Builtin identity belongs to the type, so every typedef spelling shares it.
+005932: BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
+005933: {
+005934:     CTypeId type = C_TYPE_ID_INVALID;
+005935:     for (u32 index = 0; index < result->type_count; index += 1)
+005936:     {
+005937:         CType* candidate = result->types + index;
+005938:         if (candidate->kind == C_TYPE_VA_LIST && !candidate->is_const && !candidate->is_volatile &&
+005939:             !candidate->is_restrict && !candidate->is_atomic && !candidate->has_unqualified_type)
+005940:         {
+005941:             type = (CTypeId){.value = index};
+005942:             break;
+005943:         }
+005944:     }
+005945:     if (type.value == C_ID_UNDERLYING_INVALID)
+005946:     {
+005947:         type = c_parse_add_type(result, (CType){
+005948:             .element_type = C_TYPE_ID_INVALID,
+005949:             .return_type = C_TYPE_ID_INVALID,
+005950:             .array_bound = C_ARRAY_BOUND_INVALID,
+005951:             .kind = C_TYPE_VA_LIST,
+005952:             .is_complete = true,
+005953:         });
+005954:     }
+005955:     return type;
+005956: }
+005957: 
+005958: BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
+005959: {
+005960:     if (!c_parse_result_reserve_types(result, 1))
+005961:     {
+005962:         return C_TYPE_ID_INVALID;
+005963:     }
+005964:     CTypeId id = {
+005965:         .value = result->type_count,
+005966:     };
+005967:     result->types[result->type_count++] = type;
+005968:     c_parse_aggregate_lookup_insert(result, id);
+005969:     return id;
+005970: }
+005971: 
+005972: BUSTER_C_SHARED bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out)
+005973: {
+005974:     if (!machine || !result || !type_out || type.value >= result->type_count)
+005975:     {
+005976:         return false;
+005977:     }
+===== line 5958 =====
+005928:     }
+005929: }
+005930: 
+005931: // Builtin identity belongs to the type, so every typedef spelling shares it.
+005932: BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
+005933: {
+005934:     CTypeId type = C_TYPE_ID_INVALID;
+005935:     for (u32 index = 0; index < result->type_count; index += 1)
+005936:     {
+005937:         CType* candidate = result->types + index;
+005938:         if (candidate->kind == C_TYPE_VA_LIST && !candidate->is_const && !candidate->is_volatile &&
+005939:             !candidate->is_restrict && !candidate->is_atomic && !candidate->has_unqualified_type)
+005940:         {
+005941:             type = (CTypeId){.value = index};
+005942:             break;
+005943:         }
+005944:     }
+005945:     if (type.value == C_ID_UNDERLYING_INVALID)
+005946:     {
+005947:         type = c_parse_add_type(result, (CType){
+005948:             .element_type = C_TYPE_ID_INVALID,
+005949:             .return_type = C_TYPE_ID_INVALID,
+005950:             .array_bound = C_ARRAY_BOUND_INVALID,
+005951:             .kind = C_TYPE_VA_LIST,
+005952:             .is_complete = true,
+005953:         });
+005954:     }
+005955:     return type;
+005956: }
+005957: 
+005958: BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
+005959: {
+005960:     if (!c_parse_result_reserve_types(result, 1))
+005961:     {
+005962:         return C_TYPE_ID_INVALID;
+005963:     }
+005964:     CTypeId id = {
+005965:         .value = result->type_count,
+005966:     };
+005967:     result->types[result->type_count++] = type;
+005968:     c_parse_aggregate_lookup_insert(result, id);
+005969:     return id;
+005970: }
+005971: 
+005972: BUSTER_C_SHARED bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out)
+005973: {
+005974:     if (!machine || !result || !type_out || type.value >= result->type_count)
+005975:     {
+005976:         return false;
+005977:     }
+005978:     u32 capacity = machine->incomplete_array_chain_capacity;
+005979:     CTypeId* chain = machine->incomplete_array_chain;
+005980:     if (!capacity || !chain)
+005981:     {
+005982:         return false;
+005983:     }
+005984:     u32 chain_count = 0;
+005985:     bool incomplete = false;
+005986:     CTypeId current = type;
+005987:     while (current.value < result->type_count && result->types[current.value].kind == C_TYPE_ARRAY)
+005988:     {
+===== line 6030 =====
+006000:     }
+006001:     if (!incomplete)
+006002:     {
+006003:         *type_out = type;
+006004:         return true;
+006005:     }
+006006:     u32 incomplete_count = 0;
+006007:     for (u32 index = 0; index < chain_count; index += 1)
+006008:     {
+006009:         CType* array = result->types + chain[index].value;
+006010:         incomplete_count += array->array_bound < result->array_bound_count && c_parse_type_is_incomplete_array(result, chain[index]);
+006011:     }
+006012:     if (!c_parse_result_reserve_types(result, chain_count) || !c_parse_result_reserve_array_bounds(result, incomplete_count))
+006013:     {
+006014:         return false;
+006015:     }
+006016:     CTypeId cloned_element = current;
+006017:     for (u32 reverse = chain_count; reverse; reverse -= 1)
+006018:     {
+006019:         CType original = result->types[chain[reverse - 1].value];
+006020:         CType copy = original;
+006021:         copy.element_type = cloned_element;
+006022:         if (c_parse_type_is_incomplete_array(result, chain[reverse - 1]))
+006023:         {
+006024:             u32 bound_index = result->array_bound_count++;
+006025:             result->array_bounds[bound_index] = result->array_bounds[original.array_bound];
+006026:             result->array_bounds[bound_index].has_inferred_count = false;
+006027:             result->array_bounds[bound_index].inferred_count = 0;
+006028:             copy.array_bound = bound_index;
+006029:         }
+006030:         cloned_element = c_parse_add_type(result, copy);
+006031:         if (cloned_element.value == C_ID_UNDERLYING_INVALID)
+006032:         {
+006033:             return false;
+006034:         }
+006035:     }
+006036:     *type_out = cloned_element;
+006037:     return true;
+006038: }
+006039: 
+006040: /* Whether adding `_Atomic` to `base` takes an alignment request `base` carries
+006041:    away from the type the step builds.  It is the one place the two reference
+006042:    compilers disagree: Clang treats `_Atomic T` as *constructing* a type rather
+006043:    than qualifying one, so `typedef int cache_line __attribute__((aligned(64)))`
+006044:    gives `_Atomic cache_line` the alignment an atomic of that width gets (4),
+006045:    while GCC keeps the alias's 64.  Clang is this repository's oracle, and it
+006046:    is also the answer this frontend already gave through a typedef of the
+006047:    atomic type.  `_Atomic` written on a type that is *already* atomic keeps the
+006048:    request in both references, which is why the test is on the step rather than
+006049:    on the result.
+006050: 
+006051:    Two places build that type and both ask here, because one type answering two
+006052:    alignments depending on how it is spelled is what #726 was:
+006053:    c_parse_add_qualified_type below builds the copy a declaration makes, and
+006054:    c_ir_type_name_prefix in c_gen.c resolves the type name an expression
+006055:    spells, which builds no C type at all and answered with the alias's own
+006056:    number.  The empty table is the guard, so a translation unit without an
+006057:    aligned typedef -- almost every one -- pays one compare. */
+006058: BUSTER_C_SHARED bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic)
+006059: {
+006060:     bool drops = false;
+===== line 6103 =====
+006073:    from, and it is also why the alignment record -- keyed on the alias -- did
+006074:    not describe the copy: `const cache_line` answered `_Alignof` 4 where Clang
+006075:    and GCC answer 64, in every position and with no diagnostic (#714).  The
+006076:    copy therefore inherits the record, which states an alignment the *type*
+006077:    carries and a qualifier cannot take away.  The guard is the empty table, so
+006078:    a translation unit without an aligned typedef -- almost every one -- pays
+006079:    one compare per qualified type. */
+006080: BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers)
+006081: {
+006082:     CTypeId qualified_id = C_TYPE_ID_INVALID;
+006083:     if (base.value < result->type_count)
+006084:     {
+006085:         CType qualified = result->types[base.value];
+006086:         qualified.is_const |= qualifiers.is_const;
+006087:         qualified.is_volatile |= qualifiers.is_volatile;
+006088:         qualified.is_restrict |= qualifiers.is_restrict;
+006089:         qualified.is_atomic |= qualifiers.is_atomic;
+006090:         qualified.unqualified_type = qualified.has_unqualified_type ? qualified.unqualified_type : base;
+006091:         qualified.has_unqualified_type = true;
+006092:         // `_Atomic` applied *to* the alias is the exception; see
+006093:         // c_parse_atomic_drops_type_alignment above, which is also what the
+006094:         // type-name resolver in c_gen.c asks so the two cannot answer
+006095:         // differently.
+006096:         bool atomic_applied = c_parse_atomic_drops_type_alignment(result, base, qualifiers.is_atomic);
+006097:         CTypeAlignment const* base_alignment = result->type_alignment_count && !atomic_applied ? c_parse_type_alignment(result, base) : 0;
+006098:         u32 alignment_start = base_alignment ? base_alignment->alignment_start : 0;
+006099:         u32 alignment_count = base_alignment ? base_alignment->alignment_count : 0;
+006100:         // Room is taken and the range read out before the copy is added: the
+006101:         // growth reallocates the table the record points into.
+006102:         bool inherit = alignment_count && c_parse_reserve_type_alignment(result);
+006103:         qualified_id = c_parse_add_type(result, qualified);
+006104:         if (inherit && qualified_id.value != C_ID_UNDERLYING_INVALID)
+006105:         {
+006106:             result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
+006107:                 .type_index = qualified_id.value,
+006108:                 .alignment_start = alignment_start,
+006109:                 .alignment_count = alignment_count,
+006110:             };
+006111:         }
+006112:     }
+006113: 
+006114:     return qualified_id;
+006115: }
+006116: 
+006117: BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id)
+006118: {
+006119:     if (type_id.value >= result->type_count)
+006120:     {
+006121:         return C_TYPE_ID_INVALID;
+006122:     }
+006123:     CType type = result->types[type_id.value];
+006124:     if (type.has_unqualified_type && type.unqualified_type.value < result->type_count)
+006125:     {
+006126:         return type.unqualified_type;
+006127:     }
+006128:     if (!type.is_const && !type.is_volatile && !type.is_restrict && !type.is_atomic)
+006129:     {
+006130:         return type_id;
+006131:     }
+006132:     type.is_const = false;
+006133:     type.is_volatile = false;
+===== line 6138 =====
+006108:                 .alignment_start = alignment_start,
+006109:                 .alignment_count = alignment_count,
+006110:             };
+006111:         }
+006112:     }
+006113: 
+006114:     return qualified_id;
+006115: }
+006116: 
+006117: BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id)
+006118: {
+006119:     if (type_id.value >= result->type_count)
+006120:     {
+006121:         return C_TYPE_ID_INVALID;
+006122:     }
+006123:     CType type = result->types[type_id.value];
+006124:     if (type.has_unqualified_type && type.unqualified_type.value < result->type_count)
+006125:     {
+006126:         return type.unqualified_type;
+006127:     }
+006128:     if (!type.is_const && !type.is_volatile && !type.is_restrict && !type.is_atomic)
+006129:     {
+006130:         return type_id;
+006131:     }
+006132:     type.is_const = false;
+006133:     type.is_volatile = false;
+006134:     type.is_restrict = false;
+006135:     type.is_atomic = false;
+006136:     type.unqualified_type = C_TYPE_ID_INVALID;
+006137:     type.has_unqualified_type = false;
+006138:     return c_parse_add_type(result, type);
+006139: }
+006140: 
+006141: BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
+006142: {
+006143:     switch (spelling.length)
+006144:     {
+006145:     case 3:
+006146:     {
+006147:         return string_equal(spelling, S8("int"));
+006148:     }
+006149:     case 4:
+006150:     {
+006151:         return string_equal(spelling, S8("void")) || string_equal(spelling, S8("char")) || string_equal(spelling, S8("long")) ||
+006152:                string_equal(spelling, S8("auto")) || string_equal(spelling, S8("enum"));
+006153:     }
+006154:     case 5:
+006155:     {
+006156:         return string_equal(spelling, S8("_Bool")) || string_equal(spelling, S8("short")) || string_equal(spelling, S8("float")) ||
+006157:                string_equal(spelling, S8("const")) || string_equal(spelling, S8("union"));
+006158:     }
+006159:     case 6:
+006160:     {
+006161:         return string_equal(spelling, S8("signed")) || string_equal(spelling, S8("double")) || string_equal(spelling, S8("extern")) ||
+006162:                string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct")) ||
+006163:                string_equal(spelling, S8("__bf16"));
+006164:     }
+006165:     case 7:
+006166:     {
+006167:         return string_equal(spelling, S8("_Atomic")) || string_equal(spelling, S8("typedef")) || string_equal(spelling, S8("__const"));
+006168:     }
+===== line 6643 =====
+006613:         else if (seen_short)
+006614:         {
+006615:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+006616:         }
+006617:         else if (seen_int128)
+006618:         {
+006619:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
+006620:         }
+006621:         else if (long_count >= 2)
+006622:         {
+006623:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+006624:         }
+006625:         else if (long_count == 1)
+006626:         {
+006627:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+006628:         }
+006629:         else
+006630:         {
+006631:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+006632:         }
+006633:         if (type.kind == C_TYPE_VA_LIST)
+006634:         {
+006635:             parsed = c_parse_variable_argument_list_type(result);
+006636:             if (type.is_const || type.is_volatile || type.is_restrict || type.is_atomic)
+006637:             {
+006638:                 parsed = c_parse_add_qualified_type(result, parsed, type);
+006639:             }
+006640:         }
+006641:         else if (type.kind != C_TYPE_INVALID)
+006642:         {
+006643:             parsed = c_parse_add_type(result, type);
+006644:         }
+006645:     }
+006646:     return parsed;
+006647: }
+006648: 
+006649: BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
+006650: 
+006651: BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
+006652: 
+006653: // How many parent links separate `scope` from `candidate`, or UINT32_MAX when
+006654: // `candidate` is not `scope` or one of its ancestors.  Distance is what makes
+006655: // the innermost visible tag win the scan below.
+006656: BUSTER_C_SHARED u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope)
+006657: {
+006658:     // A type recorded without a scope -- a hand-built result, or a parse that
+006659:     // ran before the scope table existed -- reads as the file scope, which is
+006660:     // scope zero whenever there are scopes at all.
+006661:     if (candidate.value == C_ID_UNDERLYING_INVALID)
+006662:     {
+006663:         candidate = (CScopeId){0};
+006664:     }
+006665:     u32 distance = 0;
+006666:     while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < result->scope_count)
+006667:     {
+006668:         if (scope.value == candidate.value)
+006669:         {
+006670:             return distance;
+006671:         }
+006672:         scope = result->scopes[scope.value].parent;
+006673:         distance += 1;
+===== line 6744 =====
+006714:             bool scoped = scan_by_scope && scope.value != C_ID_UNDERLYING_INVALID;
+006715:             for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+006716:             {
+006717:                 C_AGGREGATE_LOOKUP_COUNT(lookup, fallback_type_count);
+006718:                 CType* type = &result->types[type_index];
+006719:                 if (type->kind == kind && !type->has_unqualified_type && string_equal(type->tag, tag))
+006720:                 {
+006721:                     if (!scoped)
+006722:                     {
+006723:                         found = (CTypeId){.value = type_index};
+006724:                         break;
+006725:                     }
+006726:                     u32 distance = c_parse_scope_distance(result, type->tag_scope, scope);
+006727:                     if (distance != UINT32_MAX && distance <= best_distance)
+006728:                     {
+006729:                         found = (CTypeId){.value = type_index};
+006730:                         best_distance = distance;
+006731:                     }
+006732:                 }
+006733:             }
+006734:         }
+006735:     }
+006736:     return found;
+006737: }
+006738: 
+006739: #undef C_AGGREGATE_LOOKUP_COUNT
+006740: 
+006741: #if BUSTER_INCLUDE_TESTS
+006742: CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type)
+006743: {
+006744:     return c_parse_add_type(result, type);
+006745: }
+006746: 
+006747: CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope)
+006748: {
+006749:     return c_parse_aggregate_lookup(result, kind, tag, scope);
+006750: }
+006751: 
+006752: void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint)
+006753: {
+006754:     CTypeParseMachine machine = {0};
+006755:     c_type_parse_rollback(&machine, result, checkpoint, 0);
+006756: }
+006757: #endif
+006758: 
+006759: // True when `index` starts a GNU assembler label: the keyword, a parenthesis, at
+006760: // least one string literal, and the matching close. The shape is checked rather
+006761: // than assumed because the same keyword also introduces an assembly statement,
+006762: // which carries qualifiers, colons, or operands the label form never has;
+006763: // `after_out` receives the token past the group.
+006764: BUSTER_C_INTERNAL bool c_parse_asm_label_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out)
+006765: {
+006766:     if (index + 2 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+006767:         !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_ASM_KEYWORDS) ||
+006768:         !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+006769:     {
+006770:         return false;
+006771:     }
+006772:     u32 scan = index + 2;
+006773:     while (scan < end && preprocess.tokens[scan].kind == C_TOKEN_STRING_LITERAL)
+006774:     {
+===== line 7728 =====
+007698:     {
+007699:         for (u32 index = start; index + 3 < end; index += 1)
+007700:         {
+007701:             if (preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+007702:                 !(c_parse_token_class_compute(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) & C_TOKEN_CLASS_VECTOR_SIZE) ||
+007703:                 !c_parse_vector_size_argument(result, preprocess, scope, index, end, &vector_byte_size))
+007704:             {
+007705:                 continue;
+007706:             }
+007707:             break;
+007708:         }
+007709:     }
+007710:     if (!vector_byte_size)
+007711:     {
+007712:         return base;
+007713:     }
+007714:     if (base.value >= result->type_count)
+007715:     {
+007716:         return C_TYPE_ID_INVALID;
+007717:     }
+007718:     CTypeKind base_kind = result->types[base.value].kind;
+007719:     // GNU's vector_size accepts any integer or floating element; `_Float16`
+007720:     // joins the ladder because clang's `avx512fp16intrin.h` builds `__m512h`,
+007721:     // `__m256h` and `__m128h` out of it.
+007722:     bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
+007723:                       base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
+007724:     if (!arithmetic)
+007725:     {
+007726:         return C_TYPE_ID_INVALID;
+007727:     }
+007728:     return c_parse_add_type(result, (CType){
+007729:                                         .element_type = base,
+007730:                                         .return_type = C_TYPE_ID_INVALID,
+007731:                                         .array_bound = C_ARRAY_BOUND_INVALID,
+007732:                                         .vector_byte_size = vector_byte_size,
+007733:                                         .kind = C_TYPE_VECTOR,
+007734:                                         .is_complete = true,
+007735:                                     });
+007736: }
+007737: 
+007738: BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+007739: 
+007740: BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+007741:                                                            u32* declarator_start)
+007742: {
+007743:     CType qualifiers = {
+007744:         .element_type = C_TYPE_ID_INVALID,
+007745:         .return_type = C_TYPE_ID_INVALID,
+007746:         .array_bound = C_ARRAY_BOUND_INVALID,
+007747:     };
+007748:     bool has_qualifier = false;
+007749:     u32 typedef_index = start;
+007750:     while (typedef_index < end && preprocess.tokens[typedef_index].kind == C_TOKEN_IDENTIFIER)
+007751:     {
+007752:         u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, typedef_index, end);
+007753:         if (alignment_end != typedef_index)
+007754:         {
+007755:             typedef_index = c_parse_skip_attributes(preprocess, alignment_end, end);
+007756:             continue;
+007757:         }
+007758:         if (c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[typedef_index], &qualifiers))
+===== line 8732 =====
+008702:             else if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+008703:             {
+008704:                 depth -= 1;
+008705:             }
+008706:             close += 1;
+008707:         }
+008708:         if (depth || close == specifier_index + 3)
+008709:         {
+008710:             if (is_atomic)
+008711:             {
+008712:                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[specifier_index]), C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
+008713:                                    S8("_Atomic requires a type name"));
+008714:             }
+008715:             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+008716:             return;
+008717:         }
+008718:         frame->checkpoint = *result;
+008719:         frame->mutation_mark = machine->mutation_count;
+008720:         frame->specifier_index = specifier_index;
+008721:         frame->close = close;
+008722:         frame->unqualified = is_typeof && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("typeof_unqual"));
+008723:         frame->is_bit_field = is_atomic;
+008724:         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+008725:         u32 operand_start = specifier_index + 2;
+008726:         u32 operand_end = close - 1;
+008727:         bool nullptr_operand = is_typeof && c_preprocess_dialect_is_c23(preprocess.dialect) && operand_end == operand_start + 1 &&
+008728:                                preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER &&
+008729:                                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start]), S8("nullptr"));
+008730:         if (nullptr_operand)
+008731:         {
+008732:             machine->result_type = c_parse_add_type(result, (CType){
+008733:                                                                   .element_type = C_TYPE_ID_INVALID,
+008734:                                                                   .return_type = C_TYPE_ID_INVALID,
+008735:                                                                   .array_bound = C_ARRAY_BOUND_INVALID,
+008736:                                                                   .kind = C_TYPE_NULLPTR,
+008737:                                                                   .is_complete = true,
+008738:                                                               });
+008739:             machine->result_index = operand_end;
+008740:             machine->result_valid = true;
+008741:         }
+008742:         else if (c_type_parse_frame_push(machine, (CTypeParseFrame){
+008743:                                                        .result = result,
+008744:                                                        .preprocess = preprocess,
+008745:                                                        .scope = frame->scope,
+008746:                                                        .start = operand_start,
+008747:                                                        .end = operand_end,
+008748:                                                        .mutation_mark = machine->mutation_count,
+008749:                                                        .kind = C_TYPE_PARSE_FRAME_SCALAR,
+008750:                                                    }))
+008751:         {
+008752:             return;
+008753:         }
+008754:         else
+008755:         {
+008756:             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
+008757:             return;
+008758:         }
+008759:     }
+008760:     if (frame->stage == C_TYPE_PARSE_STAGE_FINISH)
+008761:     {
+008762:         CTypeId type = machine->result_type;
+===== line 9241 =====
+009211:         frame->scan_index = frame->segment_start;
+009212:         frame->depth = 1;
+009213:         frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+009214:     }
+009215:     else
+009216:     {
+009217:         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+009218:     }
+009219: }
+009220: 
+009221: // One parameter list has been scanned to its closing parenthesis.  The name's
+009222: // own list is scanned first but applied last -- it is the outermost derivation
+009223: // of `void (*getf(int))(void)` -- so it only records its range here and hands
+009224: // the frame on to the outer suffix; the outer list is the return type and
+009225: // becomes a function type immediately.
+009226: BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame* frame, CParseResult* result, CPreprocessResult preprocess, u32 list_close)
+009227: {
+009228:     if (frame->scanning_inner_parameters)
+009229:     {
+009230:         frame->inner_parameter_start = frame->parameter_start;
+009231:         frame->inner_parameter_count = frame->written_parameter_count;
+009232:         frame->inner_variadic = frame->variadic;
+009233:         frame->inner_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
+009234:         frame->has_inner_parameters = true;
+009235:         frame->scanning_inner_parameters = false;
+009236:         frame->variadic = false;
+009237:         c_type_parse_parenthesized_suffix_begin(frame, result, preprocess);
+009238:         return;
+009239:     }
+009240:     frame->index = list_close + 1;
+009241:     frame->type = c_parse_add_type(result, (CType){
+009242:                                              .element_type = C_TYPE_ID_INVALID,
+009243:                                              .return_type = frame->type,
+009244:                                              .array_bound = C_ARRAY_BOUND_INVALID,
+009245:                                              .parameter_start = frame->parameter_start,
+009246:                                              .parameter_count = frame->written_parameter_count,
+009247:                                              .kind = C_TYPE_FUNCTION,
+009248:                                              .is_variadic = frame->variadic,
+009249:                                              .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close),
+009250:                                          });
+009251:     frame->has_function_suffix = true;
+009252:     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+009253: }
+009254: 
+009255: BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+009256: {
+009257:     CParseResult* result = frame->result;
+009258:     CPreprocessResult preprocess = frame->preprocess;
+009259:     if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+009260:     {
+009261:         // The nested group carries the name, so its type is this declarator's.
+009262:         if (!machine->result_valid)
+009263:         {
+009264:             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+009265:             return;
+009266:         }
+009267:         c_type_parse_frame_complete(machine, machine->result_type, frame->end, true);
+009268:         return;
+009269:     }
+009270:     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+009271:     {
+===== line 9559 =====
+009529:             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+009530:                                                       .result = result,
+009531:                                                       .preprocess = preprocess,
+009532:                                                       .type = frame->type,
+009533:                                                       .start = frame->nested_start,
+009534:                                                       .end = frame->close_index,
+009535:                                                       .declarator_start = frame->nested_start,
+009536:                                                       .name_index = nested_has_name ? nested_name_index : frame->nested_start,
+009537:                                                       .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+009538:                                                       .has_name = nested_has_name,
+009539:                                                   }))
+009540:             {
+009541:                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+009542:             }
+009543:             return;
+009544:         }
+009545:         if (frame->has_name)
+009546:         {
+009547:             u32 array_index = frame->has_inner_parameters ? frame->inner_close + 1 : frame->name_index + 1;
+009548:             frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &array_index, frame->close_index);
+009549:             if (array_index != frame->close_index)
+009550:             {
+009551:                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+009552:                 return;
+009553:             }
+009554:         }
+009555:         if (frame->has_inner_parameters)
+009556:         {
+009557:             // Everything derived so far -- the outer suffix and the pointer
+009558:             // chain -- is what the name's own parameter list returns.
+009559:             frame->type = c_parse_add_type(result, (CType){
+009560:                                                      .element_type = C_TYPE_ID_INVALID,
+009561:                                                      .return_type = frame->type,
+009562:                                                      .array_bound = C_ARRAY_BOUND_INVALID,
+009563:                                                      .parameter_start = frame->inner_parameter_start,
+009564:                                                      .parameter_count = frame->inner_parameter_count,
+009565:                                                      .kind = C_TYPE_FUNCTION,
+009566:                                                      .is_variadic = frame->inner_variadic,
+009567:                                                      .is_unprototyped = frame->inner_unprototyped,
+009568:                                                  });
+009569:         }
+009570:         bool valid = frame->type.value != C_ID_UNDERLYING_INVALID && (!frame->has_function_suffix || frame->index == frame->end);
+009571:         c_type_parse_frame_complete(machine, frame->type, frame->end, valid);
+009572:     }
+009573: }
+009574: 
+009575: BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start)
+009576: {
+009577:     while (machine->frame_count > frame_start && !machine->failed)
+009578:     {
+009579:         CTypeParseFrame* frame = machine->frames + machine->frame_count - 1;
+009580:         switch (frame->kind)
+009581:         {
+009582:         case C_TYPE_PARSE_FRAME_SCALAR:
+009583:             c_type_parse_scalar_step(machine, frame);
+009584:             break;
+009585:         case C_TYPE_PARSE_FRAME_CORE:
+009586:             c_type_parse_core_step(machine, frame);
+009587:             break;
+009588:         case C_TYPE_PARSE_FRAME_SIZEOF:
+009589:             c_type_parse_sizeof_step(machine, frame);
+===== line 10443 =====
+010413:             case C_TYPE_NULLPTR:
+010414:             case C_TYPE_POINTER:
+010415:             case C_TYPE_ARRAY:
+010416:             case C_TYPE_VECTOR:
+010417:             case C_TYPE_FUNCTION:
+010418:             case C_TYPE_STRUCT:
+010419:             case C_TYPE_UNION:
+010420:             case C_TYPE_ENUM:
+010421:             case C_TYPE_COUNT:
+010422:             {
+010423:                 break;
+010424:             }
+010425:             }
+010426:         }
+010427:         if (!integer_underlying || underlying_declarator != underlying_end)
+010428:         {
+010429:             return C_TYPE_ID_INVALID;
+010430:         }
+010431:         index = underlying_end;
+010432:     }
+010433:     CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
+010434:     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+010435:     if (!definition)
+010436:     {
+010437:         if (!tag.length)
+010438:         {
+010439:             return C_TYPE_ID_INVALID;
+010440:         }
+010441:         if (type.value == C_ID_UNDERLYING_INVALID)
+010442:         {
+010443:             type = c_parse_add_type(result, (CType){
+010444:                                                 .tag = tag,
+010445:                                                 .tag_scope = frame->scope,
+010446:                                                 .element_type = enum_underlying_type,
+010447:                                                 .return_type = C_TYPE_ID_INVALID,
+010448:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+010449:                                                 .kind = kind,
+010450:                                             });
+010451:         }
+010452:         type = c_parse_apply_trailing_qualifiers(result, preprocess, type, &index, end);
+010453:         *declarator_start = index;
+010454:         return type;
+010455:     }
+010456:     u32 open = index;
+010457:     u32 depth = 1;
+010458:     index += 1;
+010459:     while (index < end && depth)
+010460:     {
+010461:         if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+010462:         {
+010463:             depth += 1;
+010464:         }
+010465:         else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+010466:         {
+010467:             depth -= 1;
+010468:         }
+010469:         index += 1;
+010470:     }
+010471:     if (depth)
+010472:     {
+010473:         return C_TYPE_ID_INVALID;
+===== line 10498 =====
+010468:         }
+010469:         index += 1;
+010470:     }
+010471:     if (depth)
+010472:     {
+010473:         return C_TYPE_ID_INVALID;
+010474:     }
+010475:     u32 close = index - 1;
+010476:     u32 definition_type_start = result->type_count;
+010477:     // A body against a tag that is already complete is two different things
+010478:     // by scope.  In the same scope it is a redefinition and stays refused.
+010479:     // In an inner scope it is a new, distinct type that shadows the outer one
+010480:     // -- clang's xmmintrin.h defines `struct __mm_storeh_pi_struct` inside
+010481:     // two intrinsics, and the second body must not be read against the
+010482:     // first's completed record, which both mis-sized the second struct and
+010483:     // sent the whole statement back through the expression parser.  An
+010484:     // incomplete found tag keeps its existing completion path whatever the
+010485:     // scope, which is the `struct S; struct S { ... };` forward idiom.
+010486:     if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].is_complete)
+010487:     {
+010488:         if (result->types[type.value].tag_scope.value == frame->scope.value)
+010489:         {
+010490:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
+010491:                                string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
+010492:             return C_TYPE_ID_INVALID;
+010493:         }
+010494:         type = C_TYPE_ID_INVALID;
+010495:     }
+010496:     if (type.value == C_ID_UNDERLYING_INVALID)
+010497:     {
+010498:         type = c_parse_add_type(result, (CType){
+010499:                                             .tag = tag,
+010500:                                             .tag_scope = frame->scope,
+010501:                                             .element_type = enum_underlying_type,
+010502:                                             .return_type = C_TYPE_ID_INVALID,
+010503:                                             .array_bound = C_ARRAY_BOUND_INVALID,
+010504:                                             .member_start = result->member_count,
+010505:                                             .kind = kind,
+010506:                                         });
+010507:     }
+010508:     if (type.value < definition_type_start && !c_type_parse_record_mutation(machine, result, type))
+010509:     {
+010510:         return C_TYPE_ID_INVALID;
+010511:     }
+010512:     CType* aggregate = &result->types[type.value];
+010513:     if (kind == C_TYPE_ENUM && enum_underlying_type.value != C_ID_UNDERLYING_INVALID)
+010514:     {
+010515:         if (aggregate->element_type.value != C_ID_UNDERLYING_INVALID && aggregate->element_type.value != enum_underlying_type.value)
+010516:         {
+010517:             return C_TYPE_ID_INVALID;
+010518:         }
+010519:         aggregate->element_type = enum_underlying_type;
+010520:     }
+010521:     aggregate->member_start = result->member_count;
+010522:     aggregate->definition_start = open + 1;
+010523:     aggregate->definition_token_count = close - (open + 1);
+010524:     if (kind == C_TYPE_ENUM)
+010525:     {
+010526:         aggregate->enum_member_start = result->enum_member_count;
+010527:         u32 enum_start = open + 1;
+010528:         s64 previous_value = -1;
+===== line 10892 =====
+010862: }
+010863: 
+010864: BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end)
+010865: {
+010866:     while (*index < end && c_token_is_punctuator(&preprocess.tokens[*index], C_PUNCTUATOR_STAR))
+010867:     {
+010868:         *index += 1;
+010869:         CType pointer = {
+010870:             .element_type = base,
+010871:             .return_type = C_TYPE_ID_INVALID,
+010872:             .array_bound = C_ARRAY_BOUND_INVALID,
+010873:             .kind = C_TYPE_POINTER,
+010874:         };
+010875:         while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER)
+010876:         {
+010877:             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[*index]);
+010878:             if (c_parse_type_qualifier_word(spelling, &pointer))
+010879:             {
+010880:             }
+010881:             else if (string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
+010882:             {
+010883:                 /* Nullability affects diagnostics, not the C object
+010884:                    representation. */
+010885:             }
+010886:             else
+010887:             {
+010888:                 break;
+010889:             }
+010890:             *index += 1;
+010891:         }
+010892:         base = c_parse_add_type(result, pointer);
+010893:     }
+010894:     return base;
+010895: }
+010896: 
+010897: BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index)
+010898: {
+010899:     if (declarator_start >= end || !c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+010900:     {
+010901:         return false;
+010902:     }
+010903:     u32 index = declarator_start + 1;
+010904:     while (index < end)
+010905:     {
+010906:         while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
+010907:         {
+010908:             index += 1;
+010909:             CType ignored = {0};
+010910:             while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+010911:             {
+010912:                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+010913:                 if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
+010914:                     string_equal(spelling, S8("_Null_unspecified")))
+010915:                 {
+010916:                     index += 1;
+010917:                     continue;
+010918:                 }
+010919:                 break;
+010920:             }
+010921:         }
+010922:         // A declarator group may hold another one: the name of
+===== line 11069 =====
+011039:         u32 bound_word_count = 0;
+011040:         u32 bound_word_index = bound_start;
+011041:         for (u32 token_index = bound_start; token_index < bound_start + bound_count; token_index += 1)
+011042:         {
+011043:             CToken bound_token = preprocess.tokens[token_index];
+011044:             String8 bound_spelling = c_token_spelling(preprocess.spelling_base, bound_token);
+011045:             bool is_static_word = string_equal(bound_spelling, S8("static"));
+011046:             is_static |= is_static_word;
+011047:             CType bound_qualifiers = {0};
+011048:             if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers)))
+011049:             {
+011050:                 bound_word_index = token_index;
+011051:                 bound_word_count += 1;
+011052:             }
+011053:         }
+011054:         bool is_star = bound_word_count == 1 && c_token_is_punctuator(&preprocess.tokens[bound_word_index], C_PUNCTUATOR_STAR);
+011055:         if (!c_parse_result_reserve_array_bounds(result, 1))
+011056:         {
+011057:             result->array_bound_count = first_bound;
+011058:             return C_TYPE_ID_INVALID;
+011059:         }
+011060:         result->array_bounds[result->array_bound_count++] = (CArrayBound){
+011061:             .token_start = bound_start,
+011062:             .token_count = bound_count,
+011063:             .is_static = is_static,
+011064:             .is_star = is_star,
+011065:         };
+011066:     }
+011067:     for (u32 bound_index = result->array_bound_count; bound_index > first_bound; bound_index -= 1)
+011068:     {
+011069:         element_type = c_parse_add_type(result, (CType){
+011070:                                                     .element_type = element_type,
+011071:                                                     .return_type = C_TYPE_ID_INVALID,
+011072:                                                     .array_bound = bound_index - 1,
+011073:                                                     .kind = C_TYPE_ARRAY,
+011074:                                                 });
+011075:     }
+011076:     return element_type;
+011077: }
+011078: 
+011079: BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+011080:                                                     CDeclaration declaration, u32 start, u32 end)
+011081: {
+011082:     BUSTER_UNUSED(declaration);
+011083:     for (u32 token_index = start; token_index < end; token_index += 1)
+011084:     {
+011085:         if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("_Alignas")))
+011086:         {
+011087:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token_index]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+011088:                                S8("alignment specifier cannot be applied to a parameter"));
+011089:             return false;
+011090:         }
+011091:     }
+011092:     u32 derived_start = result->type_count;
+011093:     u32 declarator_start = start;
+011094:     CTypeId type = c_parse_scalar_type(machine, result, preprocess, start, end, &declarator_start);
+011095:     if (type.value == C_ID_UNDERLYING_INVALID)
+011096:     {
+011097:         return false;
+011098:     }
+011099:     type = c_parse_pointer_chain(result, preprocess, type, &declarator_start, end);
+===== line 11635 =====
+011605:                         break;
+011606:                     }
+011607:                     else
+011608:                     {
+011609:                         if (!c_parse_parameter_segment(machine, result, preprocess, *declaration, segment_start, index))
+011610:                         {
+011611:                             valid = false;
+011612:                             break;
+011613:                         }
+011614:                         if (written_parameter_count >= reserved_parameter_count)
+011615:                         {
+011616:                             valid = false;
+011617:                             break;
+011618:                         }
+011619:                         result->parameters[parameter_start + written_parameter_count++] = result->parameters[result->parameter_count - 1];
+011620:                         result->parameter_count -= 1;
+011621:                     }
+011622:                     if (list_end)
+011623:                     {
+011624:                         break;
+011625:                     }
+011626:                     segment_start = index + 1;
+011627:                 }
+011628:                 if (!valid)
+011629:                 {
+011630:                     result->parameter_count = parameter_start;
+011631:                     return;
+011632:                 }
+011633:                 declaration->parameter_start = parameter_start;
+011634:                 declaration->parameter_count = written_parameter_count;
+011635:                 declaration->type = c_parse_add_type(result, (CType){
+011636:                                                                  .element_type = C_TYPE_ID_INVALID,
+011637:                                                                  .return_type = base,
+011638:                                                                  .array_bound = C_ARRAY_BOUND_INVALID,
+011639:                                                                  .parameter_start = parameter_start,
+011640:                                                                  .parameter_count = declaration->parameter_count,
+011641:                                                                  .kind = C_TYPE_FUNCTION,
+011642:                                                                  .is_variadic = declaration->is_variadic,
+011643:                                                                  .is_unprototyped = unprototyped,
+011644:                                                              });
+011645:             }
+011646:         }
+011647:     }
+011648: }
+011649: 
+011650: // A declarator may spell `noreturn` on the function type it derives rather
+011651: // than on a function it declares -- the typedef and function-pointer shapes,
+011652: // where the call site sees only the type. The type has to be noted while the
+011653: // declarator that built it is still in hand, so the derivation runs first and
+011654: // the marker is read against the declaration it was written in.
+011655: BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+011656:                                                   CDeclaration* declaration, CTypeId inherited_base)
+011657: {
+011658:     u32 derived_start = result->type_count;
+011659:     c_parse_declaration_type_derive(machine, result, preprocess, declaration, inherited_base);
+011660:     CTypeId function = c_parse_noreturn_candidate_function_type(result, declaration->type, declaration->kind == C_DECLARATION_TYPEDEF, derived_start);
+011661:     if (function.value != C_ID_UNDERLYING_INVALID && c_ir_declaration_is_noreturn(preprocess, *declaration))
+011662:     {
+011663:         c_parse_add_noreturn_function_type(result, function);
+011664:     }
+011665:     // GNU's transparent_union is read against the declaration the same way
+===== line 12186 =====
+012156:     if (target.kind == C_TYPE_VOID)
+012157:     {
+012158:         return true;
+012159:     }
+012160:     CTypeId source_unqualified = c_parse_unqualified_type(result, source_id);
+012161:     CTypeId target_unqualified = c_parse_unqualified_type(result, target_id);
+012162:     return source_unqualified.value < result->type_count && target_unqualified.value < result->type_count &&
+012163:            c_parse_types_compatible(arena, result, preprocess, source_unqualified, target_unqualified);
+012164: }
+012165: 
+012166: BUSTER_C_INTERNAL bool c_parse_cleanup_function_matches(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTypeId declared_type,
+012167:                                                            CEntity* function)
+012168: {
+012169:     if (!function || function->type.value >= result->type_count)
+012170:     {
+012171:         return false;
+012172:     }
+012173:     CType* function_type = &result->types[function->type.value];
+012174:     if (function_type->kind != C_TYPE_FUNCTION || function_type->parameter_count != 1 || function_type->parameter_start >= result->parameter_count)
+012175:     {
+012176:         return false;
+012177:     }
+012178:     CTypeId parameter_id = result->parameters[function_type->parameter_start].type;
+012179:     if (parameter_id.value >= result->type_count)
+012180:     {
+012181:         return false;
+012182:     }
+012183:     CType* parameter_type = &result->types[parameter_id.value];
+012184:     if (parameter_type->kind == C_TYPE_ARRAY || parameter_type->kind == C_TYPE_FUNCTION)
+012185:     {
+012186:         parameter_id = c_parse_add_type(result, (CType){
+012187:                                                    .element_type = parameter_type->kind == C_TYPE_ARRAY ? parameter_type->element_type : parameter_id,
+012188:                                                    .return_type = C_TYPE_ID_INVALID,
+012189:                                                    .array_bound = C_ARRAY_BOUND_INVALID,
+012190:                                                    .kind = C_TYPE_POINTER,
+012191:                                                });
+012192:     }
+012193:     if (parameter_id.value >= result->type_count || result->types[parameter_id.value].kind != C_TYPE_POINTER)
+012194:     {
+012195:         return false;
+012196:     }
+012197:     return c_parse_cleanup_pointer_conversion(arena, result, preprocess, declared_type, result->types[parameter_id.value].element_type);
+012198: }
+012199: 
+012200: BUSTER_C_INTERNAL bool c_parse_validate_cleanup_attribute(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CEntityId entity_id,
+012201:                                                              CCleanupAttributeInfo attribute, bool is_typedef, bool is_register, bool is_extern,
+012202:                                                              bool is_thread_local)
+012203: {
+012204:     if (!attribute.count)
+012205:     {
+012206:         return false;
+012207:     }
+012208:     if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+012209:     {
+012210:         c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
+012211:         return false;
+012212:     }
+012213:     if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
+012214:     {
+012215:         c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
+012216:         return false;
+===== line 12406 =====
+012376:     {
+012377:         CTypeId left_element = c_parse_unqualified_type(result, left_value.element_type);
+012378:         CTypeId right_element = c_parse_unqualified_type(result, right_value.element_type);
+012379:         if (left_element.value >= result->type_count || right_element.value >= result->type_count)
+012380:         {
+012381:             type = C_TYPE_ID_INVALID;
+012382:         }
+012383:         else
+012384:         {
+012385:             CType left_element_value = result->types[left_element.value];
+012386:             CType right_element_value = result->types[right_element.value];
+012387:             bool void_compatible = (left_element_value.kind == C_TYPE_VOID && right_element_value.kind != C_TYPE_FUNCTION) ||
+012388:                                    (right_element_value.kind == C_TYPE_VOID && left_element_value.kind != C_TYPE_FUNCTION);
+012389:             bool element_compatible = void_compatible || c_parse_types_compatible(arena, result, preprocess, left_element, right_element);
+012390:             CTypeId element = left_element_value.kind == C_TYPE_VOID ? left_element : right_element_value.kind == C_TYPE_VOID ? right_element : left_element;
+012391:             CType element_qualifiers = {
+012392:                 .is_const = result->types[left_value.element_type.value].is_const || result->types[right_value.element_type.value].is_const,
+012393:                 .is_volatile = result->types[left_value.element_type.value].is_volatile || result->types[right_value.element_type.value].is_volatile,
+012394:                 .is_restrict = result->types[left_value.element_type.value].is_restrict || result->types[right_value.element_type.value].is_restrict,
+012395:                 .is_atomic = result->types[left_value.element_type.value].is_atomic || result->types[right_value.element_type.value].is_atomic,
+012396:             };
+012397:             if (!element_compatible)
+012398:             {
+012399:                 element = c_parse_expression_scalar_type(result, C_TYPE_VOID);
+012400:                 element_qualifiers = (CType){0};
+012401:             }
+012402:             if (element_qualifiers.is_const || element_qualifiers.is_volatile || element_qualifiers.is_restrict || element_qualifiers.is_atomic)
+012403:             {
+012404:                 element = c_parse_add_qualified_type(result, element, element_qualifiers);
+012405:             }
+012406:             type = c_parse_add_type(result, (CType){
+012407:                                                 .element_type = element,
+012408:                                                 .return_type = C_TYPE_ID_INVALID,
+012409:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+012410:                                                 .kind = C_TYPE_POINTER,
+012411:                                             });
+012412:         }
+012413:     }
+012414:     return type;
+012415: }
+012416: 
+012417: BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+012418:                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end)
+012419: {
+012420:     left = c_parse_auto_decay_type(result, left);
+012421:     right = c_parse_auto_decay_type(result, right);
+012422:     if (left.value >= result->type_count || right.value >= result->type_count)
+012423:     {
+012424:         return C_TYPE_ID_INVALID;
+012425:     }
+012426:     CType left_value = result->types[left.value];
+012427:     CType right_value = result->types[right.value];
+012428:     if (left_value.kind == C_TYPE_NULLPTR && right_value.kind == C_TYPE_POINTER)
+012429:     {
+012430:         return right;
+012431:     }
+012432:     if (right_value.kind == C_TYPE_NULLPTR && left_value.kind == C_TYPE_POINTER)
+012433:     {
+012434:         return left;
+012435:     }
+012436:     // The pointer rules need the arms' spellings and the arithmetic ones do
+===== line 13498 =====
+013468:             {
+013469:                 info->has_initializer = true;
+013470:                 info->initializer_start = index + 1;
+013471:             }
+013472:         }
+013473:         info->initializer_end = end;
+013474:         if (info->initializer_end > start && c_token_is_punctuator(&preprocess.tokens[info->initializer_end - 1], C_PUNCTUATOR_SEMICOLON))
+013475:         {
+013476:             info->initializer_end -= 1;
+013477:         }
+013478:         result = true;
+013479:     }
+013480: 
+013481:     return result;
+013482: }
+013483: 
+013484: BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type)
+013485: {
+013486:     if (type.value >= result->type_count)
+013487:     {
+013488:         return C_TYPE_ID_INVALID;
+013489:     }
+013490:     type = c_parse_unqualified_type(result, type);
+013491:     if (type.value >= result->type_count)
+013492:     {
+013493:         return C_TYPE_ID_INVALID;
+013494:     }
+013495:     CType value = result->types[type.value];
+013496:     if (value.kind == C_TYPE_ARRAY)
+013497:     {
+013498:         return c_parse_add_type(result, (CType){
+013499:                                                 .element_type = value.element_type,
+013500:                                                 .return_type = C_TYPE_ID_INVALID,
+013501:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+013502:                                                 .kind = C_TYPE_POINTER,
+013503:                                             });
+013504:     }
+013505:     if (value.kind == C_TYPE_FUNCTION)
+013506:     {
+013507:         return c_parse_add_type(result, (CType){
+013508:                                                 .element_type = type,
+013509:                                                 .return_type = C_TYPE_ID_INVALID,
+013510:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+013511:                                                 .kind = C_TYPE_POINTER,
+013512:                                             });
+013513:     }
+013514:     return type;
+013515: }
+013516: 
+013517: BUSTER_C_INTERNAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+013518:                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+013519: {
+013520:     CTypeId type = C_TYPE_ID_INVALID;
+013521:     if (start >= end || !c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &type))
+013522:     {
+013523:         return false;
+013524:     }
+013525:     type = c_parse_auto_decay_type(result, type);
+013526:     if (type.value >= result->type_count || result->types[type.value].kind == C_TYPE_VOID)
+013527:     {
+013528:         return false;
+===== line 13507 =====
+013477:         }
+013478:         result = true;
+013479:     }
+013480: 
+013481:     return result;
+013482: }
+013483: 
+013484: BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type)
+013485: {
+013486:     if (type.value >= result->type_count)
+013487:     {
+013488:         return C_TYPE_ID_INVALID;
+013489:     }
+013490:     type = c_parse_unqualified_type(result, type);
+013491:     if (type.value >= result->type_count)
+013492:     {
+013493:         return C_TYPE_ID_INVALID;
+013494:     }
+013495:     CType value = result->types[type.value];
+013496:     if (value.kind == C_TYPE_ARRAY)
+013497:     {
+013498:         return c_parse_add_type(result, (CType){
+013499:                                                 .element_type = value.element_type,
+013500:                                                 .return_type = C_TYPE_ID_INVALID,
+013501:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+013502:                                                 .kind = C_TYPE_POINTER,
+013503:                                             });
+013504:     }
+013505:     if (value.kind == C_TYPE_FUNCTION)
+013506:     {
+013507:         return c_parse_add_type(result, (CType){
+013508:                                                 .element_type = type,
+013509:                                                 .return_type = C_TYPE_ID_INVALID,
+013510:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+013511:                                                 .kind = C_TYPE_POINTER,
+013512:                                             });
+013513:     }
+013514:     return type;
+013515: }
+013516: 
+013517: BUSTER_C_INTERNAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+013518:                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+013519: {
+013520:     CTypeId type = C_TYPE_ID_INVALID;
+013521:     if (start >= end || !c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &type))
+013522:     {
+013523:         return false;
+013524:     }
+013525:     type = c_parse_auto_decay_type(result, type);
+013526:     if (type.value >= result->type_count || result->types[type.value].kind == C_TYPE_VOID)
+013527:     {
+013528:         return false;
+013529:     }
+013530:     *type_out = type;
+013531:     return true;
+013532: }
+013533: 
+013534: BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preprocess, u32 index, u32 end, u32* body_start, u32* body_end,
+013535:                                                          u32* group_end);
+013536: 
+013537: BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+===== line 13603 =====
+013573:                         break;
+013574:                     }
+013575:                 }
+013576:             }
+013577:             continue;
+013578:         }
+013579:         bool member = use_index > start && (c_token_is_punctuator(&preprocess.tokens[use_index - 1], C_PUNCTUATOR_DOT) ||
+013580:                                             c_token_is_punctuator(&preprocess.tokens[use_index - 1], C_PUNCTUATOR_ARROW));
+013581:         bool tag_name = use_index > start && preprocess.tokens[use_index - 1].kind == C_TOKEN_IDENTIFIER &&
+013582:                         c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[use_index - 1], C_PARSE_AGGREGATE_KEYWORDS);
+013583:         if (use.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, use_index) && !member && !tag_name &&
+013584:                 !(use_index && c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, start, use_index - 1)) &&
+013585:                 !c_parse_identifier_is_bound(result, use_index))
+013586:         {
+013587:             c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
+013588:         }
+013589:     }
+013590: }
+013591: 
+013592: 
+013593: // C11 6.7.6.3p8: a parameter declared with function type -- either spelling,
+013594: // `int func(int)` or `int (func)(int)` -- adjusts to a pointer to that
+013595: // function.  CPython's Parser/pegen.c passes its grammar rules this way:
+013596: // `RES_TYPE (func)(Parser *)` in the LOOKAHEAD helpers.  Without the
+013597: // adjustment the parameter entity carried the bare function type and every
+013598: // call through it was refused.
+013599: BUSTER_C_INTERNAL CTypeId c_parse_adjust_parameter_type(CParseResult* result, CTypeId type)
+013600: {
+013601:     if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
+013602:     {
+013603:         type = c_parse_add_type(result, (CType){
+013604:                                             .element_type = type,
+013605:                                             .return_type = C_TYPE_ID_INVALID,
+013606:                                             .array_bound = C_ARRAY_BOUND_INVALID,
+013607:                                             .kind = C_TYPE_POINTER,
+013608:                                         });
+013609:     }
+013610:     return type;
+013611: }
+013612: 
+013613: BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+013614:                                                           CTypeId return_type, u32 open, u32 end, u32* index_out)
+013615: {
+013616:     u32 close = open + 1;
+013617:     u32 depth = 1;
+013618:     while (close < end && depth)
+013619:     {
+013620:         if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+013621:         {
+013622:             depth += 1;
+013623:         }
+013624:         else if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+013625:         {
+013626:             depth -= 1;
+013627:         }
+013628:         close += 1;
+013629:     }
+013630:     if (depth)
+013631:     {
+013632:         return C_TYPE_ID_INVALID;
+013633:     }
+===== line 13694 =====
+013664:                     parameter_count += 1;
+013665:                 }
+013666:             }
+013667:             else
+013668:             {
+013669:                 valid = false;
+013670:             }
+013671:             segment_start = index + 1;
+013672:             continue;
+013673:         }
+013674:         if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+013675:             c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET) ||
+013676:             c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+013677:         {
+013678:             nested_depth += 1;
+013679:         }
+013680:         else if ((c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+013681:                   c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACKET) ||
+013682:                   c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE)) &&
+013683:                  nested_depth)
+013684:         {
+013685:             nested_depth -= 1;
+013686:         }
+013687:     }
+013688:     if (!valid || nested_depth)
+013689:     {
+013690:         result->parameter_count = parameter_start;
+013691:         return C_TYPE_ID_INVALID;
+013692:     }
+013693:     *index_out = close + 1;
+013694:     return c_parse_add_type(result, (CType){
+013695:                                                .element_type = C_TYPE_ID_INVALID,
+013696:                                                .return_type = return_type,
+013697:                                                .array_bound = C_ARRAY_BOUND_INVALID,
+013698:                                                .parameter_start = parameter_start,
+013699:                                                .parameter_count = parameter_count,
+013700:                                                .kind = C_TYPE_FUNCTION,
+013701:                                                .is_variadic = variadic,
+013702:                                                .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, close),
+013703:                                            });
+013704: }
+013705: 
+013706: BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+013707:                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
+013708:                                                        u32 body_token_count);
+013709: 
+013710: // The GNU statement expression `({ ... })` opening at `index`, if one does.
+013711: // `body_start` and `body_end` bound the block's tokens -- the braces excluded
+013712: // -- and `group_end` is the closing parenthesis, which is what a token walk
+013713: // resumes past.
+013714: BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preprocess, u32 index, u32 end, u32* body_start, u32* body_end,
+013715:                                                          u32* group_end)
+013716: {
+013717:     bool found = false;
+013718:     if (index + 2 < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+013719:         c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+013720:     {
+013721:         u32 close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+013722:         if (close + 1 < end && c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+013723:         {
+013724:             *body_start = index + 2;
+===== line 17214 =====
+017184:             .name = declaration->name,
+017185:             .location = declaration->location,
+017186:             .type = declaration->type,
+017187:             .scope =
+017188:                 {
+017189:                     .value = 0,
+017190:                 },
+017191:             .next_in_scope = C_ENTITY_ID_INVALID,
+017192:             .declaration_index = result.declaration_count - 1,
+017193:             .declaration_token_plus_one = declaration_name_token < token_count ? declaration_name_token + 1 : 0,
+017194:             .alignment_start = declaration->alignment_start,
+017195:             .alignment_count = declaration->alignment_count,
+017196:             .kind = kind == C_DECLARATION_FUNCTION  ? C_ENTITY_FUNCTION
+017197:                     : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF
+017198:                                                     : C_ENTITY_OBJECT,
+017199:             .is_definition = declaration->is_definition,
+017200:             .is_thread_local = is_thread_local,
+017201:             .is_constexpr = declaration->is_constexpr,
+017202:         };
+017203:         // The name is that token's spelling, so its interned id is the
+017204:         // entity's; a declaration without a name token interns the empty
+017205:         // name as before.
+017206:         c_parse_scope_add_entity(&result,
+017207:                                  (CScopeId){
+017208:                                      .value = 0,
+017209:                                  },
+017210:                                  entity, declaration_name_token < token_count ? preprocess.tokens[declaration_name_token].symbol : 0);
+017211:     }
+017212:     if (result.enum_member_count)
+017213:     {
+017214:         CTypeId enum_integer_type = c_parse_add_type(&result, (CType){
+017215:                                                                   .element_type = C_TYPE_ID_INVALID,
+017216:                                                                   .return_type = C_TYPE_ID_INVALID,
+017217:                                                                   .array_bound = C_ARRAY_BOUND_INVALID,
+017218:                                                                   .kind = C_TYPE_INT,
+017219:                                                                   .is_complete = true,
+017220:                                                               });
+017221:         for (u32 member_index = 0; member_index < result.enum_member_count; member_index += 1)
+017222:         {
+017223:             CEnumMember* member = &result.enum_members[member_index];
+017224:             u32 member_symbol = c_parse_symbol_or_intern(&result, member->symbol, member->name);
+017225:             if (c_parse_lookup_entity_symbol(&result,
+017226:                                              (CScopeId){
+017227:                                                  .value = 0,
+017228:                                              },
+017229:                                              member_symbol, member->name)
+017230:                     .value != C_ID_UNDERLYING_INVALID)
+017231:             {
+017232:                 c_parse_diagnostic(&result, member->location, C_DIAGNOSTIC_REDEFINITION, S8("redefinition of enumerator"));
+017233:                 continue;
+017234:             }
+017235:             CEntityId entity = {
+017236:                 .value = result.entity_count,
+017237:             };
+017238:             BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+017239:             result.entities[result.entity_count++] = (CEntity){
+017240:                 .name = member->name,
+017241:                 .location = member->location,
+017242:                 .type = enum_integer_type,
+017243:                 .scope =
+017244:                     {
