@@ -618,15 +618,15 @@
       "source": "src/buster/lib/os.c",
       "provenance": "repo:src/buster/lib/os.c",
       "destination": "dependencies/project-include/buster/lib/os.c",
-      "bytes": 204091,
-      "sha256": "38978ee29e267865037020138ecd33d7b97ffb33ad617110637a3fa3157a338e"
+      "bytes": 205913,
+      "sha256": "5046ac2ba42d5b201934978733a7069cea50af2a17865e4ccb9cd7f99d890465"
     },
     {
       "source": "src/buster/lib/os.h",
       "provenance": "repo:src/buster/lib/os.h",
       "destination": "dependencies/project-include/buster/lib/os.h",
-      "bytes": 27713,
-      "sha256": "14259480f2aa1286690f7d761d4095994dcf7900ddcc21737f383d80cc141f46"
+      "bytes": 28262,
+      "sha256": "c272e20bbebaa2161057455bca6a6d93cf9f6bbe6d7800df83c4baefd47aea67"
     },
     {
       "source": "src/buster/lib/os_internal.h",

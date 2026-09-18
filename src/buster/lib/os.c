@@ -1203,6 +1203,62 @@ void os_make_directory(String8 path)
 #endif
 }
 
+OsDirectoryCreateResult os_make_directory_exclusive(String8 path)
+{
+    OsDirectoryCreateResult result = {0};
+    bool valid = path.pointer != 0 && path.length != 0;
+    for (u64 index = 0; index < path.length && valid; index += 1)
+    {
+        valid = path.pointer[index] != 0;
+    }
+
+    if (!valid)
+    {
+#if defined(_WIN32)
+        result.error.v = (u32)ERROR_INVALID_PARAMETER;
+#else
+        result.error.v = (u32)EINVAL;
+#endif
+    }
+    else
+    {
+        TemporalArena scratch = scratch_begin(0, 0);
+#if defined(_WIN32)
+        String16 wide = string16_from_string8(scratch.arena, path, true);
+        if (!CreateDirectoryW(wide.pointer, 0))
+        {
+            result.error = os_get_last_error();
+            result.already_exists = result.error.v == (u32)ERROR_ALREADY_EXISTS || result.error.v == (u32)ERROR_FILE_EXISTS;
+            if (result.already_exists)
+            {
+                result.error = (OsError){0};
+            }
+        }
+#elif defined(__linux__) || defined(__APPLE__)
+        String8 terminated = string_duplicate_arena(scratch.arena, path, true);
+        int status;
+        do
+        {
+            status = mkdir((const char*)terminated.pointer, 0700);
+        } while (status < 0 && errno == EINTR);
+        if (status < 0)
+        {
+            result.error = os_get_last_error();
+            result.already_exists = result.error.v == (u32)EEXIST;
+            if (result.already_exists)
+            {
+                result.error = (OsError){0};
+            }
+        }
+#else
+        result.error.v = 1;
+#endif
+        scratch_end(scratch);
+    }
+
+    return result;
+}
+
 bool os_file_delete(String8 path)
 {
     return !os_file_delete_checked(path).v;
@@ -4899,7 +4955,6 @@ BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
         gang->startup.mutex = os_mutex_create();
         if (gang->startup.mutex)
         {
-            os_mutex_lock(gang->startup.mutex);
             gang->dispatch_barrier = os_barrier_create((u32)count);
             u64 next_lane = 1;
             bool complete = gang->dispatch_barrier != 0;
@@ -4908,6 +4963,12 @@ BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
                 gang->starts = arena_allocate(arena, LanePersistentWorkerStart, count);
                 gang->handles = arena_allocate(arena, OsThreadHandle*, count);
                 memset(gang->handles, 0, sizeof(*gang->handles) * count);
+            }
+            // Allocation failure can enter the fatal reporter and perform
+            // diagnostic I/O. Finish allocations before locking the startup gate.
+            os_mutex_lock(gang->startup.mutex);
+            if (complete)
+            {
                 while (complete && next_lane < count)
                 {
                     gang->starts[next_lane] = (LanePersistentWorkerStart){

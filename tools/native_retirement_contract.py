@@ -30,7 +30,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "aa883c302a326143ff5e2f670bdb5e66dd85162e45033246c40df5f5a3411c21"
+FULL_SUPPORT_CONTRACT_SHA256 = "1990e8a8c219d019d256a7f5dbe8a78a5d9fb18b9be11a6ab0962f7edb2e2b24"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -46,10 +46,10 @@ FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add270575
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 374
 FULL_APPLICABILITY_LEDGER_SHA256 = "00cf09f1a58eb0fe8e44fbc1bd9e462a91df4449233c2b0c788442ec7a192a0c"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "22e4fc5a6bc614884c24e1824dd5a700eea7c5a7ce0e9fdcfaffaeec2d49df14"
-FULL_DEPENDENCY_RECEIPT_SHA256 = "87d4e5d49145a9b2e69e90b3a570e344eae9828c634b55533eb6fd792bc7287c"
-FULL_DEPENDENCY_PROJECT_SHA256 = "c6362bd8a9056d29bd8a68749aed156736e602f1f1c3b6a9303c8621bd88599a"
-FULL_DEPENDENCY_LEDGER_SHA256 = "e1217b4bc33dc6957515605f90df02be373e6e98402b15cecbeb21326a932590"
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "d9d2f29b83e0c19efa7b2006ec7860f9e9f0a1eb39d2a3107142f29522dd9c40"
+FULL_DEPENDENCY_RECEIPT_SHA256 = "958b0452f333191749c712ac6c3882d617733b3876e517e035287dd97ba1a85b"
+FULL_DEPENDENCY_PROJECT_SHA256 = "984525a3be386ae4efeccdf9aac2ac342f3b2fde2dc1cd5a1e16816ffe9989bf"
+FULL_DEPENDENCY_LEDGER_SHA256 = "d76d104a360abb5a89223154b62c1466e527f80474f5ba393d06b73e9cc1e4d7"
 FULL_EXTERNAL_CHECKOUTS = (
     {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
     {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},

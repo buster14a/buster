@@ -84,3 +84,7 @@ IR source cursors, module line suppression and inline-assembly symbol changes
 are shared within a TU. Serial table prewarm does not remove these dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
+
+Lane startup allocates worker records and handle storage before acquiring the
+startup gate. Allocation failures may enter the fatal diagnostic path, so the
+gate protects thread publication and cancellation without enclosing allocation.

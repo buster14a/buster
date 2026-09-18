@@ -239,6 +239,20 @@ BUSTER_F_DECL void os_make_directory(String8 path);
 // mkdir/EEXIST; callers opening a result tree still validate its contents.
 // Unlike os_make_directory, reports failure and accepts bounded path slices.
 BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
+
+typedef struct OsDirectoryCreateResult OsDirectoryCreateResult;
+struct OsDirectoryCreateResult
+{
+    OsError error;
+    // True means an entry of any kind already occupied the requested name.
+    bool already_exists;
+    u8 reserved[3];
+};
+// Creates exactly one new directory and never accepts an existing file,
+// directory or link as ownership. POSIX mode is 0700; Windows inherits the
+// containing directory's access policy. Parent directories are not created.
+BUSTER_F_DECL OsDirectoryCreateResult os_make_directory_exclusive(String8 path);
+
 BUSTER_F_DECL bool os_file_delete(String8 path);
 // The native error behind os_file_delete; a missing path is still success.
 BUSTER_F_DECL OsError os_file_delete_checked(String8 path);

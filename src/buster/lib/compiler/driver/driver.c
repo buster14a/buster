@@ -3828,11 +3828,19 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     {
         result.error = COMPILER_DRIVER_ERROR_GPU;
         result.diagnostic = pipeline.diagnostic.length ? pipeline.diagnostic : S8("GPU pipeline failed without a diagnostic");
+        if (invocation.save_gpu_temporaries && pipeline.temporary_directory.length)
+        {
+            result.diagnostic = string_format(arena, S8("{S8}\nGPU temporary files: {S8}"), result.diagnostic, pipeline.temporary_directory);
+        }
         return result;
     }
     if (pipeline.log.length)
     {
         compiler_driver_warning_append_text(warnings, pipeline.log);
+    }
+    if (invocation.save_gpu_temporaries && pipeline.temporary_directory.length)
+    {
+        compiler_driver_warning_append_text(warnings, string_format(arena, S8("GPU temporary files: {S8}\n"), pipeline.temporary_directory));
     }
     if (pipeline.artifact.format != GPU_OUTPUT_NONE)
     {
