@@ -1,0 +1,37 @@
+name: Issue 280 apply
+
+on:
+  push:
+    branches:
+      - fix/280-conversion-source-widths
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/280-conversion-source-widths
+      - name: Apply focused repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/issue-280-apply.py
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/scripts/issue-280-apply.py
+          git rm .github/workflows/issue-280-apply.yml
+          git rm .github/workflows/issue-280-bootstrap.yml
+          git rm .github/workflows/issue-280-inspect.yml
+          git add docs/agents/driver.md \
+                  src/buster/lib/compiler/assembly/assembly.c \
+                  src/buster/lib/compiler/assembly/x86_64_metadata.c \
+                  src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+          git commit -m 'assembly: infer conversion source widths from metadata'
+          git push origin HEAD:fix/280-conversion-source-widths
