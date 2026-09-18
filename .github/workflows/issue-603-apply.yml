@@ -23,7 +23,7 @@ jobs:
         env:
           BASE_SHA: 6db3c81a331544a60b859fa5a4b6fcb19db8d642
           TRANSPORT_HEAD: ${{ github.sha }}
-          BRANCH: sol/603-analyzer-reference-provenance-v2-20260918
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(git rev-parse --verify HEAD)" = "$TRANSPORT_HEAD"
@@ -50,6 +50,7 @@ jobs:
           HASHES
           sha256sum --check "$RUNNER_TEMP/issue-603-payload.sha256"
           python3 .github/issue-603-payload/apply.py
+          chmod 0644 tools/analyzer_selection_test.py
           git diff --check
 
           # Replace the transport commit with one commit directly on the
@@ -99,5 +100,53 @@ jobs:
           PY
           test -z "$(git status --porcelain)"
 
-          git push --force-with-lease="refs/heads/$BRANCH:$TRANSPORT_HEAD" \
-            origin "HEAD:refs/heads/$BRANCH"
+          # The Actions token may create immutable Git objects but, by design,
+          # cannot move a ref to a commit that edits workflow files. Publish the
+          # exact tested commit object; the connected repository writer moves the
+          # branch ref to this SHA after inspecting this successful run.
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          base_sha = os.environ["BASE_SHA"]
+          api_root = f"https://api.github.com/repos/{repository}"
+
+          def request(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "User-Agent": "buster-issue-603-publisher",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              req = urllib.request.Request(api_root + path, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+
+          base_commit = request("GET", f"/git/commits/{base_sha}")
+          files = [
+              (".github/workflows/ci.yml", "100644"),
+              ("docs/clang-analyze-shards.md", "100644"),
+              ("tools/analyzer_reference.py", "100755"),
+              ("tools/analyzer_selection_test.py", "100644"),
+          ]
+          entries = []
+          for path, mode in files:
+              content = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+              blob = request("POST", "/git/blobs", {"content": content, "encoding": "base64"})
+              entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob["sha"]})
+          tree = request("POST", "/git/trees", {"base_tree": base_commit["tree"]["sha"], "tree": entries})
+          commit = request("POST", "/git/commits", {
+              "message": "ci: freeze analyzer reference provenance (#603)",
+              "tree": tree["sha"],
+              "parents": [base_sha],
+          })
+          assert commit["tree"]["sha"] == tree["sha"]
+          print(f"FINAL_COMMIT_SHA={commit['sha']}")
+          print(f"FINAL_TREE_SHA={tree['sha']}")
+          PY
