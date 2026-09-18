@@ -1,0 +1,104 @@
+name: Drain PR 796 Buster CI
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+
+concurrency:
+  group: repair-pr796-drain-buster-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  drain:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Force-cancel every active Buster CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          branch = os.environ["TARGET_BRANCH"]
+          token = os.environ["GH_TOKEN"]
+          workflow_id = 197051687
+          known_active = {35305462599}
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def request(path: str, method: str = "GET") -> tuple[int, bytes]:
+              url = f"https://api.github.com/repos/{repository}{path}"
+              req = urllib.request.Request(url, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return response.status, response.read()
+              except urllib.error.HTTPError as error:
+                  return error.code, error.read()
+
+          query = urllib.parse.urlencode({"branch": branch, "per_page": 100})
+          status, payload = request(f"/actions/runs?{query}")
+          if status != 200:
+              raise SystemExit(f"failed to list runs: HTTP {status}: {payload!r}")
+
+          active_states = {"queued", "pending", "in_progress", "waiting", "requested"}
+          runs = json.loads(payload).get("workflow_runs", [])
+          active = known_active | {
+              int(run["id"])
+              for run in runs
+              if int(run.get("workflow_id", 0)) == workflow_id
+              and run.get("status") in active_states
+          }
+          if not active:
+              raise SystemExit("no active Buster CI run was found")
+
+          for run_id in sorted(active):
+              cancel_status, cancel_payload = request(
+                  f"/actions/runs/{run_id}/force-cancel", "POST"
+              )
+              if cancel_status not in {202, 409}:
+                  raise SystemExit(
+                      f"failed to force-cancel run {run_id}: "
+                      f"HTTP {cancel_status}: {cancel_payload!r}"
+                  )
+              print(f"force-cancel request for run {run_id}: HTTP {cancel_status}")
+
+          remaining = set(active)
+          for _ in range(30):
+              time.sleep(2)
+              for run_id in tuple(remaining):
+                  probe_status, probe_payload = request(f"/actions/runs/{run_id}")
+                  if probe_status != 200:
+                      raise SystemExit(
+                          f"failed to probe run {run_id}: "
+                          f"HTTP {probe_status}: {probe_payload!r}"
+                      )
+                  run = json.loads(probe_payload)
+                  print(
+                      f"run {run_id}: status={run.get('status')} "
+                      f"conclusion={run.get('conclusion')}"
+                  )
+                  if run.get("status") == "completed":
+                      remaining.remove(run_id)
+              if not remaining:
+                  break
+          if remaining:
+              raise SystemExit(f"runs remained active after force-cancel: {sorted(remaining)}")
+          PYTHON
