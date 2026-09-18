@@ -2563,6 +2563,96 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
         valid &= case_valid;
     }
 
+
+    // Legacy and VEX conversions publish the source memory tuple directly as
+    // q/dq/qq metadata. Exercise both dialects and repeat each exact source so
+    // form selection cannot depend on mutable candidate state.
+    typedef struct X86ConversionSourceCase X86ConversionSourceCase;
+    struct X86ConversionSourceCase
+    {
+        String8 source;
+        AssemblySyntax syntax;
+        u8 bytes[6];
+        u8 byte_count;
+    };
+    X86ConversionSourceCase const conversion_sources[] = {
+        {S8("cvtps2pd 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0x0f, 0x5a, 0x40, 0x40}, 4},
+        {S8("cvtps2pd xmm0, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0x0f, 0x5a, 0x40, 0x40}, 4},
+        {S8("vcvtps2pd 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xf8, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtps2pd xmm0, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf8, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtps2pd 64(%rax), %ymm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xfc, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtps2pd ymm0, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xfc, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtpd2ps 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0x66, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtpd2ps xmm0, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0x66, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtpd2ps xmm0, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf9, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtpd2ps xmm0, ymmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xfd, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtss2sd 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xf3, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtss2sd xmm0, dword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xf3, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtsd2ss 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xf2, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtsd2ss xmm0, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xf2, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtss2sd 64(%rax), %xmm1, %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xf2, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtss2sd xmm0, xmm1, dword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf2, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtsd2ss 64(%rax), %xmm1, %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xf3, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtsd2ss xmm0, xmm1, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf3, 0x5a, 0x40, 0x40}, 5},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(conversion_sources); index += 1)
+    {
+        X86ConversionSourceCase test_case = conversion_sources[index];
+        for (u32 repeat = 0; repeat < 2; repeat += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case.source,
+                (AssemblyEncodeOptions){.target = target, .syntax = test_case.syntax});
+            bool case_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length,
+                                                 test_case.bytes, test_case.byte_count);
+            if (!case_valid)
+            {
+                arguments->show(arguments, S8("CONVERSION_SOURCE_WIDTH source: {S8}"), test_case.source);
+            }
+            valid &= case_valid;
+        }
+    }
+    String8 const invalid_conversion_widths[] = {
+        S8("vcvtps2pd xmm0, xmmword ptr [rax+64]\n"),
+        S8("vcvtps2pd ymm0, qword ptr [rax+64]\n"),
+        S8("vcvtpd2ps xmm0, qword ptr [rax+64]\n"),
+        S8("cvtss2sd xmm0, qword ptr [rax+64]\n"),
+        S8("cvtsd2ss xmm0, dword ptr [rax+64]\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_conversion_widths); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_conversion_widths[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        bool case_valid = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+        if (!case_valid)
+        {
+            arguments->show(arguments, S8("CONVERSION_INVALID_WIDTH accepted: {S8}"), invalid_conversion_widths[index]);
+        }
+        valid &= case_valid;
+    }
+    String8 const ambiguous_conversion_widths[] = {
+        S8("vcvtpd2ps xmm0, [rax+64]\n"),
+        S8("vcvtpd2ps 64(%rax), %xmm0\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ambiguous_conversion_widths); index += 1)
+    {
+        AssemblySyntax syntax = index ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL;
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, ambiguous_conversion_widths[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax});
+        valid &= rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+    }
+    Target no_avx_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2}, 1),
+    };
+    AssemblyEncodeResult feature_disabled = assembly_encode(arguments->arena,
+        S8("vcvtps2pd 64(%rax), %ymm0\n"),
+        (AssemblyEncodeOptions){.target = no_avx_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    valid &= feature_disabled.diagnostic_count != 0 && feature_disabled.bytes.length == 0 &&
+             feature_disabled.relocation_count == 0;
+
     return valid;
 }
 
