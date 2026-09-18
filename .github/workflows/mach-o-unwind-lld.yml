@@ -1,0 +1,54 @@
+name: Mach-O unwind LLVM linker
+
+on:
+  pull_request:
+    paths:
+      - src/buster/lib/compiler/object/object.c
+      - src/buster/tests/compiler/object/object_test.c
+      - tests/basic_c_mach_unwind_host.c
+      - tests/basic_c_mach_unwind_subject.c
+      - tools/test_mach_o_unwind_lld.sh
+      - docs/mach-o-unwind-linker-compatibility.md
+      - .github/workflows/mach-o-unwind-lld.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  link:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install LLVM 22 linker tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes clang-22 lld-22 llvm-22 cmake ninja-build
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
+      - name: Build the compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$driver" build --config Release -t ide
+      - name: Link both Darwin architectures with ld64.lld
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/test_mach_o_unwind_lld.sh build/Release/ide "$RUNNER_TEMP/mach-o-unwind-lld"
+      - name: Retain linker evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mach-o-unwind-lld-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mach-o-unwind-lld
+          if-no-files-found: warn
+          retention-days: 7

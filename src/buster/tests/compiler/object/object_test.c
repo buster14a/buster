@@ -22,6 +22,52 @@ BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_test_eh_frame_record_start(ByteSlice bytes, u64 field_offset, u64* record_start)
+{
+    if (!record_start || (bytes.length && !bytes.pointer) || field_offset > bytes.length || sizeof(u32) > bytes.length - field_offset)
+    {
+        return false;
+    }
+    u64 offset = 0;
+    while (offset < bytes.length)
+    {
+        u64 remaining = bytes.length - offset;
+        if (remaining < sizeof(u32))
+        {
+            return false;
+        }
+        u32 length32 = 0;
+        memcpy(&length32, bytes.pointer + offset, sizeof(length32));
+        if (!length32)
+        {
+            return false;
+        }
+        u64 header_size = sizeof(u32);
+        u64 payload_size = length32;
+        if (length32 == UINT32_MAX)
+        {
+            header_size = sizeof(u32) + sizeof(u64);
+            if (remaining < header_size)
+            {
+                return false;
+            }
+            memcpy(&payload_size, bytes.pointer + offset + sizeof(u32), sizeof(payload_size));
+        }
+        if (header_size > remaining || payload_size > remaining - header_size)
+        {
+            return false;
+        }
+        u64 end = offset + header_size + payload_size;
+        if (field_offset >= offset && field_offset < end && sizeof(u32) <= end - field_offset)
+        {
+            *record_start = offset;
+            return true;
+        }
+        offset = end;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_test_mach_compact_section_rewrite(ByteSlice bytes)
 {
     u64 section = 32 + 72 + (u64)OBJECT_SECTION_READ_ONLY_DATA * 80;
@@ -3740,7 +3786,11 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         x86_cfi_sparse.symbol_count = 1;
         x86_cfi_sparse.relocations = &x86_cfi_relocation;
         x86_cfi_sparse.relocation_count = 1;
-        s64 x86_cfi_addends[] = {INT32_MIN, -17, 0, 23, INT32_MAX};
+        u64 x86_cfi_record_start = 0;
+        bool x86_cfi_record_valid = object_test_eh_frame_record_start(x86_cfi_sections[1].data, x86_cfi_relocation.offset, &x86_cfi_record_start);
+        u64 x86_cfi_place_adjustment = x86_cfi_record_valid ? x86_cfi_relocation.offset - x86_cfi_record_start : 0;
+        BUSTER_TEST(arguments, x86_cfi_record_valid && x86_cfi_place_adjustment <= INT32_MAX);
+        s64 x86_cfi_addends[] = {(s64)INT32_MIN + (s64)x86_cfi_place_adjustment, -17, 0, 23, INT32_MAX};
         ObjectArtifact x86_cfi_pair = {0};
         u32 x86_cfi_relocations_offset = 0;
         for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(x86_cfi_addends); addend_index += 1)
@@ -3758,12 +3808,22 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 u32 stored = 0;
                 memcpy(words, x86_cfi_pair.bytes.pointer + x86_cfi_relocations_offset, sizeof(words));
                 memcpy(&stored, x86_cfi_pair.bytes.pointer + raw_offset + x86_cfi_relocation.offset, sizeof(stored));
-                // The wire representation is also checked independently against
-                // LLVM assembly output; these bits are the Mach-O contract.
+                // The relocation records stay at the field, but the subtractor
+                // symbol is a CFI-record boundary accepted by ld64.lld.
                 BUSTER_TEST(arguments, words[0] == x86_cfi_relocation.offset && words[2] == words[0]);
                 BUSTER_TEST(arguments, (words[1] >> 28) == 5 && (words[3] >> 28) == 0);
                 BUSTER_TEST(arguments, ((words[1] >> 24) & 15) == 12 && ((words[3] >> 24) & 15) == 12);
-                BUSTER_TEST(arguments, (s32)stored == x86_cfi_addends[addend_index]);
+                BUSTER_TEST(arguments, (s32)stored == x86_cfi_addends[addend_index] - (s64)x86_cfi_place_adjustment);
+                u64 place_symbol_record = object_test_mach_symbol_offset(x86_cfi_pair.bytes, x86_cfi_sparse.symbol_count);
+                u64 place_symbol_value = UINT64_MAX;
+                u64 unwind_section_address = UINT64_MAX;
+                u64 unwind_section_header = 32 + 72 + (u64)1 * 80;
+                if (place_symbol_record != UINT64_MAX && unwind_section_header + 40 <= x86_cfi_pair.bytes.length)
+                {
+                    memcpy(&place_symbol_value, x86_cfi_pair.bytes.pointer + place_symbol_record + 8, sizeof(place_symbol_value));
+                    memcpy(&unwind_section_address, x86_cfi_pair.bytes.pointer + unwind_section_header + 32, sizeof(unwind_section_address));
+                }
+                BUSTER_TEST(arguments, place_symbol_value == unwind_section_address + x86_cfi_record_start);
             }
             ObjectFile roundtrip = object_read(arguments->arena, x86_cfi_pair.bytes, x86_cfi_sparse.target);
             if (BUSTER_REQUIRE(arguments, roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1 && roundtrip.relocations != 0))
@@ -3778,9 +3838,14 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
         x86_cfi_relocation.addend = (s64)INT32_MIN - 1;
         BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        if (x86_cfi_place_adjustment)
+        {
+            x86_cfi_relocation.addend = (s64)INT32_MIN + (s64)x86_cfi_place_adjustment - 1;
+            BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        }
         if (x86_cfi_pair.error == OBJECT_ERROR_NONE && x86_cfi_relocations_offset)
         {
-            for (u32 defect = 0; defect < 6; defect += 1)
+            for (u32 defect = 0; defect < 7; defect += 1)
             {
                 ByteSlice broken = {.pointer = arena_allocate(arguments->arena, u8, x86_cfi_pair.bytes.length), .length = x86_cfi_pair.bytes.length};
                 memcpy(broken.pointer, x86_cfi_pair.bytes.pointer, (size_t)broken.length);
@@ -3805,7 +3870,18 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                     break; // Invalid subtractor symbol.
                 case 5:
                     words[1] &= 0xff000000;
-                    break; // Text symbol is not the place.
+                    break; // Text symbol is not the CFI record base.
+                case 6:
+                {
+                    u64 symbol_record = object_test_mach_symbol_offset(broken, x86_cfi_sparse.symbol_count);
+                    if (symbol_record != UINT64_MAX)
+                    {
+                        u64 value = 0;
+                        memcpy(&value, broken.pointer + symbol_record + 8, sizeof(value));
+                        object_test_write_u64(broken, symbol_record + 8, value + 1);
+                    }
+                    break; // An internal CFI label is not a record boundary.
+                }
                 }
                 memcpy(broken.pointer + x86_cfi_relocations_offset, words, sizeof(words));
                 BUSTER_TEST(arguments, object_read(arguments->arena, broken, x86_cfi_sparse.target).error != OBJECT_ERROR_NONE);
@@ -3859,6 +3935,31 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 u32 a64_mach_cfi_flags = 0;
                 memcpy(&a64_mach_cfi_flags, a64_mach_cfi_artifact.bytes.pointer + a64_mach_cfi_section_header + 64, sizeof(a64_mach_cfi_flags));
                 BUSTER_TEST(arguments, a64_mach_cfi_flags == 0x6800000b);
+            }
+            if (BUSTER_REQUIRE(arguments, a64_mach_cfi_object.relocation_count == 1 && a64_mach_cfi_object.relocations != 0))
+            {
+                ObjectRelocation* cfi_relocation = a64_mach_cfi_object.relocations;
+                u32 raw_offset = 0;
+                u32 relocation_offset = 0;
+                u32 relocation_count = 0;
+                bool located = object_test_mach_section_offsets(a64_mach_cfi_artifact.bytes, OBJECT_SECTION_UNWIND, &raw_offset,
+                                                                  &relocation_offset, &relocation_count);
+                u64 record_start = 0;
+                bool record_valid = object_test_eh_frame_record_start(a64_mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data,
+                                                                      cfi_relocation->offset, &record_start);
+                u64 symbol_record = object_test_mach_symbol_offset(a64_mach_cfi_artifact.bytes, a64_mach_cfi_object.symbol_count);
+                u64 symbol_value = UINT64_MAX;
+                u64 section_address = UINT64_MAX;
+                u32 stored = 0;
+                if (located && symbol_record != UINT64_MAX)
+                {
+                    memcpy(&stored, a64_mach_cfi_artifact.bytes.pointer + raw_offset + cfi_relocation->offset, sizeof(stored));
+                    memcpy(&symbol_value, a64_mach_cfi_artifact.bytes.pointer + symbol_record + 8, sizeof(symbol_value));
+                    memcpy(&section_address, a64_mach_cfi_artifact.bytes.pointer + a64_mach_cfi_section_header + 32, sizeof(section_address));
+                }
+                BUSTER_TEST(arguments, located && relocation_count == 2 && record_valid &&
+                                           symbol_value == section_address + record_start &&
+                                           (s32)stored == cfi_relocation->addend - (s64)(cfi_relocation->offset - record_start));
             }
             ObjectFile a64_mach_cfi_roundtrip = object_read(arguments->arena, a64_mach_cfi_artifact.bytes, a64_mach_cfi_object.target);
             if (BUSTER_REQUIRE(arguments, a64_mach_cfi_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_cfi_roundtrip.sections != 0 &&
