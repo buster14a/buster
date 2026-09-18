@@ -1,0 +1,82 @@
+name: Issue 183 deep inspection
+
+on:
+  push:
+    branches:
+      - fix/183-gnu17-enum-types
+    paths:
+      - .github/workflows/issue-183-deep-inspect.yml
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Capture exact implementation context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil, subprocess
+
+          out = Path('.github/issue-183-deep')
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True)
+
+          def slice_lines(path: str, start: int, end: int, name: str) -> None:
+              lines = Path(path).read_text().splitlines()
+              body = [f'path: {path}', f'lines: {start}-{end}', '']
+              for n in range(max(1, start), min(len(lines), end) + 1):
+                  body.append(f'{n:06d}: {lines[n-1]}')
+              (out / name).write_text('\n'.join(body) + '\n')
+
+          def contexts(path: str, needle: str, before: int, after: int, name: str) -> None:
+              lines = Path(path).read_text().splitlines()
+              hits = [i for i, line in enumerate(lines) if needle in line]
+              body = [f'path: {path}', f'needle: {needle}', f'hits: {[i+1 for i in hits]}', '']
+              for index in hits:
+                  lo = max(0, index-before)
+                  hi = min(len(lines), index+after+1)
+                  body += [f'===== line {index+1} =====']
+                  body += [f'{n+1:06d}: {lines[n]}' for n in range(lo, hi)]
+              (out / name).write_text('\n'.join(body) + '\n')
+
+          slice_lines('src/buster/lib/compiler/frontend/c/c_parse.c', 10280, 10980, 'parse-enum.txt')
+          slice_lines('src/buster/lib/compiler/frontend/c/c_parse.c', 17150, 17380, 'parse-entities.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_parse.c', 'c_parse_builtin_type_layout', 120, 180, 'parse-layout-helper.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_parse.c', 'c_parse_add_type(', 30, 30, 'parse-add-type-calls.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_source.c', 'c_integer_expression_evaluate_with_features', 180, 260, 'source-evaluator-internal.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_source.c', 'c_integer_expression_evaluate(', 80, 160, 'source-evaluator-public.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_internal.h', 'c_integer_expression_evaluate', 40, 80, 'internal-evaluator-decl.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_gen.c', 'c_ir_emit_integer_value_typed', 80, 120, 'gen-typed-integer.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_gen.c', 'C_ENTITY_ENUMERATOR', 55, 95, 'gen-enumerators.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_gen.c', 'builder->s32_type', 8, 12, 'gen-s32-sites.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c_gen.c', 'c_type_ir_map[', 12, 20, 'gen-type-map-sites.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c.h', 'struct CTypeLayout', 45, 90, 'header-layout.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c.h', 'struct CEnumMember', 45, 90, 'header-enum-member.txt')
+          contexts('src/buster/lib/compiler/frontend/c/c.h', 'typedef enum CPreprocessDialect', 30, 80, 'header-dialect.txt')
+
+          def command(name: str, argv: list[str]) -> None:
+              result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              (out / name).write_text('$ ' + ' '.join(argv) + f'\nexit={result.returncode}\n\n' + result.stdout)
+
+          command('test-files.txt', ['bash', '-lc', "find . -type f \\( -path '*test*' -o -path '*fixture*' \\) | sort | sed -n '1,2000p'"])
+          command('grep-generic.txt', ['bash', '-lc', "git grep -n '_Generic' -- ':!src/buster/lib/compiler/frontend/c/c_gen.c' || true"])
+          command('grep-gnu17.txt', ['bash', '-lc', "git grep -n -E 'GNU17|gnu17|C_PREPROCESS_DIALECT_GNU17|c-gnu' || true"])
+          command('grep-enum-tests.txt', ['bash', '-lc', "git grep -n -E 'enum \\{|enum [A-Za-z_].*\\{' -- tests test src 2>/dev/null | sed -n '1,1200p' || true"])
+          command('grep-ctest.txt', ['bash', '-lc', "git grep -n -E 'add_test|ctest|BUILD_TESTING' -- CMakeLists.txt cmake tests test .github 2>/dev/null | sed -n '1,1600p' || true"])
+          PY
+          git rm .github/workflows/issue-183-deep-inspect.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-deep
+          git commit -m "chore: capture issue 183 implementation context"
+          git push origin HEAD:${GITHUB_REF_NAME}
