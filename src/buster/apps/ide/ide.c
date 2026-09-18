@@ -15,6 +15,8 @@
 #include <buster/lib/entry_point.h>
 #include <buster/lib/time.h>
 #include <buster/lib/arena.h>
+#include <buster/lib/os.h>
+#include <buster/lib/system_headers.h>
 #include <buster/lib/file.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
@@ -1079,8 +1081,89 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 }
 
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_process_spawn_probe(String8 mode)
+{
+    bool success = false;
+    if (string_equal(mode, S8("descriptor")))
+    {
+        String8 value = os_get_environment_variable(S8("BUSTER_OS_SPAWN_PROBE_VALUE"));
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
+        bool valid = parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == value.length;
+        if (valid)
+        {
+#if BUSTER_WINDOWS
+            DWORD flags = 0;
+            SetLastError(ERROR_SUCCESS);
+            BOOL present = GetHandleInformation((HANDLE)(uintptr_t)parsed.value, &flags);
+            success = !present && GetLastError() == ERROR_INVALID_HANDLE;
+#else
+            errno = 0;
+            success = fcntl((int)parsed.value, F_GETFD) < 0 && errno == EBADF;
+#endif
+        }
+    }
+    else if (string_equal(mode, S8("environment")))
+    {
+        success = string_equal(os_get_environment_variable(S8("BUSTER_OS_SPAWN_EXPECTED")), S8("present")) &&
+                  string_equal(os_get_environment_variable(S8("PATH")), S8("hostile-path")) &&
+                  !os_get_environment_variable(S8("BUSTER_OS_SPAWN_FORBIDDEN")).length &&
+                  !os_get_environment_variable(S8("HOME")).length && !os_get_environment_variable(S8("USERPROFILE")).length;
+    }
+    else if (string_equal(mode, S8("closed-stdio")))
+    {
+#if BUSTER_WINDOWS
+        DWORD identifiers[] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+        HANDLE closed[BUSTER_ARRAY_LENGTH(identifiers)] = {0};
+        u32 closed_count = 0;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(identifiers); index += 1)
+        {
+            HANDLE handle = GetStdHandle(identifiers[index]);
+            (void)SetStdHandle(identifiers[index], 0);
+            bool duplicate = false;
+            for (u32 previous = 0; previous < closed_count; previous += 1)
+            {
+                duplicate = duplicate || closed[previous] == handle;
+            }
+            if (handle && handle != INVALID_HANDLE_VALUE && !duplicate)
+            {
+                closed[closed_count++] = handle;
+                CloseHandle(handle);
+            }
+        }
+#else
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+#endif
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
+        String8 keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_EXPECTED"), S8("PATH")};
+        String8 values[] = {S8("environment"), S8("present"), S8("hostile-path")};
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(keys),
+                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(values),
+                                                    (ProcessSpawnOptions){
+                                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                    });
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait = os_process_wait_sync(program_state->arena, spawn);
+            success = wait.result == PROCESS_RESULT_SUCCESS;
+        }
+    }
+    return success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+#endif
+
 ProcessResult entry_point(void)
 {
+#if BUSTER_INCLUDE_TESTS
+    String8 process_spawn_probe = os_get_environment_variable(S8("BUSTER_OS_SPAWN_PROBE"));
+    if (process_spawn_probe.length)
+    {
+        return compiler_process_spawn_probe(process_spawn_probe);
+    }
+#endif
     switch (compiler_state.command)
     {
         case COMPILER_COMMAND_HELP:

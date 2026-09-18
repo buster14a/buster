@@ -178,7 +178,7 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
     command_print(arguments);
     u64 capture_mask = capture ? (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR) : 0;
     ProcessSpawnResult spawn = os_process_spawn(arguments, environment_keys, environment_values,
-        (ProcessSpawnOptions){.capture = capture_mask, .use_process_environment = 1, .new_process_group = 1});
+        (ProcessSpawnOptions){.capture = capture_mask, .use_process_environment = 1, .search_path = 1, .new_process_group = 1});
     if (spawn.handle)
     {
         result.wait = os_process_wait_deadline(arena, spawn, timeout_seconds ? timeout_seconds * 1000000ull : 0);

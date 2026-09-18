@@ -139,7 +139,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult arm_a64_sysreg_run_generator(Arena* arena, Str
     if (arguments_fit)
     {
         ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = arguments, .length = argument_count}, (SliceString8){0}, (SliceString8){0},
-                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         if (!spawn.handle)
         {
             fprintf(stderr, "error: unable to launch tools/generate_aarch64_system_registers.py (python3 is required for import)\n");

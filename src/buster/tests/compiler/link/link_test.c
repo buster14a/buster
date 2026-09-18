@@ -2007,7 +2007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
                                                             (ProcessSpawnOptions){
                                                                 .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
-                                                                .use_process_environment = true,
+                                                                .use_process_environment = true, .search_path = true,
                                                             });
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (!spawn.handle)
@@ -7377,7 +7377,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     ProcessSpawnResult dyld_info = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(dyld_info_arguments), (SliceString8){0}, (SliceString8){0},
                                                     (ProcessSpawnOptions){
                                                         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                        .use_process_environment = true,
+                                                        .use_process_environment = true, .search_path = true,
                                                     });
     BUSTER_TEST(arguments, dyld_info.handle != 0);
     if (dyld_info.handle)
@@ -7415,7 +7415,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
                                                     (ProcessSpawnOptions){
-                                                        .use_process_environment = true,
+                                                        .use_process_environment = true, .search_path = true,
                                                     });
         BUSTER_TEST(arguments, spawn.handle != 0);
         if (spawn.handle)
@@ -7554,7 +7554,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
                                                     (ProcessSpawnOptions){
-                                                        .use_process_environment = true,
+                                                        .use_process_environment = true, .search_path = true,
                                                     });
         BUSTER_TEST(arguments, spawn.handle != 0);
         if (spawn.handle)
@@ -7606,7 +7606,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
                                                     (ProcessSpawnOptions){
-                                                        .use_process_environment = true,
+                                                        .use_process_environment = true, .search_path = true,
                                                     });
         BUSTER_TEST(arguments, spawn.handle != 0);
         if (spawn.handle)
