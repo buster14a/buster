@@ -1,0 +1,42 @@
+name: issue447-inspect
+
+on:
+  push:
+    branches:
+      - codex/issue447-direct-ssa-linear-20260918
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print direct SSA source windows
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/buster/lib/compiler/frontend/c/c_gen.c')
+          lines = path.read_text().splitlines()
+          needles = [
+              'struct CIrDirectSsa',
+              'c_ir_ssa_grow_slots(',
+              'c_ir_ssa_slot(',
+              'c_ir_ssa_finish(',
+              'direct_ssa =',
+              'predecessor_offsets =',
+          ]
+          for needle in needles:
+              matches = [i for i, line in enumerate(lines) if needle in line]
+              print(f'===== {needle!r}: {[i + 1 for i in matches]} =====')
+              for i in matches[:8]:
+                  lo = max(0, i - 50)
+                  hi = min(len(lines), i + 180)
+                  print(f'----- {path}:{lo + 1}-{hi} -----')
+                  for line_number in range(lo, hi):
+                      print(f'{line_number + 1:7}: {lines[line_number]}')
+          PY
