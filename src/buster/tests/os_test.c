@@ -4,6 +4,10 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+#include <stdio.h>
+#endif
+
 // Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
 BUSTER_CT_CHECK((char8)0xff == 0xff);
 BUSTER_CT_CHECK(sizeof(u32) == 4 && sizeof(u64) == 8);
@@ -126,6 +130,49 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
     while (!state->release)
     {
     }
+}
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+typedef struct OsTestDirectoryDeleteRaceState OsTestDirectoryDeleteRaceState;
+struct OsTestDirectoryDeleteRaceState
+{
+    String8 child;
+    String8 parked;
+    String8 outside;
+    AtomicU64 start;
+    AtomicU64 stop;
+    AtomicU64 swaps;
+    u64 limit;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_directory_delete_race(void* argument)
+{
+    OsTestDirectoryDeleteRaceState* state = (OsTestDirectoryDeleteRaceState*)argument;
+    while (!state->start)
+    {
+    }
+    while (!state->stop && state->swaps < state->limit)
+    {
+        if (rename((const char*)state->child.pointer, (const char*)state->parked.pointer) == 0)
+        {
+            if (symlink((const char*)state->outside.pointer, (const char*)state->child.pointer) == 0)
+            {
+                atomic_u64_increment(&state->swaps);
+                poll(0, 0, 1);
+                (void)unlink((const char*)state->child.pointer);
+            }
+            (void)rename((const char*)state->parked.pointer, (const char*)state->child.pointer);
+            poll(0, 0, 1);
+        }
+        else
+        {
+            (void)unlink((const char*)state->child.pointer);
+            (void)rename((const char*)state->parked.pointer, (const char*)state->child.pointer);
+        }
+    }
+    (void)unlink((const char*)state->child.pointer);
+    (void)rename((const char*)state->parked.pointer, (const char*)state->child.pointer);
 }
 #endif
 
@@ -1390,6 +1437,89 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
         os_directory_delete(outside_directory);
 
+        arena_set_position(arena, position);
+    }
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+    // A hostile peer repeatedly replaces a child directory with a link to an
+    // outside directory while deletion runs. The operation may report a race,
+    // but it must never resolve through the link or touch the outside file.
+    {
+        enum
+        {
+            OS_TEST_DIRECTORY_DELETE_RACE_ROUNDS = 8,
+            OS_TEST_DIRECTORY_DELETE_RACE_FILLERS = 64,
+            OS_TEST_DIRECTORY_DELETE_RACE_SWAPS = 32,
+        };
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+        String8 outside = buster_test_temporary_path(arena, S8("buster-delete-race-outside"), S8(""));
+        String8 root = buster_test_temporary_path(arena, S8("buster-delete-race-root"), S8(""));
+        BUSTER_TEST(arguments, os_directory_delete(outside));
+        BUSTER_TEST(arguments, os_directory_delete(root));
+        BUSTER_TEST(arguments, os_make_directory_attempt(outside));
+        String8 outside_file = string_format_z(arena, S8("{S8}/survivor.txt"), outside);
+        BUSTER_TEST(arguments, file_write(outside_file, BUSTER_SLICE_TO_BYTE_SLICE(S8("outside must survive"))));
+        String8 outside_absolute = os_path_absolute(arena, outside, true);
+        BUSTER_TEST(arguments, outside_absolute.length != 0);
+
+        bool survivor_present = outside_absolute.length != 0;
+        u64 swap_count = 0;
+        for (u32 round = 0; round < OS_TEST_DIRECTORY_DELETE_RACE_ROUNDS && survivor_present; round += 1)
+        {
+            BUSTER_TEST(arguments, os_directory_delete(root));
+            BUSTER_TEST(arguments, os_make_directory_attempt(root));
+            String8 child = string_format_z(arena, S8("{S8}/child"), root);
+            String8 parked = string_format_z(arena, S8("{S8}/parked"), root);
+            BUSTER_TEST(arguments, os_make_directory_attempt(child));
+            BUSTER_TEST(arguments,
+                        file_write(string_format_z(arena, S8("{S8}/inside.txt"), child),
+                                   BUSTER_SLICE_TO_BYTE_SLICE(S8("inside"))));
+            for (u32 index = 0; index < OS_TEST_DIRECTORY_DELETE_RACE_FILLERS; index += 1)
+            {
+                String8 filler = string_format_z(arena, S8("{S8}/filler-{u32}.txt"), root, index);
+                BUSTER_TEST(arguments, file_write(filler, BUSTER_SLICE_TO_BYTE_SLICE(S8("filler"))));
+            }
+
+            OsTestDirectoryDeleteRaceState state = {
+                .child = child,
+                .parked = parked,
+                .outside = outside_absolute,
+                .limit = OS_TEST_DIRECTORY_DELETE_RACE_SWAPS,
+            };
+            OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){
+                .callback = &os_test_directory_delete_race,
+                .argument = &state,
+            });
+            BUSTER_TEST(arguments, thread != 0);
+            if (thread)
+            {
+                atomic_u64_increment(&state.start);
+                u32 wait_count = 0;
+                while (!state.swaps && wait_count < 1000)
+                {
+                    poll(0, 0, 1);
+                    wait_count += 1;
+                }
+                BUSTER_TEST(arguments, state.swaps != 0);
+                (void)os_directory_delete(root);
+                atomic_u64_increment(&state.stop);
+                BUSTER_TEST(arguments, os_thread_join(thread));
+                swap_count += state.swaps;
+            }
+
+            OsFileDescriptor* survivor = os_file_open(outside_file, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+            survivor_present = survivor != 0;
+            BUSTER_TEST(arguments, survivor_present);
+            if (survivor)
+            {
+                BUSTER_TEST(arguments, os_file_close(survivor));
+            }
+            BUSTER_TEST(arguments, os_directory_delete(root));
+        }
+        BUSTER_TEST(arguments, swap_count >= OS_TEST_DIRECTORY_DELETE_RACE_ROUNDS);
+        BUSTER_TEST(arguments, os_directory_delete(outside));
         arena_set_position(arena, position);
     }
 #endif

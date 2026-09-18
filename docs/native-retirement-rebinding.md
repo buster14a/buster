@@ -10,6 +10,8 @@ to the independent constants in `tools/native_retirement_contract.py`; SDK
 records remain bound to `docs/native-retirement-sdks-v1.json`; resource records,
 archived replay data, the support/applicability inventories, fixture decisions,
 and historical evidence are never refreshed by this command.
+The current project-only descriptor omits the optional `resources` section;
+checking and refreshing preserve that omission without adding resource records.
 
 ## Prepare the complete pinned closure
 

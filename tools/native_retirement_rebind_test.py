@@ -218,6 +218,24 @@ materializer ledger SHA-256
         self.assertEqual(records["src/beta.h"]["sha256"], sha256(branch_beta))
         self.assertEqual(rebind.run("check", self.root)["status"], "current")
 
+    def test_refresh_preserves_descriptor_without_optional_resources(self):
+        descriptor = self._manifest()
+        del descriptor["resources"]
+        self._write_descriptor(descriptor)
+        self._write_bindings(self._identities())
+        before = self._snapshot()
+        self.assertEqual(rebind.run("check", self.root)["status"], "current")
+        self.assertEqual(self._snapshot(), before)
+        self.alpha.write_bytes(self.alpha.read_bytes().replace(b"LEFT 1", b"LEFT 30"))
+        self.assertEqual(rebind.run("refresh", self.root)["status"], "refreshed")
+        refreshed = json.loads((self.root / rebind.DESCRIPTOR_PATH).read_bytes())
+        self.assertNotIn("resources", refreshed)
+        self.assertEqual(refreshed["projects"][0]["sha256"], sha256(self.alpha.read_bytes()))
+        before = self._snapshot()
+        self.assertEqual(rebind.run("refresh", self.root)["status"], "current")
+        self.assertEqual(rebind.run("check", self.root)["status"], "current")
+        self.assertEqual(self._snapshot(), before)
+
     def test_combines_distinct_regions_of_one_project_header(self):
         base = self.alpha.read_bytes()
         branch_left = base.replace(b"LEFT 1", b"LEFT 30")

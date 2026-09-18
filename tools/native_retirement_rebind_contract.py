@@ -34,7 +34,7 @@ TOP_LEVEL_ORDER = (
 )
 REQUIRED_TOP_LEVEL = frozenset({
     "schema", "version", "source_root", "metadata",
-    "external_checkouts", "external_generated", "projects", "resources",
+    "external_checkouts", "external_generated", "projects",
 })
 RECORD_KEYS = ("source", "provenance", "destination", "bytes", "sha256")
 SHA256_RE = r"[0-9a-f]{64}"
@@ -193,6 +193,8 @@ def _load_descriptor(raw):
     if not isinstance(value.get("external_checkouts"), list) or not isinstance(value.get("external_generated"), list):
         _fail("dependency descriptor external declarations must be lists")
     for collection in ("projects", "resources"):
+        if collection == "resources" and collection not in value:
+            continue
         records = value.get(collection)
         if not isinstance(records, list) or not records:
             _fail(f"dependency descriptor {collection} must be a non-empty list")
