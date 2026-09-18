@@ -503,13 +503,6 @@
       "sha256": "788529876cb23af30c58e077d862059c0bbe3e029501288f688e29762d519c1f"
     },
     {
-      "source": "src/buster/lib/compiler/ir/ir_append.h",
-      "provenance": "repo:src/buster/lib/compiler/ir/ir_append.h",
-      "destination": "dependencies/project-include/buster/lib/compiler/ir/ir_append.h",
-      "bytes": 2721,
-      "sha256": "79b81a22e530697e588d66a3f78d649579e217cfd1a3716b64df75fc0a0fc661"
-    },
-    {
       "source": "src/buster/lib/compiler/ir/ir_cfg.c",
       "provenance": "repo:src/buster/lib/compiler/ir/ir_cfg.c",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir_cfg.c",

@@ -376,3 +376,10 @@ and retained evidence. Run `./build.sh test_uefi --self-test <fresh-directory>`
 first. Missing firmware or mismatched pins fail explicitly. See
 [the reference lane](../uefi-target.md#reference-firmware-execution-gate) for
 prerequisites, negative controls, pins and the runtime success contract.
+
+## Production Clang PGO/LTO
+
+The opt-in production-throughput workflow, profile provenance contract,
+validation matrix, and evidence layout are documented in
+[`docs/production-profile.md`](../production-profile.md). Ordinary developer
+and CI defaults remain unchanged.
