@@ -19441,6 +19441,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 register_index = 0;
                         u32 float_register_index = 0;
                         u32 prior_stack_parts = 0;
+                        u32 prior_stack_bytes = 0;
+                        bool darwin_stack = result.abi == CODEGEN_ABI_AARCH64_DARWIN;
                         for (u32 prior_index = 0; prior_index < argument_index; prior_index += 1)
                         {
                             u32 prior_parts = 1;
@@ -19463,8 +19465,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 else
                                 {
                                     float_register_index = 8;
-                                    prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, prior_type->layout.alignment > 8);
-                                    prior_stack_parts += (u32)((prior_type->layout.size + 7) / 8);
+                                    if (darwin_stack)
+                                    {
+                                        u32 argument_alignment = (u32)BUSTER_MIN(prior_type->layout.alignment, 16u);
+                                        prior_stack_bytes = (prior_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                        prior_stack_bytes += (u32)prior_type->layout.size;
+                                        prior_stack_parts = (prior_stack_bytes + 7u) / 8u;
+                                    }
+                                    else
+                                    {
+                                        prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, prior_type->layout.alignment > 8);
+                                        prior_stack_parts += (u32)((prior_type->layout.size + 7) / 8);
+                                    }
                                 }
                                 continue;
                             }
@@ -19473,6 +19485,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 if (float_register_index < 8)
                                 {
                                     float_register_index += 1;
+                                }
+                                else if (darwin_stack)
+                                {
+                                    u32 argument_alignment = (u32)BUSTER_MIN(prior_type->layout.alignment, 16u);
+                                    prior_stack_bytes = (prior_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                    prior_stack_bytes += (u32)prior_type->layout.size;
+                                    prior_stack_parts = (prior_stack_bytes + 7u) / 8u;
                                 }
                                 else
                                 {
@@ -19506,8 +19525,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     register_index = 8;
                                 }
-                                prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, prior_even_integer_pair);
-                                prior_stack_parts += prior_parts;
+                                if (darwin_stack)
+                                {
+                                    u32 argument_alignment = prior_indirect ? 8u : (u32)BUSTER_MIN(prior_type->layout.alignment, 16u);
+                                    u32 argument_size = prior_indirect ? 8u : (u32)prior_type->layout.size;
+                                    prior_stack_bytes = (prior_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                    prior_stack_bytes += argument_size;
+                                    prior_stack_parts = (prior_stack_bytes + 7u) / 8u;
+                                }
+                                else
+                                {
+                                    prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, prior_even_integer_pair);
+                                    prior_stack_parts += prior_parts;
+                                }
                             }
                         }
                         u32 part_count = 1;
@@ -19550,8 +19580,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + prior_stack_parts * 8, 8, false, false, 29) ||
-                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                                u32 scale = argument_type->bit_width / 8;
+                                u32 argument_stack_offset = prior_stack_parts * 8u;
+                                if (darwin_stack)
+                                {
+                                    u32 argument_alignment = (u32)BUSTER_MIN(argument_type->layout.alignment, 16u);
+                                    argument_stack_offset = (prior_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                }
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + argument_stack_offset, scale, false, false, 29) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, scale, true, false))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
@@ -19573,7 +19610,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, argument_type->layout.alignment > 8);
+                                u32 argument_stack_offset = prior_stack_parts * 8u;
+                                if (darwin_stack)
+                                {
+                                    u32 argument_alignment = (u32)BUSTER_MIN(argument_type->layout.alignment, 16u);
+                                    argument_stack_offset = (prior_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                }
+                                else
+                                {
+                                    prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, argument_type->layout.alignment > 8);
+                                    argument_stack_offset = prior_stack_parts * 8u;
+                                }
                                 for (u32 part = 0; part < argument_abi.part_count; part += 1)
                                 {
                                     CodegenCanonicalAbiPart* abi_part = argument_abi.parts + part;
@@ -19581,8 +19628,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     while (copied < abi_part->size)
                                     {
                                         u32 remaining = abi_part->size - copied;
-                                        u32 chunk = remaining >= 8 ? 8 : 4;
-                                        u32 source_offset = 16 + prior_stack_parts * 8 + abi_part->value_offset + copied;
+                                        u32 chunk = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+                                        u32 source_offset = 16 + argument_stack_offset + abi_part->value_offset + copied;
                                         u32 destination_offset = result_offset + abi_part->value_offset + copied;
                                         if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, source_offset, chunk, false, false, 29) ||
                                             !codegen_canonical_a64_frame_memory_operation(&buffer, 9, destination_offset, chunk, true, false))
@@ -19601,7 +19648,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             if (indirect)
                             {
-                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 10, 16 + prior_stack_parts * 8, 8, false, false, 29))
+                                u32 argument_stack_offset = prior_stack_parts * 8u;
+                                if (darwin_stack)
+                                {
+                                    argument_stack_offset = (prior_stack_bytes + 7u) & ~7u;
+                                }
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 10, 16 + argument_stack_offset, 8, false, false, 29))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
@@ -19618,10 +19670,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
-                            prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, even_integer_pair);
+                            u32 argument_stack_offset = prior_stack_parts * 8u;
+                            if (darwin_stack)
+                            {
+                                u32 argument_alignment = (u32)BUSTER_MIN(argument_type->layout.alignment, 16u);
+                                argument_stack_offset = (prior_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                            }
+                            else
+                            {
+                                prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, even_integer_pair);
+                                argument_stack_offset = prior_stack_parts * 8u;
+                            }
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
-                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + (prior_stack_parts + part_index) * 8, 8, false, false, 29) ||
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + argument_stack_offset + part_index * 8, 8, false, false, 29) ||
                                     !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
@@ -21009,6 +21071,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 simulated_registers = 0;
                         u32 simulated_float_registers = 0;
                         u32 stack_part_count = 0;
+                        u32 packed_stack_bytes = 0;
+                        bool darwin_stack = result.abi == CODEGEN_ABI_AARCH64_DARWIN;
                         for (u32 argument_array_index = 0; argument_array_index < argument_count; argument_array_index += 1)
                         {
                             IrValueId argument = instruction->operands[argument_array_index + 1];
@@ -21038,8 +21102,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 else
                                 {
                                     argument_on_stack[argument_array_index] = true;
-                                    argument_stack_offset[argument_array_index] = stack_part_count;
-                                    stack_part_count += 1;
+                                    if (darwin_stack)
+                                    {
+                                        u32 argument_alignment = (u32)BUSTER_MIN(type->layout.alignment, 16u);
+                                        packed_stack_bytes = (packed_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                        argument_stack_offset[argument_array_index] = packed_stack_bytes;
+                                        packed_stack_bytes += (u32)type->layout.size;
+                                        stack_part_count = (packed_stack_bytes + 7u) / 8u;
+                                    }
+                                    else
+                                    {
+                                        argument_stack_offset[argument_array_index] = stack_part_count * 8u;
+                                        stack_part_count += 1;
+                                    }
                                 }
                                 continue;
                             }
@@ -21057,9 +21132,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         simulated_float_registers = 8;
                                     }
                                     argument_on_stack[argument_array_index] = true;
-                                    stack_part_count = codegen_canonical_a64_align_stack_pair(stack_part_count, type->layout.alignment > 8);
-                                    argument_stack_offset[argument_array_index] = stack_part_count;
-                                    stack_part_count += (u32)((type->layout.size + 7) / 8);
+                                    if (darwin_stack)
+                                    {
+                                        u32 argument_alignment = (u32)BUSTER_MIN(type->layout.alignment, 16u);
+                                        packed_stack_bytes = (packed_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                        argument_stack_offset[argument_array_index] = packed_stack_bytes;
+                                        packed_stack_bytes += (u32)type->layout.size;
+                                        stack_part_count = (packed_stack_bytes + 7u) / 8u;
+                                    }
+                                    else
+                                    {
+                                        stack_part_count = codegen_canonical_a64_align_stack_pair(stack_part_count, type->layout.alignment > 8);
+                                        argument_stack_offset[argument_array_index] = stack_part_count * 8u;
+                                        stack_part_count += (u32)((type->layout.size + 7) / 8);
+                                    }
                                 }
                                 continue;
                             }
@@ -21091,12 +21177,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     simulated_registers = 8;
                                 }
                                 argument_on_stack[argument_array_index] = true;
-                                stack_part_count = codegen_canonical_a64_align_stack_pair(stack_part_count, even_integer_pair);
-                                argument_stack_offset[argument_array_index] = stack_part_count;
-                                stack_part_count += part_count;
+                                if (darwin_stack)
+                                {
+                                    u32 argument_alignment = indirect ? 8u : (u32)BUSTER_MIN(type->layout.alignment, 16u);
+                                    u32 argument_size = indirect ? 8u : (u32)type->layout.size;
+                                    packed_stack_bytes = (packed_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
+                                    argument_stack_offset[argument_array_index] = packed_stack_bytes;
+                                    packed_stack_bytes += argument_size;
+                                    stack_part_count = (packed_stack_bytes + 7u) / 8u;
+                                }
+                                else
+                                {
+                                    stack_part_count = codegen_canonical_a64_align_stack_pair(stack_part_count, even_integer_pair);
+                                    argument_stack_offset[argument_array_index] = stack_part_count * 8u;
+                                    stack_part_count += part_count;
+                                }
                             }
                         }
-                        u32 stack_size = (stack_part_count * 8 + 15) & ~(u32)15;
+                        u32 stack_bytes = darwin_stack ? packed_stack_bytes : stack_part_count * 8u;
+                        u32 stack_size = (stack_bytes + 15u) & ~(u32)15;
                         if (stack_size)
                         {
                             codegen_canonical_a64_adjust_stack(&buffer, stack_size, true);
@@ -21112,24 +21211,40 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 u32 source_offset = value_offsets[argument.value];
                                 codegen_canonical_a64_base_address(&buffer, 9, 28, source_offset);
-                                if (!codegen_canonical_a64_memory_operation(&buffer, 9, argument_stack_offset[argument_array_index] * 8, 8, true, false))
+                                if (!codegen_canonical_a64_memory_operation(&buffer, 9, argument_stack_offset[argument_array_index], 8, true, false))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
                                 }
                                 continue;
                             }
+                            IrTypeId argument_type_id = function->values[argument.value].canonical_type;
+                            IrType* argument_type = ir_type_from_id(&program->types, argument_type_id);
                             u32 part_count = 1;
-                            codegen_canonical_integer_aggregate_parts(program, function->values[argument.value].canonical_type, &part_count);
-                            for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                            bool aggregate = codegen_canonical_integer_aggregate_parts(program, argument_type_id, &part_count);
+                            if (!aggregate && argument_type && argument_type->layout.size <= 8)
                             {
-                                u32 source_offset = value_offsets[argument.value] + part_index * 8;
-                                if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, source_offset, 8, false, false) ||
-                                    !codegen_canonical_a64_memory_operation(&buffer, 9, (argument_stack_offset[argument_array_index] + part_index) * 8, 8, true,
-                                                                            false))
+                                u32 scale = (u32)argument_type->layout.size;
+                                u32 source_offset = value_offsets[argument.value];
+                                if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, source_offset, scale, false, false) ||
+                                    !codegen_canonical_a64_memory_operation(&buffer, 9, argument_stack_offset[argument_array_index], scale, true, false))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
+                                }
+                            }
+                            else
+                            {
+                                for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                                {
+                                    u32 source_offset = value_offsets[argument.value] + part_index * 8;
+                                    if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, source_offset, 8, false, false) ||
+                                        !codegen_canonical_a64_memory_operation(&buffer, 9, argument_stack_offset[argument_array_index] + part_index * 8u, 8,
+                                                                                true, false))
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
                                 }
                             }
                         }

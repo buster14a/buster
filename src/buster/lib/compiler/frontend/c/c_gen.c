@@ -7231,10 +7231,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_atomic_aggregate_conversion(CIntegerIrBuil
     return c_ir_emit_load_place_raw(builder, slot, atomic_type, source);
 }
 
-// Compatible vector typedefs can have distinct canonical IDs. Reinterpret
-// their identical lane representation through typed views of a private slot;
-// every load/store remains type-correct without inventing an identity cast.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vector_alias_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
+// Reinterpret equal-sized representations through typed views of a private
+// slot; every load/store remains type-correct without inventing an IR bitcast.
+// Compatible vector typedefs use this for their identical lane representation,
+// and Darwin x86 compiler-rt calls use it for the integer carrier of binary16.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_representation_alias_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type,
+                                                                        IrSourceRange source)
 {
     IrTypeId source_type = builder->function->values[value.value].canonical_type;
     IrValueId result = IR_VALUE_ID_INVALID;
@@ -7401,7 +7403,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             source_element->bit_width == target_element->bit_width && source_element->is_signed == target_element->is_signed &&
             (source_element->kind != IR_TYPE_FLOAT || source_element->float_format == target_element->float_format))
         {
-            return c_ir_emit_vector_alias_conversion(builder, value, target_type, source);
+            return c_ir_emit_representation_alias_conversion(builder, value, target_type, source);
         }
     }
     // Two types that differ only in a `volatile` qualifier are one type as far
@@ -15042,8 +15044,37 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
     IrValueId result = IR_VALUE_ID_INVALID;
     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
     IrTypeId function_type = IR_TYPE_ID_INVALID;
-    if (argument.value < builder->function->value_count &&
-        builder->function->values[argument.value].canonical_type.value == parameter_type.value)
+    bool darwin_x64_integer_half_abi = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                                       (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS);
+    IrTypeId runtime_return_type = return_type;
+    IrTypeId runtime_parameter_type = parameter_type;
+    IrValueId runtime_argument = argument;
+    bool parameter_is_half = c_ir_type_is_ieee_binary16(builder, parameter_type);
+    bool return_is_half = c_ir_type_is_ieee_binary16(builder, return_type);
+    if (darwin_x64_integer_half_abi && (parameter_is_half || return_is_half))
+    {
+        // Darwin's x86 compiler-rt binary16 entry points predate the scalar
+        // `_Float16` ABI: half operands/results use an unsigned 16-bit integer
+        // carrier (EDI/AX), while the wider float side remains in XMM. Keep
+        // ordinary source-level `_Float16` calls in their SSE class and bridge
+        // only these compiler-runtime symbols through a bit-preserving view.
+        IrTypeId bits_type = c_ir_unsigned_type_of_size(builder, 2);
+        if (bits_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return result;
+        }
+        if (parameter_is_half)
+        {
+            runtime_parameter_type = bits_type;
+            runtime_argument = c_ir_emit_representation_alias_conversion(builder, argument, bits_type, source);
+        }
+        if (return_is_half)
+        {
+            runtime_return_type = bits_type;
+        }
+    }
+    if (runtime_argument.value < builder->function->value_count &&
+        builder->function->values[runtime_argument.value].canonical_type.value == runtime_parameter_type.value)
     {
         for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count && symbol.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)
         {
@@ -15053,8 +15084,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
                 IrType* candidate_type = ir_type_from_id(&builder->program->types, candidate->type);
                 bool compatible = candidate_type && candidate_type->kind == IR_TYPE_FUNCTION && !candidate_type->is_variadic &&
                                   candidate_type->calling_convention == IR_CALLING_CONVENTION_C && candidate_type->parameter_count == 1 &&
-                                  candidate_type->return_type.value == return_type.value && candidate_type->parameter_types &&
-                                  candidate_type->parameter_types[0].value == parameter_type.value;
+                                  candidate_type->return_type.value == runtime_return_type.value && candidate_type->parameter_types &&
+                                  candidate_type->parameter_types[0].value == runtime_parameter_type.value;
                 if (compatible)
                 {
                     symbol = candidate->id;
@@ -15069,12 +15100,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
         if (symbol.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
         {
             IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, 1);
-            parameter_types[0] = parameter_type;
+            parameter_types[0] = runtime_parameter_type;
             function_type = ir_program_add_type(builder->program, (IrType){
                                                                       .name = S8("binary16 compiler runtime function"),
                                                                       .parameter_types = parameter_types,
                                                                       .element_type = IR_TYPE_ID_INVALID,
-                                                                      .return_type = return_type,
+                                                                      .return_type = runtime_return_type,
                                                                       .layout =
                                                                           {
                                                                               .size = builder->program->data_layout.pointer.size,
@@ -15108,15 +15139,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
 
             IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
             operands[0] = reference_result;
-            operands[1] = argument;
-            result = c_ir_add_result(builder, return_type);
-            IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, return_type);
+            operands[1] = runtime_argument;
+            IrValueId call_result = c_ir_add_result(builder, runtime_return_type);
+            IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, runtime_return_type);
             call.operands = operands;
             call.operand_count = 2;
             call.symbol = symbol;
-            call.result = result;
+            call.result = call_result;
             IrInstructionId call_id = c_ir_append_instruction(builder, call, source);
-            builder->function->values[result.value].definition = call_id;
+            builder->function->values[call_result.value].definition = call_id;
+            result = darwin_x64_integer_half_abi && return_is_half
+                         ? c_ir_emit_representation_alias_conversion(builder, call_result, return_type, source)
+                         : call_result;
         }
     }
     return result;

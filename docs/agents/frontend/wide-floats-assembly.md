@@ -41,8 +41,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `quality` compile the same signatures without machine fallback. Baseline
   targets need no F16C or AVX512-FP16 feature. Lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
-  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Comparisons and
-  truth conversion widen exactly, negation flips the binary16 sign bit without
+  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's
+  compiler-runtime entry points carry the half bits in the integer ABI even
+  though ordinary `_Float16` still uses XMM, so lowering bridges those symbols
+  through an internal `unsigned short` view. Apple AArch64 also packs stack-only
+  scalar arguments at their natural alignment rather than into eightbyte slots;
+  the canonical and MIR call layouts share that rule. Comparisons and truth
+  conversion widen exactly, negation flips the binary16 sign bit without
   quieting a NaN, and vector arithmetic/comparisons scalarize through the same
   per-lane operations. Hosted links therefore need the compiler-runtime/libgcc
   builtins, just as complex multiply/divide links do. The Wasm, eBPF and LLVM
