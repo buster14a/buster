@@ -701,8 +701,10 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             DwarfFunction* function = input.functions + function_index;
             u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
             u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
+            // COFF producers leave pParent/pEnd/pNext as zero placeholders.
+            // CVPACK-compatible linkers and pdb.c rebuild them after merging
+            // the DEBUG_S_SYMBOLS payloads into the module symbol stream.
             byte_writer_emit_u32_le(&symbols, 0);
-            u64 end_pointer_offset = symbols.count;
             byte_writer_emit_u32_le(&symbols, 0);
             byte_writer_emit_u32_le(&symbols, 0);
             byte_writer_emit_u32_le(&symbols, function->code_size);
@@ -755,13 +757,8 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                     codeview_record_end(&symbols, inline_end);
                 }
             }
-            u64 end_record = symbols.count;
             u64 end_marker = codeview_record_begin(&symbols, S_END);
             codeview_record_end(&symbols, end_marker);
-            if (end_record <= UINT32_MAX)
-            {
-                byte_writer_patch_u32_le(&symbols, end_pointer_offset, (u32)end_record);
-            }
             codeview_subsection_end(&symbols, function_symbols);
 
             u64 function_lines = codeview_subsection_begin(&symbols, DEBUG_S_LINES);
