@@ -13545,7 +13545,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         if (BUSTER_REQUIRE(arguments, ordinary_enum_tokens.token_count <= UINT32_MAX))
         {
             BUSTER_TEST(arguments,
-                        c_test_parse_generic_constant_tokens_alias(ordinary_enum_temporary.arena, ordinary_enum_tokens, 0,
+                        c_test_parse_generic_constant_tokens_alias(ordinary_enum_tokens, 0,
                                                                    (u32)ordinary_enum_tokens.token_count));
         }
         CParseResult ordinary_enum_parse = c_parse(ordinary_enum_temporary.arena, ordinary_enum_tokens);

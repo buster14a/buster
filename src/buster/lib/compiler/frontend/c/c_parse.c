@@ -3895,6 +3895,26 @@ BUSTER_GLOBAL_LOCAL bool c_parse_generic_constant_tokens_flatten(CTypeParseMachi
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_parse_generic_constant_tokens_alias_range(CPreprocessResult preprocess, u32 start, u32 end,
+                                                                       CToken** tokens_out, u32* token_count_out)
+{
+    bool aliased = start < end;
+    for (u32 index = start; aliased && index + 1 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        bool generic = token.kind == C_TOKEN_IDENTIFIER &&
+                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+                       c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        aliased = !generic;
+    }
+    if (aliased)
+    {
+        *tokens_out = preprocess.tokens;
+        *token_count_out = end - start;
+    }
+    return aliased;
+}
+
 // Flatten only selected _Generic associations into a compact token stream for
 // the parse-side integer evaluators.  The explicit range stack preserves
 // nested selections without source-dependent recursion.  Ordinary expressions
@@ -3905,33 +3925,20 @@ BUSTER_C_INTERNAL bool c_parse_generic_constant_tokens(CTypeParseMachine* machin
                                                          CToken** tokens_out, u32* token_count_out)
 {
     bool valid = start < end;
-    bool needs_flatten = false;
-    for (u32 index = start; valid && !needs_flatten && index + 1 < end; index += 1)
-    {
-        CToken token = preprocess.tokens[index];
-        needs_flatten = token.kind == C_TOKEN_IDENTIFIER &&
-                        string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
-                        c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-    }
-    if (valid && needs_flatten)
+    if (valid && !c_parse_generic_constant_tokens_alias_range(preprocess, start, end, tokens_out, token_count_out))
     {
         valid = c_parse_generic_constant_tokens_flatten(machine, arena, preprocess, result, scope, start, end, tokens_out, token_count_out);
-    }
-    else if (valid)
-    {
-        *tokens_out = preprocess.tokens;
-        *token_count_out = end - start;
     }
     return valid;
 }
 
 #if BUSTER_INCLUDE_TESTS
-bool c_test_parse_generic_constant_tokens_alias(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
+bool c_test_parse_generic_constant_tokens_alias(CPreprocessResult preprocess, u32 start, u32 end)
 {
     CToken* tokens = 0;
     u32 token_count = 0;
-    bool valid = c_parse_generic_constant_tokens(0, arena, preprocess, 0, C_SCOPE_ID_INVALID, start, end, &tokens, &token_count);
-    return valid && tokens == preprocess.tokens && token_count == end - start;
+    bool aliased = c_parse_generic_constant_tokens_alias_range(preprocess, start, end, &tokens, &token_count);
+    return aliased && tokens == preprocess.tokens && token_count == end - start;
 }
 #endif
 
