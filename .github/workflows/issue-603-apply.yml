@@ -1,0 +1,103 @@
+name: Issue 603 patch application
+
+on:
+  push:
+    branches:
+      - sol/603-analyzer-reference-provenance-v2-20260918
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Apply, validate and publish the single clean change
+        shell: bash
+        env:
+          BASE_SHA: 6db3c81a331544a60b859fa5a4b6fcb19db8d642
+          TRANSPORT_HEAD: ${{ github.sha }}
+          BRANCH: sol/603-analyzer-reference-provenance-v2-20260918
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --verify HEAD)" = "$TRANSPORT_HEAD"
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA"
+          transport_paths="$(git diff --name-only "$BASE_SHA..HEAD" | LC_ALL=C sort)"
+          expected_transport_paths="$(printf '%s\n' \
+            .github/issue-603-payload/payload.b64.00 \
+            .github/issue-603-payload/payload.b64.01 \
+            .github/issue-603-payload/payload.b64.02 \
+            .github/workflows/issue-603-apply.yml | LC_ALL=C sort)"
+          test "$transport_paths" = "$expected_transport_paths"
+          cat .github/issue-603-payload/payload.b64.* | base64 --decode > "$RUNNER_TEMP/issue-603-payload.tar.gz"
+          printf '%s  %s\n' \
+            8e3f8092a36aa794c2ececa9320dbddb7bee5679b31a81fa30da09b8504bf7ac \
+            "$RUNNER_TEMP/issue-603-payload.tar.gz" | sha256sum --check
+          archive_paths="$(tar -tzf "$RUNNER_TEMP/issue-603-payload.tar.gz" | LC_ALL=C sort)"
+          expected_archive_paths="$(printf '%s\n' analyzer_reference.py analyzer_selection_test.py apply.py | LC_ALL=C sort)"
+          test "$archive_paths" = "$expected_archive_paths"
+          tar -xzf "$RUNNER_TEMP/issue-603-payload.tar.gz" -C .github/issue-603-payload
+          cat > "$RUNNER_TEMP/issue-603-payload.sha256" <<'HASHES'
+          9f5d075b469083a7d85d5b56cae85113576910b90ee0d1e51275334e4488519d  .github/issue-603-payload/analyzer_reference.py
+          f8a049694f4ddf73a331ebb322d9201ad5870134625a9f67eae3747b1e19ac5c  .github/issue-603-payload/analyzer_selection_test.py
+          e53fef6a93290e5b3ffc1d16fff1630f24608e9c1d5f72ff98f810d595b79523  .github/issue-603-payload/apply.py
+          HASHES
+          sha256sum --check "$RUNNER_TEMP/issue-603-payload.sha256"
+          python3 .github/issue-603-payload/apply.py
+          git diff --check
+
+          # Replace the transport commit with one commit directly on the
+          # exact reviewed base. Deleted transport files therefore never appear
+          # in the submitted tree or pull-request diff.
+          git reset --soft "$BASE_SHA"
+          git add -A
+          actual_paths="$(git diff --cached --name-only | LC_ALL=C sort)"
+          expected_paths="$(printf '%s\n' \
+            .github/workflows/ci.yml \
+            docs/clang-analyze-shards.md \
+            tools/analyzer_reference.py \
+            tools/analyzer_selection_test.py | LC_ALL=C sort)"
+          test "$actual_paths" = "$expected_paths"
+          git diff --cached --check
+          git config user.name 'OpenAI'
+          git config user.email 'support@openai.com'
+          git commit -m 'ci: freeze analyzer reference provenance (#603)'
+          test "$(git rev-list --count "$BASE_SHA..HEAD")" = 1
+          test -z "$(git status --porcelain)"
+
+          python3 -m py_compile tools/analyzer_reference.py tools/analyzer_selection_test.py
+          python3 tools/analyzer_selection_test.py -v
+          python3 tools/check_action_pins.py
+          python3 tests/action_pins_test.py
+
+          validation="$RUNNER_TEMP/issue-603-validation"
+          mkdir -p "$validation"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char \
+            -MMD -MF "$validation/driver.d" build.c -o "$validation/analyzer-driver"
+          python3 tools/analyzer_reference.py manifest \
+            --repository "$GITHUB_WORKSPACE" --revision HEAD \
+            --root "$GITHUB_WORKSPACE" --depfile "$validation/driver.d" \
+            --output "$validation/manifest.json"
+          python3 - "$validation/manifest.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          manifest = json.loads(Path(sys.argv[1]).read_text())
+          assert manifest["complete"], manifest["issues"]
+          dependencies = {entry["path"] for entry in manifest["dependencies"]}
+          assert "build.c" in dependencies
+          assert "tools/clang_analyze.c" in dependencies
+          print(f"verified analyzer driver closure: {len(dependencies)} tracked dependencies")
+          PY
+          test -z "$(git status --porcelain)"
+
+          git push --force-with-lease="refs/heads/$BRANCH:$TRANSPORT_HEAD" \
+            origin "HEAD:refs/heads/$BRANCH"
