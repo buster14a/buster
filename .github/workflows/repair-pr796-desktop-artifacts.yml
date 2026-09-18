@@ -14,7 +14,6 @@ permissions:
 
 jobs:
   repair:
-    if: github.event.head_commit.message == 'ci: stage PR 796 artifact repair'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -31,84 +30,7 @@ jobs:
       - name: Add safe desktop artifact staging
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('.github/workflows/ci.yml')
-          text = path.read_text()
-          marker = '      - name: Retain desktop logs\n'
-          assert text.count(marker) == 1
-          condition = '$' + '{{ !cancelled() }}'
-          step = '''      # Logs may contain symlinks into build/.buster-cache. upload-artifact
-          # follows those links and can fail on intentionally unreadable cache entries.
-          # Rebuild the upload root from readable regular files only, without
-          # preserving links or source permissions.
-          - name: Sanitize desktop logs
-            if: CONDITION
-            timeout-minutes: 2
-            shell: bash
-            run: |
-              set -euo pipefail
-              "$BUSTER_CI_PYTHON" - <<'PYTHON'
-              import os
-              import shutil
-              import stat
-              from pathlib import Path
-
-              root = Path(os.environ["RUNNER_TEMP"]) / "buster-ci"
-              source = root.with_name("buster-ci-unsanitized")
-              if source.is_symlink() or source.is_file():
-                  source.unlink()
-              elif source.is_dir():
-                  shutil.rmtree(source, ignore_errors=True)
-              if root.is_symlink() or root.is_file():
-                  root.unlink()
-              elif root.is_dir():
-                  root.rename(source)
-              root.mkdir(parents=True, exist_ok=True)
-
-              skipped = []
-              if source.is_dir():
-                  for directory, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
-                      current = Path(directory)
-                      relative = current.relative_to(source)
-                      retained_directories = []
-                      for name in dirnames:
-                          entry = current / name
-                          try:
-                              mode = entry.lstat().st_mode
-                          except OSError as error:
-                              skipped.append(f"{relative / name}: {error}")
-                              continue
-                          if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
-                              retained_directories.append(name)
-                              (root / relative / name).mkdir(parents=True, exist_ok=True)
-                          else:
-                              skipped.append(f"{relative / name}: non-directory or symbolic link")
-                      dirnames[:] = retained_directories
-                      for name in filenames:
-                          entry = current / name
-                          destination = root / relative / name
-                          try:
-                              mode = entry.lstat().st_mode
-                              if not stat.S_ISREG(mode):
-                                  skipped.append(f"{relative / name}: non-regular file")
-                                  continue
-                              destination.parent.mkdir(parents=True, exist_ok=True)
-                              with entry.open("rb") as input_file, destination.open("wb") as output_file:
-                                  shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
-                          except OSError as error:
-                              destination.unlink(missing_ok=True)
-                              skipped.append(f"{relative / name}: {error}")
-
-              report = root / "artifact-sanitization.txt"
-              report.write_text("\n".join(skipped) + ("\n" if skipped else ""), encoding="utf-8")
-              shutil.rmtree(source, ignore_errors=True)
-              PYTHON
-
-'''.replace('CONDITION', condition)
-          path.write_text(text.replace(marker, step + marker, 1))
-          PY
+          python3 -c "import base64; exec(compile(base64.b64decode('ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwYXRoID0gUGF0aCgiLmdpdGh1Yi93b3JrZmxvd3MvY2kueW1sIikKdGV4dCA9IHBhdGgucmVhZF90ZXh0KCkKbWFya2VyID0gIiAgICAgIC0gbmFtZTogUmV0YWluIGRlc2t0b3AgbG9nc1xuIgphc3NlcnQgdGV4dC5jb3VudChtYXJrZXIpID09IDEKc3RlcCA9IHInJycgICAgICAjIExvZ3MgbWF5IGNvbnRhaW4gc3ltbGlua3MgaW50byBidWlsZC8uYnVzdGVyLWNhY2hlLiB1cGxvYWQtYXJ0aWZhY3QKICAgICAgIyBmb2xsb3dzIHRob3NlIGxpbmtzIGFuZCBjYW4gZmFpbCBvbiBpbnRlbnRpb25hbGx5IHVucmVhZGFibGUgY2FjaGUgZW50cmllcy4KICAgICAgIyBSZWJ1aWxkIHRoZSB1cGxvYWQgcm9vdCBmcm9tIHJlYWRhYmxlIHJlZ3VsYXIgZmlsZXMgb25seSwgd2l0aG91dAogICAgICAjIHByZXNlcnZpbmcgbGlua3Mgb3Igc291cmNlIHBlcm1pc3Npb25zLgogICAgICAtIG5hbWU6IFNhbml0aXplIGRlc2t0b3AgbG9ncwogICAgICAgIGlmOiAke3sgIWNhbmNlbGxlZCgpIH19CiAgICAgICAgdGltZW91dC1taW51dGVzOiAyCiAgICAgICAgc2hlbGw6IGJhc2gKICAgICAgICBydW46IHwKICAgICAgICAgIHNldCAtZXVvIHBpcGVmYWlsCiAgICAgICAgICAiJEJVU1RFUl9DSV9QWVRIT04iIC0gPDwnUFlUSE9OJwogICAgICAgICAgaW1wb3J0IG9zCiAgICAgICAgICBpbXBvcnQgc2h1dGlsCiAgICAgICAgICBpbXBvcnQgc3RhdAogICAgICAgICAgZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgogICAgICAgICAgcm9vdCA9IFBhdGgob3MuZW52aXJvblsiUlVOTkVSX1RFTVAiXSkgLyAiYnVzdGVyLWNpIgogICAgICAgICAgc291cmNlID0gcm9vdC53aXRoX25hbWUoImJ1c3Rlci1jaS11bnNhbml0aXplZCIpCiAgICAgICAgICBpZiBzb3VyY2UuaXNfc3ltbGluaygpIG9yIHNvdXJjZS5pc19maWxlKCk6CiAgICAgICAgICAgICAgc291cmNlLnVubGluaygpCiAgICAgICAgICBlbGlmIHNvdXJjZS5pc19kaXIoKToKICAgICAgICAgICAgICBzaHV0aWwucm10cmVlKHNvdXJjZSwgaWdub3JlX2Vycm9ycz1UcnVlKQogICAgICAgICAgaWYgcm9vdC5pc19zeW1saW5rKCkgb3Igcm9vdC5pc19maWxlKCk6CiAgICAgICAgICAgICAgcm9vdC51bmxpbmsoKQogICAgICAgICAgZWxpZiByb290LmlzX2RpcigpOgogICAgICAgICAgICAgIHJvb3QucmVuYW1lKHNvdXJjZSkKICAgICAgICAgIHJvb3QubWtkaXIocGFyZW50cz1UcnVlLCBleGlzdF9vaz1UcnVlKQoKICAgICAgICAgIHNraXBwZWQgPSBbXQogICAgICAgICAgaWYgc291cmNlLmlzX2RpcigpOgogICAgICAgICAgICAgIGZvciBkaXJlY3RvcnksIGRpcm5hbWVzLCBmaWxlbmFtZXMgaW4gb3Mud2Fsayhzb3VyY2UsIHRvcGRvd249VHJ1ZSwgZm9sbG93bGlua3M9RmFsc2UpOgogICAgICAgICAgICAgICAgICBjdXJyZW50ID0gUGF0aChkaXJlY3RvcnkpCiAgICAgICAgICAgICAgICAgIHJlbGF0aXZlID0gY3VycmVudC5yZWxhdGl2ZV90byhzb3VyY2UpCiAgICAgICAgICAgICAgICAgIHJldGFpbmVkX2RpcmVjdG9yaWVzID0gW10KICAgICAgICAgICAgICAgICAgZm9yIG5hbWUgaW4gZGlybmFtZXM6CiAgICAgICAgICAgICAgICAgICAgICBlbnRyeSA9IGN1cnJlbnQgLyBuYW1lCiAgICAgICAgICAgICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgICAgICAgbW9kZSA9IGVudHJ5LmxzdGF0KCkuc3RfbW9kZQogICAgICAgICAgICAgICAgICAgICAgZXhjZXB0IE9TRXJyb3IgYXMgZXJyb3I6CiAgICAgICAgICAgICAgICAgICAgICAgICAgc2tpcHBlZC5hcHBlbmQoZiJ7cmVsYXRpdmUgLyBuYW1lfToge2Vycm9yfSIpCiAgICAgICAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgICAgICAgIGlmIHN0YXQuU19JU0RJUihtb2RlKSBhbmQgbm90IHN0YXQuU19JU0xOSyhtb2RlKToKICAgICAgICAgICAgICAgICAgICAgICAgICByZXRhaW5lZF9kaXJlY3Rvcmllcy5hcHBlbmQobmFtZSkKICAgICAgICAgICAgICAgICAgICAgICAgICAocm9vdCAvIHJlbGF0aXZlIC8gbmFtZSkubWtkaXIocGFyZW50cz1UcnVlLCBleGlzdF9vaz1UcnVlKQogICAgICAgICAgICAgICAgICAgICAgZWxzZToKICAgICAgICAgICAgICAgICAgICAgICAgICBza2lwcGVkLmFwcGVuZChmIntyZWxhdGl2ZSAvIG5hbWV9OiBub24tZGlyZWN0b3J5IG9yIHN5bWJvbGljIGxpbmsiKQogICAgICAgICAgICAgICAgICBkaXJuYW1lc1s6XSA9IHJldGFpbmVkX2RpcmVjdG9yaWVzCiAgICAgICAgICAgICAgICAgIGZvciBuYW1lIGluIGZpbGVuYW1lczoKICAgICAgICAgICAgICAgICAgICAgIGVudHJ5ID0gY3VycmVudCAvIG5hbWUKICAgICAgICAgICAgICAgICAgICAgIGRlc3RpbmF0aW9uID0gcm9vdCAvIHJlbGF0aXZlIC8gbmFtZQogICAgICAgICAgICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgICAgICAgICAgIG1vZGUgPSBlbnRyeS5sc3RhdCgpLnN0X21vZGUKICAgICAgICAgICAgICAgICAgICAgICAgICBpZiBub3Qgc3RhdC5TX0lTUkVHKG1vZGUpOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICBza2lwcGVkLmFwcGVuZChmIntyZWxhdGl2ZSAvIG5hbWV9OiBub24tcmVndWxhciBmaWxlIikKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgICAgICAgICAgICBkZXN0aW5hdGlvbi5wYXJlbnQubWtkaXIocGFyZW50cz1UcnVlLCBleGlzdF9vaz1UcnVlKQogICAgICAgICAgICAgICAgICAgICAgICAgIHdpdGggZW50cnkub3BlbigicmIiKSBhcyBpbnB1dF9maWxlLCBkZXN0aW5hdGlvbi5vcGVuKCJ3YiIpIGFzIG91dHB1dF9maWxlOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICBzaHV0aWwuY29weWZpbGVvYmooaW5wdXRfZmlsZSwgb3V0cHV0X2ZpbGUsIGxlbmd0aD0xMDI0ICogMTAyNCkKICAgICAgICAgICAgICAgICAgICAgIGV4Y2VwdCBPU0Vycm9yIGFzIGVycm9yOgogICAgICAgICAgICAgICAgICAgICAgICAgIGRlc3RpbmF0aW9uLnVubGluayhtaXNzaW5nX29rPVRydWUpCiAgICAgICAgICAgICAgICAgICAgICAgICAgc2tpcHBlZC5hcHBlbmQoZiJ7cmVsYXRpdmUgLyBuYW1lfToge2Vycm9yfSIpCgogICAgICAgICAgcmVwb3J0ID0gcm9vdCAvICJhcnRpZmFjdC1zYW5pdGl6YXRpb24udHh0IgogICAgICAgICAgcmVwb3J0LndyaXRlX3RleHQoIlxuIi5qb2luKHNraXBwZWQpICsgKCJcbiIgaWYgc2tpcHBlZCBlbHNlICIiKSwgZW5jb2Rpbmc9InV0Zi04IikKICAgICAgICAgIHNodXRpbC5ybXRyZWUoc291cmNlLCBpZ25vcmVfZXJyb3JzPVRydWUpCiAgICAgICAgICBQWVRIT04KCicnJwpwYXRoLndyaXRlX3RleHQodGV4dC5yZXBsYWNlKG1hcmtlciwgc3RlcCArIG1hcmtlciwgMSkpCg=='), 'repair.py', 'exec'))"
 
       - name: Commit the repair
         run: |
