@@ -1,0 +1,100 @@
+#if BUSTER_INCLUDE_TESTS
+typedef struct OsProcessSpawnTestState OsProcessSpawnTestState;
+struct OsProcessSpawnTestState
+{
+    u64 call_count;
+    u64 fail_call;
+    OsProcessSpawnTestOperation operation;
+    bool armed;
+    bool failed;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessSpawnTestState os_process_spawn_test_state;
+
+void os_process_spawn_test_fail_on_call(OsProcessSpawnTestOperation operation, u64 call_index)
+{
+    BUSTER_VALIDATE(operation < OS_PROCESS_SPAWN_TEST_OPERATION_COUNT);
+    os_process_spawn_test_state = (OsProcessSpawnTestState){
+        .fail_call = call_index,
+        .operation = operation,
+        .armed = true,
+    };
+}
+
+bool os_process_spawn_test_end(void)
+{
+    bool result = os_process_spawn_test_state.armed && os_process_spawn_test_state.failed;
+    os_process_spawn_test_state = (OsProcessSpawnTestState){0};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)
+{
+    bool result = false;
+    if (os_process_spawn_test_state.armed && os_process_spawn_test_state.operation == operation)
+    {
+        u64 call = os_process_spawn_test_state.call_count;
+        os_process_spawn_test_state.call_count += 1;
+        if (call == os_process_spawn_test_state.fail_call)
+        {
+            os_process_spawn_test_state.failed = true;
+            result = true;
+        }
+    }
+    return result;
+}
+
+u64 os_process_spawn_test_resource_count(void)
+{
+    u64 result = 0;
+#if defined(_WIN32)
+    DWORD count = 0;
+    if (GetProcessHandleCount(GetCurrentProcess(), &count))
+    {
+        result = count;
+    }
+#else
+#if defined(__linux__)
+    char const* directory_path = "/proc/self/fd";
+#else
+    char const* directory_path = "/dev/fd";
+#endif
+    DIR* directory = opendir(directory_path);
+    if (directory)
+    {
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != 0)
+        {
+            result += entry->d_name[0] != '.';
+        }
+        closedir(directory);
+        // The directory used for the census is itself visible in fd directories.
+        result -= result != 0;
+    }
+#endif
+    return result;
+}
+#define OS_PROCESS_SPAWN_TEST_FAIL(operation) os_process_spawn_test_should_fail(operation)
+#else
+#define OS_PROCESS_SPAWN_TEST_FAIL(operation) false
+#endif
+
+BUSTER_GLOBAL_LOCAL void os_process_spawn_fail(ProcessSpawnResult* result, ProcessSpawnFailure failure, OsError error)
+{
+    if (result->failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        result->failure = failure;
+        result->error = error;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL OsError os_process_spawn_invalid_error(void)
+{
+#if defined(_WIN32)
+    return (OsError){ERROR_INVALID_PARAMETER};
+#else
+    return (OsError){EINVAL};
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL OsError os_process_spawn_not_found_error(void)
