@@ -105,9 +105,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
         ObjectSymbol right_symbols[] = {{.name = S8("same"), .size = 2, .section = OBJECT_SECTION_TEXT,
                                          .kind = OBJECT_SYMBOL_FUNCTION, .global = true}};
         ObjectFile objects[] = {
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), S8("same"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(left_bytes), S8("same"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
                                     left_symbols, BUSTER_ARRAY_LENGTH(left_symbols), 0, 0),
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), S8("same"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(right_bytes), S8("same"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
                                     right_symbols, BUSTER_ARRAY_LENGTH(right_symbols), 0, 0),
         };
         LinkObjectResult linked = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
@@ -125,9 +125,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
         ObjectSymbol right_symbols[] = {{.name = S8("same_size_bad"), .size = 2, .section = OBJECT_SECTION_TEXT,
                                          .kind = OBJECT_SYMBOL_DATA, .global = true}};
         ObjectFile objects[] = {
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), S8("same_size_bad"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(left_bytes), S8("same_size_bad"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
                                     left_symbols, 1, 0, 0),
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), S8("same_size_bad"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(right_bytes), S8("same_size_bad"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
                                     right_symbols, 1, 0, 0),
         };
         LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
@@ -142,9 +142,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
         ObjectSymbol right_symbols[] = {{.name = S8("exact_bad"), .size = 2, .section = OBJECT_SECTION_TEXT,
                                          .kind = OBJECT_SYMBOL_DATA, .global = true}};
         ObjectFile objects[] = {
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), S8("exact_bad"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(left_bytes), S8("exact_bad"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
                                     left_symbols, 1, 0, 0),
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), S8("exact_bad"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(right_bytes), S8("exact_bad"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
                                     right_symbols, 1, 0, 0),
         };
         LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
@@ -164,9 +164,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
         ObjectRelocation left_relocations[] = {{.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE32}};
         ObjectRelocation right_relocations[] = {{.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE32}};
         ObjectFile objects[] = {
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("exact_reloc"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(bytes), S8("exact_reloc"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
                                     left_symbols, 2, left_relocations, 1),
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("exact_reloc"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(bytes), S8("exact_reloc"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
                                     right_symbols, 2, right_relocations, 1),
         };
         LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){.allow_undefined_symbols = true});
@@ -181,9 +181,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
                                          .kind = OBJECT_SYMBOL_DATA, .global = true}};
         ObjectSymbol large_symbols[] = {{.name = S8("largest"), .size = 3, .section = OBJECT_SECTION_TEXT,
                                          .kind = OBJECT_SYMBOL_DATA, .global = true}};
-        ObjectFile small = link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(small_bytes), S8("largest"), OBJECT_COMDAT_SELECTION_LARGEST,
+        ObjectFile small = link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(small_bytes), S8("largest"), OBJECT_COMDAT_SELECTION_LARGEST,
                                                     small_symbols, 1, 0, 0);
-        ObjectFile large = link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(large_bytes), S8("largest"), OBJECT_COMDAT_SELECTION_LARGEST,
+        ObjectFile large = link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(large_bytes), S8("largest"), OBJECT_COMDAT_SELECTION_LARGEST,
                                                     large_symbols, 1, 0, 0);
         ObjectFile objects[2] = {order ? large : small, order ? small : large};
         LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
@@ -229,8 +229,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
              .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE},
         };
         ObjectFile objects[] = {
-            link_test_comdat_object(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), left_symbols, 3, left_relocations, 1, left_comdats, 2),
-            link_test_comdat_object(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), right_symbols, 3, right_relocations, 1, right_comdats, 2),
+            link_test_comdat_object(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(left_bytes), left_symbols, 3, left_relocations, 1, left_comdats, 2),
+            link_test_comdat_object(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(right_bytes), right_symbols, 3, right_relocations, 1, right_comdats, 2),
         };
         LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){.allow_undefined_symbols = true});
         u32 child = link_test_comdat_symbol_find(&linked.object, S8("assoc_child"));
@@ -250,9 +250,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
         ObjectSymbol right_symbols[] = {{.name = S8("mode_bad"), .size = 1, .section = OBJECT_SECTION_TEXT,
                                          .kind = OBJECT_SYMBOL_DATA, .global = true}};
         ObjectFile objects[] = {
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("mode_bad"), OBJECT_COMDAT_SELECTION_ANY,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(bytes), S8("mode_bad"), OBJECT_COMDAT_SELECTION_ANY,
                                     left_symbols, 1, 0, 0),
-            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("mode_bad"), OBJECT_COMDAT_SELECTION_LARGEST,
+            link_test_single_comdat(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(bytes), S8("mode_bad"), OBJECT_COMDAT_SELECTION_LARGEST,
                                     right_symbols, 1, 0, 0),
         };
         LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
