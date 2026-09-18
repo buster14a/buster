@@ -7,9 +7,9 @@
 typedef struct CIncludeFileIdentity CIncludeFileIdentity;
 struct CIncludeFileIdentity
 {
-    // Path fallback for builtins and until the shared file layer publishes a
-    // descriptor identity. Physical identities leave this empty and compare
-    // their device/index pair instead.
+    // Path key for builtins and other non-filesystem namespaces. Filesystem
+    // bytes use the identity captured from their supplying descriptor instead;
+    // physical identities compare their device/index pair and ignore this path.
     String8 path;
     u64 device;
     u64 index;

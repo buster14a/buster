@@ -292,7 +292,7 @@ def _workflow_mobile_lanes(path: Path = WORKFLOW_PATH) -> list[dict[str, str]]:
     required_fragments = (
         "./android/test_ci.sh --all",
         "./ios/test_ci.sh --all",
-        "BUSTER_CI_REQUIRED: ${{ matrix.os == 'ios' && 'ios' || 'android' }}",
+        "BUSTER_CI_REQUIRED: ${{ matrix.os == 'ios' && 'ios' || (steps.android_sdk.outcome == 'success' && 'android_sdk android' || 'android_sdk') }}",
         "run: python3 tools/ci_summary.py",
     )
     for fragment in required_fragments:

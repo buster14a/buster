@@ -1235,11 +1235,11 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_unlink_at(int parent, String8 name, 
 
 BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
 {
-    // Keep every parent descriptor until its child has been removed. Every
-    // descendant lookup is then one component beneath an already retained
-    // directory, and O_NOFOLLOW plus unlinkat make link traversal impossible.
-    // Linux openat2 would duplicate this single-component containment rule;
-    // the descriptor-relative path is the portable invariant itself.
+    // Retain the current directory and the root's parent. On ascent, reopen
+    // ".." relative to the retained child and verify the saved parent identity.
+    // Restarting the parent's enumeration is safe after removing the child;
+    // any failed removal stops the walk. This bounds descriptors independently
+    // of depth without following links or reopening a descendant by pathname.
     bool result = true;
     u64 root_end = root.length;
     while (root_end > 1 && root.pointer[root_end - 1] == '/')
@@ -1321,7 +1321,7 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             }
         }
 
-        while (frame)
+        while (frame && result)
         {
             errno = 0;
             struct dirent* entry = readdir(frame->directory);
@@ -1368,6 +1368,11 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                                 .device = opened.st_dev,
                                 .inode = opened.st_ino,
                             };
+                            if (closedir(frame->directory) != 0)
+                            {
+                                result = false;
+                            }
+                            frame->directory = 0;
                             frame = child_frame;
                         }
                     }
@@ -1382,9 +1387,30 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                 int read_error = errno;
                 OsDirectoryDeleteFrame* finished = frame;
                 OsDirectoryDeleteFrame* parent = finished->parent;
-                int parent_descriptor = parent ? dirfd(parent->directory) : root_parent;
+                int parent_descriptor = root_parent;
+                if (parent)
+                {
+                    parent_descriptor = os_directory_delete_open_at(dirfd(finished->directory), S8(".."));
+                    struct stat reopened;
+                    bool same_parent = parent_descriptor >= 0 && os_directory_delete_stat(parent_descriptor, &reopened) == 0 &&
+                                       reopened.st_dev == parent->device && reopened.st_ino == parent->inode;
+                    parent->directory = same_parent ? fdopendir(parent_descriptor) : 0;
+                    if (!parent->directory)
+                    {
+                        if (parent_descriptor >= 0)
+                        {
+                            close(parent_descriptor);
+                        }
+                        parent_descriptor = -1;
+                        result = false;
+                    }
+                }
                 struct stat selected_again;
-                if (os_directory_delete_stat_at(parent_descriptor, finished->name, &selected_again) == 0)
+                if (read_error || parent_descriptor < 0)
+                {
+                    result = false;
+                }
+                else if (os_directory_delete_stat_at(parent_descriptor, finished->name, &selected_again) == 0)
                 {
                     bool same = S_ISDIR(selected_again.st_mode) && selected_again.st_dev == finished->device &&
                                 selected_again.st_ino == finished->inode;
@@ -1402,16 +1428,20 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                 {
                     result = false;
                 }
-                if (read_error)
-                {
-                    result = false;
-                }
                 if (closedir(finished->directory) != 0)
                 {
                     result = false;
                 }
                 frame = parent;
             }
+        }
+        while (frame)
+        {
+            if (frame->directory && closedir(frame->directory) != 0)
+            {
+                result = false;
+            }
+            frame = frame->parent;
         }
         if (close(root_parent) != 0)
         {
