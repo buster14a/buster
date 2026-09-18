@@ -200,16 +200,30 @@ case "$tool" in
             list)
                 if [[ ${1:-} == devices ]]; then
                     if [[ -f $state/shutdown-transition && " $* " == *" -j "* ]]; then
-                        sleep "${BUSTER_SHUTDOWN_TEST_PROBE_SLEEP_SECONDS:-0}"
-                        if [[ ${BUSTER_SHUTDOWN_TEST_PROBE_STATUS:-0} -ne 0 ]]; then
-                            exit "${BUSTER_SHUTDOWN_TEST_PROBE_STATUS}"
+                        shutdown_count=0
+                        if [[ -f $state/shutdown-count ]]; then
+                            read -r shutdown_count <"$state/shutdown-count"
                         fi
-                        if [[ -n ${BUSTER_SHUTDOWN_TEST_JSON:-} ]]; then
-                            printf '%s\n' "$BUSTER_SHUTDOWN_TEST_JSON"
+                        probe_sleep=${BUSTER_SHUTDOWN_TEST_PROBE_SLEEP_SECONDS:-0}
+                        probe_status=${BUSTER_SHUTDOWN_TEST_PROBE_STATUS:-0}
+                        probe_json=${BUSTER_SHUTDOWN_TEST_JSON:-}
+                        if [[ $shutdown_count -ge 2 ]]; then
+                            probe_sleep=${BUSTER_SHUTDOWN_TEST_RECOVERY_PROBE_SLEEP_SECONDS:-0}
+                            probe_status=${BUSTER_SHUTDOWN_TEST_RECOVERY_PROBE_STATUS:-0}
+                            probe_json=${BUSTER_SHUTDOWN_TEST_RECOVERY_JSON:-}
+                        fi
+                        sleep "$probe_sleep"
+                        if [[ $probe_status -ne 0 ]]; then
+                            exit "$probe_status"
+                        fi
+                        if [[ -n $probe_json ]]; then
+                            printf '%s
+' "$probe_json"
                         else
                             post_udid=$(cat "$state/shutdown-transition")
                             post_state=$(cat "$state/shutdown-state")
-                            printf '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"name":"buster-ci","udid":"%s","isAvailable":true,"state":"%s"}]}}\n' \
+                            printf '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"name":"buster-ci","udid":"%s","isAvailable":true,"state":"%s"}]}}
+' \
                                 "$post_udid" "$post_state"
                         fi
                     elif [[ " $* " == *" -j "* ]]; then
@@ -251,8 +265,25 @@ case "$tool" in
                 printf 'fake simulator diagnostic\n'
                 ;;
             shutdown)
-                case "${BUSTER_SHUTDOWN_TEST_SHUTDOWN_MODE:-timeout}" in
+                shutdown_count=0
+                if [[ -f $state/shutdown-count ]]; then
+                    read -r shutdown_count <"$state/shutdown-count"
+                fi
+                shutdown_count=$((shutdown_count + 1))
+                printf '%s
+' "$shutdown_count" >"$state/shutdown-count"
+                shutdown_mode=${BUSTER_SHUTDOWN_TEST_SHUTDOWN_MODE:-timeout}
+                shutdown_state=${BUSTER_SHUTDOWN_TEST_POST_STATE:-Shutdown}
+                if [[ $shutdown_count -ge 2 ]]; then
+                    shutdown_mode=${BUSTER_SHUTDOWN_TEST_RECOVERY_MODE:-success}
+                    shutdown_state=${BUSTER_SHUTDOWN_TEST_RECOVERY_POST_STATE:-Shutdown}
+                fi
+                case "$shutdown_mode" in
                     success)
+                        printf '%s
+' "${1:-}" >"$state/shutdown-transition"
+                        printf '%s
+' "$shutdown_state" >"$state/shutdown-state"
                         : >"$state/shutdown"
                         ;;
                     reject)
@@ -262,8 +293,10 @@ case "$tool" in
                         exit 124
                         ;;
                     timeout)
-                        printf '%s\n' "${1:-}" >"$state/shutdown-transition"
-                        printf '%s\n' "${BUSTER_SHUTDOWN_TEST_POST_STATE:-Shutdown}" >"$state/shutdown-state"
+                        printf '%s
+' "${1:-}" >"$state/shutdown-transition"
+                        printf '%s
+' "$shutdown_state" >"$state/shutdown-state"
                         sleep 60
                         : >"$state/shutdown"
                         ;;
@@ -288,6 +321,11 @@ class ShutdownPostconditionTest(unittest.TestCase):
         post_json: str | None = None,
         probe_status: int = 0,
         probe_sleep: int = 0,
+        recovery_mode: str = "success",
+        recovery_post_state: str = "Shutdown",
+        recovery_json: str | None = None,
+        recovery_probe_status: int = 0,
+        recovery_probe_sleep: int = 0,
         hosted: bool = True,
         explicit: bool = False,
         borrowed: bool = False,
@@ -333,6 +371,10 @@ class ShutdownPostconditionTest(unittest.TestCase):
                     "BUSTER_SHUTDOWN_TEST_POST_STATE": post_state,
                     "BUSTER_SHUTDOWN_TEST_PROBE_STATUS": str(probe_status),
                     "BUSTER_SHUTDOWN_TEST_PROBE_SLEEP_SECONDS": str(probe_sleep),
+                    "BUSTER_SHUTDOWN_TEST_RECOVERY_MODE": recovery_mode,
+                    "BUSTER_SHUTDOWN_TEST_RECOVERY_POST_STATE": recovery_post_state,
+                    "BUSTER_SHUTDOWN_TEST_RECOVERY_PROBE_STATUS": str(recovery_probe_status),
+                    "BUSTER_SHUTDOWN_TEST_RECOVERY_PROBE_SLEEP_SECONDS": str(recovery_probe_sleep),
                     "BUSTER_SHUTDOWN_TEST_BORROWED": "1" if borrowed else "0",
                 }
             )
@@ -351,6 +393,8 @@ class ShutdownPostconditionTest(unittest.TestCase):
                 env["BUSTER_IOS_SIMULATOR_UDID"] = SHUTDOWN_TEST_UDID
             if post_json is not None:
                 env["BUSTER_SHUTDOWN_TEST_JSON"] = post_json
+            if recovery_json is not None:
+                env["BUSTER_SHUTDOWN_TEST_RECOVERY_JSON"] = recovery_json
             result = subprocess.run(
                 [
                     "bash",
@@ -370,6 +414,10 @@ class ShutdownPostconditionTest(unittest.TestCase):
             postcondition_log = Path(
                 str(console) + ".shutdown-postcondition.result.log"
             )
+            recovery_log = Path(str(console) + ".shutdown-recovery.result.log")
+            recovery_postcondition_log = Path(
+                str(console) + ".shutdown-recovery-postcondition.result.log"
+            )
             return {
                 "status": result.returncode,
                 "output": result.stdout + result.stderr,
@@ -379,6 +427,14 @@ class ShutdownPostconditionTest(unittest.TestCase):
                 else "",
                 "postcondition": postcondition_log.read_text(encoding="utf-8")
                 if postcondition_log.exists()
+                else "",
+                "recovery": recovery_log.read_text(encoding="utf-8")
+                if recovery_log.exists()
+                else "",
+                "recovery_postcondition": recovery_postcondition_log.read_text(
+                    encoding="utf-8"
+                )
+                if recovery_postcondition_log.exists()
                 else "",
             }
 
@@ -411,11 +467,127 @@ class ShutdownPostconditionTest(unittest.TestCase):
         )
         self.assertIn("result_status=1", result["shutdown"])
 
+    def test_non_shutdown_postcondition_recovers_once(self) -> None:
+        result = self.invoke(post_state="Booted")
+        self.assertEqual(result["status"], 0, result["output"])
+        self.assertIn("shutdown_status=124", result["shutdown"])
+        self.assertIn("shutdown_outcome=timeout", result["shutdown"])
+        self.assertIn("postcondition_state=Shutdown", result["shutdown"])
+        self.assertIn(
+            "shutdown_disposition=recovered-shutdown-after-timeout",
+            result["shutdown"],
+        )
+        self.assertIn("state=non-shutdown", result["postcondition"])
+        self.assertIn("initial_state=non-shutdown", result["recovery"])
+        self.assertIn("retry_status=0", result["recovery"])
+        self.assertIn("retry_outcome=success", result["recovery"])
+        self.assertIn("final_state=Shutdown", result["recovery"])
+        self.assertIn(
+            "disposition=recovered-shutdown-after-timeout",
+            result["recovery"],
+        )
+        self.assertIn("state=Shutdown", result["recovery_postcondition"])
+        self.assertEqual(
+            result["commands"].count("simctl shutdown " + SHUTDOWN_TEST_UDID),
+            2,
+        )
+        self.assertEqual(result["commands"].count("simctl list devices -j"), 2)
+
+    def test_timed_out_retry_can_be_verified_by_final_state(self) -> None:
+        result = self.invoke(
+            post_state="Booted",
+            recovery_mode="timeout",
+            recovery_post_state="Shutdown",
+        )
+        self.assertEqual(result["status"], 0, result["output"])
+        self.assertIn("retry_status=124", result["recovery"])
+        self.assertIn("retry_outcome=timeout", result["recovery"])
+        self.assertIn("final_state=Shutdown", result["recovery"])
+        self.assertIn(
+            "shutdown_disposition=recovered-shutdown-after-timeout",
+            result["shutdown"],
+        )
+
+    def test_non_shutdown_application_failure_is_not_retried(self) -> None:
+        result = self.invoke(app_result="failure", post_state="Booted")
+        self.assertEqual(result["status"], 1, result["output"])
+        self.assertIn("prior_status=1", result["shutdown"])
+        self.assertIn(
+            "shutdown_disposition=unresolved-failure",
+            result["shutdown"],
+        )
+        self.assertEqual(result["recovery"], "")
+        self.assertEqual(
+            result["commands"].count("simctl shutdown " + SHUTDOWN_TEST_UDID),
+            1,
+        )
+
+    def test_shutdown_recovery_failures_remain_failed(self) -> None:
+        target = SHUTDOWN_TEST_UDID
+        other = "00000000-0000-0000-0000-000000000001"
+        cases = [
+            ("retry-reject", {"recovery_mode": "reject"}),
+            ("retry-native-124", {"recovery_mode": "numeric-124"}),
+            (
+                "retry-timeout-still-booted",
+                {
+                    "recovery_mode": "timeout",
+                    "recovery_post_state": "Booted",
+                },
+            ),
+            ("final-booted", {"recovery_post_state": "Booted"}),
+            ("final-booting", {"recovery_post_state": "Booting"}),
+            (
+                "final-shutting-down",
+                {"recovery_post_state": "Shutting Down"},
+            ),
+            ("final-probe-reject", {"recovery_probe_status": 9}),
+            ("final-probe-timeout", {"recovery_probe_sleep": 60}),
+            ("final-malformed", {"recovery_json": "{"}),
+            ("final-missing", {"recovery_json": '{"devices":{}}'}),
+            (
+                "final-other",
+                {
+                    "recovery_json": '{"devices":{"runtime":[{"udid":"'
+                    + other
+                    + '","state":"Shutdown"}]}}'
+                },
+            ),
+            (
+                "final-duplicate",
+                {
+                    "recovery_json": '{"devices":{"runtime":[{"udid":"'
+                    + target
+                    + '","state":"Shutdown"},{"udid":"'
+                    + target
+                    + '","state":"Shutdown"}]}}'
+                },
+            ),
+        ]
+        for name, arguments in cases:
+            with self.subTest(case=name):
+                result = self.invoke(post_state="Booted", **arguments)
+                self.assertEqual(result["status"], 1, result["output"])
+                self.assertIn(
+                    "shutdown_disposition=unresolved-failure",
+                    result["shutdown"],
+                )
+                self.assertIn("result_status=1", result["shutdown"])
+                self.assertNotIn(
+                    "disposition=recovered-shutdown-after-timeout",
+                    result["recovery"],
+                )
+                self.assertEqual(
+                    result["commands"].count(
+                        "simctl shutdown " + SHUTDOWN_TEST_UDID
+                    ),
+                    2,
+                )
+
     def test_unresolved_postconditions_fail_closed(self) -> None:
         target = SHUTDOWN_TEST_UDID
         other = "00000000-0000-0000-0000-000000000001"
         cases = [
-            ("booted", {"post_state": "Booted"}),
             ("missing", {"post_json": '{"devices":{}}'}),
             (
                 "other-device",
