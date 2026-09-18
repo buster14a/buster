@@ -846,9 +846,11 @@ jobs:
           if [[ "$selection" == skip ]]; then
             rm -f build/analyzer-baseline
           fi
-          printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection" >> "$GITHUB_ENV"
-          printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason" >> "$GITHUB_ENV"
-          printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized" >> "$GITHUB_ENV"
+          {
+            printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection"
+            printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason"
+            printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized"
+          } >> "$GITHUB_ENV"
           {
             printf '## Clang analyzer comparison selection\n\n'
             printf '| Event | Candidate | Reference | Selection | Reason |\n| --- | --- | --- | --- | --- |\n'
