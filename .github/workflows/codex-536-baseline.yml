@@ -1,0 +1,80 @@
+name: Capture issue 536 baseline
+
+on:
+  push:
+    branches:
+      - codex/536-baseline-evidence
+    paths:
+      - .github/workflows/codex-536-baseline.yml
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out baseline branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Build unchanged baseline and replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_sha=b7a0f87cb881e44298a77e956e38ccc821d6e93b
+          test "$(git rev-parse HEAD^)" = "$baseline_sha"
+
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o /tmp/buster-issue536-build
+          /tmp/buster-issue536-build generate \
+            --build-directory build-536-baseline \
+            --config Release \
+            --cc clang \
+            --ci \
+            --linker DEFAULT \
+            -DCMAKE_C_FLAGS=-Wno-invalid-feature-combination \
+            -DBUSTER_UNITY_BUILD=OFF \
+            -DBUSTER_INCLUDE_TESTS=OFF
+          /tmp/buster-issue536-build build --build-directory build-536-baseline --config Release -t ide
+
+          work="$RUNNER_TEMP/issue-536"
+          mkdir -p "$work"
+          printf '%s\n' 'int audit_first(void);' > "$work/first.input"
+          printf '%s\n' 'int audit_second(void);' > "$work/second.c"
+
+          argv="build-536-baseline/Release/ide cc -fsyntax-only -x c $work/first.input -x none $work/second.c"
+          set +e
+          build-536-baseline/Release/ide cc -fsyntax-only -x c "$work/first.input" -x none "$work/second.c" > "$work/stdout.txt" 2> "$work/stderr.txt"
+          status=$?
+          set -e
+
+          {
+            echo "ISSUE_536_BASELINE_V1"
+            echo "source_revision=$baseline_sha"
+            echo "workflow_revision=$(git rev-parse HEAD)"
+            echo "runner_image=ubuntu-24.04"
+            echo "build_config=Release"
+            echo "argv=$argv"
+            echo "status=$status"
+            echo "--- stdout ---"
+            cat "$work/stdout.txt"
+            echo "--- stderr ---"
+            cat "$work/stderr.txt"
+          } > issue536-baseline-evidence.txt
+          cat issue536-baseline-evidence.txt
+
+          test "$status" -ne 0
+          grep -F "$work/first.input" issue536-baseline-evidence.txt
+
+      - name: Publish replay evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add issue536-baseline-evidence.txt
+          git commit -m "docs: capture issue 536 baseline replay"
+          git push origin HEAD:codex/536-baseline-evidence
