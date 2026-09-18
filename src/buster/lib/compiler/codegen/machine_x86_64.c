@@ -11664,6 +11664,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("NOP"), 52},
     {S8_INITIALIZER("MUL"), 22},
     {S8_INITIALIZER("FLD"), 56},
+    {S8_INITIALIZER("NOT"), 81},
     {S8_INITIALIZER("CALL"), 21},
     {S8_INITIALIZER("IDIV"), 23},
     {S8_INITIALIZER("JNBE"), 24},
@@ -11725,9 +11726,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 26, 39, 63, 68, 73, 76, 78, 80};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 64, 69, 74, 77, 79, 81};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 80);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 81);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
