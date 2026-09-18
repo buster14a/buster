@@ -1,0 +1,65 @@
+name: Issue 280 GNU and Clang byte oracle
+
+on:
+  push:
+    branches:
+      - ci/280-gnu-clang-oracle
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Install assemblers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y binutils clang
+      - name: Compare GNU and Clang bytes in both dialects
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > issue280-att.s <<'EOF'
+          .text
+          .globl issue280_oracle
+          issue280_oracle:
+              cvtps2pd 64(%rax), %xmm0
+              vcvtps2pd 64(%rax), %xmm0
+              vcvtps2pd 64(%rax), %ymm0
+              cvtpd2ps 64(%rax), %xmm0
+              cvtss2sd 64(%rax), %xmm0
+              cvtsd2ss 64(%rax), %xmm0
+              vcvtss2sd 64(%rax), %xmm1, %xmm0
+              vcvtsd2ss 64(%rax), %xmm1, %xmm0
+          EOF
+          cat > issue280-intel.s <<'EOF'
+          .intel_syntax noprefix
+          .text
+          .globl issue280_oracle
+          issue280_oracle:
+              cvtps2pd xmm0, qword ptr [rax+64]
+              vcvtps2pd xmm0, qword ptr [rax+64]
+              vcvtps2pd ymm0, xmmword ptr [rax+64]
+              cvtpd2ps xmm0, xmmword ptr [rax+64]
+              cvtss2sd xmm0, dword ptr [rax+64]
+              cvtsd2ss xmm0, qword ptr [rax+64]
+              vcvtss2sd xmm0, xmm1, dword ptr [rax+64]
+              vcvtsd2ss xmm0, xmm1, qword ptr [rax+64]
+          EOF
+          printf '0f5a4040c5f85a4040c5fc5a4040660f5a4040f30f5a4040f20f5a4040c5f25a4040c5f35a4040' | xxd -r -p > expected.bin
+          as --64 issue280-att.s -o gnu-att.o
+          as --64 issue280-intel.s -o gnu-intel.o
+          clang -c -x assembler issue280-att.s -o clang-att.o
+          clang -c -x assembler issue280-intel.s -o clang-intel.o
+          for object in gnu-att gnu-intel clang-att clang-intel; do
+              objcopy --only-section=.text -O binary "$object.o" "$object.bin"
+              echo "$object: $(xxd -p -c 4096 "$object.bin")"
+              cmp expected.bin "$object.bin"
+          done
+          cmp gnu-att.bin gnu-intel.bin
+          cmp gnu-att.bin clang-att.bin
+          cmp gnu-att.bin clang-intel.bin
