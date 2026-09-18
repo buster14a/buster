@@ -1,0 +1,100 @@
+                    u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
+                    if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION))
+                    {
+                        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION, os_process_spawn_injected_error());
+                    }
+                    else if (!os_windows_pipe_disable_inheritance(result.pipes[stream][parent_side]))
+                    {
+                        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION, os_get_last_error());
+                    }
+                }
+            }
+        }
+    }
+
+    STARTUPINFOEXW startup_info = {0};
+    startup_info.StartupInfo.cb = sizeof(startup_info);
+    startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    DWORD standard_ids[STANDARD_STREAM_COUNT] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+    for (StandardStream stream = 0; result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        HANDLE child_handle = 0;
+        if (options.capture & ((u64)1 << stream))
+        {
+            u32 child_side = stream == STANDARD_STREAM_INPUT ? 0 : 1;
+            child_handle = (HANDLE)result.pipes[stream][child_side];
+        }
+        else
+        {
+            HANDLE source = GetStdHandle(standard_ids[stream]);
+            if (source && source != INVALID_HANDLE_VALUE)
+            {
+                if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION))
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION, os_process_spawn_injected_error());
+                }
+                else if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &duplicated_standard[stream], 0, TRUE, DUPLICATE_SAME_ACCESS))
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION, os_get_last_error());
+                }
+                else
+                {
+                    child_handle = duplicated_standard[stream];
+                }
+            }
+        }
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+        {
+            if (stream == STANDARD_STREAM_INPUT) startup_info.StartupInfo.hStdInput = child_handle;
+            if (stream == STANDARD_STREAM_OUTPUT) startup_info.StartupInfo.hStdOutput = child_handle;
+            if (stream == STANDARD_STREAM_ERROR) startup_info.StartupInfo.hStdError = child_handle;
+            if (child_handle)
+            {
+                inherited_handles[inherited_handle_count++] = child_handle;
+            }
+        }
+    }
+
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE && inherited_handle_count)
+    {
+        SIZE_T attribute_bytes = 0;
+        (void)InitializeProcThreadAttributeList(0, 1, 0, &attribute_bytes);
+        if (!attribute_bytes)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_get_last_error());
+        }
+        else
+        {
+            u64 word_count = (attribute_bytes + sizeof(u64) - 1) / sizeof(u64);
+            attribute_list = (LPPROC_THREAD_ATTRIBUTE_LIST)arena_allocate(temp.arena, u64, word_count);
+            if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_HANDLE_LIST))
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_process_spawn_injected_error());
+            }
+            else if (!InitializeProcThreadAttributeList(attribute_list, 1, 0, &attribute_bytes))
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_get_last_error());
+            }
+            else
+            {
+                attribute_list_ready = true;
+                startup_info.lpAttributeList = attribute_list;
+                if (!UpdateProcThreadAttribute(attribute_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited_handles,
+                                               inherited_handle_count * sizeof(inherited_handles[0]), 0, 0))
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_get_last_error());
+                }
+            }
+        }
+    }
+
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        String16 application = string16_from_string8(temp.arena, executable, true);
+        WindowsStringList command_line = windows_string_list_from_slice_string(temp.arena, arguments);
+        WindowsStringList environment = options.use_process_environment
+                                            ? program_state->input.raw_environment
+                                            : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
+        DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
+        if (attribute_list_ready)
+        {
